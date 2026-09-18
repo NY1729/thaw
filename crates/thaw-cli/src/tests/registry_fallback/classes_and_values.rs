@@ -1340,3 +1340,56 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A local class reference passed as an argument to a real ambient npm
+/// function that constructs it internally (`new cls()`, exactly
+/// class-transformer's own `plainToInstance(User, plain)` shape) used to
+/// segfault the moment the newly built instance crossed back to
+/// JavaScript: an uninitialized instance field (`name!: string`) is a null
+/// `Str` pointer, and the JSON marshaling dereferenced it (`CStr::from_ptr
+/// (null)` -> `strlen` -> SIGSEGV). It must now surface as JSON `null`,
+/// matching what `console.log` already prints for the same value.
+#[test]
+fn a_class_with_an_uninitialized_string_field_survives_a_native_construction_callback() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-class-as-plain-value-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("ctor-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Ctor { new (): any; }\n\
+         export declare function build(cls: Ctor): any;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.build = function(cls) { return new cls(); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { build } from "ctor-kit";
+class User { name!: string; }
+function main(): void {
+    const user = build(User);
+    console.log(typeof user);
+    console.log(user.name);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "object\nnull\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

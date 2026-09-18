@@ -34,6 +34,14 @@
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
   globalThis.__thaw_instanceof_date_dynamic_value = value => value instanceof Date;
+  // General sibling of the Date-only check above, for `value instanceof C`
+  // where both sides are live handles (e.g. a decorated class's own
+  // "class token", class-transformer's `plainToInstance(User, ...)`
+  // result). A non-callable right operand (a plain object) is `false`
+  // rather than a thrown TypeError, matching the compile-time path this
+  // replaces.
+  globalThis.__thaw_instanceof_dynamic_value = (value, target) =>
+    typeof target === 'function' ? value instanceof target : false;
   globalThis.__thaw_is_buffer_dynamic_value = value => Buffer.isBuffer(value);
   const timers = new Map();
   const normalizeDelay = value => {

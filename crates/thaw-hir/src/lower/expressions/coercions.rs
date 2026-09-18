@@ -1158,6 +1158,53 @@ impl<'a> FnLowerer<'a> {
         )))
     }
 
+    /// `value instanceof target` for two live `JsValue` handles -- a real
+    /// runtime `instanceof` between a dynamic result and a class's own
+    /// decorator "class token". Used when the left operand is a `JsValue`
+    /// and the right names a decorated local class: the compile-time
+    /// `class_type_has_identity` check has no native layout to compare
+    /// (the value is an opaque live object), so this asks the live engine
+    /// instead, exactly as `dynamic_value_check`'s one-argument calls do.
+    /// `callDynamicValueMixed` is the existing two-handle invocation
+    /// (`json_args` carries no positional JSON here, so an empty array);
+    /// its JSON result is a real boolean.
+    fn dynamic_value_instanceof(
+        &mut self,
+        value: HirExpr,
+        target: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let callable = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(
+                "__thaw_instanceof_dynamic_value".into(),
+            ))],
+        );
+        let empty_arguments = self.wrap_native_value_as_json(
+            HirExpr::ArrayLit(Vec::new()),
+            HirType::Array(Box::new(HirType::Json)),
+        )?;
+        Ok(HirExpr::JsonAsBool(Box::new(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixed".into())),
+            vec![
+                callable,
+                empty_arguments,
+                HirExpr::ArrayLit(vec![value, target]),
+            ],
+        ))))
+    }
+
+    /// The live "class token" `JsValue` symbol a decorated class's bare
+    /// reference resolves to (see `DECORATOR_CLASS_TOKENS` /
+    /// `lower_class_decorator_tokens`), if this class has one. The token is
+    /// keyed by the class layout's own identity marker (its first field).
+    fn decorator_class_token(&self, class_name: &str) -> Option<Symbol> {
+        let HirType::Object(fields) = self.interfaces.get(class_name)? else {
+            return None;
+        };
+        let marker = fields.first()?.0.as_str();
+        DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow().get(marker).cloned())
+    }
+
     /// `value === undefined`/`undefined === value` for a live `JsValue`.
     /// See the call site's comment (`lower_optional_undefined_equality`).
     fn dynamic_value_is_undefined(&mut self, value: HirExpr) -> HirExpr {
