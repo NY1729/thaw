@@ -1253,3 +1253,90 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A bare class-name reference (not immediately `new`'d) used to fail
+/// outright: `"unknown variable `__thawmod0_User`"` (or the class's own
+/// mangled equivalent). Real trigger: `class-transformer`'s own
+/// `plainToInstance(User, plain)`, a common factory-function idiom
+/// (pass a *local* class -- typically the caller's own DTO, exactly
+/// like `plainToInstance`'s -- as a plain argument to an ambient
+/// function; the real JS implementation does `new cls()` internally).
+/// Confirmed to reproduce with zero npm/registry involvement at all
+/// (`class User {} const c: any = User;`), so this is a general gap,
+/// not specific to any one package -- scoped here to a *local* class
+/// specifically, since a real ambient/npm-exported class turns out to
+/// register its own constructor through a separate mechanism (an
+/// auto-generated `.d.ts`-construct-signature wrapper symbol, not
+/// `class_constructor_symbol`) this fix does not (yet) cover.
+///
+/// A class never registered anything under its own bare name in
+/// `self.scope`/`self.signatures` -- everything lived under the
+/// mangled `class_constructor_symbol`. Fixed by making a bare
+/// class-name `Expr::Ident` resolve to `HirExpr::FunctionRef` the same
+/// way an ordinary plain function value already does (mirroring the
+/// identical, already-working pattern a static method's own `this`
+/// already uses) -- a class's constructor is already an ordinary,
+/// referenceable native function (`new User(...)` itself desugars to a
+/// plain call to this exact symbol).
+///
+/// Verification surfaced a second, separate, pre-existing bug this fix
+/// exposed for the first time (reproduces with a bare *function*
+/// reference too, nothing class-specific): `coerce_to_declared`'s own
+/// `declared == Json, actual == HirType::Function` branch returned
+/// `registerNativeCallback(value)` directly -- but that call's own
+/// inferred type is always `HirType::JsValue` (a raw `i64` handle), not
+/// `Json` (a pointer), so storing the result into an `any`-typed slot
+/// corrupted it: a real, reproducible segfault the moment anything
+/// (`typeof`, `console.log`, passing it on again, ...) read that slot
+/// back as if it held a real `serde_json::Value` pointer. Fixed by
+/// wrapping the result in `JsValueAsJson` (the same wrapping the
+/// sibling `actual == JsValue` branch right below it already applies),
+/// producing the identical `{"__thaw_js_handle_id__": id}` placeholder
+/// shape every other consumer of a `Json`-declared-but-really-live
+/// value already expects.
+///
+/// (Passing a class reference on as an argument to a *real* ambient
+/// npm function that itself does `new cls()` -- exactly what
+/// `class-transformer`'s own `plainToInstance` needs -- surfaced a
+/// third, deeper, NOT-yet-fixed crash; out of scope for this fix, kept
+/// to a plain local re-reference here instead.)
+#[test]
+fn a_bare_class_reference_can_be_used_as_a_plain_value() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-class-as-plain-value-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let entry = dir.join("main.ts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &entry,
+        r#"class User {
+    name!: string;
+}
+function identity(cls: any): any {
+    return cls;
+}
+function main(): void {
+    console.log("before");
+    const cls: any = User;
+    const same = identity(cls);
+    console.log("after", same !== undefined);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "before\nafter true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
