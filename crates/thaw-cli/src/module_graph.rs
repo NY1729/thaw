@@ -406,6 +406,10 @@ struct RenameReferences<'a> {
     /// alone here and falls through to thaw-hir's existing "import
     /// calls not supported" rejection.
     dynamic_imports: &'a HashMap<String, HashMap<String, String>>,
+    /// Local names bound from an *external* (npm/registry) import, which
+    /// have no declaration in the compiled program under that name -- see
+    /// `visit_mut_expr`'s own `InstanceOf` handling.
+    external_bindings: &'a HashSet<String>,
     import_meta_url: &'a str,
     import_meta_main: bool,
     module_path: &'a Path,
@@ -502,23 +506,32 @@ impl VisitMut for RenameReferences<'_> {
 
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         // `a instanceof B`'s right operand is a bare class-identifier
-        // *type* reference, not a value read -- renaming it the way
-        // every other `Expr::Ident` gets renamed below (to a package's
-        // real flattened value symbol, or a module-qualified local)
-        // breaks thaw-hir's own `instanceof` lowering, which needs the
-        // identifier exactly as written to recognize a built-in
-        // special case (`Date`, the fixed Error-family name list) or
-        // look up a real class's `self.interfaces` entry by its own
-        // bare name (real trigger: a real npm-exported `class
-        // YAMLException extends Error {}`, imported as a value
-        // elsewhere in the same file -- see `[[project_npm_interop_
-        // gaps_19]]`; `thaw-cli`'s own shim for it, `push_error_
-        // family_ambient_declarations`, declares it under this exact
-        // same bare name). Visits the left operand normally; the right
-        // operand is intentionally left completely untouched.
+        // *type* reference, not an ordinary value read. A *local* class
+        // (declared in this module, or imported from a relative module in
+        // this same program) is renamed like any other declaration
+        // reference, so thaw-hir's own `instanceof` lowering can find that
+        // class's constructor signature under its real, rewritten name
+        // (real bug: `class User {} ... u instanceof User` failed "not a
+        // known class" because the operand was left bare while the class
+        // itself was renamed to `__thawmod0_User`). An *external*
+        // (npm/registry) imported name has no such declaration in the
+        // program; it stays exactly as written so the shim's own bare
+        // ambient stub still matches (real trigger: a real npm-exported
+        // `class YAMLException extends Error {}`, imported as a value
+        // elsewhere in the same file -- see `[[project_npm_interop_gaps_
+        // 19]]`). Visits the left operand normally either way. A
+        // non-identifier right operand (a member expression) is still
+        // left completely untouched, as before.
         if let Expr::Bin(binary) = expr {
             if binary.op == thaw_parser::ast::BinaryOp::InstanceOf {
                 binary.left.visit_mut_with(self);
+                let rename_right = matches!(
+                    binary.right.as_ref(),
+                    Expr::Ident(ident) if !self.external_bindings.contains(ident.sym.as_ref())
+                );
+                if rename_right {
+                    binary.right.visit_mut_with(self);
+                }
                 return;
             }
         }
@@ -1003,6 +1016,12 @@ pub fn bundle_with_source_transform(
         let mut names = HashMap::new();
         let mut namespaces = HashMap::new();
         let mut nested_namespaces = HashMap::new();
+        // Local binding names that come from an *external* (npm/registry)
+        // import, as opposed to a local declaration or a relative-module
+        // import. Only these are deliberately left unrenamed on an
+        // `instanceof` right operand -- see `visit_mut_expr`'s own
+        // `InstanceOf` handling.
+        let mut external_bindings: HashSet<String> = HashSet::new();
         let import_meta_url = file_url(&modules[index].path);
         for name in declared_names(&modules[index].module) {
             let replacement = if is_entry && matches!(name.as_str(), "main" | "handler") {
@@ -1168,6 +1187,9 @@ pub fn bundle_with_source_transform(
                         )
                     })?;
                     names.insert(local.clone(), target.clone());
+                    if !modules[index].dependencies.contains_key(specifier) {
+                        external_bindings.insert(local.clone());
+                    }
                     // A named export that is *also* a namespace merged
                     // onto its own binding (real example: marked's
                     // exported `marked` function, merged with
@@ -1232,6 +1254,7 @@ pub fn bundle_with_source_transform(
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
                         dynamic_imports: &dynamic_import_exports,
+                        external_bindings: &external_bindings,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -1249,6 +1272,7 @@ pub fn bundle_with_source_transform(
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
                         dynamic_imports: &dynamic_import_exports,
+                        external_bindings: &external_bindings,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -1375,6 +1399,7 @@ pub fn bundle_with_source_transform(
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
                                 dynamic_imports: &dynamic_import_exports,
+                                external_bindings: &external_bindings,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -1407,6 +1432,7 @@ pub fn bundle_with_source_transform(
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
                                 dynamic_imports: &dynamic_import_exports,
+                                external_bindings: &external_bindings,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -1440,6 +1466,7 @@ pub fn bundle_with_source_transform(
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
                                 dynamic_imports: &dynamic_import_exports,
+                                external_bindings: &external_bindings,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -1471,6 +1498,7 @@ pub fn bundle_with_source_transform(
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
                         dynamic_imports: &dynamic_import_exports,
+                        external_bindings: &external_bindings,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
