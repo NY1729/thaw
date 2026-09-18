@@ -664,7 +664,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
-                self.compile_json_array_push_native(result_json, result, ret)?;
+                // `preserve_undefined: true` -- this is a standalone
+                // return value being wrapped, not an object field that
+                // can legitimately omit itself (see `wrap_native_value_
+                // as_json`, thaw-hir, for the identical reasoning): a
+                // callback whose own inferred return type is `Optional
+                // (Json)`/`Nullish(Json)` (real trigger: `qs`'s own
+                // `filter: (prefix, value) => (cond ? undefined :
+                // value)`, a ternary unifying an `Undefined` branch with
+                // a `Json` one) must still tell a real `undefined` apart
+                // from a real `null` in the JSON this produces -- the
+                // `false` this used to pass silently collapsed the
+                // "absent" case to a plain JSON `null` every time,
+                // indistinguishable from an explicit `null` return.
+                self.compile_json_array_push_native_with_undefined(
+                    result_json,
+                    result,
+                    ret,
+                    true,
+                )?;
                 self.builder
                     .build_call(
                         self.module.get_function("thaw_json_index").unwrap(),
@@ -858,7 +876,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
-            self.compile_json_array_push_native(array, value, resolved)?;
+            // See the identical `preserve_undefined: true` reasoning at
+            // this same function's synchronous counterpart above -- a
+            // resolved `Promise<Optional<Json>>`/`Promise<Nullish<Json>>`
+            // value needs the same real-`undefined`-vs-`null` distinction.
+            self.compile_json_array_push_native_with_undefined(array, value, resolved, true)?;
             self.builder
                 .build_call(
                     self.module.get_function("thaw_json_index").unwrap(),
