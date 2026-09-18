@@ -1446,3 +1446,99 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "object\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A bare `import * as X from "pkg"` of an `export = X` package must bind
+/// `X` to the exported *value itself*, matching real esModuleInterop --
+/// real example: koa's own documented `import * as Koa from "koa"; new
+/// Koa()`. Binding it only as a namespace object left `new X()` with
+/// nothing to construct ("only `new Promise<T>(...)` is supported").
+#[test]
+fn a_namespace_import_of_an_export_assignment_class_is_constructible() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-export-assignment-namespace-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("widget-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "declare class Widget {\n\
+             constructor();\n\
+             label(): string;\n\
+         }\n\
+         export = Widget;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Widget() {}\n\
+         Widget.prototype.label = function() { return 'W'; };\n\
+         module.exports = Widget;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import * as Widget from "widget-kit";
+const w = new Widget();
+console.log(w.label());
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "W\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `===`/`!==` between a live `JsValue` and a native string -- the shape
+/// every dynamic getter comparison takes (real example: koa's own
+/// `ctx.path === "/json"` / `ctx.method === "GET"`). The strict-equality
+/// type check used to reject the mismatched pair outright; the `JsValue`
+/// side is now coerced to the scalar's own native type first.
+#[test]
+fn strict_equality_between_a_dynamic_value_and_a_string_compares_by_value() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-dynamic-scalar-equality-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("strkit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function get(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.get = function() { return 'hello'; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { get } from "strkit";
+const value = get();
+console.log(value === "hello", value !== "bye");
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true true\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
