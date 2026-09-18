@@ -293,6 +293,59 @@ fn installed_package_inlines_named_function_reexports() {
     let _ = fs::remove_dir_all(registry);
 }
 
+/// The class sibling of `installed_package_inlines_named_function_
+/// reexports` above -- real trigger: `@types/semver`'s own layout
+/// (`index.d.ts`: `import SemVer = require("./classes/semver"); export
+/// { SemVer };`, one file per class/function; `classes/semver.d.ts`:
+/// `declare class SemVer {...} export = SemVer;`). Before this fix,
+/// `import { SemVer } from "semver"` failed outright ("`semver` has no
+/// export named `SemVer`") since `export_assignment_function_
+/// declarations` (the existing fix for this exact barrel shape, but
+/// only for a *function*-shaped `export = X;` target -- semver's own
+/// `functions/valid.d.ts`) returned empty for a class-shaped target,
+/// with nothing tried next.
+#[test]
+fn installed_package_inlines_a_class_reexported_through_an_import_equals_barrel() {
+    let scratch = temp_registry("installed-dts-class-export-assignment-scratch");
+    let registry = temp_registry("installed-dts-class-export-assignment-registry");
+    let package = scratch.join("node_modules/version-kit");
+    fs::create_dir_all(package.join("dist/classes")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"version-kit","version":"1.0.0","types":"./dist/index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/index.d.ts"),
+        "import Version = require('./classes/version');\nexport { Version };\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/classes/version.d.ts"),
+        "declare class Version {\n\
+         \x20\x20\x20\x20constructor(raw: string);\n\
+         \x20\x20\x20\x20raw: string;\n\
+         \x20\x20\x20\x20major(): number;\n\
+         }\n\
+         export = Version;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "function Version(raw) { this.raw = raw; }\n\
+         Version.prototype.major = function() { return Number(this.raw.split('.')[0]); };\n\
+         module.exports = { Version: Version };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "version-kit").unwrap();
+    let declarations = resolve(&registry, "version-kit").unwrap().dts_source;
+    assert!(declarations.contains("declare class Version"));
+    assert!(declarations.contains("major(): number"));
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
 /// A `declare const NAME: import("./sibling.js").SomeType<Args>;` --
 /// real example: `tar`'s own `create.d.ts`, `export declare const
 /// create: import("./make-command.js").TarCommand<Pack, PackSync>;`.

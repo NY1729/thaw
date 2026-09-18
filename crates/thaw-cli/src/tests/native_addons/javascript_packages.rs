@@ -3527,3 +3527,76 @@ run();
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Round 28's npm compat audit (`semver`): `import { SemVer, Range } from
+/// "semver"` -- semver's own three real classes -- used to fail outright,
+/// `"semver has no export named SemVer"`. `semver` has no `.d.ts` files
+/// of its own (real trigger: its real `package.json` declares no
+/// `types` field at all), so real-world TypeScript usage relies entirely
+/// on `@types/semver` -- whose own barrel `index.d.ts` reaches each
+/// class the identical way it reaches semver's plain functions (already
+/// working): `import SemVer = require("./classes/semver"); export {
+/// SemVer };`, with `classes/semver.d.ts` itself only exporting via
+/// `export = SemVer;`. See `installed_package_inlines_a_class_
+/// reexported_through_an_import_equals_barrel` (thaw-registry's own
+/// unit test) for the full root-cause writeup (a general gap: any
+/// `@types/*` package using this common one-class/function-per-file
+/// layout, not semver-specific). This is the same fix, confirmed
+/// against the real npm package that found it -- exercises both a
+/// named import (`new SemVer(...)`) and a namespace-qualified
+/// constructor call (`new semver.Range(...)`, previously unreachable
+/// for a *different* reason -- `SemVer` wasn't a recognized class at
+/// all yet -- fixed by this same root cause).
+#[test]
+fn registry_add_constructs_real_semver_classes_reexported_through_an_import_equals_barrel_when_enabled(
+) {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-js-semver-classes-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "semver").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { SemVer } from "semver";
+import * as semver from "semver";
+
+function run(): void {
+    const v = new SemVer("1.2.3-beta.1+build.5");
+    console.log(v.major, v.minor, v.patch, v.prerelease.join("."));
+    const range = new semver.Range("^1.2.3");
+    console.log(range.test("1.5.0"), range.test("2.0.0"));
+}
+run();
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["semver".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1 2 3 beta.1\ntrue false\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
