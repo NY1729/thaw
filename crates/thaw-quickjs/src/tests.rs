@@ -367,6 +367,28 @@ fn console_exposes_node_style_stdout_and_stderr_streams() {
 }
 
 #[test]
+fn error_properties_round_trip_through_the_tagged_exception_format() {
+    assert_eq!(
+        load(
+            "function errorProps() {\n\
+               const error = new Error('boom');\n\
+               error.status = 418;\n\
+               error.statusCode = 418;\n\
+               error.expose = true;\n\
+               const props = globalThis.__thaw_error_properties_json(error);\n\
+               const restored = globalThis.__thaw_error_from_tagged('\\u0001ImATeapotError\\u0001boom\\u0005' + props);\n\
+               return [restored.name, restored.message, restored.status, restored.expose];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("errorProps", "[]"),
+        r#"["ImATeapotError","boom",418,true]"#
+    );
+}
+
+#[test]
 fn base64_globals_round_trip_latin1_and_validate_input() {
     assert_eq!(
             load(
