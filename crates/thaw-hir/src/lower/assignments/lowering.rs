@@ -890,6 +890,32 @@ impl<'a> FnLowerer<'a> {
                         );
                     }
                 }
+                // Same `Json`-array-pattern accommodation as `lower_
+                // binding_pattern` (`destructuring.rs`) -- see its own
+                // doc comment for the full reasoning. A rest element is
+                // rejected the same way, for the same reason.
+                if *ty == HirType::Json {
+                    for (index, element_pattern) in pattern.elems.iter().enumerate() {
+                        let Some(element_pattern) = element_pattern else {
+                            continue;
+                        };
+                        if matches!(element_pattern, Pat::Rest(_)) {
+                            return Err(
+                                "a rest element cannot destructure a dynamic Json array".into(),
+                            );
+                        }
+                        self.lower_assignment_pattern(
+                            element_pattern,
+                            HirExpr::JsonIndex(
+                                Box::new(value.clone()),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            &HirType::Json,
+                            statements,
+                        )?;
+                    }
+                    return Ok(());
+                }
                 let HirType::Tuple(elements) = ty else {
                     return Err(format!(
                         "array pattern requires a fixed-length tuple, got {ty:?}"

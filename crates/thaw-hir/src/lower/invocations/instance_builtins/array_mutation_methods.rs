@@ -827,9 +827,22 @@ impl<'a> FnLowerer<'a> {
                     let label = if property.sym == *"push" { "push" } else { "unshift" };
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, &format!("Array.{label}"))?;
-                    for value in &arguments {
-                        self.expect_type(&element, value, "array push/unshift value")?;
-                    }
+                    // `coerce_to_declared`, not the stricter `expect_type`
+                    // this replaced: a `Json`/`JsValue` value pushed into a
+                    // *typed* array (real trigger: a for-of loop element
+                    // decoded from a dynamic iterator, e.g. `lru-cache`'s
+                    // `Generator<K>`-returning `keys()`) used to reject
+                    // outright ("array push/unshift value has type Json,
+                    // expected Str") with no way to push it at all except
+                    // decoding it (`String(k)`) into a fresh local first.
+                    // `coerce_to_declared` already falls back to this same
+                    // strict `expect_type` check for anything it can't
+                    // coerce, so genuinely incompatible pushes are still
+                    // rejected exactly as before.
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|value| self.coerce_to_declared(&element, value))
+                        .collect::<Result<Vec<_>, String>>()?;
                     let receiver_name = format!("__thaw_{label}_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope
@@ -929,17 +942,6 @@ impl<'a> FnLowerer<'a> {
                     let result = match receiver_type.clone() {
                         HirType::Array(element) => {
                             let array_type = HirType::Array(element.clone());
-                            let builtin = match element.as_ref() {
-                                HirType::F64 => "__thaw_number_array_join",
-                                HirType::Str => "__thaw_string_array_join",
-                                HirType::Bool => "__thaw_bool_array_join",
-                                HirType::Object(_) => "__thaw_object_array_join",
-                                other => {
-                                    return Err(format!(
-                                        "array join does not support element type {other:?}"
-                                    ))
-                                }
-                            };
                             let receiver_name =
                                 format!("__thaw_join_receiver_{}", self.next_binding);
                             self.next_binding += 1;
@@ -948,13 +950,119 @@ impl<'a> FnLowerer<'a> {
                             self.next_binding += 1;
                             self.scope.insert(receiver_name.clone(), array_type.clone());
                             self.scope.insert(separator_name.clone(), HirType::Str);
-                            let result = HirExpr::Call(
-                                Box::new(HirExpr::Var(builtin.to_string())),
-                                vec![
-                                    HirExpr::Var(receiver_name.clone()),
-                                    HirExpr::Var(separator_name.clone()),
-                                ],
-                            );
+                            let result = if let HirType::Json = element.as_ref() {
+                                // No native `__thaw_..._array_join` intrinsic
+                                // exists for a generic `Json` element (real
+                                // trigger: `Array.from(cache.keys())` on a
+                                // real npm class's `Generator<K>`-returning
+                                // method, e.g. `lru-cache`) -- built directly
+                                // out of existing HIR nodes instead of adding
+                                // a new one: a native `while` loop that reads
+                                // each element out via `TypedIndex`, converts
+                                // it the same way a template literal already
+                                // does (`coerce_primitive_to_string`, which
+                                // already handles `Json` via `JsonAsString`
+                                // -- real JS `String()` semantics, not just
+                                // "this JSON value happens to already be a
+                                // string"), and concatenates via the same
+                                // `__thaw_string_concat` a template literal's
+                                // own lowering already uses.
+                                let result_name =
+                                    format!("__thaw_join_result_{}", self.next_binding);
+                                self.next_binding += 1;
+                                let index_name =
+                                    format!("__thaw_join_index_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(result_name.clone(), HirType::Str);
+                                self.scope.insert(index_name.clone(), HirType::F64);
+                                let element_str = self.coerce_primitive_to_string(
+                                    HirExpr::TypedIndex(
+                                        Box::new(HirExpr::Var(receiver_name.clone())),
+                                        Box::new(HirExpr::Var(index_name.clone())),
+                                        HirType::Json,
+                                    ),
+                                )?;
+                                let concat = |lhs: HirExpr, rhs: HirExpr| {
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                                        vec![lhs, rhs],
+                                    )
+                                };
+                                let loop_body = vec![
+                                    HirStmt::If(
+                                        HirExpr::BinOp(
+                                            BinOp::Gt,
+                                            Box::new(HirExpr::Var(index_name.clone())),
+                                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                        ),
+                                        vec![HirStmt::Expr(HirExpr::Assign(
+                                            result_name.clone(),
+                                            Box::new(concat(
+                                                HirExpr::Var(result_name.clone()),
+                                                HirExpr::Var(separator_name.clone()),
+                                            )),
+                                        ))],
+                                        Vec::new(),
+                                    ),
+                                    HirStmt::Expr(HirExpr::Assign(
+                                        result_name.clone(),
+                                        Box::new(concat(
+                                            HirExpr::Var(result_name.clone()),
+                                            element_str,
+                                        )),
+                                    )),
+                                    HirStmt::Expr(HirExpr::Assign(
+                                        index_name.clone(),
+                                        Box::new(HirExpr::BinOp(
+                                            BinOp::Add,
+                                            Box::new(HirExpr::Var(index_name.clone())),
+                                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                                        )),
+                                    )),
+                                ];
+                                HirExpr::Block(vec![
+                                    HirStmt::Let(
+                                        result_name.clone(),
+                                        HirType::Str,
+                                        HirExpr::Lit(HirLit::Str(String::new())),
+                                    ),
+                                    HirStmt::Let(
+                                        index_name.clone(),
+                                        HirType::F64,
+                                        HirExpr::Lit(HirLit::F64(0.0)),
+                                    ),
+                                    HirStmt::While(
+                                        HirExpr::BinOp(
+                                            BinOp::Lt,
+                                            Box::new(HirExpr::Var(index_name.clone())),
+                                            Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                                                receiver_name.clone(),
+                                            )))),
+                                        ),
+                                        loop_body,
+                                    ),
+                                    HirStmt::Return(Some(HirExpr::Var(result_name))),
+                                ])
+                            } else {
+                                let builtin = match element.as_ref() {
+                                    HirType::F64 => "__thaw_number_array_join",
+                                    HirType::Str => "__thaw_string_array_join",
+                                    HirType::Bool => "__thaw_bool_array_join",
+                                    HirType::Object(_) => "__thaw_object_array_join",
+                                    other => {
+                                        return Err(format!(
+                                            "array join does not support element type {other:?}"
+                                        ))
+                                    }
+                                };
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var(builtin.to_string())),
+                                    vec![
+                                        HirExpr::Var(receiver_name.clone()),
+                                        HirExpr::Var(separator_name.clone()),
+                                    ],
+                                )
+                            };
                             self.wrap_call_argument_bindings(
                                 result,
                                 &[
