@@ -138,6 +138,8 @@ fn generate_registry_shims(
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
         let commonjs_export_name = commonjs_export_name(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s CommonJS export: {e}"))?;
+        let commonjs_export_assignment = commonjs_export_assignment(&package.dts_source)
+            .map_err(|e| format!("failed to parse `{name}`'s CommonJS export assignment: {e}"))?;
         let called_commonjs_namespace_properties = called_commonjs_namespace_properties(
             &package.dts_source,
             commonjs_export_name.as_deref(),
@@ -190,6 +192,7 @@ fn generate_registry_shims(
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             commonjs_export_name,
+            commonjs_export_assignment,
             called_commonjs_namespace_properties: called_commonjs_namespace_properties
                 .into_iter()
                 .collect(),
@@ -1438,6 +1441,10 @@ fn generate_registry_shims(
     let mut external_exports = ExternalExports::new();
     let mut external_namespace_aliases: ExternalNamespaceAliases = std::collections::HashMap::new();
     let mut external_nested_namespaces: ExternalNestedNamespaces = std::collections::HashMap::new();
+    // `package -> the symbol its own `export = X;` assignment names`, for a
+    // bare `import * as X from "pkg"` (see `commonjs_export_assignment`).
+    let mut external_export_assignments: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for pkg in &resolved {
         if !pkg.namespace_self_aliases.is_empty() {
             external_namespace_aliases
@@ -1536,6 +1543,11 @@ fn generate_registry_shims(
                 .or_default()
                 .insert("default".to_string());
         }
+        if let Some(name) = &pkg.commonjs_export_assignment {
+            if let Some(target) = package_exports.get(name) {
+                external_export_assignments.insert(pkg.name.clone(), target.clone());
+            }
+        }
         external_exports.insert(pkg.name.clone(), package_exports);
     }
     Ok((
@@ -1555,6 +1567,7 @@ fn generate_registry_shims(
         external_exports,
         external_namespace_aliases,
         external_nested_namespaces,
+        external_export_assignments,
         jit_fallback_reasons,
     ))
 }

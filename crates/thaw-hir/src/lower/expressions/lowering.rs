@@ -825,14 +825,17 @@ impl<'a> FnLowerer<'a> {
                     BinaryOp::Gt => self.lower_relational(lhs, rhs, BinOp::Gt)?,
                     BinaryOp::LtEq => self.lower_relational(lhs, rhs, BinOp::LtEq)?,
                     BinaryOp::GtEq => self.lower_relational(lhs, rhs, BinOp::GtEq)?,
-                    BinaryOp::EqEqEq => self
-                        .lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
-                        .unwrap_or(HirExpr::BinOp(
-                            BinOp::EqEqEq,
-                            Box::new(lhs),
-                            Box::new(rhs),
-                        )),
+                    BinaryOp::EqEqEq => {
+                        let (lhs, rhs) = self.coerce_strict_equality_operands(lhs, rhs)?;
+                        self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
+                            .unwrap_or(HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(lhs),
+                                Box::new(rhs),
+                            ))
+                    }
                     BinaryOp::NotEqEq => {
+                        let (lhs, rhs) = self.coerce_strict_equality_operands(lhs, rhs)?;
                         let equality = self
                             .lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
                             .unwrap_or(HirExpr::BinOp(

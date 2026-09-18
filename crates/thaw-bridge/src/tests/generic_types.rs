@@ -280,6 +280,26 @@ fn retains_recursive_arrays_for_napi_but_not_direct_ffi() {
     ));
 }
 
+/// A pair of mutually-recursive generic type aliases must classify without
+/// recursing forever. `classify_ts_type` resets the cycle-guard chain every
+/// time it dispatches into a generic alias, so a genuinely cyclic alias
+/// (`type A<T> = B<T>; type B<T> = A<T>`, real in koa's own `.d.ts`
+/// dependency graph) overflowed the compiler's stack. The alias should
+/// degrade to a Fallback (its parameter is unresolvable), not abort.
+#[test]
+fn recursively_cyclic_generic_aliases_do_not_overflow_the_stack() {
+    let funcs = parse_dts(
+        "export type A<T> = B<T>;\n\
+         export type B<T> = A<T>;\n\
+         export declare function use(value: A<number>): void;",
+    )
+    .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
 #[test]
 fn classifies_tuples_as_fast_path() {
     let funcs =

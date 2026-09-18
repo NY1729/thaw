@@ -820,6 +820,34 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// `===`/`!==` between a live `JsValue` and a native scalar
+    /// (`Str`/`F64`/`Bool`) -- a very common shape once a value comes from
+    /// a dynamic getter (real example: koa's own `ctx.path === "/json"` or
+    /// `ctx.method === "GET"`, where `ctx.path` reads as a `JsValue`).
+    /// Coerces the `JsValue` side to the scalar's own native type via
+    /// `coerce_to_declared` (which already maps `JsValue` -> scalar through
+    /// `readDynamicValue` + `JsonAsString`/`JsonAsNumber`/`JsonAsBool`), so
+    /// the ordinary strict-equality emit applies unchanged. Without this,
+    /// the strict-equality type check rejected the mismatched pair outright.
+    fn coerce_strict_equality_operands(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<(HirExpr, HirExpr), String> {
+        let scalar = |ty: &HirType| matches!(ty, HirType::Str | HirType::F64 | HirType::Bool);
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        if lhs_type == HirType::JsValue && scalar(&rhs_type) {
+            let lhs = self.coerce_to_declared(&rhs_type, lhs)?;
+            return Ok((lhs, rhs));
+        }
+        if rhs_type == HirType::JsValue && scalar(&lhs_type) {
+            let rhs = self.coerce_to_declared(&lhs_type, rhs)?;
+            return Ok((lhs, rhs));
+        }
+        Ok((lhs, rhs))
+    }
+
     fn lower_loose_equality(
         &mut self,
         mut lhs: HirExpr,

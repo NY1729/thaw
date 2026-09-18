@@ -615,8 +615,12 @@ type RegistryShims = (
     ExternalExports,
     ExternalNamespaceAliases,
     ExternalNestedNamespaces,
+    ExternalExportAssignments,
     JitFallbackReasons,
 );
+/// `package -> the symbol its own `export = X;` assignment names`, for a
+/// bare `import * as X from "pkg"` (`module_graph.rs`).
+type ExternalExportAssignments = std::collections::HashMap<String, String>;
 type JitFallbackReasons = std::collections::HashMap<(String, String), String>;
 
 /// `(factory function name, class name)` -- a Fallback factory function
@@ -834,6 +838,29 @@ fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
             DefaultDecl::Fn(fn_expr) => fn_expr.ident.as_ref().map(|ident| ident.sym.to_string()),
             _ => None,
         },
+        _ => None,
+    }))
+}
+
+/// Like [`commonjs_export_name`], but only for a genuine `export = X;`
+/// assignment -- not an ESM `export default`. A bare `import * as X from
+/// "pkg"` of an `export =` package binds `X` to the exported *value itself*
+/// (real TypeScript/esModuleInterop: `import * as Koa from "koa"` where
+/// `export = Application` makes `new Koa()` valid), whereas a real ESM
+/// default export's namespace object is not constructible. Real example:
+/// koa's own `@types` barrel.
+fn commonjs_export_assignment(source: &str) -> Result<Option<String>, String> {
+    use thaw_parser::ast::{Expr, ModuleDecl, ModuleItem};
+
+    let module = thaw_parser::parse_typescript(source)?;
+    Ok(module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+            if let Expr::Ident(identifier) = export.expr.as_ref() {
+                Some(identifier.sym.to_string())
+            } else {
+                None
+            }
+        }
         _ => None,
     }))
 }

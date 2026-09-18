@@ -1,3 +1,29 @@
+thread_local! {
+    /// Names of generic type aliases/interfaces currently being resolved on
+    /// this thread, independent of the `in_progress` chain threaded
+    /// explicitly through `resolve_generic_*`/`resolve_ts_type_with_
+    /// substitution`. `classify_ts_type` is a separate entry point with no
+    /// access to that chain, and resets it to a fresh vector every time it
+    /// dispatches into a generic alias/interface -- so a genuinely cyclic
+    /// alias (`type A<T> = B<T>; type B<T> = A<T>`, real in koa's own
+    /// `.d.ts` dependency graph) recursed forever, a hard compiler stack
+    /// overflow. This stack survives that reset and breaks the cycle.
+    static ACTIVE_GENERIC_TYPES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// RAII pop for `ACTIVE_GENERIC_TYPES`, so every early `return` inside the
+/// resolvers balances its own push without a manual pop at each exit.
+struct ActiveGenericType;
+
+impl Drop for ActiveGenericType {
+    fn drop(&mut self) {
+        ACTIVE_GENERIC_TYPES.with(|active| {
+            active.borrow_mut().pop();
+        });
+    }
+}
+
 /// Resolves `Name<ConcreteArg, ...>` for a generic interface `Name`,
 /// mirroring `thaw_hir::lower::resolve_generic_interface` but degrading to
 /// `DtsType::Unsupported` instead of erroring (wrong argument count,
@@ -12,11 +38,15 @@ fn resolve_generic_interface(
     generic_interfaces: &GenericInterfaces,
     in_progress: &mut Vec<String>,
 ) -> DtsType {
-    if in_progress.iter().any(|n| n == name) {
+    if in_progress.iter().any(|n| n == name)
+        || ACTIVE_GENERIC_TYPES.with(|active| active.borrow().iter().any(|n| n == name))
+    {
         return DtsType::Unsupported(format!(
             "generic interface `{name}` is (indirectly) self-referential"
         ));
     }
+    ACTIVE_GENERIC_TYPES.with(|active| active.borrow_mut().push(name.to_string()));
+    let _active = ActiveGenericType;
     if !decl.extends.is_empty() {
         return DtsType::Unsupported(format!(
             "generic interface `{name}` cannot use `extends` yet"
@@ -185,11 +215,15 @@ fn resolve_generic_alias(
     generic_interfaces: &GenericInterfaces,
     in_progress: &mut Vec<String>,
 ) -> DtsType {
-    if in_progress.iter().any(|active| active == name) {
+    if in_progress.iter().any(|active| active == name)
+        || ACTIVE_GENERIC_TYPES.with(|active| active.borrow().iter().any(|n| n == name))
+    {
         return DtsType::Unsupported(format!(
             "generic type alias `{name}` is (indirectly) self-referential"
         ));
     }
+    ACTIVE_GENERIC_TYPES.with(|active| active.borrow_mut().push(name.to_string()));
+    let _active = ActiveGenericType;
     let parameters = &decl
         .type_params
         .as_ref()
