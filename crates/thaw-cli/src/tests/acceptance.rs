@@ -39,6 +39,51 @@ fn builds_and_runs_a_constructor_overload() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `instanceof` against an ordinary, non-Error, same-module class (and a
+/// subclass) must work end to end. The module rename pass used to leave an
+/// `instanceof` right operand completely unrenamed while the class
+/// declaration itself was renamed to `__thawmodN_<Name>`, so thaw-hir's
+/// own existence check never found the constructor ("native `instanceof`
+/// right operand `User` is not a known class"). The external-import
+/// exemption this replaced is covered by
+/// `instanceof_recognizes_a_real_npm_exported_error_subclass`; this covers
+/// the ordinary local case.
+#[test]
+fn builds_and_runs_instanceof_against_a_local_class() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-instanceof-local-class-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "class User {}\n\
+         class Admin extends User {}\n\
+         class Other {}\n\
+         function main(): void {\n\
+           const user = new User();\n\
+           const admin = new Admin();\n\
+           console.log(user instanceof User, user instanceof Admin, user instanceof Other);\n\
+           console.log(admin instanceof User, admin instanceof Admin, admin instanceof Other);\n\
+         }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true false false\ntrue true false\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     let measure_performance = std::env::var("THAW_RUN_PERFORMANCE").as_deref() == Ok("1");
