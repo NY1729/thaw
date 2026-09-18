@@ -202,6 +202,168 @@ fn iterator_object_adapter(
 }
 
 impl<'a> FnLowerer<'a> {
+    /// The `HirType::JsValue` sibling of `iterator_object_adapter` above --
+    /// same job (adapt something following the JS iterator protocol into
+    /// thaw's own generator-producer ABI, so `Stmt::ForOf`'s existing
+    /// `HirType::Function(...)` recognition and its whole batching/close-
+    /// on-exit machinery picks it up unchanged), but for a receiver with
+    /// no static shape at all -- real trigger: a real npm class's method
+    /// documented `Generator<T>`/`IterableIterator<T>` in its `.d.ts`
+    /// (e.g. `lru-cache`'s `LRUCache.keys()`), which thaw-bridge's own
+    /// `.d.ts` classifier (unlike `thaw-hir`'s `lower_ts_type`) has no
+    /// `Generator`/`IterableIterator` case for at all, so it falls back
+    /// to the generic dynamic escape hatch, `HirType::JsValue`.
+    ///
+    /// Unlike `iterator_object_adapter`, this always succeeds (there's no
+    /// static shape to fail to match) and needs `&mut self` (`coerce_to_
+    /// declared`, to marshal call arguments into `Json` the same way an
+    /// ordinary `.method()` call on a `JsValue` receiver already does --
+    /// see `lower_dynamic_value_method_call`, `invocations/dynamic_
+    /// values.rs`). `next`/`return`/`throw` are called unconditionally,
+    /// with no static existence check possible for a fully dynamic
+    /// value: every real `Generator` object -- the only shape a real
+    /// `.d.ts` ever declares this way -- is spec-guaranteed to have all
+    /// three. A hand-rolled plain iterable *without* `.return`/`.throw`,
+    /// reached this dynamically, would throw a dynamic "not a function"
+    /// error, but only if the consuming loop exits early.
+    fn dynamic_iterator_adapter(
+        &mut self,
+        iterator: HirExpr,
+        iterator_name: Symbol,
+    ) -> Result<(HirExpr, HirType), String> {
+        let value_type = HirType::Json;
+        let result_name = format!("{iterator_name}_result");
+        let control = format!("{iterator_name}_control");
+        let error = format!("{iterator_name}_error");
+        let returns = format!("{iterator_name}_returns");
+        let return_request = format!("{iterator_name}_return_request");
+        let forced_return = format!("{iterator_name}_forced_return");
+        let channel = HirType::Array(Box::new(value_type.clone()));
+        let producer_type = generator_function_type(
+            false,
+            value_type.clone(),
+            value_type.clone(),
+            HirType::Undefined,
+        );
+        // `coerce_to_declared` (used below, to marshal `error` into the
+        // dynamic `throw()` call's Json argument array) infers its
+        // input's type from `self.scope` -- unlike `iterator_object_
+        // adapter`'s static `PropAccess`-only construction, which never
+        // needs a type lookup at all, so this hand-built producer's own
+        // synthetic parameters need registering here first. Restored
+        // below: these names are scoped only to this producer's own
+        // body, not the surrounding function actually being lowered.
+        let saved_scope = self.scope.clone();
+        self.scope.insert(iterator_name.clone(), HirType::JsValue);
+        self.scope.insert(control.clone(), HirType::I64);
+        self.scope.insert(error.clone(), HirType::Str);
+        let call_method = |lowerer: &mut Self, name: &str, args: Vec<HirExpr>| -> Result<HirExpr, String> {
+            let args = args
+                .into_iter()
+                .map(|argument| lowerer.coerce_to_declared(&HirType::Json, argument))
+                .collect::<Result<Vec<_>, String>>()?;
+            let array = lowerer.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(args))?;
+            Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+                vec![
+                    HirExpr::Var(iterator_name.clone()),
+                    HirExpr::Lit(HirLit::Str(name.to_string())),
+                    array,
+                ],
+            ))
+        };
+        let result_statements = |name: Symbol, call: HirExpr| {
+            vec![
+                HirStmt::Let(name.clone(), HirType::Json, call),
+                HirStmt::If(
+                    HirExpr::JsonAsBool(Box::new(HirExpr::JsonGet(
+                        Box::new(HirExpr::Var(name.clone())),
+                        "done".into(),
+                    ))),
+                    vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
+                    Vec::new(),
+                ),
+                HirStmt::Return(Some(HirExpr::ArrayLit(vec![HirExpr::JsonGet(
+                    Box::new(HirExpr::Var(name)),
+                    "value".into(),
+                )]))),
+            ]
+        };
+        let mut producer_body = Vec::new();
+        let throw_call = call_method(self, "throw", vec![HirExpr::Var(error.clone())])?;
+        producer_body.push(HirStmt::If(
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Var(control.clone())),
+                Box::new(HirExpr::Lit(HirLit::I64(2))),
+            ),
+            result_statements(format!("{result_name}_throw"), throw_call),
+            Vec::new(),
+        ));
+        let return_call = call_method(self, "return", Vec::new())?;
+        producer_body.push(HirStmt::If(
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Var(control.clone())),
+                Box::new(HirExpr::Lit(HirLit::I64(1))),
+            ),
+            result_statements(format!("{result_name}_return"), return_call),
+            Vec::new(),
+        ));
+        let next_call = call_method(self, "next", Vec::new())?;
+        producer_body.extend(result_statements(result_name, next_call));
+        let producer = HirExpr::Lambda(
+            vec![HirParam {
+                name: iterator_name.clone(),
+                ty: HirType::JsValue,
+            }],
+            vec![
+                HirParam {
+                    name: control.clone(),
+                    ty: HirType::I64,
+                },
+                HirParam {
+                    name: error.clone(),
+                    ty: HirType::Str,
+                },
+                HirParam {
+                    name: format!("{iterator_name}_input"),
+                    ty: HirType::Undefined,
+                },
+                HirParam {
+                    name: returns,
+                    ty: channel.clone(),
+                },
+                HirParam {
+                    name: return_request,
+                    ty: channel.clone(),
+                },
+                HirParam {
+                    name: forced_return,
+                    ty: channel.clone(),
+                },
+            ],
+            channel.clone(),
+            Box::new(HirExpr::Block(producer_body)),
+        );
+        self.scope = saved_scope;
+        Ok((
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: iterator_name,
+                        ty: HirType::JsValue,
+                    }],
+                    producer_type.clone(),
+                    Box::new(HirExpr::Block(vec![HirStmt::Return(Some(producer))])),
+                )),
+                vec![iterator],
+            ),
+            producer_type,
+        ))
+    }
+
     fn collect_pattern_bindings(pattern: &Pat, names: &mut Vec<String>) {
         match pattern {
             Pat::Ident(binding) => names.push(binding.id.sym.to_string()),
@@ -1146,6 +1308,14 @@ impl<'a> FnLowerer<'a> {
                             values = producer;
                             values_type = producer_type;
                         }
+                    }
+                    if values_type == HirType::JsValue {
+                        let name = format!("__thaw_iterator_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let (producer, producer_type) =
+                            self.dynamic_iterator_adapter(values.clone(), name)?;
+                        values = producer;
+                        values_type = producer_type;
                     }
                     if let HirType::Function(params, result) = &values_type {
                         let (result, async_generator) = match result.as_ref() {
