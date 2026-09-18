@@ -125,6 +125,42 @@ impl<'a> FnLowerer<'a> {
                             ret,
                         ));
                     }
+                    // A bare class-name reference (not immediately
+                    // `new`'d) -- real trigger: `class-transformer`'s
+                    // own `plainToInstance(User, plain)`, a common
+                    // factory-function idiom (pass a class constructor
+                    // as a plain argument; the real JS implementation
+                    // does `new cls()` internally). A class never
+                    // registers anything under its own bare name here
+                    // (everything lives under the mangled `class_
+                    // constructor_symbol`), so this fell through to the
+                    // generic `HirExpr::Var(name)` default below,
+                    // producing "unknown variable" the moment anything
+                    // tried to infer its type. Mirrors the identical
+                    // pattern already used for a static method's own
+                    // `this` just below (`class_constructor_symbol` +
+                    // `self.interfaces` lookup) -- a class's constructor
+                    // is already an ordinary, referenceable native
+                    // function (`new User(...)` itself desugars to a
+                    // plain call to this exact symbol), so this just
+                    // makes the bare identifier resolve to it the same
+                    // way an ordinary plain function value already does
+                    // just above. Every downstream consumer (`Function`-
+                    // to-`JsValue` coercion via `registerNativeCallback`,
+                    // dynamic-call argument marshaling, and real JS
+                    // `new`-on-a-returning-constructor semantics) already
+                    // exists and needs no further change.
+                    let constructor = class_constructor_symbol(&name);
+                    if let Some(signature) = self.signatures.get(&constructor) {
+                        let result = self.interfaces.get(&name).cloned().ok_or_else(|| {
+                            format!("class `{name}` has no layout")
+                        })?;
+                        return Ok(HirExpr::FunctionRef(
+                            constructor,
+                            signature.params.clone(),
+                            result,
+                        ));
+                    }
                 }
                 if !self.scope.contains_key(&name) && !self.signatures.contains_key(&name) {
                     match ident.sym.as_ref() {
