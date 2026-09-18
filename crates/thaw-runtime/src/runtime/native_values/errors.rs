@@ -33,14 +33,22 @@ const ERROR_CODE_MARKER: char = '\u{3}';
 /// this never needs to coexist with them in practice, but the split
 /// functions still handle the combination correctly regardless.
 const ERROR_NAME_OVERRIDE_MARKER: char = '\u{4}';
+/// Trailing bag of an exception's own extra properties (a JSON object),
+/// appended by thaw-quickjs's `describe_tagged_exception` for a JS error
+/// crossing native code and back (e.g. an `http-errors` error's `status`).
+/// Native `.message`/`.name` reads must ignore it.
+const ERROR_PROPS_MARKER: char = '\u{5}';
 
 fn split_error_tag(message: &str) -> (&str, &str) {
     let Some(rest) = message.strip_prefix(ERROR_TAG_MARKER) else {
-        return ("Error", message);
+        return ("Error", message.split_once(ERROR_PROPS_MARKER).map_or(message, |value| value.0));
     };
     let (name, body) = rest
         .split_once(ERROR_TAG_MARKER)
         .unwrap_or(("Error", message));
+    let body = body
+        .split_once(ERROR_PROPS_MARKER)
+        .map_or(body, |value| value.0);
     let body = body
         .split_once(ERROR_NAME_OVERRIDE_MARKER)
         .map_or(body, |value| value.0);
@@ -52,6 +60,7 @@ fn split_error_tag(message: &str) -> (&str, &str) {
 /// see `ERROR_NAME_OVERRIDE_MARKER`.
 fn split_error_name_override(message: &str) -> Option<&str> {
     let (_, after) = message.split_once(ERROR_NAME_OVERRIDE_MARKER)?;
+    let after = after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0);
     let after = after.split_once(ERROR_CAUSE_MARKER).map_or(after, |value| value.0);
     Some(after.split_once(ERROR_CODE_MARKER).map_or(after, |value| value.0))
 }
@@ -68,13 +77,15 @@ fn resolved_error_name(message: &str) -> String {
 }
 
 fn split_error_cause(message: &str) -> Option<&str> {
-    message
-        .split_once(ERROR_CAUSE_MARKER)
-        .map(|value| value.1.split_once(ERROR_CODE_MARKER).map_or(value.1, |code| code.0))
+    let after = message.split_once(ERROR_CAUSE_MARKER)?.1;
+    let after = after.split_once(ERROR_CODE_MARKER).map_or(after, |value| value.0);
+    Some(after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0))
 }
 
 fn split_error_code(message: &str) -> Option<&str> {
-    message.split_once(ERROR_CODE_MARKER).map(|value| value.1)
+    message
+        .split_once(ERROR_CODE_MARKER)
+        .map(|value| value.1.split_once(ERROR_PROPS_MARKER).map_or(value.1, |props| props.0))
 }
 
 /// # Safety

@@ -1282,3 +1282,67 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A JavaScript error thrown inside a package's own code, called from a
+/// natively-compiled async callback, must keep its *own extra properties*
+/// when it propagates back into the package's JS `catch` block (real
+/// trigger: koa's `ctx.throw(418, ...)`, whose `http-errors` error carries
+/// `status`/`statusCode`/`expose` on its prototype, read by koa's own error
+/// handler to answer 418 instead of a generic 500). The exception ABI
+/// carries them as a trailing JSON bag.
+#[test]
+fn a_thrown_js_errors_own_properties_survive_a_native_callback_boundary() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-error-properties-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let thrower = registry.join("boom-kit");
+    let handler = registry.join("router-kit");
+    std::fs::create_dir_all(&thrower).unwrap();
+    std::fs::create_dir_all(&handler).unwrap();
+    std::fs::write(
+        thrower.join("package.d.ts"),
+        "export declare function boom(): void;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        thrower.join("bundle.js"),
+        "module.exports.boom = function() { var e = new Error('teapot'); e.status = 418; e.expose = true; throw e; };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        handler.join("package.d.ts"),
+        "export declare function handle(callback: () => Promise<void>): Promise<string>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        handler.join("bundle.js"),
+        "module.exports.handle = async function(cb) { try { await cb(); return 'ok'; } catch (e) { return 'err:' + e.status + ':' + e.expose; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { handle } from "router-kit";
+import { boom } from "boom-kit";
+async function main(): Promise<void> {
+    const result = await handle(async (): Promise<void> => {
+        boom();
+    });
+    console.log(result);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "err:418:true\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

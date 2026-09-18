@@ -40,8 +40,69 @@
   // result). A non-callable right operand (a plain object) is `false`
   // rather than a thrown TypeError, matching the compile-time path this
   // replaces.
+  // Serializes an Error's own *and inherited* enumerable scalar/object
+  // properties (everything but `name`/`message`/`stack`) to JSON, for the
+  // exception ABI. `JSON.stringify` alone would miss `http-errors`'
+  // `status`/`statusCode`/`expose`, which live on the error's *prototype*;
+  // `for...in` walks the prototype chain. Used by `describe_tagged_
+  // exception` (thaw-quickjs) and replayed by `__thaw_error_from_tagged`.
+  globalThis.__thaw_error_properties_json = function (error) {
+    if (!error || (typeof error !== 'object' && typeof error !== 'function')) return '';
+    const out = {};
+    for (const key in error) {
+      if (key === 'message' || key === 'name' || key === 'stack') continue;
+      const value = error[key];
+      const type = typeof value;
+      if (
+        type === 'string' ||
+        type === 'number' ||
+        type === 'boolean' ||
+        value === null ||
+        (type === 'object' && value !== null)
+      ) {
+        out[key] = value;
+      }
+    }
+    return JSON.stringify(out);
+  };
   globalThis.__thaw_instanceof_dynamic_value = (value, target) =>
     typeof target === 'function' ? value instanceof target : false;
+  // Rebuilds a real Error from the tagged exception string a native
+  // boundary carries (`describe_tagged_exception`, thaw-quickjs): an
+  // optional `\u0001name\u0001message` prefix, an optional trailing
+  // `\u0005<json>` bag of the error's own extra properties (`http-errors`'
+  // `status`/`statusCode`/`expose`/`headers`, which koa's own error
+  // handler reads), and the native name-override/cause/code tags
+  // (`\u0004`/`\u0002`/`\u0003`) stripped from the message. Shared by both
+  // the synchronous callback-error and rejected-native-Promise paths of
+  // the native-callback wrapper.
+  globalThis.__thaw_error_from_tagged = function (raw) {
+    let propertiesJson = null;
+    const propertiesIndex = raw.indexOf('\u0005');
+    if (propertiesIndex >= 0) {
+      propertiesJson = raw.slice(propertiesIndex + 1);
+      raw = raw.slice(0, propertiesIndex);
+    }
+    let name = 'Error';
+    let message = raw;
+    if (raw.charCodeAt(0) === 1) {
+      const separator = raw.indexOf('\u0001', 1);
+      if (separator > 1) {
+        name = raw.slice(1, separator);
+        message = raw.slice(separator + 1);
+      }
+    }
+    message = message.split('\u0004')[0].split('\u0002')[0].split('\u0003')[0];
+    const error = new Error(message);
+    error.name = name;
+    if (propertiesJson) {
+      try {
+        const properties = JSON.parse(propertiesJson);
+        for (const key in properties) error[key] = properties[key];
+      } catch (ignored) {}
+    }
+    return error;
+  };
   globalThis.__thaw_is_buffer_dynamic_value = value => Buffer.isBuffer(value);
   const timers = new Map();
   const normalizeDelay = value => {
