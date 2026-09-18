@@ -40,6 +40,73 @@ fn class_decorator_token_symbol(class_name: &str) -> Symbol {
     class_static_field_symbol(class_name, "__thaw_decorator_target__")
 }
 
+/// Class names that appear as a bare *value* reference somewhere in the
+/// module (`Expr::Ident`), as opposed to only ever being constructed
+/// (`new Class`) or used in a type position. Such a class is handed to real
+/// JavaScript as a value -- `plainToInstance(User, ...)`, `@Type(() =>
+/// Address)`, `value instanceof Address` -- and so needs the same stable,
+/// live "class token" a *decorated* class already gets (see
+/// `lower_class_decorator_tokens`). Without one, every crossing would
+/// create a fresh native-callback wrapper with no shared identity, so
+/// `instanceof`/metadata lookups against it could never match.
+///
+/// Deliberately excludes a `new Class()` callee (the class is being
+/// constructed, not used as a value) and a `class X extends Base` super
+/// reference (Thaw consumes the base's *layout*, not its value identity).
+fn class_names_referenced_as_values(
+    module: &swc_ecma_ast::Module,
+    classes: &[&ClassDecl],
+) -> HashSet<Symbol> {
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    struct Collector<'a> {
+        classes: &'a HashSet<Symbol>,
+        found: HashSet<Symbol>,
+    }
+    impl Visit for Collector<'_> {
+        fn visit_expr(&mut self, expr: &swc_ecma_ast::Expr) {
+            if let swc_ecma_ast::Expr::Ident(ident) = expr {
+                if self.classes.contains(ident.sym.as_ref()) {
+                    self.found.insert(ident.sym.to_string());
+                }
+            }
+            expr.visit_children_with(self);
+        }
+
+        fn visit_new_expr(&mut self, expression: &swc_ecma_ast::NewExpr) {
+            // Skip a bare callee identifier (the constructed class); still
+            // visit the arguments, which may reference a class as a value
+            // (`new Thing(User)`).
+            if matches!(expression.callee.as_ref(), swc_ecma_ast::Expr::Member(_)) {
+                expression.callee.visit_with(self);
+            }
+            if let Some(arguments) = &expression.args {
+                for argument in arguments {
+                    argument.visit_with(self);
+                }
+            }
+        }
+
+        fn visit_class(&mut self, class: &swc_ecma_ast::Class) {
+            // `extends Base` consumes Base's layout, not its value identity.
+            for member in &class.body {
+                member.visit_with(self);
+            }
+        }
+    }
+
+    let names: HashSet<Symbol> = classes
+        .iter()
+        .map(|declaration| declaration.ident.sym.to_string())
+        .collect();
+    let mut collector = Collector {
+        classes: &names,
+        found: HashSet::new(),
+    };
+    module.visit_with(&mut collector);
+    collector.found
+}
+
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
     let merged = normalize_interface_merges(module)?;
@@ -142,6 +209,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     {
         return lower_normalized_module(&specialized);
     }
+    let value_referenced_classes = class_names_referenced_as_values(module, &class_decls);
 
     let mut signatures: HashMap<Symbol, FnSignature> = HashMap::new();
     let mut fn_decls = Vec::new();
@@ -1129,7 +1197,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 immutable_globals.insert(symbol);
             }
         }
-        if class_has_decorators(&declaration.class) {
+        if class_has_decorators(&declaration.class)
+            || value_referenced_classes.contains(class_name)
+        {
             let token_symbol = class_decorator_token_symbol(class_name);
             global_types.insert(token_symbol.clone(), HirType::JsValue);
             immutable_globals.insert(token_symbol.clone());
@@ -1315,6 +1385,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &enum_values,
             &enum_reverse_values,
             Some(&call_constraints),
+            &value_referenced_classes,
         )?;
         for fn_decl in &fn_decls {
             let name = fn_decl.ident.sym.to_string();
@@ -1500,6 +1571,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         &generic_interfaces,
         &enum_values,
         &enum_reverse_values,
+        &value_referenced_classes,
     )?);
     let initializers = lower_top_level_initializers(
         module,
@@ -1511,6 +1583,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         &enum_values,
         &enum_reverse_values,
         None,
+        &value_referenced_classes,
     )?;
 
     let extern_functions = signatures
