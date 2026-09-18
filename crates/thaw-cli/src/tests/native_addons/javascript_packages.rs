@@ -3301,6 +3301,66 @@ run();
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Round 26's npm compat audit (`qs`), found while verifying the segfault
+/// fix above: `qs.stringify(obj, { filter: (prefix, value) => (cond ?
+/// undefined : value) })` -- a `filter` callback returning `undefined`
+/// from one ternary branch -- produced `a=1&b=` instead of real Node's
+/// `a=1` (confirmed directly against real Node: `filter` treats an
+/// `undefined` return as "omit this key" but a `null` return as "keep
+/// the key with an empty value", two different outcomes). See `a_
+/// native_closure_returning_undefined_from_one_ternary_branch_is_not_
+/// confused_with_null` (thaw-cli's own synthetic-package unit test, in
+/// `tests/registry_fallback/callbacks.rs`) for the full root-cause
+/// writeup (a hardcoded `preserve_undefined: false` in the shared
+/// native-callback return-value marshaling, general, not qs-specific).
+#[test]
+fn registry_add_stringifies_a_real_qs_filter_callback_returning_undefined_from_a_ternary_when_enabled(
+) {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-js-qs-filter-ternary-undefined-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "qs").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import * as qs from "qs";
+
+function run(): void {
+    console.log(qs.stringify({ a: "1", b: "2" }, { filter: (prefix: string, value: any) => (prefix === "b" ? undefined : value) }));
+}
+run();
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["qs".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "exit status: {:?}, stderr: {}",
+        result.status.code(),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "a=1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Round 24's npm compat audit (`ws`). A real client/server round trip
 /// (echo message, then a full client-initiated close handshake) crashed
 /// twice in a row on the client's own `net.Socket` teardown, both fixed

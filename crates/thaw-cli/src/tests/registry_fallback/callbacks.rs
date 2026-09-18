@@ -156,6 +156,97 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A native closure whose body is a ternary unifying an `Undefined`
+/// branch with a `Json` branch (`prefix === "b" ? undefined : value`) --
+/// real trigger: `qs.stringify(obj, { filter: (prefix, value) =>
+/// (cond ? undefined : value) })`, whose `filter` treats an `undefined`
+/// return (omit the key) differently from a `null` return (keep the key
+/// with an empty value) -- confirmed directly against real Node. Thaw
+/// produced the `null` behavior for both, wrong for the `undefined` case.
+///
+/// Root cause: ternary lowering (`crates/thaw-hir/src/lower/expressions/
+/// lowering.rs`, `Expr::Cond`) unifies `(Undefined, Json)` into
+/// `HirType::Optional(Json)`, a real native tagged union, not a JSON
+/// value yet. When such a closure's inferred return type doesn't match
+/// its call site's own declared type (as here: the closure's own
+/// annotation-free params/return give it type `Function([Str, Json],
+/// Optional(Json))`, while the `.d.ts`'s callback type wants `Json`),
+/// the field-typed-as-`Function` branch of `compile_json_object_set_
+/// native_with_undefined` (thaw-llvm's `json_bridge/encoding.rs`)
+/// registers it as a live native callback via `compile_register_native_
+/// callback_from_closure` using the closure's *own* return type (`ret`)
+/// directly, without first reconciling it against any wider expected
+/// type. That closure's own return-value marshaling, inside `compile_
+/// value_callback_from_closure` (`dynamic_host/callbacks.rs`), called
+/// `compile_json_array_push_native` -- which hardcodes `preserve_
+/// undefined: false` -- to turn its `Optional(Json)` result into JSON,
+/// so the tagged union's "absent" case always became a plain JSON
+/// `null`, indistinguishable from an explicit `null` return. Same bug
+/// in the analogous `Promise<Optional<Json>>` resolved-value path
+/// (`compile_native_promise_callback_finisher`).
+///
+/// Fixed by switching both call sites to `compile_json_array_push_
+/// native_with_undefined(..., true)` -- the same `preserve_undefined:
+/// true` a standalone value already uses elsewhere (`wrap_native_value_
+/// as_json`, thaw-hir) for the identical "this is a value being
+/// round-tripped through JSON, not an object field that can
+/// legitimately omit itself" reason.
+#[test]
+fn a_native_closure_returning_undefined_from_one_ternary_branch_is_not_confused_with_null() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-native-callback-ternary-undefined-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("callback-kit3");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Options {\n\
+         \x20\x20\x20\x20filter?: Array<string | number> | ((prefix: string, value: any) => any) | undefined;\n\
+         }\n\
+         export declare function invoke(value: any, options?: Options): any;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { invoke: function(value, options) { \
+         var filter = options && options.filter; \
+         var result = typeof filter === 'function' ? filter('key', value) : value; \
+         return { \
+         typeOfResult: typeof result, \
+         isUndefined: result === undefined, \
+         isNull: result === null \
+         }; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { invoke } from "callback-kit3";
+function main(): void {
+    const outcome: any = invoke("hello", { filter: (prefix: string, value: any) => (prefix === "key" ? undefined : value) });
+    console.log(outcome.typeOfResult, outcome.isUndefined, outcome.isNull);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "undefined true false\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A native closure passed as a dynamic-method-call argument (same shape
 /// as the test above), whose declared return type is `Promise<T>` --
 /// real-world example: drizzle-orm's `sqlite-proxy` driver,
