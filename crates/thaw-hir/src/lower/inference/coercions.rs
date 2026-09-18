@@ -252,10 +252,40 @@ impl<'a> FnLowerer<'a> {
             // detection, the args-JSON reviver, ...) treats it exactly
             // like any other live value crossing into a dynamic call.
             if let HirType::Function(_, _) = &actual {
-                return Ok(HirExpr::Call(
+                // `registerNativeCallback`'s own inferred type is always
+                // `HirType::JsValue` (`inference/types.rs`'s hardcoded
+                // intrinsic-name case) -- a raw `i64` handle, not the
+                // pointer representation a genuinely `Json`-typed value
+                // needs. Reaching a dynamic call's own JSON argument
+                // array/object field already tolerates this raw shape
+                // (that call site's own codegen separately detects an
+                // `i64` reaching a `Json`-declared slot via `is_int_
+                // value()` and wraps it there, see `compile_json_
+                // object_set_native_with_undefined`'s `HirType::Json`
+                // arm) -- but nothing else does. A `let`/`const c: any
+                // = someFunctionOrClass;` (real trigger: any plain
+                // function *or* class reference -- `new User(...)`
+                // itself desugars to an ordinary function call, so a
+                // bare `User` reference hits this exact branch too --
+                // coerced into an `any`-typed local) stored this raw
+                // `i64` directly into a slot whose declared type says
+                // `Json` (a pointer), corrupting it -- a real,
+                // reproducible segfault the moment anything (`typeof`,
+                // `console.log`, ...) later read that slot back as if
+                // it held a real `serde_json::Value` pointer. `JsValueAsJson`
+                // (the same wrapping the sibling `actual == JsValue`
+                // case below already applies) produces the identical
+                // `{"__thaw_js_handle_id__": id}` placeholder `compile_
+                // dynamic_value_placeholder`'s own `is_int_value()` path
+                // would otherwise build downstream -- doing it here
+                // instead makes every consumer correct, the dynamic-
+                // call-argument case included (its own `is_int_value()`
+                // check now simply sees an already-wrapped pointer and
+                // skips, never double-wrapping).
+                return Ok(HirExpr::JsValueAsJson(Box::new(HirExpr::Call(
                     Box::new(HirExpr::Var("registerNativeCallback".to_string())),
                     vec![value],
-                ));
+                ))));
             }
             // A bare `undefined` literal (`schema.safeParse(undefined)`,
             // real zod) has no JSON representation either -- JSON has no
