@@ -546,7 +546,14 @@ fn dts_source_with_reexported_functions_inner(
                     }
                 }
                 None => match import_equals_targets.get(&original) {
-                    Some(target_path) => export_assignment_function_declarations(target_path)?,
+                    Some(target_path) => {
+                        let functions = export_assignment_function_declarations(target_path)?;
+                        if !functions.is_empty() {
+                            functions
+                        } else {
+                            export_assignment_class_or_interface_declarations(target_path)?
+                        }
+                    }
                     None => match named_import_targets.get(&original) {
                         Some((target_path, target_name)) => {
                             let mut visited = std::collections::BTreeSet::new();
@@ -1994,6 +2001,61 @@ fn export_assignment_function_declarations(path: &Path) -> Result<Vec<String>, S
             (function.ident.sym.as_ref() == target).then(|| {
                 source_map
                     .span_to_snippet(function.span())
+                    .map_err(|error| format!("failed to read declaration for `{target}`: {error:?}"))
+            })
+        })
+        .collect()
+}
+
+/// The `export_assignment_function_declarations`'s sibling for a plain
+/// (non-exported) `declare class X {...}`/`declare interface X {...}`
+/// matching whatever identifier `path`'s own `export = X;` names --
+/// real-world example: `@types/semver`'s `classes/semver.d.ts`
+/// (`import semver = require("../index"); declare class SemVer {...}
+/// export = SemVer;`), reached the identical way (`import SemVer =
+/// require("./classes/semver")` in the barrel `index.d.ts`, then a
+/// plain local `export { SemVer };`) `export_assignment_function_
+/// declarations` already handles for a *function*-shaped target. Before
+/// this fix, `SemVer`/`Range`/`Comparator` -- semver's three real
+/// classes -- were silently dropped entirely (`export_assignment_
+/// function_declarations` returns empty for a class-shaped target,
+/// with nothing to try next), so `import { SemVer } from "semver"`
+/// failed outright: `` `semver` has no export named `SemVer` ``.
+fn export_assignment_class_or_interface_declarations(path: &Path) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{Decl, Expr, ModuleDecl, ModuleItem, Stmt};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let source = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read re-exported declarations `{}`: {error}",
+            path.display()
+        )
+    })?;
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let Some(target) = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref() {
+            Expr::Ident(ident) => Some(ident.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }) else {
+        return Ok(Vec::new());
+    };
+    module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::Stmt(Stmt::Decl(declaration)) = item else {
+                return None;
+            };
+            let (name, span) = match declaration {
+                Decl::Class(class) => (class.ident.sym.as_ref(), class.span()),
+                Decl::TsInterface(interface) => (interface.id.sym.as_ref(), interface.span()),
+                _ => return None,
+            };
+            (name == target).then(|| {
+                source_map
+                    .span_to_snippet(span)
                     .map_err(|error| format!("failed to read declaration for `{target}`: {error:?}"))
             })
         })
