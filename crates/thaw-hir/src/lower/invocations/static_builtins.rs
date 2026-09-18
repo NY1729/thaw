@@ -723,6 +723,94 @@ impl<'a> FnLowerer<'a> {
                                 );
                                 (source, array_type, element_type)
                             }
+                            // A `JsValue` following the JS iterator
+                            // protocol -- real trigger: `Array.from(cache.
+                            // keys())`, `lru-cache`'s `LRUCache.keys()`
+                            // returning a real `Generator<K>` (a real npm
+                            // class's method return type documented this
+                            // way falls back to the generic dynamic escape
+                            // hatch, `HirType::JsValue`, since thaw-
+                            // bridge's own `.d.ts` classifier -- unlike
+                            // thaw-hir's `lower_ts_type` -- has no
+                            // `Generator`/`IterableIterator` case at all).
+                            // Unlike `for...of` (`Stmt::ForOf`, `lower/
+                            // statements/lowering.rs`), which lazily steps
+                            // thaw's own resumable generator-producer ABI
+                            // via `dynamic_iterator_adapter`, `Array.from`
+                            // wants the whole thing eagerly drained into
+                            // one array up front -- simpler to build
+                            // directly as a self-contained native `while`
+                            // loop than to route through that heavier,
+                            // resumable machinery.
+                            HirType::JsValue => {
+                                let iterator_name =
+                                    format!("__thaw_array_from_iterator_{}", self.next_binding);
+                                self.next_binding += 1;
+                                let array_name =
+                                    format!("__thaw_array_from_result_{}", self.next_binding);
+                                self.next_binding += 1;
+                                let result_name =
+                                    format!("__thaw_array_from_next_{}", self.next_binding);
+                                self.next_binding += 1;
+                                let element_type = HirType::Json;
+                                let array_type = HirType::Array(Box::new(element_type.clone()));
+                                let empty_args =
+                                    self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(Vec::new()))?;
+                                let call_next = HirExpr::Call(
+                                    Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+                                    vec![
+                                        HirExpr::Var(iterator_name.clone()),
+                                        HirExpr::Lit(HirLit::Str("next".to_string())),
+                                        empty_args,
+                                    ],
+                                );
+                                let loop_body = vec![
+                                    HirStmt::Let(result_name.clone(), HirType::Json, call_next),
+                                    HirStmt::If(
+                                        HirExpr::JsonAsBool(Box::new(HirExpr::JsonGet(
+                                            Box::new(HirExpr::Var(result_name.clone())),
+                                            "done".into(),
+                                        ))),
+                                        vec![HirStmt::Break],
+                                        Vec::new(),
+                                    ),
+                                    HirStmt::Expr(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_array_push".to_string())),
+                                        vec![
+                                            HirExpr::Var(array_name.clone()),
+                                            HirExpr::JsonGet(
+                                                Box::new(HirExpr::Var(result_name)),
+                                                "value".into(),
+                                            ),
+                                        ],
+                                    )),
+                                ];
+                                let block = HirExpr::Block(vec![
+                                    HirStmt::Let(
+                                        array_name.clone(),
+                                        array_type.clone(),
+                                        HirExpr::ArrayLit(Vec::new()),
+                                    ),
+                                    HirStmt::While(
+                                        HirExpr::Lit(HirLit::Bool(true)),
+                                        loop_body,
+                                    ),
+                                    HirStmt::Return(Some(HirExpr::Var(array_name))),
+                                ]);
+                                let source = HirExpr::Call(
+                                    Box::new(HirExpr::Lambda(
+                                        Vec::new(),
+                                        vec![HirParam {
+                                            name: iterator_name,
+                                            ty: HirType::JsValue,
+                                        }],
+                                        array_type.clone(),
+                                        Box::new(block),
+                                    )),
+                                    vec![source],
+                                );
+                                (source, array_type, element_type)
+                            }
                             other => {
                                 return Err(format!(
                                     "native `Array.from` requires a homogeneous array, string, Map, or Set, got {other:?}"
