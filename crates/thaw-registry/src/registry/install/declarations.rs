@@ -2405,11 +2405,40 @@ fn reexported_class_or_interface_declarations_inner(
     Ok(declarations)
 }
 
+/// Builds `path`'s own `.d.ts` sibling -- unlike a blanket `Path::with_
+/// extension("d.ts")`, which always *replaces* whatever Rust considers
+/// the current "extension" (everything after the final `.` in the file
+/// name). That's exactly right when `path`'s own last segment already
+/// names a real source-file extension (`import * as ns from
+/// "./impl.js"` -> `impl.d.ts`, an ordinary, common re-export shape),
+/// but wrong when a real npm/`.d.ts` file name instead embeds a dot as
+/// part of its own name, not an extension (`expose.decorator.d.ts`,
+/// `expose-options.interface.d.ts`, `transformation-type.enum.d.ts`,
+/// ... all real files in `@types/semver`/`@types/class-transformer`'s
+/// own layout): `Path::new("expose.decorator").with_extension("d.ts")`
+/// then silently produces `expose.d.ts` (wrong, usually nonexistent)
+/// instead of `expose.decorator.d.ts`, and the whole reexport chain
+/// resolves to nothing. Distinguished by checking whether the current
+/// extension is one of the source-file kinds a `.d.ts` sibling would
+/// ever actually replace; anything else is treated as part of the name
+/// and appended after, not replaced.
+fn with_d_ts_suffix(path: &Path) -> Option<PathBuf> {
+    const SOURCE_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"];
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+        if SOURCE_EXTENSIONS.contains(&extension) {
+            return Some(path.with_extension("d.ts"));
+        }
+    }
+    let file_name = path.file_name()?.to_str()?;
+    Some(path.with_file_name(format!("{file_name}.d.ts")))
+}
+
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {
     if source == "." || source.starts_with("./") || source.starts_with("../") {
         let path = entry_path.parent()?.join(source);
-        return [path.with_extension("d.ts"), path.join("index.d.ts")]
+        return [with_d_ts_suffix(&path), Some(path.join("index.d.ts"))]
             .into_iter()
+            .flatten()
             .find(|candidate| candidate.is_file());
     }
     // A bare specifier re-exports from a genuinely *different* installed
@@ -2438,8 +2467,9 @@ fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf>
         }
     }
     let path = package_dir;
-    [path.with_extension("d.ts"), path.join("index.d.ts")]
+    [with_d_ts_suffix(&path), Some(path.join("index.d.ts"))]
         .into_iter()
+        .flatten()
         .find(|candidate| candidate.is_file())
 }
 
