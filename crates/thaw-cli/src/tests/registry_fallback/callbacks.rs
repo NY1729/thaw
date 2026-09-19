@@ -1463,3 +1463,62 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A native callback parameter annotated `any` that the body **mutates**
+/// must be a live `JsValue`, so a package handing the callback its own
+/// mutable object sees the mutation. Real trigger: immer's own
+/// `produce(value, draft => { draft.x = ... })`, whose `draft` is a Proxy
+/// -- with a `Json` snapshot the write landed on a local copy and the
+/// returned state was unchanged. A merely-read `any` parameter (a callback
+/// that only consumes JSON data) keeps its `Json` shape.
+#[test]
+fn a_mutating_any_callback_parameter_is_a_live_value() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-mutating-callback-param-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("mutate-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function withDraft(value: any, mutate: (draft: any) => void): any;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.withDraft = function(value, mutate) {\n\
+             var backing = { count: value.count };\n\
+             var draft = new Proxy(backing, {\n\
+                 get: function(obj, key) { return obj[key]; },\n\
+                 set: function(obj, key, val) { obj[key] = val; return true; }\n\
+             });\n\
+             mutate(draft);\n\
+             return backing;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { withDraft } from "mutate-kit";
+function main(): void {
+    const next: any = withDraft({ count: 1 }, (draft: any): void => {
+        draft.count = 42;
+    });
+    console.log("count", next.count);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "count 42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

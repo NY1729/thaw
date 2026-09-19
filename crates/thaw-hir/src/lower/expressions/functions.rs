@@ -150,11 +150,29 @@ impl<'a> FnLowerer<'a> {
             let mut params = Vec::with_capacity(source_params.len());
             let mut destructuring = Vec::new();
             for (pattern, param) in arrow.params.iter().zip(source_params) {
-                let name = self.bind_local(&param.name, param.ty.clone());
+                // A callback parameter annotated `any`/`unknown` that the
+                // body *mutates* receives a live JavaScript value, not a
+                // JSON snapshot: a package hands the closure its own
+                // mutable object (real trigger: immer's own
+                // `produce(value, draft => { draft.x = ... })`, whose
+                // `draft` is a Proxy). Typing it `JsValue` routes the
+                // body's `.x` writes through `setDynamicProperty` on the
+                // real handle instead of a `Json` snapshot's local
+                // `JsonSet`, which never reaches the caller. A merely-read
+                // `any` parameter (a callback that just consumes JSON data)
+                // stays `Json`, so no existing callback changes shape.
+                let untyped =
+                    parameter_is_any_annotated(pattern) && arrow_body_mutates(&param.name, arrow);
+                let ty = if untyped && matches!(param.ty, HirType::Dynamic | HirType::Json) {
+                    HirType::JsValue
+                } else {
+                    param.ty.clone()
+                };
+                let name = self.bind_local(&param.name, ty.clone());
                 if !matches!(pattern, Pat::Ident(_) | Pat::Rest(_)) {
-                    destructuring.push((pattern, name.clone(), param.ty.clone()));
+                    destructuring.push((pattern, name.clone(), ty.clone()));
                 }
-                params.push(HirParam { name, ty: param.ty });
+                params.push(HirParam { name, ty });
             }
             let mut prefix = Vec::new();
             for (pattern, name, ty) in destructuring {
@@ -976,4 +994,123 @@ fn rest_aware_closure(arrow: &swc_ecma_ast::ArrowExpr, closure: HirExpr) -> HirE
         Box::new(ret.clone()),
     );
     HirExpr::TypedClosure(callable, Box::new(closure))
+}
+
+/// Whether an arrow/function body mutates the parameter `name` -- a direct
+/// assignment to one of its members (`draft.x = ...`, `draft[i] = ...`), a
+/// mutating method call on it (`draft.push(...)`, `draft.set(...)`), or
+/// `++`/`--`/`delete` on a member. Such a parameter must be a *live*
+/// `JsValue` so the mutation reaches the real object (immer's Proxy draft);
+/// a merely-read parameter keeps its `Json` snapshot shape.
+fn arrow_body_mutates(name: &str, arrow: &swc_ecma_ast::ArrowExpr) -> bool {
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    struct Finder<'a> {
+        name: &'a str,
+        mutated: bool,
+    }
+
+    /// The base identifier of a member/assignment target chain
+    /// (`a.b[c]` -> `Some("a")`), following the object side down.
+    fn root_ident(expr: &swc_ecma_ast::Expr) -> Option<&str> {
+        match expr {
+            swc_ecma_ast::Expr::Ident(ident) => Some(ident.sym.as_ref()),
+            swc_ecma_ast::Expr::Member(member) => root_ident(member.obj.as_ref()),
+            swc_ecma_ast::Expr::Paren(paren) => root_ident(paren.expr.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn is_mutating_method(name: &str) -> bool {
+        matches!(
+            name,
+            "push" | "pop" | "shift" | "unshift" | "splice" | "sort" | "reverse" | "fill" | "copyWithin"
+                | "set" | "delete" | "clear" | "add"
+        )
+    }
+
+    impl Visit for Finder<'_> {
+        fn visit_assign_expr(&mut self, assignment: &swc_ecma_ast::AssignExpr) {
+            if let swc_ecma_ast::AssignTarget::Simple(simple) = &assignment.left {
+                let target = match simple {
+                    swc_ecma_ast::SimpleAssignTarget::Member(member) => {
+                        Some(member.obj.as_ref())
+                    }
+                    _ => None,
+                };
+                if target.and_then(root_ident) == Some(self.name) {
+                    self.mutated = true;
+                }
+            }
+            assignment.visit_children_with(self);
+        }
+
+        fn visit_update_expr(&mut self, update: &swc_ecma_ast::UpdateExpr) {
+            if root_ident(update.arg.as_ref()) == Some(self.name) {
+                self.mutated = true;
+            }
+            update.visit_children_with(self);
+        }
+
+        fn visit_unary_expr(&mut self, unary: &swc_ecma_ast::UnaryExpr) {
+            if unary.op == swc_ecma_ast::UnaryOp::Delete
+                && root_ident(unary.arg.as_ref()) == Some(self.name)
+            {
+                self.mutated = true;
+            }
+            unary.visit_children_with(self);
+        }
+
+        fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+            if let swc_ecma_ast::Callee::Expr(callee) = &call.callee {
+                if let swc_ecma_ast::Expr::Member(member) = callee.as_ref() {
+                    if root_ident(member.obj.as_ref()) == Some(self.name) {
+                        if let swc_ecma_ast::MemberProp::Ident(property) = &member.prop {
+                            if is_mutating_method(property.sym.as_ref()) {
+                                self.mutated = true;
+                            }
+                        }
+                    }
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    // Only the arrow's own body -- a nested arrow capturing the same name
+    // is a different scope; skipping it would miss a mutation inside a
+    // nested callback, but treating it as this parameter's mutation would
+    // be wrong when the nested arrow shadows the name. Conservatively scan
+    // the whole body (a shadowing rename only happens for a *different*
+    // binding, which never shares this exact name in practice here).
+    let mut finder = Finder {
+        name,
+        mutated: false,
+    };
+    arrow.body.visit_with(&mut finder);
+    finder.mutated
+}
+
+/// Whether an arrow/function parameter's own annotation is `any`/`unknown`
+/// (or entirely absent) -- see the `lower_arrow` call site.
+fn parameter_is_any_annotated(pattern: &Pat) -> bool {
+    let annotation = match pattern {
+        Pat::Ident(binding) => binding.type_ann.as_ref(),
+        Pat::Rest(rest) => rest.type_ann.as_ref(),
+        Pat::Object(object) => object.type_ann.as_ref(),
+        Pat::Array(array) => array.type_ann.as_ref(),
+        Pat::Assign(assignment) => return parameter_is_any_annotated(&assignment.left),
+        _ => return false,
+    };
+    let Some(annotation) = annotation else {
+        return true;
+    };
+    matches!(
+        annotation.type_ann.as_ref(),
+        TsType::TsKeywordType(keyword)
+            if matches!(
+                keyword.kind,
+                TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword
+            )
+    )
 }
