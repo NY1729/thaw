@@ -6,7 +6,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 Self::async_block_returns_on_all_paths(then_body)
                     && Self::async_block_returns_on_all_paths(else_body)
             }
-            HirStmt::Try(try_body, _, catch_body) => {
+            HirStmt::Try(try_body, _, catch_body, _) => {
                 Self::async_block_returns_on_all_paths(try_body)
                     && Self::async_block_returns_on_all_paths(catch_body)
             }
@@ -22,7 +22,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .chain(else_body)
                 .any(Self::async_stmt_exits),
             HirStmt::While(_, body) => body.iter().any(Self::async_stmt_exits),
-            HirStmt::Try(try_body, _, catch_body) => try_body
+            HirStmt::Try(try_body, _, catch_body, _) => try_body
                 .iter()
                 .chain(catch_body)
                 .any(Self::async_stmt_exits),
@@ -59,7 +59,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut next_temporary = 0usize;
         let mut next_guard = 0usize;
         for stmt in &normalized_body {
-            if let HirStmt::Try(try_body, catch_name, catch_body) = stmt {
+            if let HirStmt::Try(try_body, catch_name, catch_body, _) = stmt {
                 let frame_names = self
                     .frame_async_functions
                     .keys()
@@ -94,7 +94,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         disable_guards: Vec::new(),
                     };
                     for nested in try_body {
-                        if let HirStmt::Try(inner_body, inner_catch_name, inner_catch_body) = nested
+                        if let HirStmt::Try(inner_body, inner_catch_name, inner_catch_body, _) = nested
                         {
                             let inner_try_guard = format!("__thaw_try_{next_guard}");
                             let inner_catch_guard = format!("__thaw_catch_{next_guard}");
@@ -130,6 +130,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                     nested_try_body,
                                     nested_catch_name,
                                     nested_catch_body,
+                                    _,
                                 ) = inner_stmt
                                 {
                                     self.append_nested_async_try(
@@ -194,6 +195,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                     nested_try_body,
                                     nested_catch_name,
                                     nested_catch_body,
+                                    _,
                                 ) = inner_stmt
                                 {
                                     let mut enclosing = outer_handler.clone();

@@ -193,7 +193,7 @@ fn lowers_switch_to_selected_case_state_without_switch_breaks() {
             HirStmt::If(_, then_body, else_body) => {
                 contains_break(then_body) || contains_break(else_body)
             }
-            HirStmt::Try(body, _, catch_body) => {
+            HirStmt::Try(body, _, catch_body, _) => {
                 contains_break(body) || contains_break(catch_body)
             }
             HirStmt::While(_, _) => false,
@@ -239,6 +239,7 @@ fn lowers_try_catch() {
                 Box::new(HirExpr::Var("console.log".into())),
                 vec![HirExpr::Var("e".into())],
             ))],
+            Some("e".into()),
         )]
     );
 }
@@ -257,7 +258,7 @@ fn lowers_finally_onto_normal_return_and_rethrow_paths() {
         }
         function main(): void { console.log(f()); }"#,
     );
-    let HirStmt::Try(body, _, catch_body) = &program.functions[0].body[0] else {
+    let HirStmt::Try(body, _, catch_body, _) = &program.functions[0].body[0] else {
         panic!("expected lowered try");
     };
     assert!(matches!(body[0], HirStmt::Expr(_)));
@@ -281,7 +282,7 @@ fn renames_catch_binding_that_shadows_an_outer_local() {
         }"#,
     );
     let body = &program.functions[0].body;
-    let HirStmt::Try(_, catch_name, catch_body) = &body[1] else {
+    let HirStmt::Try(_, catch_name, catch_body, _) = &body[1] else {
         panic!("expected lowered try");
     };
     assert_eq!(catch_name, "error__thaw_0");

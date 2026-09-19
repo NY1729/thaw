@@ -1628,7 +1628,8 @@ impl<'a> FnLowerer<'a> {
                         HirStmt::Try(
                             inject_finally_before_exits(vec![loop_stmt], std::slice::from_ref(&close), false),
                             exception.clone(),
-                            vec![close.clone(), HirStmt::Throw(HirExpr::Var(exception))],
+                            vec![close.clone(), HirStmt::Throw(HirExpr::Var(exception.clone()))],
+                            Some(exception.clone()),
                         )
                     } else {
                         loop_stmt
@@ -2135,7 +2136,12 @@ impl<'a> FnLowerer<'a> {
                         inject_finally_before_exits(catch_body, &finalizer, true);
                     after_try = finalizer;
                 }
-                let mut lowered = vec![HirStmt::Try(body, catch_name, catch_body)];
+                let mut lowered = vec![HirStmt::Try(
+                    body,
+                    catch_name.clone(),
+                    catch_body,
+                    Some(catch_name),
+                )];
                 lowered.extend(after_try);
                 Ok(lowered)
             }

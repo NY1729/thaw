@@ -333,7 +333,7 @@ fn stmt_contains_await(stmt: &HirStmt) -> bool {
         HirStmt::While(condition, body) => {
             contains_await(condition) || body.iter().any(stmt_contains_await)
         }
-        HirStmt::Try(body, _, catch) => {
+        HirStmt::Try(body, _, catch, _) => {
             body.iter().any(stmt_contains_await) || catch.iter().any(stmt_contains_await)
         }
         HirStmt::Return(None)
@@ -362,7 +362,7 @@ fn async_arrow_has_only_tail_await_returns(statements: &[HirStmt]) -> bool {
             }
             // Adopting a returned promise would move its rejection outside the
             // surrounding catch, so try/catch needs the general async frame path.
-            HirStmt::Try(body, _, catch) => {
+            HirStmt::Try(body, _, catch, _) => {
                 !body.iter().any(stmt_contains_await) && !catch.iter().any(stmt_contains_await)
             }
             other => !stmt_contains_await(other),
@@ -423,10 +423,11 @@ fn rewrite_async_arrow_returns(
                 condition,
                 rewrite_async_arrow_returns(body, resolve, resolved)?,
             )),
-            HirStmt::Try(body, binding, catch) => rewritten.push(HirStmt::Try(
+            HirStmt::Try(body, binding, catch, hidden) => rewritten.push(HirStmt::Try(
                 rewrite_async_arrow_returns(body, resolve, resolved)?,
                 binding,
                 rewrite_async_arrow_returns(catch, resolve, resolved)?,
+                hidden,
             )),
             other => rewritten.push(other),
         }
@@ -473,7 +474,7 @@ fn collect_stmt_bindings_with_bound(
                 collect_expr_bindings_with_bound(cond, names, &bound);
                 collect_stmt_bindings_with_bound(body, names, &bound);
             }
-            HirStmt::Try(body, catch_name, catch_body) => {
+            HirStmt::Try(body, catch_name, catch_body, _) => {
                 collect_stmt_bindings_with_bound(body, names, &bound);
                 let mut catch_bound = bound.clone();
                 catch_bound.insert(catch_name.clone());
@@ -521,10 +522,11 @@ fn inject_finally_before_exits(
             | HirStmt::Continue
             | HirStmt::BreakDepth(_)
             | HirStmt::ContinueDepth(_) => out.push(stmt),
-            HirStmt::Try(body, catch_name, catch_body) => out.push(HirStmt::Try(
+            HirStmt::Try(body, catch_name, catch_body, hidden) => out.push(HirStmt::Try(
                 inject_finally_before_exits(body, finalizer, false),
                 catch_name,
                 inject_finally_before_exits(catch_body, finalizer, inject_throws),
+                hidden,
             )),
             other => out.push(other),
         }
@@ -573,10 +575,11 @@ fn inject_before_target_continue(
                 inject_before_target_continue(then_body, nested_depth, injected),
                 inject_before_target_continue(else_body, nested_depth, injected),
             )),
-            HirStmt::Try(body, catch_name, catch_body) => out.push(HirStmt::Try(
+            HirStmt::Try(body, catch_name, catch_body, hidden) => out.push(HirStmt::Try(
                 inject_before_target_continue(body, nested_depth, injected),
                 catch_name,
                 inject_before_target_continue(catch_body, nested_depth, injected),
+                hidden,
             )),
             HirStmt::While(cond, body) => out.push(HirStmt::While(
                 cond,
@@ -616,10 +619,11 @@ fn rewrite_switch_case_stmts(
             rewrite_switch_case_stmts(then_body, selected, case_index, exit),
             rewrite_switch_case_stmts(else_body, selected, case_index, exit),
         ),
-        HirStmt::Try(body, catch_name, catch_body) => HirStmt::Try(
+        HirStmt::Try(body, catch_name, catch_body, hidden) => HirStmt::Try(
             rewrite_switch_case_stmts(body, selected, case_index, exit),
             catch_name,
             rewrite_switch_case_stmts(catch_body, selected, case_index, exit),
+            hidden,
         ),
         other => other,
     };

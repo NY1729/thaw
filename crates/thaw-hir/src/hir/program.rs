@@ -198,7 +198,7 @@ pub fn set_ffi_error_abi(
                     visit_expr(condition, symbol, abi, found);
                     visit_stmts(body, symbol, abi, found);
                 }
-                HirStmt::Try(body, _, catch_body) => {
+                HirStmt::Try(body, _, catch_body, _) => {
                     visit_stmts(body, symbol, abi, found);
                     visit_stmts(catch_body, symbol, abi, found);
                 }
@@ -415,7 +415,7 @@ pub fn set_ffi_ownership(
                     update_expr(condition, symbol, returns, errors, found);
                     update_stmts(body, symbol, returns, errors, found);
                 }
-                HirStmt::Try(body, _, catch_body) => {
+                HirStmt::Try(body, _, catch_body, _) => {
                     update_stmts(body, symbol, returns, errors, found);
                     update_stmts(catch_body, symbol, returns, errors, found);
                 }
@@ -987,7 +987,7 @@ pub fn set_ffi_string_abi(
                         found,
                     );
                 }
-                HirStmt::Try(body, _, catch_body) => {
+                HirStmt::Try(body, _, catch_body, _) => {
                     update_stmts(
                         body,
                         symbol,

@@ -179,7 +179,7 @@ impl<'a> GeneratorStateMachine<'a> {
                 handler,
                 cancel_target,
             )),
-            HirStmt::Try(try_body, catch_name, catch_body) => {
+            HirStmt::Try(try_body, catch_name, catch_body, _) => {
                 self.locals.push(HirStmt::Let(
                     catch_name.clone(),
                     HirType::Str,
@@ -263,7 +263,7 @@ fn generator_statements_emit_value(statements: &[HirStmt], values: &str) -> bool
                         || generator_statements_emit_value(else_body, values)
                 }
                 HirStmt::While(_, body) => generator_statements_emit_value(body, values),
-                HirStmt::Try(try_body, _, catch_body) => {
+                HirStmt::Try(try_body, _, catch_body, _) => {
                     generator_statements_emit_value(try_body, values)
                         || generator_statements_emit_value(catch_body, values)
                 }
@@ -442,11 +442,12 @@ fn lower_generator_state_machine(
                 vec![
                     HirStmt::Expr(HirExpr::Assign(
                         handler.binding,
-                        Box::new(HirExpr::Var(caught)),
+                        Box::new(HirExpr::Var(caught.clone())),
                     )),
                     generator_set_state(state, handler.entry),
                     HirStmt::Continue,
                 ],
+                Some(caught.clone()),
             )];
         }
         dispatch.push(HirStmt::If(

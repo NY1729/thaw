@@ -23,7 +23,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.collect_async_frame_locals(nested, locals)?;
                 }
             }
-            HirStmt::Try(body, _, catch_body) => {
+            HirStmt::Try(body, _, catch_body, _) => {
                 for nested in body.iter().chain(catch_body) {
                     self.collect_async_frame_locals(nested, locals)?;
                 }
@@ -36,7 +36,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn flatten_async_finally_only_tries(&self, body: &[HirStmt]) -> Result<Vec<HirStmt>, String> {
         let mut flattened = Vec::new();
         for stmt in body {
-            let HirStmt::Try(try_body, catch_name, catch_body) = stmt else {
+            let HirStmt::Try(try_body, catch_name, catch_body, _) = stmt else {
                 flattened.push(stmt.clone());
                 continue;
             };
@@ -87,7 +87,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .chain(else_body)
                 .any(Self::stmt_contains_throw),
             HirStmt::While(_, body) => body.iter().any(Self::stmt_contains_throw),
-            HirStmt::Try(body, _, catch_body) => {
+            HirStmt::Try(body, _, catch_body, _) => {
                 body.iter().chain(catch_body).any(Self::stmt_contains_throw)
             }
             _ => false,
@@ -116,7 +116,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .iter()
                         .any(|stmt| Self::stmt_awaits_named_async(stmt, frame_names))
             }
-            HirStmt::Try(body, _, catch_body) => body
+            HirStmt::Try(body, _, catch_body, _) => body
                 .iter()
                 .chain(catch_body)
                 .any(|stmt| Self::stmt_awaits_named_async(stmt, frame_names)),

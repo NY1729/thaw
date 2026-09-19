@@ -47,7 +47,7 @@ impl<'ctx> HirCompiler<'ctx> {
             disable_guards: Vec::new(),
         };
         for stmt in try_body {
-            if let HirStmt::Try(nested_try, nested_name, nested_catch) = stmt {
+            if let HirStmt::Try(nested_try, nested_name, nested_catch, _) = stmt {
                 self.append_nested_async_try(
                     segments,
                     nested_try,
@@ -111,7 +111,7 @@ impl<'ctx> HirCompiler<'ctx> {
             outer
         });
         for stmt in catch_body {
-            if let HirStmt::Try(nested_try, nested_name, nested_catch) = stmt {
+            if let HirStmt::Try(nested_try, nested_name, nested_catch, _) = stmt {
                 self.append_nested_async_try(
                     segments,
                     nested_try,
