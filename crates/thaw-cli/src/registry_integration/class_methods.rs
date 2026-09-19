@@ -27,6 +27,27 @@ fn rewrite_fallback_function_overloads(
     )
 }
 
+/// Whether `declared` is `<parameter>[]`, optionally unioned with
+/// `null`/`undefined` in any order -- real example: lodash's
+/// `reduce<T, TResult>(collection: T[] | null | undefined, callback:
+/// MemoListIterator<T, TResult, T[]>, accumulator: TResult)`. Still enough
+/// to infer `T` from a real array argument, which is what lets
+/// `annotate_generic_callback_arguments` type the callback's own
+/// `prev`/`curr`.
+fn declared_array_of(declared: &str, parameter: &str) -> bool {
+    let mut core = declared.trim();
+    loop {
+        let stripped = core
+            .strip_suffix(" | null")
+            .or_else(|| core.strip_suffix(" | undefined"));
+        match stripped {
+            Some(rest) => core = rest.trim_end(),
+            None => break,
+        }
+    }
+    core == format!("{parameter}[]")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rewrite_external_class_methods_with_static(
     source: &str,
@@ -1603,7 +1624,7 @@ fn rewrite_external_class_methods_with_static(
                             }
                         }
                     }
-                } else if declared == &format!("{parameter}[]") {
+                } else if declared_array_of(declared, parameter) {
                     if let thaw_hir::HirType::Array(element) = &actual {
                         if let Some(element) = type_text(element) {
                             substitutions.insert(parameter.clone(), element);
