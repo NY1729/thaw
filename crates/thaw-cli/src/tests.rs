@@ -298,6 +298,29 @@ fn a_source_file_script_is_detected_for_thaw_execution() {
 }
 
 #[test]
+fn a_project_script_builds_against_the_project_registry() {
+    assert_eq!(
+        run_build_args(
+            "/proj/server.ts",
+            Path::new("/tmp/app"),
+            Some(Path::new("/proj/thaw_modules"))
+        ),
+        [
+            "/proj/server.ts",
+            "-o",
+            "/tmp/app",
+            "--registry",
+            "/proj/thaw_modules"
+        ]
+    );
+    // A plain `thaw <file>` keeps the default (cwd-relative) registry.
+    assert_eq!(
+        run_build_args("main.ts", Path::new("app"), None),
+        ["main.ts", "-o", "app"]
+    );
+}
+
+#[test]
 fn only_a_genuinely_absent_registry_package_is_missing() {
     let directory =
         std::env::temp_dir().join(format!("thaw-cli-registry-missing-{}", std::process::id()));
