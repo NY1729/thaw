@@ -318,6 +318,14 @@ fn generate_registry_shims(
         std::collections::HashMap::new();
     let mut value_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
+    // `(package, function)` pairs compiled to a native JIT declaration by
+    // the first-wins loop below. These never touch QuickJS-NG, so they must
+    // stay out of `fallback_names`: a package whose every Fallback function
+    // is JIT-targeted needs no `bundle.js`/`loadScript` at all, and counting
+    // one here would link the whole QuickJS runtime back into an otherwise
+    // pure-JIT build (a real regression: every `*_use_jit_without_quickjs`
+    // test started reporting `quickjs: true`).
+    let mut jit_targets = std::collections::HashSet::new();
     let mut jit_fallback_reasons = JitFallbackReasons::new();
     // Names `union_overload_dispatch_declaration` already claims with a
     // runtime `typeof`-based dispatcher. The argument-shape-scoring loop
@@ -971,6 +979,9 @@ fn generate_registry_shims(
                             }
                         }
                     }
+                    if jit_operation.is_some() {
+                        jit_targets.insert((pkg.name.clone(), function.name.clone()));
+                    }
                 }
             }
         }
@@ -1318,8 +1329,17 @@ fn generate_registry_shims(
                 .classifications
                 .iter()
                 .filter_map(|(name, classification)| match classification {
-                    thaw_bridge::Classification::Fallback { .. } => Some(name.clone()),
-                    thaw_bridge::Classification::FastPath(_) => None,
+                    // A JIT-targeted function is compiled to a native
+                    // declaration and never reaches the loaded script, so
+                    // it must not force `bundle.js`/QuickJS in for the
+                    // package (see `jit_targets`'s own comment). Every
+                    // other Fallback function still needs its binding.
+                    thaw_bridge::Classification::Fallback { .. }
+                        if !jit_targets.contains(&(pkg.name.clone(), name.clone())) =>
+                    {
+                        Some(name.clone())
+                    }
+                    _ => None,
                 })
                 .collect();
             let qualified_aliases: Vec<(String, String)> = qualified
