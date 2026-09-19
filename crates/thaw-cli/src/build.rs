@@ -60,6 +60,16 @@ fn external_package_name(specifier: &str) -> Option<String> {
     Some(parts.get(..package_parts)?.join("/"))
 }
 
+/// Whether `package` is genuinely absent from the registry (no directory at
+/// all), as opposed to present but unresolvable. A directory that exists but
+/// is broken (`package.d.ts` missing, an unexported subpath, malformed
+/// metadata) is *not* missing -- it must surface its real error rather than
+/// being replaced by a fresh npm fetch; see the auto-fetch call site's own
+/// comment.
+fn missing_from_registry(registry_dir: &Path, package: &str) -> bool {
+    !registry_dir.join(package).exists()
+}
+
 fn installed_node_modules(input: &Path, package: &str) -> Option<PathBuf> {
     input.parent()?.ancestors().find_map(|directory| {
         let node_modules = directory.join("node_modules");
@@ -337,10 +347,18 @@ fn build_with_native_mode(
             // run `thaw registry add` / `thaw install` first. The root
             // package name is fetched (a `pkg/sub` specifier's subpath is
             // then resolved from the installed root).
-            if install_missing && thaw_registry::resolve(registry_dir, &package).is_err() {
+            //
+            // Only a genuinely *absent* package is fetched -- one with no
+            // registry directory at all. A directory that exists but still
+            // fails to resolve (broken metadata, an unexported subpath, an
+            // invalid name) is a real error, not a reason to hit the network
+            // and replace it with an unrelated one from npm.
+            if install_missing {
                 let install = external_package_name(&package).unwrap_or_else(|| package.clone());
-                if let Err(error) = thaw_registry::add(registry_dir, &install) {
-                    return Err(format!("{location}: failed to fetch `{install}`: {error}"));
+                if missing_from_registry(registry_dir, &install) {
+                    if let Err(error) = thaw_registry::add(registry_dir, &install) {
+                        return Err(format!("{location}: failed to fetch `{install}`: {error}"));
+                    }
                 }
             }
             thaw_registry::resolve(registry_dir, &package).map_err(|error| {
