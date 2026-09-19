@@ -1050,21 +1050,27 @@ fn arrow_body_mutates(name: &str, arrow: &swc_ecma_ast::ArrowExpr) -> bool {
         }
     }
 
-    fn block_shadows_name(block: &swc_ecma_ast::BlockStmt, name: &str) -> bool {
-        block.stmts.iter().any(|statement| {
+    fn statements_shadow_name(statements: &[swc_ecma_ast::Stmt], name: &str) -> bool {
+        statements.iter().any(|statement| {
             let swc_ecma_ast::Stmt::Decl(declaration) = statement else {
                 return false;
             };
             match declaration {
-                swc_ecma_ast::Decl::Var(var) if var.kind != swc_ecma_ast::VarDeclKind::Var => var
-                    .decls
-                    .iter()
-                    .any(|declaration| pattern_binds_name(&declaration.name, name)),
+                swc_ecma_ast::Decl::Var(var) if var.kind != swc_ecma_ast::VarDeclKind::Var => {
+                    var_decl_binds_name(var, name)
+                }
                 swc_ecma_ast::Decl::Fn(function) => function.ident.sym == name,
                 swc_ecma_ast::Decl::Class(class) => class.ident.sym == name,
                 _ => false,
             }
         })
+    }
+
+    fn var_decl_binds_name(declaration: &swc_ecma_ast::VarDecl, name: &str) -> bool {
+        declaration
+            .decls
+            .iter()
+            .any(|declarator| pattern_binds_name(&declarator.name, name))
     }
 
     impl Visit for Finder<'_> {
@@ -1090,6 +1096,28 @@ fn arrow_body_mutates(name: &str, arrow: &swc_ecma_ast::ArrowExpr) -> bool {
             function.visit_children_with(self);
         }
 
+        fn visit_fn_expr(&mut self, function: &swc_ecma_ast::FnExpr) {
+            if function
+                .ident
+                .as_ref()
+                .is_some_and(|identifier| identifier.sym == self.name)
+            {
+                return;
+            }
+            function.visit_children_with(self);
+        }
+
+        fn visit_class_expr(&mut self, class: &swc_ecma_ast::ClassExpr) {
+            if class
+                .ident
+                .as_ref()
+                .is_some_and(|identifier| identifier.sym == self.name)
+            {
+                return;
+            }
+            class.visit_children_with(self);
+        }
+
         fn visit_catch_clause(&mut self, catch: &swc_ecma_ast::CatchClause) {
             if catch
                 .param
@@ -1102,10 +1130,62 @@ fn arrow_body_mutates(name: &str, arrow: &swc_ecma_ast::ArrowExpr) -> bool {
         }
 
         fn visit_block_stmt(&mut self, block: &swc_ecma_ast::BlockStmt) {
-            if block_shadows_name(block, self.name) {
+            if statements_shadow_name(&block.stmts, self.name) {
                 return;
             }
             block.visit_children_with(self);
+        }
+
+        fn visit_for_stmt(&mut self, statement: &swc_ecma_ast::ForStmt) {
+            if matches!(
+                statement.init.as_ref(),
+                Some(swc_ecma_ast::VarDeclOrExpr::VarDecl(declaration))
+                    if declaration.kind != swc_ecma_ast::VarDeclKind::Var
+                        && var_decl_binds_name(declaration.as_ref(), self.name)
+            ) {
+                return;
+            }
+            statement.visit_children_with(self);
+        }
+
+        fn visit_for_in_stmt(&mut self, statement: &swc_ecma_ast::ForInStmt) {
+            if matches!(
+                &statement.left,
+                swc_ecma_ast::ForHead::VarDecl(declaration)
+                    if declaration.kind != swc_ecma_ast::VarDeclKind::Var
+                        && var_decl_binds_name(declaration, self.name)
+            ) {
+                statement.right.visit_with(self);
+                return;
+            }
+            statement.visit_children_with(self);
+        }
+
+        fn visit_for_of_stmt(&mut self, statement: &swc_ecma_ast::ForOfStmt) {
+            if matches!(
+                &statement.left,
+                swc_ecma_ast::ForHead::VarDecl(declaration)
+                    if declaration.kind != swc_ecma_ast::VarDeclKind::Var
+                        && var_decl_binds_name(declaration, self.name)
+            ) {
+                statement.right.visit_with(self);
+                return;
+            }
+            statement.visit_children_with(self);
+        }
+
+        fn visit_switch_stmt(&mut self, statement: &swc_ecma_ast::SwitchStmt) {
+            statement.discriminant.visit_with(self);
+            if statement
+                .cases
+                .iter()
+                .any(|case| statements_shadow_name(&case.cons, self.name))
+            {
+                return;
+            }
+            for case in &statement.cases {
+                case.visit_with(self);
+            }
         }
 
         fn visit_assign_expr(&mut self, assignment: &swc_ecma_ast::AssignExpr) {
@@ -1212,10 +1292,14 @@ mod mutation_detection_tests {
 
     #[test]
     fn mutation_detection_respects_nested_shadowing_and_captures() {
-        let shadowed = parsed_arrow(
+        for source in [
             "const callback = (draft: any) => { const nested = (draft: any) => { draft.x++; }; nested({}); };",
-        );
-        assert!(!arrow_body_mutates("draft", &shadowed));
+            "const callback = (draft: any) => { for (let draft of []) { draft.x++; } };",
+            "const callback = (draft: any) => { const nested = function draft() { draft.x++; }; nested(); };",
+            "const callback = (draft: any) => { switch (0) { case 0: let draft: any; draft.x++; } };",
+        ] {
+            assert!(!arrow_body_mutates("draft", &parsed_arrow(source)), "{source}");
+        }
 
         let captured = parsed_arrow(
             "const callback = (draft: any) => { const nested = () => { draft.x++; }; nested(); };",
