@@ -174,7 +174,7 @@ impl<'a> FnLowerer<'a> {
                         collect(else_body, out, bare);
                     }
                     HirStmt::While(_, body) => collect(body, out, bare),
-                    HirStmt::Try(body, _, catch_body) => {
+                    HirStmt::Try(body, _, catch_body, _) => {
                         collect(body, out, bare);
                         collect(catch_body, out, bare);
                     }
@@ -248,7 +248,7 @@ impl<'a> FnLowerer<'a> {
                     HirStmt::While(_, loop_body) => {
                         collect(loop_body, yields, returns, yielded, returned)
                     }
-                    HirStmt::Try(try_body, _, catch_body) => {
+                    HirStmt::Try(try_body, _, catch_body, _) => {
                         collect(try_body, yields, returns, yielded, returned);
                         collect(catch_body, yields, returns, yielded, returned);
                     }
