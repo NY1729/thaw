@@ -945,6 +945,11 @@ impl<'ctx> HirCompiler<'ctx> {
             );
         }
         self.module.add_function(
+            "thaw_error_property",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_error_is_instance",
             self.context
                 .bool_type()

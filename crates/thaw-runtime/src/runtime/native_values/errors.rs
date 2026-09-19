@@ -94,6 +94,46 @@ fn split_error_code(message: &str) -> Option<&str> {
         .map(|value| value.1.split_once(ERROR_PROPS_MARKER).map_or(value.1, |props| props.0))
 }
 
+/// Reads a caught error's own custom property from the trailing
+/// `\u{5}<json>` bag `describe_tagged_exception` (thaw-quickjs) appends --
+/// real trigger: `catch (e) { e.status }` for an `http-errors` Error thrown
+/// by koa, whose `status`/`expose` live on the error's prototype. Returns
+/// the value rendered as a string (`"418"`, `"true"`, a string itself),
+/// or `None` when the tag carries no such property (the caller then
+/// yields `undefined`, matching an absent property). Strings are returned
+/// without JSON quoting.
+fn error_property(message: &str, name: &str) -> Option<String> {
+    let bag = message.split_once(ERROR_PROPS_MARKER)?.1;
+    let value: serde_json::Value = serde_json::from_str(bag).ok()?;
+    let value = value.as_object()?.get(name)?;
+    Some(match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => return None,
+        other => other.to_string(),
+    })
+}
+
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+///
+/// # Safety
+/// `name` must be null or a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_property(
+    message: *const c_char,
+    name: *const c_char,
+) -> *const c_char {
+    if message.is_null() || name.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    match error_property(&text, &name) {
+        Some(value) => arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast()),
+        None => std::ptr::null(),
+    }
+}
+
 /// # Safety
 /// `message` must be null or a valid, NUL-terminated C string.
 ///
@@ -259,6 +299,20 @@ mod error_native_tests {
             .into_owned()
     }
 
+    fn call_property(message: &str, name: &str) -> Option<String> {
+        let message = CString::new(message).unwrap();
+        let name = CString::new(name).unwrap();
+        let result = unsafe { thaw_error_property(message.as_ptr(), name.as_ptr()) };
+        if result.is_null() {
+            return None;
+        }
+        Some(
+            unsafe { CStr::from_ptr(result) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
     fn call_to_string(message: &str) -> String {
         let message = CString::new(message).unwrap();
         let result = unsafe { thaw_error_to_string(message.as_ptr()) };
@@ -301,6 +355,21 @@ mod error_native_tests {
         let labeled = "`pkg::boom`'s promise rejected: boom\u{1}Error\u{1}boom\u{5}{\"status\":418}";
         assert_eq!(call_message(labeled), "`pkg::boom`'s promise rejected: boom");
         assert_eq!(call_name(labeled), "Error");
+    }
+
+    #[test]
+    fn a_caught_errors_custom_property_round_trips_from_its_json_bag() {
+        // `.status`/`.expose` live in the trailing `\u{5}<json>` bag a
+        // caught JS error carries (real trigger: koa's `onerror` reading
+        // an `http-errors` error). A number renders as itself, a boolean
+        // as `true`/`false`, a string unquoted; an absent property is
+        // `None`.
+        let tagged = "\u{1}ImATeapotError\u{1}teapot\u{5}{\"status\":418,\"expose\":true,\"label\":\"x\"}";
+        assert_eq!(call_property(tagged, "status").as_deref(), Some("418"));
+        assert_eq!(call_property(tagged, "expose").as_deref(), Some("true"));
+        assert_eq!(call_property(tagged, "label").as_deref(), Some("x"));
+        assert_eq!(call_property(tagged, "missing"), None);
+        assert_eq!(call_property("plain", "status"), None);
     }
 
     #[test]

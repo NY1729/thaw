@@ -132,6 +132,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("error property access returned no value".into());
             }
+            "__thaw_error_property" => {
+                let [receiver, key] = args else {
+                    return Err("__thaw_error_property expects a receiver and a property name".into());
+                };
+                let receiver = self.compile_expr(receiver)?;
+                let key = self.compile_expr(key)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_error_property").unwrap(),
+                        &[receiver.into(), key.into()],
+                        "error_custom_property",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("error custom property access returned no value".into());
+            }
             "__thaw_i64_to_string" => {
                 let [value] = args else {
                     return Err("bigint string conversion expects one operand".into());
