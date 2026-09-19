@@ -95,6 +95,17 @@ npx prisma generate
 target/release/thaw registry add @prisma/client --from-node-modules node_modules
 ```
 
+Run a package's own command without installing it, like `npx` / `bun x`:
+
+```sh
+target/release/thaw x cowsay hello
+target/release/thaw x prettier@3 --write app.ts
+```
+
+`thaw x` resolves an installed `node_modules/<package>` first, otherwise
+installs the package into a cache under `$XDG_CACHE_HOME/thaw/x` and runs
+its `bin` entry, forwarding arguments and the exit code.
+
 For a Vite frontend, pass its project directory:
 
 ```sh
