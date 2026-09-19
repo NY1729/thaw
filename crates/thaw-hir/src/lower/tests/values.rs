@@ -1,3 +1,34 @@
+/// `const err: any = e` on a caught exception must keep the caught value's
+/// concrete `Str` type, not coerce it to `Json`. Coercing turned
+/// `err.name`/`err.message` into plain JSON key lookups on a JSON string
+/// (`undefined`), losing the `__thaw_error_name`/`__thaw_error_message`
+/// routing a `Str` value gets. Real trigger: `catch (e) { const err: any =
+/// e; err.name }` from an rxjs rejection.
+#[test]
+fn an_any_annotated_copy_of_a_caught_error_keeps_the_string_error_type() {
+    let program = lower(
+        r#"
+            function main(): void {
+                try {
+                    throw new Error("boom");
+                } catch (e) {
+                    const err: any = e;
+                    console.log(err.name, err.message);
+                }
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(
+        source.contains("__thaw_error_name"),
+        "`.name` on the caught-error copy should route to `__thaw_error_name`:\n{source}"
+    );
+    assert!(
+        source.contains("__thaw_error_message"),
+        "`.message` on the caught-error copy should route to `__thaw_error_message`:\n{source}"
+    );
+}
+
 #[test]
 fn expands_nested_top_level_object_and_array_destructuring() {
     let program = lower(
