@@ -433,21 +433,32 @@ fn project_native_aggregate(
             generic_interfaces,
             in_progress,
         ))),
-        TsType::TsTupleType(tuple) => HirType::Tuple(
-            tuple
+        TsType::TsTupleType(tuple) => {
+            // A rest tuple has no fixed arity, so projecting `[T, ...T[]]`
+            // to `[Json, Json]` would truncate every value after index 1.
+            if tuple
                 .elem_types
                 .iter()
-                .map(|element| {
-                    project_native_aggregate(
-                        &element.ty,
-                        substitution,
-                        interfaces,
-                        generic_interfaces,
-                        in_progress,
-                    )
-                })
-                .collect(),
-        ),
+                .any(|element| matches!(element.ty.as_ref(), TsType::TsRestType(_)))
+            {
+                return HirType::Json;
+            }
+            HirType::Tuple(
+                tuple
+                    .elem_types
+                    .iter()
+                    .map(|element| {
+                        project_native_aggregate(
+                            &element.ty,
+                            substitution,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )
+                    })
+                    .collect(),
+            )
+        }
         TsType::TsTypeRef(ty_ref) => {
             let ref_name = match &ty_ref.type_name {
                 TsEntityName::Ident(ident) => ident.sym.to_string(),
