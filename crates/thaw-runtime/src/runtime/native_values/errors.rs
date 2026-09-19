@@ -41,7 +41,13 @@ const ERROR_PROPS_MARKER: char = '\u{5}';
 
 fn split_error_tag(message: &str) -> (&str, &str) {
     let Some(rest) = message.strip_prefix(ERROR_TAG_MARKER) else {
-        return ("Error", message.split_once(ERROR_PROPS_MARKER).map_or(message, |value| value.0));
+        // No leading tag: a plain message, possibly with a *trailing*
+        // `\u{1}name\u{1}message` segment a labeled rejection appends (see
+        // thaw-quickjs's `describe_promise_exception`), plus an optional
+        // `\u{5}` property bag. Keep only the text before either.
+        let body = message.split_once(ERROR_PROPS_MARKER).map_or(message, |value| value.0);
+        let body = body.split_once(ERROR_TAG_MARKER).map_or(body, |value| value.0);
+        return ("Error", body);
     };
     let (name, body) = rest
         .split_once(ERROR_TAG_MARKER)
@@ -283,6 +289,18 @@ mod error_native_tests {
         assert_eq!(call_message("boom"), "boom");
         assert!(call_is_instance("boom", "Error"));
         assert!(!call_is_instance("boom", "TypeError"));
+    }
+
+    #[test]
+    fn a_labeled_rejection_keeps_its_labeled_text_and_drops_the_trailing_tag() {
+        // thaw-quickjs's `describe_promise_exception` wraps a plain-Error
+        // rejection in a human-readable label and appends the original
+        // `\u{1}Error\u{1}message\u{5}<props>` so a later property
+        // reconstruction can read it; `.message`/`String()` still show
+        // only the labeled text.
+        let labeled = "`pkg::boom`'s promise rejected: boom\u{1}Error\u{1}boom\u{5}{\"status\":418}";
+        assert_eq!(call_message(labeled), "`pkg::boom`'s promise rejected: boom");
+        assert_eq!(call_name(labeled), "Error");
     }
 
     #[test]
