@@ -2111,6 +2111,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let saved = self.bindings.clone();
                         let catch_name = self.bind_local(&source_name, HirType::Str);
+                        self.catch_bindings.insert(catch_name.clone());
                         let catch_body = self.lower_stmts(&handler.body.stmts)?;
                         self.bindings = saved;
                         (catch_name, catch_body)

@@ -1405,3 +1405,61 @@ async function main(): Promise<void> {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "holder:gadget\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A custom property on a caught JavaScript error must be readable
+/// (`e.status`), matching real Node -- real trigger: koa's own `onerror`
+/// reading an `http-errors` error's `status`/`statusCode`/`expose` to
+/// choose the response code. `typeof e` must also report `"object"`.
+#[test]
+fn a_caught_error_exposes_its_custom_properties_and_object_typeof() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-caught-error-properties-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("boom-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function boom(): void;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.boom = function() {\n\
+             var e = new Error('teapot');\n\
+             e.status = 418;\n\
+             e.statusCode = 418;\n\
+             e.expose = true;\n\
+             throw e;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { boom } from "boom-kit";
+function main(): void {
+    try {
+        boom();
+    } catch (e) {
+        console.log(typeof e, (e as any).name, (e as any).message.includes("teapot"), (e as any).status, (e as any).expose);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "object Error true 418 true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

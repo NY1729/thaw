@@ -1136,6 +1136,30 @@ impl<'a> FnLowerer<'a> {
                 }
                 let obj = self.lower_expr(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
+                // A custom property read on a *catch-bound* error string
+                // (`catch (e) { e.status }`, real trigger: koa's
+                // `http-errors` error) has no declared field to read.
+                // Route it through `thaw_error_property`, which pulls the
+                // value out of the caught error's own `\u{5}<json>` bag.
+                // Only for a `catch` binding: an ordinary string has no
+                // such bag, and treating every `str.status` as an error
+                // lookup would be wrong.
+                if let HirExpr::Var(name) = &obj {
+                    if self.catch_bindings.contains(name)
+                        && !matches!(
+                            prop.sym.as_ref(),
+                            "length" | "name" | "message" | "cause" | "code" | "stack"
+                        )
+                    {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_property".to_string())),
+                            vec![
+                                obj,
+                                HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
+                            ],
+                        ));
+                    }
+                }
                 match &obj_ty {
                     HirType::Array(_) | HirType::Tuple(_) if prop.sym == *"length" => {
                         Ok(HirExpr::ArrayLen(Box::new(obj)))

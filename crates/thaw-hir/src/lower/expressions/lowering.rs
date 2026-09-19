@@ -999,6 +999,18 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     UnaryOp::TypeOf => {
+                        // `typeof e` for a `catch (e)` binding reports
+                        // `"object"`: real JavaScript throws an `Error`
+                        // object. Internally the binding is the tagged
+                        // error *string* (so `.name`/`.message`/`.code`/
+                        // `(e as X)` keep working unchanged), so the
+                        // generic `Str -> "string"` inference below would
+                        // otherwise be wrong here.
+                        if let HirExpr::Var(name) = &value {
+                            if self.catch_bindings.contains(name) {
+                                return Ok(HirExpr::Lit(HirLit::Str("object".into())));
+                            }
+                        }
                         // `generic_arrows`/`generic_named_templates` describe *this same*
                         // local binding (a local `const` holding a generic arrow, or one
                         // forwarding to a named generic template) -- they apply regardless
