@@ -2462,11 +2462,42 @@ fn rewrite_external_class_methods_with_static(
                         fn relevant(types: &[thaw_hir::HirType], provided: usize) -> &[thaw_hir::HirType] {
                             &types[..provided.min(types.len())]
                         }
-                        let opaque = scored_candidates.iter().find(|(_, candidate)| {
-                            relevant(&candidate.4, provided).iter().all(|ty| {
+                        let all_opaque = |types: &[thaw_hir::HirType]| {
+                            relevant(types, provided).iter().all(|ty| {
                                 matches!(ty, thaw_hir::HirType::Json | thaw_hir::HirType::JsValue)
                             })
-                        });
+                        };
+                        let opaque = scored_candidates
+                            .iter()
+                            .find(|(_, candidate)| all_opaque(&candidate.4))
+                            .map(|first| {
+                                // Among equally opaque, equally-scoring
+                                // candidates, prefer one whose generic
+                                // return resolved to a concrete native
+                                // aggregate (`placeholder_return_type`).
+                                // Every candidate here dispatches to the
+                                // same runtime JS function and their
+                                // provided parameters are all uncoerced
+                                // `Json`/`JsValue`, so this changes
+                                // nothing at runtime while giving
+                                // `result[0]`-style decoding a real
+                                // tuple/array instead of an opaque handle.
+                                // Real trigger: immer's `produceWithPatches`,
+                                // whose base-first `<Base>(base, recipe,
+                                // listener?)` overload ties at 0 with its
+                                // own curried `<State>(recipe,
+                                // initialState)` overload, and picking the
+                                // first left the tuple undeclarable.
+                                scored_candidates
+                                    .iter()
+                                    .find(|(_, candidate)| {
+                                        all_opaque(&candidate.4)
+                                            && candidate.6.as_ref().is_some_and(|generic| {
+                                                generic.placeholder_return_type.is_some()
+                                            })
+                                    })
+                                    .unwrap_or(first)
+                            });
                         match opaque {
                             Some((_, candidate)) => Some(*candidate),
                             None => {

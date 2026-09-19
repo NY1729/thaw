@@ -2604,6 +2604,78 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Real, `thaw registry add`-fetched `immer@11.1.18` --
+/// `produceWithPatches(base, recipe)` returns the generic type alias
+/// `PatchesTuple<Base> = readonly [Base, Patch[], Patch[]]`, which used to
+/// arrive as an opaque `JsValue` handle (`result[0] === undefined`) and,
+/// once a tuple was emitted at all, failed the build outright
+/// ("unsupported JSON tuple element JsValue"). Pins down the real-package
+/// end of the `placeholder_return_type` projection fix (see
+/// `docs/design/generic-overload-dispatch.md`, and
+/// `a_generic_alias_tuple_return_is_rendered_with_json_placeholder_params`
+/// for the synthetic, network-free version of the same mechanism).
+///
+/// Note immer's own `Patch.path: (string | number)[]` has no native
+/// layout, so the alias can't be classified normally at all -- the
+/// projection preserving the tuple skeleton (with `Patch[]` flattened to
+/// `Json[]`) is what makes this work. `draft` still needs an explicit
+/// parameter annotation; contextual typing of a generic callback
+/// parameter is a separate, pre-existing limitation.
+#[test]
+fn registry_add_runs_real_immer_produce_with_patches_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-immer-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "immer@11.1.18").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { enablePatches, produceWithPatches } from "immer";
+function main(): void {
+    enablePatches();
+    const [next, patches, inversePatches] = produceWithPatches(
+        { count: 0, label: "start" },
+        (draft: any) => {
+            draft.count = 1;
+        },
+    );
+    console.log(next.count);
+    console.log(patches.length);
+    console.log(patches[0].op);
+    console.log(patches[0].path[0]);
+    console.log(inversePatches.length);
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["immer".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1\n1\nreplace\ncount\n1\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Round 18's npm compat audit. Real yargs's own module graph pulls in
 /// `cliui` -> `string-width`, whose ESM source hits three separate,
 /// general bugs the moment it's actually run through the dynamic

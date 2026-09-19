@@ -95,6 +95,16 @@ decide per this rule:
    anyway, so this rule fires trivially), pino (a literal duplicate
    declaration), and lodash (all four `filter` overloads render to
    `[Json, Json]`).
+   When *several* candidates qualify as opaque, they all dispatch to the
+   same runtime JS function, so which one is picked is irrelevant at
+   runtime and only affects the inferred return type — prefer one whose
+   generic return resolved to a concrete tuple
+   (`DtsGenericFunction::placeholder_return_type`; see
+   [generic-overload-dispatch](generic-overload-dispatch.md)), falling
+   back to the first opaque candidate. Real trigger: immer's
+   `produceWithPatches`, whose base-first `<Base>(base, recipe,
+   listener?)` tuple-returning overload ties at 0 with its own curried
+   `<State>(recipe, initialState)` overload.
 2. Otherwise, if every tied candidate declares the exact same parameter
    types as every other, pick the first (matching today's tie rule
    exactly) — picking among several truly identical declarations

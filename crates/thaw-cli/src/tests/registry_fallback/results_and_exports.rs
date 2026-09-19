@@ -2340,3 +2340,94 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A generic Fallback function whose declared return is a *generic type
+/// alias* over a tuple (`type PatchesTuple<T> = readonly [T, Patch[],
+/// Patch[]]`) -- real-world example: immer's own
+/// `produceWithPatches(base, recipe): PatchesTuple<Base>`, an overloaded
+/// callable-interface const whose declaring overload is fully generic.
+///
+/// The ordinary return classification degrades an unconstrained type
+/// parameter (`Base`) to the opaque `HirType::JsValue` handle, and the
+/// real `Patch` body doesn't classify at all, so the alias resolved to a
+/// failure/`JsValue` -- and a `JsValue` *tuple element* has no JSON
+/// marshaling anyway ("unsupported JSON tuple element JsValue"). Had it
+/// been left as the untyped `(argsArray: Json): Json` fallback the tuple
+/// would instead have arrived as an opaque handle with `result[0] ===
+/// undefined` the moment the caller indexed it.
+///
+/// Fixed by `thaw_bridge`'s `placeholder_return_type`: the generic alias
+/// projected with each own type parameter standing in as the placeholder
+/// `Json` and each undecodable leaf flattened to `Json` too, giving
+/// `Tuple([Json, Array(Json), Array(Json)])` -- a real, decodable tuple
+/// in the emitted declaration. This test also includes a competing
+/// curried overload so the dispatch tie-break that prefers the aggregate
+/// return is exercised. It drives the *argument-shape* wrapper
+/// (`__overload_<index>`, see `shim_generation.rs`), which is the
+/// declaration that actually carries the tuple; the first-wins bare alias
+/// still returns `JsValue` for this overload set and is unused here.
+#[test]
+fn a_generic_alias_tuple_return_is_rendered_with_json_placeholder_params() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-tuple-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("pwp-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        // `Patch` deliberately mirrors real immer's own shape, including
+        // `path: (string | number)[]` and `value?: any` -- neither has a
+        // native collection layout, so the alias can't be classified
+        // normally and the JSON projection is what makes the tuple decode.
+        "export interface Patch {\n\
+         \x20\x20\x20\x20op: \"replace\" | \"remove\" | \"add\";\n\
+         \x20\x20\x20\x20path: (string | number)[];\n\
+         \x20\x20\x20\x20value?: any;\n\
+         }\n\
+         export type PatchesTuple<T> = readonly [T, Patch[], Patch[]];\n\
+         export interface IProduceWithPatches {\n\
+         \x20\x20\x20\x20<Recipe extends (...args: any[]) => any>(recipe: Recipe): (base: any) => PatchesTuple<any>;\n\
+         \x20\x20\x20\x20<State>(recipe: (state: State) => State, initialState: State): (state: State) => PatchesTuple<State>;\n\
+         \x20\x20\x20\x20<Base, D = Base>(base: Base, recipe: (draft: D) => D, listener?: (patches: Patch[], inverse: Patch[]) => void): PatchesTuple<Base>;\n\
+         }\n\
+         export declare const produceWithPatches: IProduceWithPatches;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function produceWithPatches(base, recipe, listener) {\n\
+         \x20\x20var draft = Object.assign({}, base);\n\
+         \x20\x20var next = recipe(draft);\n\
+         \x20\x20var patches = [{ op: 'replace', path: ['count'] }];\n\
+         \x20\x20var inverse = [{ op: 'replace', path: ['count'] }];\n\
+         \x20\x20return [next, patches, inverse];\n\
+         }\n\
+         module.exports = { produceWithPatches: produceWithPatches };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { produceWithPatches } from "pwp-kit";
+function main(): void {
+    const result = produceWithPatches({ count: 0 }, (draft: any) => { draft.count = 1; return draft; });
+    console.log(result[0].count);
+    console.log(result[1][0].op);
+    console.log(result[2].length);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\nreplace\n1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
