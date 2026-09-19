@@ -850,3 +850,4 @@ include!("tests/jit_exports.rs");
 include!("tests/jit_analysis.rs");
 include!("tests/external_classes.rs");
 include!("tests/overload_inference.rs");
+include!("tests/x.rs");
