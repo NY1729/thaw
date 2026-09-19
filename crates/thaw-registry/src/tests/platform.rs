@@ -693,7 +693,7 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRuntimeWorkerPath = module.exports;")).unwrap();
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ if (String(name).startsWith('runtime-worker-dependency')) return {{}}; throw new Error(name); }}; {bundle} globalThis.exerciseRuntimeWorkerPath = module.exports;")).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let function = CString::new("exerciseRuntimeWorkerPath").unwrap();
     let path = worker_path.to_string_lossy().into_owned();
