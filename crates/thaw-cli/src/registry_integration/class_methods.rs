@@ -2474,7 +2474,7 @@ fn rewrite_external_class_methods_with_static(
                                 // Among equally opaque, equally-scoring
                                 // candidates, prefer one whose generic
                                 // return resolved to a concrete native
-                                // aggregate (`placeholder_return_type`).
+                                // aggregate (`tuple_return_type`).
                                 // Every candidate here dispatches to the
                                 // same runtime JS function and their
                                 // provided parameters are all uncoerced
@@ -2493,7 +2493,7 @@ fn rewrite_external_class_methods_with_static(
                                     .find(|(_, candidate)| {
                                         all_opaque(&candidate.4)
                                             && candidate.6.as_ref().is_some_and(|generic| {
-                                                generic.placeholder_return_type.is_some()
+                                                generic.tuple_return_type.is_some()
                                             })
                                     })
                                     .unwrap_or(first)

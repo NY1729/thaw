@@ -182,7 +182,7 @@ fn substitutes_constrained_generic_inside_returned_callable() {
 
 /// A generic function returning a generic *type alias* over a tuple
 /// (immer's `produceWithPatches<Base>(base: Base): PatchesTuple<Base>`)
-/// records a `placeholder_return_type` with the alias's type parameter
+/// records a `tuple_return_type` with the alias's type parameter
 /// standing in as `Json`, while the ordinary `ret` keeps its opaque
 /// `JsValue` handle -- the difference tuple/JSON marshaling depends on.
 /// Covers each top-level extraction shape that builds a
@@ -199,22 +199,14 @@ fn records_placeholder_native_return_for_a_generic_alias_aggregate() {
          export declare const viaInterface: Callable;",
     )
     .unwrap();
-    let patch = HirType::Object(vec![
-        ("op".into(), HirType::Str),
-        ("path".into(), HirType::Array(Box::new(HirType::Str))),
-    ]);
-    let expected = Some(HirType::Tuple(vec![
-        HirType::Json,
-        HirType::Array(Box::new(patch.clone())),
-        HirType::Array(Box::new(patch)),
-    ]));
+    let expected = Some("[Json, { op: string; path: string[] }[], { op: string; path: string[] }[]]".to_string());
     for name in ["plain", "direct", "viaInterface"] {
         let function = funcs
             .iter()
             .find(|function| function.name == name)
             .unwrap_or_else(|| panic!("missing `{name}` in {funcs:?}"));
         assert_eq!(
-            function.generic.as_ref().unwrap().placeholder_return_type,
+            function.generic.as_ref().unwrap().tuple_return_type,
             expected,
             "{name}"
         );
@@ -254,12 +246,8 @@ fn projects_undecodable_alias_leaves_to_json() {
         .find(|function| function.name == "produceWithPatches")
         .unwrap();
     assert_eq!(
-        function.generic.as_ref().unwrap().placeholder_return_type,
-        Some(HirType::Tuple(vec![
-            HirType::Json,
-            HirType::Array(Box::new(HirType::Json)),
-            HirType::Array(Box::new(HirType::Json)),
-        ]))
+        function.generic.as_ref().unwrap().tuple_return_type,
+        Some("[Json, Json[], Json[]]".to_string())
     );
 }
 
@@ -270,7 +258,7 @@ fn projects_undecodable_alias_leaves_to_json() {
 fn omits_placeholder_native_return_for_a_non_aggregate() {
     let funcs = parse_dts("export declare function identity<T>(value: T): T;").unwrap();
     assert_eq!(
-        funcs[0].generic.as_ref().unwrap().placeholder_return_type,
+        funcs[0].generic.as_ref().unwrap().tuple_return_type,
         None
     );
 }
@@ -282,9 +270,20 @@ fn omits_placeholder_native_return_for_a_rest_tuple() {
     )
     .unwrap();
     assert_eq!(
-        funcs[0].generic.as_ref().unwrap().placeholder_return_type,
+        funcs[0].generic.as_ref().unwrap().tuple_return_type,
         None
     );
+}
+
+#[test]
+fn does_not_flatten_opaque_tuple_members_to_json() {
+    let funcs = parse_dts(
+        "export declare class Token { private value: string; }\n\
+         export type Result<T> = [T, Token];\n\
+         export declare function result<T>(value: T): Result<T>;",
+    )
+    .unwrap();
+    assert_eq!(funcs[0].generic.as_ref().unwrap().tuple_return_type, None);
 }
 
 #[test]

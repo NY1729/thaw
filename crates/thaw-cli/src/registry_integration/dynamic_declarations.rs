@@ -1329,7 +1329,7 @@ fn typed_dynamic_declaration(
         // unresolvable here and collapses to `JsValue`. But when the
         // bridge projected it to a *native tuple* -- a generic alias
         // whose body is a tuple, every own type parameter standing in as
-        // the placeholder `Json` and every undecodable leaf flattened to
+        // the placeholder `Json` and every unsupported leaf represented as
         // `Json` too (immer's own `PatchesTuple<Base> = readonly [Base,
         // Patch[], Patch[]]`, whose `Patch` has no native layout, becomes
         // `Tuple([Json, Json[], Json[]])`) -- that fixed arity is
@@ -1337,14 +1337,13 @@ fn typed_dynamic_declaration(
         // trigger: immer's `produceWithPatches`, whose tuple return
         // otherwise arrived as an opaque `JsValue` with `result[0] ===
         // undefined`; a plain `JsValue` *element* isn't even a legal tuple
-        // member ("unsupported JSON tuple element JsValue"), which is
-        // exactly why the bridge substitutes `Json`, not `JsValue`.
+        // member ("unsupported JSON tuple element JsValue"). Actual opaque
+        // handles reject this projection so their identity is preserved.
         let substituted_native_return = generic
-            .placeholder_return_type
-            .as_ref()
-            .filter(|_| mentions_any_type_param(&generic.return_type, generic))
-            .and_then(render_dynamic_type);
-        let return_type = if let Some(rendered) = substituted_native_return.as_deref() {
+            .tuple_return_type
+            .as_deref()
+            .filter(|_| mentions_any_type_param(&generic.return_type, generic));
+        let return_type = if let Some(rendered) = substituted_native_return {
             rendered
         } else if returns_bare_type_param
             || (!mentions_any_type_param(&generic.return_type, generic)
