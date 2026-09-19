@@ -1269,3 +1269,35 @@ fn lowers_calls_through_function_typed_object_properties() {
                 if matches!(callee.as_ref(), HirExpr::PropAccess(_, _, field) if field == "apply"))
     ));
 }
+
+/// `typeof e` for a `catch (e)` binding lowers to the literal `"object"`
+/// (real JavaScript throws an `Error` object), and a custom property read
+/// (`e.status`) routes through `__thaw_error_property` rather than a
+/// string operation -- real trigger: koa's `onerror` reading an
+/// `http-errors` error's `status`. `e.name`/`e.message` keep using the
+/// existing tagged-string helpers.
+#[test]
+fn typeof_and_custom_properties_on_a_caught_error() {
+    let program = lower(
+        r#"
+            function main(): void {
+                try {
+                    throw new Error("boom");
+                } catch (e) {
+                    console.log(typeof e, e.name, e.message, e.status);
+                }
+            }
+        "#,
+    );
+    let source = format!("{:?}", program.functions);
+    assert!(
+        source.contains("\"object\"") || source.contains("object"),
+        "typeof a caught error should be `object`:\n{source}"
+    );
+    assert!(
+        source.contains("__thaw_error_property"),
+        "`e.status` should route to `__thaw_error_property`:\n{source}"
+    );
+    assert!(source.contains("__thaw_error_name"), "{source}");
+    assert!(source.contains("__thaw_error_message"), "{source}");
+}

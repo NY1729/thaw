@@ -78,6 +78,7 @@ impl<'a> FnLowerer<'a> {
             native_class_aliases: HashMap::new(),
             member_receiver_bindings: HashSet::new(),
             awaited_bindings: HashSet::new(),
+            catch_bindings: HashSet::new(),
             loop_depth: 0,
             labels: Vec::new(),
             super_initializer: None,

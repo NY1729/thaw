@@ -39,6 +39,11 @@ struct FnLowerer<'a> {
     native_class_aliases: HashMap<Symbol, HirType>,
     member_receiver_bindings: HashSet<Symbol>,
     awaited_bindings: HashSet<Symbol>,
+    /// Names bound by a `catch (e)` clause. `typeof e` reports `"object"`
+    /// for these (real JavaScript throws an `Error` object), even though
+    /// the binding is stored as the tagged error *string* internally --
+    /// see `statements/lowering.rs`'s catch handling.
+    catch_bindings: HashSet<Symbol>,
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,
