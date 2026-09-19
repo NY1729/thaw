@@ -113,6 +113,14 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         | HirType::Str
         | HirType::StrLiteral(_)
         | HirType::JsValue => true,
+        // A `void` return has the same fixed `i32` placeholder slot any
+        // other type does (`thaw-llvm`'s `basic_type`), so a callback that
+        // returns nothing specializes the same way -- real example:
+        // immer's own `produceWithPatches<T>(base, recipe: (draft: T) =>
+        // void)`, whose recipe type infers as `Function([JsValue], Void)`.
+        // Without this the whole call failed "cannot specialize for native
+        // layout Function([JsValue], Void)".
+        HirType::Void => true,
         // Recurses the same way `Tuple`/`Object` already do just below,
         // rather than staying hardcoded to `F64` only -- real example:
         // zod's own `union<T extends readonly core.SomeType[]>(options:
