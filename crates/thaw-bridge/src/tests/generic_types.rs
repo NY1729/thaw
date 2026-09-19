@@ -276,6 +276,18 @@ fn omits_placeholder_native_return_for_a_non_aggregate() {
 }
 
 #[test]
+fn omits_placeholder_native_return_for_a_rest_tuple() {
+    let funcs = parse_dts(
+        "export declare function values<T>(head: T, ...tail: T[]): [T, ...T[]];",
+    )
+    .unwrap();
+    assert_eq!(
+        funcs[0].generic.as_ref().unwrap().placeholder_return_type,
+        None
+    );
+}
+
+#[test]
 fn classifies_union_parameter_as_fallback() {
     let funcs = parse_dts("export declare function f(x: string | number): void;").unwrap();
     assert!(matches!(
