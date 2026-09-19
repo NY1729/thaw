@@ -58,6 +58,33 @@ fn dts_function_param_hir_types(function: &thaw_bridge::DtsFunction) -> Vec<thaw
         .collect()
 }
 
+/// `dts_function_param_hir_types`, but with exactly the widening
+/// `typed_dynamic_declaration` applies when *rendering* a non-`napi`
+/// Fallback declaration: a callable parameter becomes the opaque `Json`
+/// (it is marshaled through `registerNativeCallback`, not passed as a
+/// native function). Scoring otherwise sees the raw `Function(..)` type
+/// that was never in the emitted declaration, so two overloads whose only
+/// difference is an unrelated callback shape fail the "all provided
+/// parameters are opaque, so the choice is runtime-irrelevant" check and
+/// the call is needlessly deferred -- real example: lodash's
+/// `reduce(collection, callback, accumulator)`, whose `callback` differs
+/// per overload and left its own `sum`/`value` untyped.
+fn scoring_param_hir_types(
+    function: &thaw_bridge::DtsFunction,
+    napi: bool,
+) -> Vec<thaw_hir::HirType> {
+    dts_function_param_hir_types(function)
+        .into_iter()
+        .map(|ty| {
+            if !napi && contains_callable_type(&ty) {
+                thaw_hir::HirType::Json
+            } else {
+                ty
+            }
+        })
+        .collect()
+}
+
 /// `dts_function_param_hir_types`'s sibling: index-aligned per-
 /// parameter field constraints, for `class_methods.rs`'s overload
 /// dispatch to disqualify a candidate whose param widened to opaque
@@ -936,7 +963,7 @@ fn union_overload_dispatch_declaration(
                 candidate.symbol.clone(),
                 candidate.source.required_params,
                 candidate.source.params.len(),
-                dts_function_param_hir_types(candidate.source),
+                scoring_param_hir_types(candidate.source, false),
                 dts_function_param_field_constraints(candidate.source),
                 None,
             )

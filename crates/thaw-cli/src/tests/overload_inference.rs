@@ -1263,3 +1263,41 @@ fn selects_fallback_function_overloads_by_object_literal_field_shape() {
         r#"__run_with_file({ file: "a.txt" }); __run_without_file({});"#
     );
 }
+
+/// A callable parameter isn't in a non-`napi` Fallback's emitted
+/// declaration at all -- it's widened to opaque `Json` and marshaled
+/// through `registerNativeCallback`. Scoring must see the same widening,
+/// otherwise two overloads whose only difference is an unrelated callback
+/// shape are not "all provided parameters opaque" and a call that should
+/// pick one is deferred instead. Real example: lodash's
+/// `reduce(collection, callback, accumulator)`.
+#[test]
+fn scoring_param_types_widen_callbacks_for_non_napi() {
+    let functions = thaw_bridge::parse_dts(
+        "export declare function apply(value: number, callback: (v: number) => number): number;",
+    )
+    .unwrap();
+    let function = &functions[0];
+    assert!(contains_callable_type(&dts_function_param_hir_types(function)[1]));
+    assert_eq!(
+        scoring_param_hir_types(function, false)[1],
+        thaw_hir::HirType::Json
+    );
+    assert!(contains_callable_type(
+        &scoring_param_hir_types(function, true)[1]
+    ));
+}
+
+/// `declared_array_of` recognizes a generic array argument even when it is
+/// nullish-unioned -- lodash's `reduce` declares its collection as
+/// `T[] | null | undefined`, which is still enough to infer `T` from a
+/// real array so the callback's own `prev`/`curr` can be annotated.
+#[test]
+fn declared_array_of_accepts_nullish_unions() {
+    assert!(declared_array_of("T[]", "T"));
+    assert!(declared_array_of("T[] | null | undefined", "T"));
+    assert!(declared_array_of("T[] | undefined | null", "T"));
+    assert!(!declared_array_of("T[] | null | undefined", "U"));
+    assert!(!declared_array_of("List<T>", "T"));
+    assert!(!declared_array_of("T", "T"));
+}

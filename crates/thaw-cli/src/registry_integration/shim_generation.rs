@@ -914,7 +914,7 @@ fn generate_registry_shims(
                                 symbol.clone(),
                                 function.required_params,
                                 function.params.len(),
-                                dts_function_param_hir_types(function),
+                                scoring_param_hir_types(function, napi),
                                 dts_function_param_field_constraints(function),
                                 None,
                             ));
@@ -932,7 +932,7 @@ fn generate_registry_shims(
                             symbol.clone(),
                             function.required_params,
                             function.params.len(),
-                            dts_function_param_hir_types(function),
+                            scoring_param_hir_types(function, napi),
                             dts_function_param_field_constraints(function),
                             function.generic.clone(),
                         ));
@@ -952,7 +952,7 @@ fn generate_registry_shims(
                             );
                             let specialized = generic_rest_array_result(generic).is_some();
                             for &arity in arities {
-                                let mut params = dts_function_param_hir_types(function);
+                                let mut params = scoring_param_hir_types(function, napi);
                                 params.resize(arity, thaw_hir::HirType::Json);
                                 let mut field_constraints =
                                     dts_function_param_field_constraints(function);
@@ -1036,7 +1036,7 @@ fn generate_registry_shims(
                     let direct = symbol.replace("__thaw_typed_wrapper_", "__thaw_typed_");
                     let specialized = generic_rest_array_result(generic).is_some();
                     for &arity in call_arities {
-                        let mut params = dts_function_param_hir_types(function);
+                        let mut params = scoring_param_hir_types(function, napi);
                         if let Some(contextual) = generic.contextual_param_types.first() {
                             if generic.type_params.iter().any(|(parameter, _)| {
                                 contextual == &format!("{parameter}[]")
@@ -1071,7 +1071,7 @@ fn generate_registry_shims(
                     symbol,
                     function.required_params,
                     function.params.len(),
-                    dts_function_param_hir_types(function),
+                    scoring_param_hir_types(function, napi),
                     dts_function_param_field_constraints(function),
                     function.generic.clone(),
                 ));
