@@ -1327,6 +1327,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
                 self.compile_json_array_push_owned(array, json)
             }
+            // A handle id pushed as a bare number reaches JS as one, so a
+            // package's own `any`-declared parameter gets a number rather
+            // than the live object (`invalid or released dynamic value
+            // handle` the moment it is used). Encode it as the same
+            // `{"__thaw_js_handle_id__": N}` placeholder the sibling
+            // `Json`/`Optional(Json)` paths produce.
+            HirType::JsValue | HirType::Dynamic => {
+                let placeholder = self.compile_dynamic_value_placeholder_unchecked(value)?;
+                self.compile_json_array_push_owned(array, placeholder)
+            }
             _ => self.compile_json_array_push_native(array, value, ty),
         }
     }

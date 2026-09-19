@@ -947,8 +947,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 // `compile_json_object_set_native_with_undefined`: a
                 // `Json`-declared slot can carry a real `JsValue` handle at
                 // runtime (an unambiguous `i64` vs. pointer distinction).
+                // `_unchecked`: this array-push helper is reached from
+                // `compile_typed_dynamic_argument` (a dynamic call's own
+                // argument list, where the reviver exists) as well as from
+                // `compile_json_array_push_owned`, both of which are
+                // already inside a QuickJS-backed dynamic-call argument
+                // marshaling context -- the same reason that sibling uses
+                // the gate-free variant.
                 if value.is_int_value() {
-                    value = self.compile_dynamic_value_placeholder(value)?;
+                    value = self.compile_dynamic_value_placeholder_unchecked(value)?;
                 }
                 "thaw_json_array_push_json"
             }
