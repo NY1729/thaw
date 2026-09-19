@@ -179,6 +179,7 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
             false,
             Some(&assets),
             false,
+            false,
         )
         .unwrap();
     }

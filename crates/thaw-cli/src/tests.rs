@@ -243,6 +243,49 @@ fn run_executes_a_file_and_forwards_arguments() {
 }
 
 #[test]
+fn run_lists_project_scripts() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-run-list-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"scripts":{"start":"server.ts","build":"vite build"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        package_script_listing(&directory).unwrap(),
+        vec![
+            ("build".to_string(), "vite build".to_string()),
+            ("start".to_string(), "server.ts".to_string()),
+        ]
+    );
+    std::fs::write(directory.join("package.json"), r#"{"name":"x"}"#).unwrap();
+    assert!(package_script_listing(&directory).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_source_file_script_is_detected_for_thaw_execution() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-run-file-script-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"scripts":{"start":"server.ts --port 3000","build":"vite build"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        package_script_file(&directory, "start"),
+        Some((
+            "server.ts".to_string(),
+            vec!["--port".into(), "3000".into()]
+        ))
+    );
+    assert_eq!(package_script_file(&directory, "build"), None);
+    assert_eq!(package_script_file(&directory, "missing"), None);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn dev_fingerprint_tracks_sources_but_ignores_dependencies() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-dev-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("node_modules/package")).unwrap();
