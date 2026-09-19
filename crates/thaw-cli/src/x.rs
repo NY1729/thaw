@@ -24,20 +24,29 @@
 ///
 /// Options: `-y`/`--yes` is accepted for `npx` compatibility (nothing is
 /// ever prompted for or written to the project). `--` separates the
-/// package spec from the command's own arguments. `-p`/`--package` and
-/// alternate-command selection (`npx -p pkg binname`) are not implemented
-/// yet; a package exposing several bins without one matching its name is
-/// rejected with the list of available commands.
+/// package spec from the command's own arguments. `-p`/`--package <spec>`
+/// resolves that package and runs the command named by the first
+/// positional argument (`thaw x -p prisma prisma generate` style),
+/// matching `npx`; a package exposing several bins without one matching
+/// its name is rejected with the list of available commands.
 fn run_x(args: &[String]) -> Result<i32, String> {
     let invocation = parse_x_args(args)?;
-    let package = thaw_registry::package_name(&invocation.spec).to_string();
     let cwd = std::env::current_dir()
         .map_err(|error| format!("failed to read the current directory: {error}"))?;
-    let package_dir = match find_local_package_dir(&package, &cwd) {
-        Some(directory) => directory,
-        None => install_into_cache(&invocation.spec)?,
+    let specs = invocation.specs();
+    let mut bins: Vec<(String, PathBuf)> = Vec::new();
+    for spec in &specs {
+        let package = thaw_registry::package_name(spec).to_string();
+        let package_dir = match find_local_package_dir(&package, &cwd) {
+            Some(directory) => directory,
+            None => install_into_cache(spec)?,
+        };
+        bins.extend(package_bins(&package_dir, &package)?);
+    }
+    let bin = match &invocation.command {
+        Some(command) => select_bin(&bins, command, &specs)?,
+        None => default_bin(&bins, thaw_registry::package_name(&specs[0]))?,
     };
-    let (_, bin) = resolve_package_bin(&package_dir, &package)?;
     bin_command(&bin)?
         .args(&invocation.arguments)
         .status()
@@ -47,44 +56,104 @@ fn run_x(args: &[String]) -> Result<i32, String> {
 
 /// Parsed form of a `thaw x` invocation.
 struct XInvocation {
-    /// The `package` or `package@version` specifier to resolve.
-    spec: String,
-    /// Everything after the spec, forwarded verbatim to the bin.
+    /// Package specs from `-p`/`--package`, in order (empty when the plain
+    /// `thaw x <package>` form was used).
+    packages: Vec<String>,
+    /// Positional package specifier, for the plain form.
+    spec: Option<String>,
+    /// Explicit command to run, required when `-p` was given.
+    command: Option<String>,
+    /// Everything after the spec/command, forwarded verbatim to the bin.
     arguments: Vec<String>,
 }
 
+impl XInvocation {
+    fn specs(&self) -> Vec<String> {
+        match &self.spec {
+            Some(spec) => vec![spec.clone()],
+            None => self.packages.clone(),
+        }
+    }
+}
+
 fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
-    let mut spec: Option<String> = None;
-    let mut arguments = Vec::new();
+    let mut packages = Vec::new();
+    let mut positionals: Vec<String> = Vec::new();
     let mut options_done = false;
-    for (index, argument) in args.iter().enumerate() {
-        if spec.is_none() {
-            match argument.as_str() {
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index].as_str();
+        if !options_done {
+            match argument {
                 // `npx` compatibility: `thaw x` never prompts or writes to
                 // the project, so `-y`/`--yes` only has to be accepted.
-                "-y" | "--yes" => {}
-                "--" => options_done = true,
-                other if other.starts_with('-') && !options_done => {
+                "-y" | "--yes" => {
+                    index += 1;
+                    continue;
+                }
+                "-p" | "--package" => {
+                    index += 1;
+                    let value = args
+                        .get(index)
+                        .ok_or("--package requires a package argument")?;
+                    packages.push(value.clone());
+                    index += 1;
+                    continue;
+                }
+                other if other.starts_with("--package=") => {
+                    packages.push(other["--package=".len()..].to_string());
+                    index += 1;
+                    continue;
+                }
+                "--" => {
+                    options_done = true;
+                    index += 1;
+                    continue;
+                }
+                other if other.starts_with('-') => {
                     return Err(format!("unknown option `{other}`"));
                 }
-                other => spec = Some(other.to_string()),
+                _ => {}
             }
-            continue;
         }
-        // The first `--` after the spec belongs to the specifier/argument
-        // split, not to the command; every later token is forwarded as-is.
-        if arguments.is_empty() && argument == "--" {
-            continue;
-        }
-        arguments.extend(args[index..].iter().cloned());
+        // The first positional ends option parsing; everything from here
+        // is forwarded verbatim.
+        positionals.extend(args[index..].iter().cloned());
         break;
     }
+
+    if packages.is_empty() {
+        let mut positionals = positionals.into_iter();
+        let spec = positionals
+            .next()
+            .ok_or("usage: thaw x <package>[@<version>] [--] [arguments...] (missing package name)")?;
+        return Ok(XInvocation {
+            packages,
+            spec: Some(spec),
+            command: None,
+            arguments: drop_separator(positionals.collect()),
+        });
+    }
+    let mut positionals = positionals.into_iter();
+    let command = positionals.next().ok_or(
+        "usage: thaw x -p <package>[@<version>] [--] <command> [arguments...] (missing command)",
+    )?;
     Ok(XInvocation {
-        spec: spec.ok_or(
-            "usage: thaw x <package>[@<version>] [--] [arguments...] (missing package name)",
-        )?,
-        arguments,
+        packages,
+        spec: None,
+        command: Some(command),
+        arguments: drop_separator(positionals.collect()),
     })
+}
+
+/// Drops the single `--` that separates a `thaw x` spec/command from the
+/// arguments to forward (`thaw x pkg -- --flag` runs with `--flag`), while
+/// preserving any later `--` (`thaw x pkg a -- b` forwards all three).
+fn drop_separator(mut arguments: Vec<String>) -> Vec<String> {
+    if arguments.first().map(String::as_str) == Some("--") {
+        arguments.remove(0);
+    }
+    arguments
 }
 
 /// Finds an installed `node_modules/<package>` by walking up from `start`,
@@ -142,40 +211,89 @@ fn x_cache_root() -> Result<PathBuf, String> {
     Ok(base.join("thaw").join("x"))
 }
 
-/// Resolves the executable a package's `bin` entry maps to, matching
-/// `npx`'s own precedence: a bin key named after the package (its
-/// unscoped basename) wins; a bare string `bin` is that package's own
-/// command; a single-entry object is unambiguous; anything else needs an
-/// explicit command (not implemented yet, so it is rejected clearly).
-fn resolve_package_bin(package_dir: &Path, package: &str) -> Result<(String, PathBuf), String> {
+/// Every command a package's `bin` entry declares, as `(name, path)`. A
+/// bare string `bin` is the package's own command (its unscoped
+/// basename); an object maps each command name to its file. A non-string
+/// value is ignored; an unsupported `bin` shape is an error; no `bin` at
+/// all is an empty list (the caller decides whether that is fatal).
+fn package_bins(package_dir: &Path, package: &str) -> Result<Vec<(String, PathBuf)>, String> {
     let manifest = std::fs::read_to_string(package_dir.join("package.json"))
         .map_err(|error| format!("failed to read `{}`: {error}", package_dir.display()))?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest)
         .map_err(|error| format!("invalid package.json for `{package}`: {error}"))?;
-    let command = package.rsplit('/').next().unwrap_or(package);
-    let bin = manifest.get("bin");
-    match bin {
-        Some(serde_json::Value::String(path)) => Ok((command.to_string(), bin_path(package_dir, path))),
-        Some(serde_json::Value::Object(entries)) => {
-            if let Some(serde_json::Value::String(path)) = entries.get(command) {
-                return Ok((command.to_string(), bin_path(package_dir, path)));
-            }
-            if entries.len() == 1 {
-                if let Some((name, serde_json::Value::String(path))) = entries.iter().next() {
-                    return Ok((name.clone(), bin_path(package_dir, path)));
+    Ok(match manifest.get("bin") {
+        Some(serde_json::Value::String(path)) => vec![(
+            package_basename(package).to_string(),
+            bin_path(package_dir, path),
+        )],
+        Some(serde_json::Value::Object(entries)) => entries
+            .iter()
+            .filter_map(|(name, value)| match value {
+                serde_json::Value::String(path) => {
+                    Some((name.clone(), bin_path(package_dir, path)))
                 }
-            }
-            let mut names = entries.keys().cloned().collect::<Vec<_>>();
-            names.sort();
-            Err(format!(
-                "`{package}` exposes multiple commands ({}) and none is named `{command}`; \
-                 running a specific command is not supported yet",
-                names.join(", ")
-            ))
-        }
-        Some(_) => Err(format!("`{package}` has an unsupported `bin` entry")),
-        None => Err(format!("`{package}` does not declare a `bin` command")),
+                _ => None,
+            })
+            .collect(),
+        Some(_) => return Err(format!("`{package}` has an unsupported `bin` entry")),
+        None => Vec::new(),
+    })
+}
+
+/// The command `thaw x <package>` runs by default: the one named after the
+/// package's own basename, or, failing that, a package's sole command
+/// (matching `npx`'s single-bin convenience). Multiple unmatched commands
+/// are rejected with the list and a `-p` hint.
+fn default_bin(bins: &[(String, PathBuf)], package: &str) -> Result<PathBuf, String> {
+    let command = package_basename(package);
+    if let Some((_, path)) = bins.iter().find(|(name, _)| name == command) {
+        return Ok(path.clone());
     }
+    match bins {
+        [] => Err(format!("`{package}` does not declare a `bin` command")),
+        [(_, path)] => Ok(path.clone()),
+        _ => Err(format!(
+            "`{package}` exposes multiple commands ({}) and none is named `{command}`; \
+             choose one with `-p {package} <command>`",
+            command_names(bins)
+        )),
+    }
+}
+
+/// The bin an explicit `-p`/`--package` invocation asks for by name.
+fn select_bin(
+    bins: &[(String, PathBuf)],
+    command: &str,
+    packages: &[String],
+) -> Result<PathBuf, String> {
+    bins.iter()
+        .find(|(name, _)| name == command)
+        .map(|(_, path)| path.clone())
+        .ok_or_else(|| {
+            let available = if bins.is_empty() {
+                "no commands".to_string()
+            } else {
+                format!("available: {}", command_names(bins))
+            };
+            format!(
+                "no command `{command}` found in {} ({available})",
+                packages.join(", ")
+            )
+        })
+}
+
+fn command_names(bins: &[(String, PathBuf)]) -> String {
+    let mut names = bins
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names.join(", ")
+}
+
+fn package_basename(package: &str) -> &str {
+    package.rsplit('/').next().unwrap_or(package)
 }
 
 fn bin_path(package_dir: &Path, declared: &str) -> PathBuf {
