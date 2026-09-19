@@ -263,11 +263,22 @@ pub enum HirStmt {
     Throw(HirExpr),
     /// `throw` unwinds through generated Thaw function calls to the nearest
     /// lexical `try`. Codegen implements this with a pending-exception slot,
-    /// preserving the ordinary function and C FFI ABIs. `catch` binds the
-    /// thrown value as a string. `finally` is expanded around normal and
-    /// abrupt exits during lowering, so it does not require a separate HIR
-    /// variant.
-    Try(Vec<HirStmt>, Symbol, Vec<HirStmt>),
+    /// preserving the ordinary function and C FFI ABIs. `finally` is expanded
+    /// around normal and abrupt exits during lowering, so it does not require
+    /// a separate HIR variant.
+    ///
+    /// `Try(body, visible_catch, catch_body, hidden_tag)`:
+    /// - `visible_catch`: the catch binding the user wrote (`catch (e)`),
+    ///   bound as an Error-shaped *object* (a fixed layout with `name`/
+    ///   `message`, so `typeof e === "object"` and `e.name`/`e.message` are
+    ///   ordinary object reads, matching real JavaScript).
+    /// - `hidden_tag`: the original tagged *string* the same throw produced,
+    ///   bound under a compiler-private name only when the catch body (or a
+    ///   nested handler) actually reads it -- `.code`/`.cause`/`.stack`
+    ///   routing, `(e as MyError)`, and `String(e)` all go through this
+    ///   string, so both representations stay available without one
+    ///   clobbering the other. `None` when nothing reads the raw tag.
+    Try(Vec<HirStmt>, Symbol, Vec<HirStmt>, Option<Symbol>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

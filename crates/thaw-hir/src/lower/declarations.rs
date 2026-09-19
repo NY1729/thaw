@@ -1386,8 +1386,9 @@ fn lower_function_statements(
                     reentry_error.clone(),
                     vec![
                         clear_running.clone(),
-                        HirStmt::Throw(HirExpr::Var(reentry_error)),
+                        HirStmt::Throw(HirExpr::Var(reentry_error.clone())),
                     ],
+                    Some(reentry_error.clone()),
                 ),
                 clear_running,
             ];

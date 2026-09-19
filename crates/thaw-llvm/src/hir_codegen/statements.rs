@@ -206,8 +206,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(true)
             }
 
-            HirStmt::Try(body, catch_name, catch_body) => {
-                self.compile_try(body, catch_name, catch_body)
+            HirStmt::Try(body, catch_name, catch_body, hidden_tag) => {
+                self.compile_try(body, catch_name, catch_body, hidden_tag.as_deref())
             }
         }
     }
@@ -330,6 +330,7 @@ impl<'ctx> HirCompiler<'ctx> {
         body: &[HirStmt],
         catch_name: &str,
         catch_body: &[HirStmt],
+        hidden_tag: Option<&str>,
     ) -> Result<bool, String> {
         let function = self.current_function();
 
@@ -412,6 +413,14 @@ impl<'ctx> HirCompiler<'ctx> {
             format!("{catch_name}__thaw_exception_object"),
             (object_slot, str_ty),
         );
+        // The hidden tag is the same caught string under a private name,
+        // for a catch body (or nested handler) that reads the raw tagged
+        // error rather than the materialized object. Bound to the same
+        // `catch_slot` storage.
+        if let Some(hidden_tag) = hidden_tag {
+            self.variables
+                .insert(hidden_tag.to_string(), (catch_slot, str_ty));
+        }
         let catch_terminated = self.compile_block(catch_body)?;
         if !catch_terminated {
             self.builder

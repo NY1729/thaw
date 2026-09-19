@@ -170,7 +170,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 next_guard,
             );
         }
-        if let HirStmt::Try(try_body, catch_name, catch_body) = stmt {
+        if let HirStmt::Try(try_body, catch_name, catch_body, _) = stmt {
             let activation_guard = if expected {
                 guard.to_string()
             } else {

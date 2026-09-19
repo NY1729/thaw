@@ -466,7 +466,7 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirStmt::Continue
             | HirStmt::BreakDepth(_)
             | HirStmt::ContinueDepth(_) => false,
-            HirStmt::Try(body, _, catch_body) => body
+            HirStmt::Try(body, _, catch_body, _) => body
                 .iter()
                 .chain(catch_body)
                 .any(|stmt| Self::stmt_awaits_frame_source(stmt, frame_functions)),
