@@ -120,19 +120,26 @@ fn is_script_path(path: &str) -> bool {
 }
 
 fn run_file(input: &str, args: &[String]) -> Result<i32, String> {
-    run_file_in(input, args, None)
+    run_file_in(input, args, None, None)
 }
 
 /// Compiles `input` and runs the resulting binary with `args`. When
 /// `directory` is given the binary starts there -- a project script's own
-/// working directory, matching `npm run`/`bun run`.
-fn run_file_in(input: &str, args: &[String], directory: Option<&Path>) -> Result<i32, String> {
+/// working directory, matching `npm run`/`bun run` -- and `registry`, when
+/// given, is that project's own `thaw_modules` (a project script's imports
+/// must resolve against the project, not the invoking shell's cwd).
+fn run_file_in(
+    input: &str,
+    args: &[String],
+    directory: Option<&Path>,
+    registry: Option<&Path>,
+) -> Result<i32, String> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let output = std::env::temp_dir().join(format!("thaw-run-{}-{nonce}", std::process::id()));
-    run_file_at(input, args, &output, directory)
+    run_file_at(input, args, &output, directory, registry)
 }
 
 fn run_file_at(
@@ -140,21 +147,34 @@ fn run_file_at(
     args: &[String],
     output: &Path,
     directory: Option<&Path>,
+    registry: Option<&Path>,
 ) -> Result<i32, String> {
-    let result =
-        run_build(&[input.into(), "-o".into(), output.display().to_string()]).and_then(|_| {
-            let mut command = Command::new(output);
-            command.args(args);
-            if let Some(directory) = directory {
-                command.current_dir(directory);
-            }
-            command
-                .status()
-                .map(|status| status.code().unwrap_or(1))
-                .map_err(|error| format!("failed to run `{}`: {error}", output.display()))
-        });
+    let build_args = run_build_args(input, output, registry);
+    let result = run_build(&build_args).and_then(|_| {
+        let mut command = Command::new(output);
+        command.args(args);
+        if let Some(directory) = directory {
+            command.current_dir(directory);
+        }
+        command
+            .status()
+            .map(|status| status.code().unwrap_or(1))
+            .map_err(|error| format!("failed to run `{}`: {error}", output.display()))
+    });
     let _ = std::fs::remove_file(output);
     result
+}
+
+/// The `thaw build` arguments for a `thaw run`/`thaw <file>` invocation: the
+/// entry, its output, and -- for a project script -- that project's own
+/// registry.
+fn run_build_args(input: &str, output: &Path, registry: Option<&Path>) -> Vec<String> {
+    let mut args = vec![input.to_string(), "-o".into(), output.display().to_string()];
+    if let Some(registry) = registry {
+        args.push("--registry".into());
+        args.push(registry.display().to_string());
+    }
+    args
 }
 
 fn run_install(args: &[String]) -> Result<(), String> {
@@ -253,7 +273,8 @@ fn run_script(args: &[String]) -> Result<i32, String> {
         let input = input
             .to_str()
             .ok_or_else(|| format!("`{}` is not valid UTF-8", input.display()))?;
-        return run_file_in(input, &script_args, Some(directory));
+        let registry = directory.join("thaw_modules");
+        return run_file_in(input, &script_args, Some(directory), Some(&registry));
     }
     // Anything wider (a shell pipeline, `tsx watch`, `vite build`, ...)
     // keeps running through npm, which is what actually provides that
