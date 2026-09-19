@@ -9,7 +9,7 @@ fn registry_runs_utf8_validate_prebuild_when_supplied() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "declare function isValidUTF8(buffer: any): boolean;\n",
+        "declare function isValidUTF8(buffer: any): boolean;\nexport = isValidUTF8;\n",
     )
     .unwrap();
     std::fs::copy(prebuild, package.join("native.node")).unwrap();
@@ -700,4 +700,3 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
-
