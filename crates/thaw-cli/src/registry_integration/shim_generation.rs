@@ -318,7 +318,6 @@ fn generate_registry_shims(
         std::collections::HashMap::new();
     let mut value_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
-    let mut jit_targets = std::collections::HashSet::new();
     let mut jit_fallback_reasons = JitFallbackReasons::new();
     // Names `union_overload_dispatch_declaration` already claims with a
     // runtime `typeof`-based dispatcher. The argument-shape-scoring loop
@@ -972,9 +971,6 @@ fn generate_registry_shims(
                             }
                         }
                     }
-                    if jit_operation.is_some() {
-                        jit_targets.insert((pkg.name.clone(), function.name.clone()));
-                    }
                 }
             }
         }
@@ -1322,13 +1318,8 @@ fn generate_registry_shims(
                 .classifications
                 .iter()
                 .filter_map(|(name, classification)| match classification {
-                    thaw_bridge::Classification::Fallback { .. }
-                        if !jit_targets.contains(&(pkg.name.clone(), name.clone())) =>
-                    {
-                        Some(name.clone())
-                    }
+                    thaw_bridge::Classification::Fallback { .. } => Some(name.clone()),
                     thaw_bridge::Classification::FastPath(_) => None,
-                    thaw_bridge::Classification::Fallback { .. } => None,
                 })
                 .collect();
             let qualified_aliases: Vec<(String, String)> = qualified
