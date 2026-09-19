@@ -1029,7 +1029,85 @@ fn arrow_body_mutates(name: &str, arrow: &swc_ecma_ast::ArrowExpr) -> bool {
         )
     }
 
+    fn pattern_binds_name(pattern: &Pat, name: &str) -> bool {
+        match pattern {
+            Pat::Ident(binding) => binding.id.sym == name,
+            Pat::Array(array) => array
+                .elems
+                .iter()
+                .flatten()
+                .any(|element| pattern_binds_name(element, name)),
+            Pat::Rest(rest) => pattern_binds_name(&rest.arg, name),
+            Pat::Object(object) => object.props.iter().any(|property| match property {
+                swc_ecma_ast::ObjectPatProp::KeyValue(property) => {
+                    pattern_binds_name(&property.value, name)
+                }
+                swc_ecma_ast::ObjectPatProp::Assign(property) => property.key.sym == name,
+                swc_ecma_ast::ObjectPatProp::Rest(rest) => pattern_binds_name(&rest.arg, name),
+            }),
+            Pat::Assign(assignment) => pattern_binds_name(&assignment.left, name),
+            Pat::Invalid(_) | Pat::Expr(_) => false,
+        }
+    }
+
+    fn block_shadows_name(block: &swc_ecma_ast::BlockStmt, name: &str) -> bool {
+        block.stmts.iter().any(|statement| {
+            let swc_ecma_ast::Stmt::Decl(declaration) = statement else {
+                return false;
+            };
+            match declaration {
+                swc_ecma_ast::Decl::Var(var) if var.kind != swc_ecma_ast::VarDeclKind::Var => var
+                    .decls
+                    .iter()
+                    .any(|declaration| pattern_binds_name(&declaration.name, name)),
+                swc_ecma_ast::Decl::Fn(function) => function.ident.sym == name,
+                swc_ecma_ast::Decl::Class(class) => class.ident.sym == name,
+                _ => false,
+            }
+        })
+    }
+
     impl Visit for Finder<'_> {
+        fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+            if arrow
+                .params
+                .iter()
+                .any(|parameter| pattern_binds_name(parameter, self.name))
+            {
+                return;
+            }
+            arrow.visit_children_with(self);
+        }
+
+        fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+            if function
+                .params
+                .iter()
+                .any(|parameter| pattern_binds_name(&parameter.pat, self.name))
+            {
+                return;
+            }
+            function.visit_children_with(self);
+        }
+
+        fn visit_catch_clause(&mut self, catch: &swc_ecma_ast::CatchClause) {
+            if catch
+                .param
+                .as_ref()
+                .is_some_and(|parameter| pattern_binds_name(parameter, self.name))
+            {
+                return;
+            }
+            catch.visit_children_with(self);
+        }
+
+        fn visit_block_stmt(&mut self, block: &swc_ecma_ast::BlockStmt) {
+            if block_shadows_name(block, self.name) {
+                return;
+            }
+            block.visit_children_with(self);
+        }
+
         fn visit_assign_expr(&mut self, assignment: &swc_ecma_ast::AssignExpr) {
             if let swc_ecma_ast::AssignTarget::Simple(simple) = &assignment.left {
                 let target = match simple {
@@ -1077,12 +1155,8 @@ fn arrow_body_mutates(name: &str, arrow: &swc_ecma_ast::ArrowExpr) -> bool {
         }
     }
 
-    // Only the arrow's own body -- a nested arrow capturing the same name
-    // is a different scope; skipping it would miss a mutation inside a
-    // nested callback, but treating it as this parameter's mutation would
-    // be wrong when the nested arrow shadows the name. Conservatively scan
-    // the whole body (a shadowing rename only happens for a *different*
-    // binding, which never shares this exact name in practice here).
+    // Follow nested closures that capture this parameter, but do not count
+    // writes below a scope that binds the same spelling to a different value.
     let mut finder = Finder {
         name,
         mutated: false,
@@ -1113,4 +1187,39 @@ fn parameter_is_any_annotated(pattern: &Pat) -> bool {
                 TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword
             )
     )
+}
+
+#[cfg(test)]
+mod mutation_detection_tests {
+    use super::*;
+
+    fn parsed_arrow(source: &str) -> swc_ecma_ast::ArrowExpr {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(
+            swc_ecma_ast::Decl::Var(declaration),
+        )) = &module.body[0]
+        else {
+            panic!("expected variable declaration");
+        };
+        let Some(swc_ecma_ast::Expr::Arrow(arrow)) = declaration.decls[0]
+            .init
+            .as_deref()
+        else {
+            panic!("expected arrow initializer");
+        };
+        arrow.clone()
+    }
+
+    #[test]
+    fn mutation_detection_respects_nested_shadowing_and_captures() {
+        let shadowed = parsed_arrow(
+            "const callback = (draft: any) => { const nested = (draft: any) => { draft.x++; }; nested({}); };",
+        );
+        assert!(!arrow_body_mutates("draft", &shadowed));
+
+        let captured = parsed_arrow(
+            "const callback = (draft: any) => { const nested = () => { draft.x++; }; nested(); };",
+        );
+        assert!(arrow_body_mutates("draft", &captured));
+    }
 }
