@@ -1805,7 +1805,22 @@ fn describe_promise_exception<'js>(ctx: &Ctx<'js>, label: &str, preserve_error: 
             } else if let Some(name) = name.filter(|name| name != "Error") {
                 format!("\u{1}{name}\u{1}`{label}`'s promise rejected: {message}")
             } else {
-                format!("`{label}`'s promise rejected: {message}")
+                // A plain `Error` rejection: keep the exact user-visible
+                // labeled text unchanged, but append the original
+                // `\u{1}Error\u{1}message` segment so the full tagged form
+                // survives the native boundary (a later property
+                // reconstruction reads it; `thaw_error_message` strips it
+                // back off for display). Only when properties actually
+                // survive too -- otherwise the trailing segment would be
+                // pure noise for a plain `Error`, whose message is the
+                // only thing a caller could ever read.
+                if properties.is_some() {
+                    format!(
+                        "`{label}`'s promise rejected: {message}\u{1}Error\u{1}{message}"
+                    )
+                } else {
+                    format!("`{label}`'s promise rejected: {message}")
+                }
             }
         } else if let Some(value) = exc.as_string() {
             let value = value.to_string().unwrap_or_default();
