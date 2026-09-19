@@ -2610,7 +2610,7 @@ async function main(): Promise<void> {
 /// arrive as an opaque `JsValue` handle (`result[0] === undefined`) and,
 /// once a tuple was emitted at all, failed the build outright
 /// ("unsupported JSON tuple element JsValue"). Pins down the real-package
-/// end of the `placeholder_return_type` projection fix (see
+/// end of the `tuple_return_type` projection fix (see
 /// `docs/design/generic-overload-dispatch.md`, and
 /// `a_generic_alias_tuple_return_is_rendered_with_json_placeholder_params`
 /// for the synthetic, network-free version of the same mechanism).

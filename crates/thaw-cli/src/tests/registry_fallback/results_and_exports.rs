@@ -2356,7 +2356,7 @@ function main(): void {
 /// would instead have arrived as an opaque handle with `result[0] ===
 /// undefined` the moment the caller indexed it.
 ///
-/// Fixed by `thaw_bridge`'s `placeholder_return_type`: the generic alias
+/// Fixed by `thaw_bridge`'s `tuple_return_type`: the generic alias
 /// projected with each own type parameter standing in as the placeholder
 /// `Json` and each undecodable leaf flattened to `Json` too, giving
 /// `Tuple([Json, Array(Json), Array(Json)])` -- a real, decodable tuple

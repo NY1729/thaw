@@ -79,29 +79,28 @@ At the bridge layer, because the placeholder substitution has to happen
 while the `.d.ts` AST (and its alias bodies) are still in scope:
 
 1. `thaw_bridge::DtsGenericFunction` gains
-   `placeholder_return_type: Option<HirType>`. A new helper
-   (`placeholder_native_return_type`, `bridge/dts/types/generics.rs`)
+   `tuple_return_type: Option<String>`. A helper
+   (`generic_tuple_return_type`, `bridge/dts/types/generics.rs`)
    projects the declared return type with a substitution map
    `type_param -> HirType::Json`, keeping tuple structure (following
-   generic aliases, `readonly` and parenthesized wrappers; nested arrays
-   and objects are preserved inside the tuple) and flattening every other
-   leaf -- an unsupported position *or* an opaque `JsValue` handle -- to
-   `Json`. It keeps the result only when the top-level skeleton is a
-   native *tuple*. The four sites that build a `DtsGenericFunction`
+   generic aliases, `readonly` and parenthesized wrappers). Unsupported
+   leaves become `Json`; opaque `JsValue` handles reject the projection
+   so object identity is not lost. It renders and keeps only a top-level
+   tuple, and skips projection when the return does not mention one of the
+   function's type parameters. The four sites that build a `DtsGenericFunction`
    (`lower_dts_function`/`lower_dts_method_signature` in
    `interfaces.rs`, `lower_dts_call_signature`/`lower_dts_fn_type` in
    `exports.rs`) all populate it.
 2. `crates/thaw-cli/src/registry_integration/dynamic_declarations.rs`'s
    `typed_dynamic_declaration`, generic branch: when the return type
-   mentions a type parameter, render `generic.placeholder_return_type`
-   (via the existing `render_dynamic_type`) before falling back to
+   mentions a type parameter, use `generic.tuple_return_type` before falling back to
    `"JsValue"`. The ordinary `ret` is untouched, so every existing path
    keeps its old behavior.
 3. `class_methods.rs`'s all-zero-tied overload dispatch: among the
    candidates whose provided parameters are all opaque
    (`Json`/`JsValue`) -- which all dispatch to the same runtime JS
    function, so the choice changes nothing at runtime -- prefer one whose
-   `generic.placeholder_return_type` is present, i.e. whose return decoded
+   `generic.tuple_return_type` is present, i.e. whose return decoded
    to a concrete aggregate. This is what steers immer's
    `(base, recipe)` call to the base-first overload instead of the earlier
    curried one.

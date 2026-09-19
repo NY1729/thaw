@@ -99,7 +99,7 @@ decide per this rule:
    same runtime JS function, so which one is picked is irrelevant at
    runtime and only affects the inferred return type — prefer one whose
    generic return resolved to a concrete tuple
-   (`DtsGenericFunction::placeholder_return_type`; see
+   (`DtsGenericFunction::tuple_return_type`; see
    [generic-overload-dispatch](generic-overload-dispatch.md)), falling
    back to the first opaque candidate. Real trigger: immer's
    `produceWithPatches`, whose base-first `<Base>(base, recipe,
