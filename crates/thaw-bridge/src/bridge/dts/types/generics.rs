@@ -338,13 +338,11 @@ fn resolve_generic_alias(
 
 /// Projects a generic function/method's declared return type into a
 /// *native tuple* skeleton, recording it on
-/// `DtsGenericFunction`'s `placeholder_return_type`. Every one of the
+/// `DtsGenericFunction`'s `tuple_return_type`. Every one of the
 /// function's own type parameters is substituted by the placeholder
-/// native type `HirType::Json`, and so is any leaf the ordinary
-/// classification can't represent (a `JsValue` handle, a `Union`, an
-/// interface field with no native layout, ...). Nested arrays/objects
-/// inside the tuple are preserved the same way (immer's `Patch[]` becomes
-/// `Json[]`).
+/// native type `HirType::Json`. Unsupported leaves become `Json`; opaque
+/// `JsValue` handles reject the projection. Nested arrays/objects inside
+/// the tuple are preserved (immer's `Patch[]` becomes `Json[]`).
 ///
 /// The ordinary return classification (`lower_dts_*`'s own `ret`)
 /// degrades an unconstrained type parameter to the opaque
@@ -362,14 +360,28 @@ fn resolve_generic_alias(
 /// return that isn't a tuple skeleton (every existing path then keeps its
 /// ordinary `ret`). Deliberately *not* extended to a top-level array or
 /// object: see the adoption comment in the body.
-fn placeholder_native_return_type(
+fn generic_tuple_return_type(
     return_type: Option<&swc_ecma_ast::TsTypeAnn>,
     type_params: Option<&swc_ecma_ast::TsTypeParamDecl>,
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
-) -> Option<HirType> {
+) -> Option<String> {
     let type_params = type_params?;
     let return_type = return_type?;
+    let described_return = describe_ts_type(&return_type.type_ann);
+    let mentions_type_param = type_params.params.iter().any(|parameter| {
+        let name = parameter.name.sym.as_str();
+        described_return.match_indices(name).any(|(index, _)| {
+            let identifier = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$');
+            let bytes = described_return.as_bytes();
+            let end = index + name.len();
+            (index == 0 || !identifier(bytes[index - 1]))
+                && (end == bytes.len() || !identifier(bytes[end]))
+        })
+    });
+    if !mentions_type_param {
+        return None;
+    }
     let mut substitution = HashMap::new();
     for parameter in &type_params.params {
         substitution.insert(parameter.name.sym.to_string(), HirType::Json);
@@ -390,12 +402,30 @@ fn placeholder_native_return_type(
     // kind -- it carries a fixed *arity* that destructuring/`result[0]`
     // actually needs, which no opaque handle can express.
     match projected {
-        tuple @ HirType::Tuple(_) => Some(tuple),
+        HirType::Tuple(_) if !contains_jsvalue(&projected) => {
+            Some(render_ts_type(&projected))
+        }
         _ => None,
     }
 }
 
-/// Best-effort projection backing `placeholder_native_return_type`: keeps
+fn contains_jsvalue(ty: &HirType) -> bool {
+    match ty {
+        HirType::JsValue => true,
+        HirType::Array(inner)
+        | HirType::Dictionary(inner)
+        | HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner) => contains_jsvalue(inner),
+        HirType::Tuple(elements) | HirType::Union(elements) => {
+            elements.iter().any(contains_jsvalue)
+        }
+        HirType::Object(fields) => fields.iter().any(|(_, field)| contains_jsvalue(field)),
+        _ => false,
+    }
+}
+
+/// Best-effort projection backing `generic_tuple_return_type`: keeps
 /// tuple/array/object structure (following generic aliases and `Array<T>`
 /// / `ReadonlyArray<T>` / `readonly` / parenthesized wrappers) and maps
 /// every other position to a native type via
@@ -466,6 +496,9 @@ fn project_native_aggregate(
             };
             if let Some(concrete) = substitution.get(&ref_name) {
                 return concrete.clone();
+            }
+            if generic_interfaces.classes.contains(&ref_name) {
+                return HirType::JsValue;
             }
             // `Array<T>` / `ReadonlyArray<T>`: keep the array skeleton so
             // an element that can't be represented still becomes `Json[]`
@@ -576,36 +609,7 @@ fn best_effort_native_leaf(
         &mut Vec::new(),
     ) {
         DtsType::Unsupported(_) => HirType::Json,
-        DtsType::Native(ty) => flatten_jsvalue_to_json(ty),
-    }
-}
-
-/// Recursively replaces every `HirType::JsValue` handle with
-/// `HirType::Json`, so a resolved object/tuple/array that still carries an
-/// opaque handle somewhere inside can be rendered and marshaled as JSON.
-fn flatten_jsvalue_to_json(ty: HirType) -> HirType {
-    match ty {
-        HirType::JsValue => HirType::Json,
-        HirType::Array(inner) => HirType::Array(Box::new(flatten_jsvalue_to_json(*inner))),
-        HirType::Tuple(elements) => {
-            HirType::Tuple(elements.into_iter().map(flatten_jsvalue_to_json).collect())
-        }
-        HirType::Object(fields) => HirType::Object(
-            fields
-                .into_iter()
-                .map(|(name, field)| (name, flatten_jsvalue_to_json(field)))
-                .collect(),
-        ),
-        HirType::Dictionary(inner) => {
-            HirType::Dictionary(Box::new(flatten_jsvalue_to_json(*inner)))
-        }
-        HirType::Optional(inner) => HirType::Optional(Box::new(flatten_jsvalue_to_json(*inner))),
-        HirType::Nullable(inner) => HirType::Nullable(Box::new(flatten_jsvalue_to_json(*inner))),
-        HirType::Nullish(inner) => HirType::Nullish(Box::new(flatten_jsvalue_to_json(*inner))),
-        HirType::Union(members) => {
-            HirType::Union(members.into_iter().map(flatten_jsvalue_to_json).collect())
-        }
-        other => other,
+        DtsType::Native(ty) => ty,
     }
 }
 

@@ -179,7 +179,7 @@ pub fn classify_all(functions: &[DtsFunction]) -> Vec<(String, Classification)> 
 /// types that actually came from a successful classification (primitives,
 /// `number[]`, and flat/nested objects), so the `Json`/`Union`/`Dynamic`
 /// arms are just defensive completeness, not expected to be exercised.
-fn render_ts_type(ty: &HirType) -> String {
+pub(crate) fn render_ts_type(ty: &HirType) -> String {
     match ty {
         HirType::F64 => "number".to_string(),
         HirType::I64 => "bigint".to_string(),

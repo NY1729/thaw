@@ -221,6 +221,7 @@ fn extract_type_alias_decls_from_decl(decl: &Decl) -> Vec<&swc_ecma_ast::TsTypeA
 struct GenericInterfaces<'a> {
     interfaces: HashMap<String, &'a TsInterfaceDecl>,
     aliases: HashMap<String, &'a swc_ecma_ast::TsTypeAliasDecl>,
+    classes: HashSet<String>,
 }
 
 /// Resolves every top-level *non-generic* `interface` into a `DtsType`
@@ -237,6 +238,13 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
     let mut raw: HashMap<String, &TsInterfaceDecl> = HashMap::new();
     let mut names = Vec::new();
     let mut generic = GenericInterfaces::default();
+    generic.classes.extend(
+        module
+            .body
+            .iter()
+            .flat_map(extract_class_decls)
+            .map(|(name, _)| name.to_string()),
+    );
     for iface in module.body.iter().flat_map(extract_interface_decls) {
         let name = iface.id.sym.to_string();
         if iface.type_params.is_some() {
@@ -601,7 +609,7 @@ fn lower_dts_function(
             .as_ref()
             .map(|annotation| describe_ts_type(&annotation.type_ann))
             .unwrap_or_else(|| "JsValue".into()),
-        placeholder_return_type: placeholder_native_return_type(
+        tuple_return_type: generic_tuple_return_type(
             func.return_type.as_deref(),
             func.type_params.as_deref(),
             interfaces,
@@ -767,7 +775,7 @@ fn lower_dts_method_signature(
             .as_ref()
             .map(|annotation| describe_ts_type(&annotation.type_ann))
             .unwrap_or_else(|| "JsValue".into()),
-        placeholder_return_type: placeholder_native_return_type(
+        tuple_return_type: generic_tuple_return_type(
             method.type_ann.as_deref(),
             method.type_params.as_deref(),
             interfaces,
