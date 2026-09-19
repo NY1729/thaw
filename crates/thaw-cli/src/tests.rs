@@ -270,7 +270,13 @@ fn a_source_file_script_is_detected_for_thaw_execution() {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
         directory.join("package.json"),
-        r#"{"scripts":{"start":"server.ts --port 3000","build":"vite build"}}"#,
+        r#"{"scripts":{
+            "start":"server.ts --port 3000",
+            "quoted":"server.ts \"hello world\"",
+            "piped":"server.ts | tee out.txt",
+            "subst":"server.ts $(pwd)",
+            "build":"vite build"
+        }}"#,
     )
     .unwrap();
     assert_eq!(
@@ -280,8 +286,34 @@ fn a_source_file_script_is_detected_for_thaw_execution() {
             vec!["--port".into(), "3000".into()]
         ))
     );
+    // Shell syntax (quoting, pipes, substitution) must fall through to
+    // `npm run`, which is what would interpret it -- a whitespace split
+    // would pass `"hello`/`world"` verbatim instead.
+    assert_eq!(package_script_file(&directory, "quoted"), None);
+    assert_eq!(package_script_file(&directory, "piped"), None);
+    assert_eq!(package_script_file(&directory, "subst"), None);
     assert_eq!(package_script_file(&directory, "build"), None);
     assert_eq!(package_script_file(&directory, "missing"), None);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn only_a_genuinely_absent_registry_package_is_missing() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-registry-missing-{}", std::process::id()));
+    let registry = directory.join("registry");
+    std::fs::create_dir_all(registry.join("present-kit")).unwrap();
+    std::fs::write(
+        registry.join("present-kit/package.d.ts"),
+        "export declare function f(): void;\n",
+    )
+    .unwrap();
+    assert!(!missing_from_registry(&registry, "present-kit"));
+    // A directory that exists but is broken (no package.d.ts) is not
+    // "missing" either -- no npm fetch is attempted for it.
+    std::fs::create_dir_all(registry.join("broken-kit")).unwrap();
+    assert!(!missing_from_registry(&registry, "broken-kit"));
+    assert!(missing_from_registry(&registry, "absent-kit"));
     let _ = std::fs::remove_dir_all(directory);
 }
 

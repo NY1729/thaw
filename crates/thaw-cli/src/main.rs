@@ -310,16 +310,36 @@ fn list_scripts(directory: &Path) -> Result<i32, String> {
 /// arguments to forward to it if so. Returns `None` for a shell command
 /// (`vite build`, `tsx watch src/server.ts`, ...), which `run_script` then
 /// hands to npm unchanged.
+///
+/// Deliberately only a *simple* command: every whitespace-separated token
+/// must be plain (no quotes, escapes, redirection, substitution, ...). A
+/// quoted argument like `"src/main.ts \"hello world\""` would otherwise be
+/// split into `"hello` and `world"`, which is not what npm's shell would
+/// pass -- so anything with shell syntax is left to `npm run`, which is
+/// what actually interprets it.
 fn package_script_file(directory: &Path, script: &str) -> Option<(String, Vec<String>)> {
     let manifest = std::fs::read_to_string(directory.join("package.json")).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
     let command = manifest.get("scripts")?.get(script)?.as_str()?;
     let mut tokens = command.split_whitespace();
     let file = tokens.next()?;
-    if !is_script_path(file) {
+    if !is_script_path(file) || !command.split_whitespace().all(is_simple_shell_token) {
         return None;
     }
     Some((file.to_string(), tokens.map(str::to_string).collect()))
+}
+
+/// A token a naive `split_whitespace` is guaranteed to reproduce exactly:
+/// no quotes, escapes, globs, redirection, or other shell metacharacters.
+fn is_simple_shell_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '-' | '.' | '/' | ':' | '@' | '=' | '+' | ','
+                )
+        })
 }
 
 fn npm_run_command(script: &str, directory: &Path) -> Command {
