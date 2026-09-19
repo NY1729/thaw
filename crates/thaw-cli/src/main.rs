@@ -9,7 +9,7 @@ include!("compat.rs");
 include!("node_compat.rs");
 include!("completeness.rs");
 
-const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw x <package>[@<version>] [--] [arguments...]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw completeness [--json] [--with-node]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
+const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw x <package>[@<version>] [--] [arguments...]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--no-install] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw completeness [--json] [--with-node]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -120,19 +120,35 @@ fn is_script_path(path: &str) -> bool {
 }
 
 fn run_file(input: &str, args: &[String]) -> Result<i32, String> {
+    run_file_in(input, args, None)
+}
+
+/// Compiles `input` and runs the resulting binary with `args`. When
+/// `directory` is given the binary starts there -- a project script's own
+/// working directory, matching `npm run`/`bun run`.
+fn run_file_in(input: &str, args: &[String], directory: Option<&Path>) -> Result<i32, String> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let output = std::env::temp_dir().join(format!("thaw-run-{}-{nonce}", std::process::id()));
-    run_file_at(input, args, &output)
+    run_file_at(input, args, &output, directory)
 }
 
-fn run_file_at(input: &str, args: &[String], output: &Path) -> Result<i32, String> {
+fn run_file_at(
+    input: &str,
+    args: &[String],
+    output: &Path,
+    directory: Option<&Path>,
+) -> Result<i32, String> {
     let result =
         run_build(&[input.into(), "-o".into(), output.display().to_string()]).and_then(|_| {
-            Command::new(output)
-                .args(args)
+            let mut command = Command::new(output);
+            command.args(args);
+            if let Some(directory) = directory {
+                command.current_dir(directory);
+            }
+            command
                 .status()
                 .map(|status| status.code().unwrap_or(1))
                 .map_err(|error| format!("failed to run `{}`: {error}", output.display()))
@@ -201,20 +217,27 @@ fn npm_add_command(packages: &[String], directory: &Path) -> Command {
     command
 }
 
+const RUN_USAGE: &str =
+    "usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>]";
+
 fn run_script(args: &[String]) -> Result<i32, String> {
-    let script = args
-        .first()
-        .ok_or("usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>]")?;
+    // `thaw run` with no arguments lists the project's scripts, like
+    // `bun run`, rather than erroring -- but only when there is actually a
+    // `package.json` to read.
+    if args.is_empty() {
+        if Path::new("package.json").is_file() {
+            return list_scripts(Path::new("."));
+        }
+        return Err(RUN_USAGE.into());
+    }
+    let script = &args[0];
     if is_script_path(script) {
         return run_file(script, &args[1..]);
     }
     let directory = match args.get(1).map(String::as_str) {
         None => Path::new("."),
         Some("--prefix") if args.len() == 3 => Path::new(&args[2]),
-        _ => return Err(
-            "usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>]"
-                .into(),
-        ),
+        _ => return Err(RUN_USAGE.into()),
     };
     if !directory.join("package.json").is_file() {
         return Err(format!(
@@ -222,6 +245,19 @@ fn run_script(args: &[String]) -> Result<i32, String> {
             directory.display()
         ));
     }
+    // A script whose command is just a supported source file is compiled
+    // and run by thaw -- the point of `thaw run` -- from the project
+    // directory, with the remaining tokens forwarded as arguments.
+    if let Some((file, script_args)) = package_script_file(directory, script) {
+        let input = directory.join(&file);
+        let input = input
+            .to_str()
+            .ok_or_else(|| format!("`{}` is not valid UTF-8", input.display()))?;
+        return run_file_in(input, &script_args, Some(directory));
+    }
+    // Anything wider (a shell pipeline, `tsx watch`, `vite build`, ...)
+    // keeps running through npm, which is what actually provides that
+    // shell and `node_modules/.bin` on PATH.
     let status = npm_run_command(script, directory)
         .status()
         .map_err(|error| format!("failed to run npm script `{script}`: {error}"))?;
@@ -229,6 +265,61 @@ fn run_script(args: &[String]) -> Result<i32, String> {
         return Err(format!("npm script `{script}` failed with {status}"));
     }
     Ok(0)
+}
+
+/// The project's `scripts`, `(name, command)` sorted by name.
+fn package_script_listing(directory: &Path) -> Result<Vec<(String, String)>, String> {
+    let manifest = std::fs::read_to_string(directory.join("package.json"))
+        .map_err(|error| format!("failed to read package.json: {error}"))?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest)
+        .map_err(|error| format!("invalid package.json: {error}"))?;
+    let Some(scripts) = manifest
+        .get("scripts")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut listing = scripts
+        .iter()
+        .map(|(name, command)| {
+            (
+                name.clone(),
+                command.as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    listing.sort();
+    Ok(listing)
+}
+
+fn list_scripts(directory: &Path) -> Result<i32, String> {
+    let listing = package_script_listing(directory)?;
+    if listing.is_empty() {
+        return Err(format!(
+            "`{}` has no scripts",
+            directory.join("package.json").display()
+        ));
+    }
+    for (name, command) in listing {
+        println!("{name}: {command}");
+    }
+    Ok(0)
+}
+
+/// Whether `script`'s command is a single supported source file, and the
+/// arguments to forward to it if so. Returns `None` for a shell command
+/// (`vite build`, `tsx watch src/server.ts`, ...), which `run_script` then
+/// hands to npm unchanged.
+fn package_script_file(directory: &Path, script: &str) -> Option<(String, Vec<String>)> {
+    let manifest = std::fs::read_to_string(directory.join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    let command = manifest.get("scripts")?.get(script)?.as_str()?;
+    let mut tokens = command.split_whitespace();
+    let file = tokens.next()?;
+    if !is_script_path(file) {
+        return None;
+    }
+    Some((file.to_string(), tokens.map(str::to_string).collect()))
 }
 
 fn npm_run_command(script: &str, directory: &Path) -> Command {
@@ -438,6 +529,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut vite: Option<PathBuf> = None;
     let mut static_link = false;
     let mut embed_native_addons = true;
+    let mut install_missing = true;
     let mut registry_was_explicit = false;
 
     let mut i = 0;
@@ -492,6 +584,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
             }
             "--static" => static_link = true,
             "--external-native" => embed_native_addons = false,
+            "--no-install" => install_missing = false,
             other => {
                 if input.is_some() {
                     return Err(format!("unexpected extra argument `{other}`"));
@@ -556,6 +649,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
         static_link,
         assets.as_deref(),
         embed_native_addons,
+        install_missing,
     );
     if let Some(path) = generated_input {
         let _ = std::fs::remove_file(path);

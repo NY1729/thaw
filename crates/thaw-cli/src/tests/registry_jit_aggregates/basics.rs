@@ -67,6 +67,50 @@ fn missing_bare_import_suggests_installing_the_project() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The same missing bare import, but with installs enabled (the default on
+/// the CLI): it is fetched from npm into the build's own registry with no
+/// prior `thaw install`/`thaw registry add`, `npx`/`bun`-style. Gated
+/// because it needs the network; `nanoid` has no runtime dependencies and
+/// is already a pinned package elsewhere in the suite.
+#[test]
+fn build_fetches_a_missing_bare_import_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-import-{}", std::process::id()));
+    let entry = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &entry,
+        "import { nanoid } from 'nanoid';\nfunction main(): void { const id: string = nanoid(8); console.log(id.length); }\n",
+    )
+    .unwrap();
+
+    build_with_native_mode(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &dir.join("thaw_modules"),
+        &[],
+        false,
+        None,
+        true,
+        true,
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "8\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn bare_imports_automatically_resolve_registry_packages() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-bare-imports-{}", std::process::id()));

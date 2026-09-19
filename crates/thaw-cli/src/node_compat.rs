@@ -111,6 +111,7 @@ fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
             false,
             None,
             true,
+            false,
         );
         let outcome = build.and_then(|_| {
             command_output_with_timeout(
