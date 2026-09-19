@@ -247,6 +247,7 @@ fn build_with_assets(
         static_link,
         assets,
         true,
+        false,
     )
 }
 
@@ -262,6 +263,11 @@ fn build_with_native_mode(
     static_link: bool,
     assets: Option<&Path>,
     embed_native_addons: bool,
+    // Fetch a bare import that isn't already in the registry (and isn't in
+    // an adjacent `node_modules`) straight from npm, `npx`/`bun`-style.
+    // `false` (tests, and `--no-install` on the CLI) keeps the build
+    // offline and reports the existing "run `thaw install`" help instead.
+    install_missing: bool,
 ) -> Result<(), String> {
     if static_link && !embed_native_addons {
         return Err("--static and --external-native cannot be used together".into());
@@ -324,6 +330,17 @@ fn build_with_native_mode(
                             })?;
                         }
                     }
+                }
+            }
+            // Last resort, `npx`/`bun`-style: fetch the package from npm
+            // into this build's own registry rather than making the user
+            // run `thaw registry add` / `thaw install` first. The root
+            // package name is fetched (a `pkg/sub` specifier's subpath is
+            // then resolved from the installed root).
+            if install_missing && thaw_registry::resolve(registry_dir, &package).is_err() {
+                let install = external_package_name(&package).unwrap_or_else(|| package.clone());
+                if let Err(error) = thaw_registry::add(registry_dir, &install) {
+                    return Err(format!("{location}: failed to fetch `{install}`: {error}"));
                 }
             }
             thaw_registry::resolve(registry_dir, &package).map_err(|error| {

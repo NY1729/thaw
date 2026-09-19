@@ -1125,6 +1125,7 @@ fn builds_and_serves_hono_react_prisma_postgres_when_enabled() {
         false,
         Some(&assets),
         true,
+        false,
     )
     .unwrap();
     record_acceptance_metrics(
