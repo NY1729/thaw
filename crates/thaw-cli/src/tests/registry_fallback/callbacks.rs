@@ -1346,3 +1346,62 @@ async function main(): Promise<void> {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "err:418:true\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A live `JsValue` returned by one package call and passed straight into
+/// *another* package call's untyped parameter -- with no `const` binding in
+/// between (`consume(makeHolder())`) -- must reach the package as the live
+/// object, not a content-free JSON snapshot. The argument expression is
+/// itself a call, so without a `JsValue` hint it lowered to the JSON-
+/// decoding snapshot (`{}`) and the package's own method lookup failed
+/// "not a function". Real trigger: rxjs's own
+/// `firstValueFrom(of(7).pipe(delay(20)))`, whose `source` parameter is
+/// `Observable<T>` -> `Json`.
+#[test]
+fn a_live_jsvalue_chained_call_argument_reaches_a_package_as_the_object() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-live-chained-argument-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("holder-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Holder { describe(): string; }\n\
+         export declare function makeHolder(): Holder;\n\
+         export declare function consume(holder: any): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Holder(name) { this.name = name; }\n\
+         Holder.prototype.describe = function() { return 'holder:' + this.name; };\n\
+         module.exports.makeHolder = function() { return new Holder('gadget'); };\n\
+         module.exports.consume = function(holder) {\n\
+             return new Promise(function(resolve) {\n\
+                 resolve(holder.describe());\n\
+             });\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeHolder, consume } from "holder-kit";
+async function main(): Promise<void> {
+    console.log(await consume(makeHolder()));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "holder:gadget\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

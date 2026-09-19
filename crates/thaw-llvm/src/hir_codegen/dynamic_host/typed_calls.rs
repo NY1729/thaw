@@ -777,7 +777,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     &HirType::JsValue,
                 )
             } else {
-                (self.compile_expr(arg)?, ty)
+                // A live `JsValue` handle (e.g. an Observable passed as an
+                // `any`/`Json`-declared package parameter) must cross as
+                // the `{"__thaw_js_handle_id__": N}` placeholder, not a
+                // raw `i64` in a JSON slot. `compile_typed_dynamic_
+                // argument`'s fall-through (`compile_json_array_push_
+                // native`) has no `JsValue` arm and would otherwise push
+                // the bare handle id as a number -- a real "invalid or
+                // released dynamic value handle N" on the far side. An
+                // `i64` where a `Json` pointer is expected is the same
+                // unambiguous marker `compile_json_object_set_native_with_
+                // undefined` already checks.
+                let value = self.compile_expr(arg)?;
+                if value.is_int_value() && matches!(ty, HirType::Json | HirType::Dynamic) {
+                    (
+                        self.compile_dynamic_value_placeholder_unchecked(value)?,
+                        &HirType::Json,
+                    )
+                } else {
+                    (value, ty)
+                }
             };
             if index == 0
                 && *ty == HirType::Bytes

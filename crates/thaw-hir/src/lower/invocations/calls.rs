@@ -1421,6 +1421,24 @@ impl<'a> FnLowerer<'a> {
                             None,
                         )?
                     }
+                    // An argument passed into an untyped `any`/`Json`/
+                    // `JsValue` slot of a Fallback package function gets
+                    // the same one-shot `JsValue` hint a dynamic method
+                    // call's own arguments already get (`lower_dynamic_
+                    // value_method_call`), so a chained call in that
+                    // position (real example: rxjs's own `firstValueFrom
+                    // (of(7).pipe(delay(20)))`, whose `source` parameter is
+                    // `Observable<T>` -> `Json`) keeps its live handle
+                    // instead of silently defaulting to a content-free JSON
+                    // snapshot (`{}`).
+                    Expr::Call(_)
+                        if matches!(
+                            expected,
+                            Some(HirType::Json | HirType::JsValue | HirType::Dynamic)
+                        ) =>
+                    {
+                        self.lower_expr_with_expected_type(&argument.expr, Some(&HirType::JsValue))?
+                    }
                     _ => self.lower_expr_with_expected_type(&argument.expr, expected)?,
                 }
             };

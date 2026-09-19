@@ -142,6 +142,16 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
 fn supports_generic_dynamic_layout(ty: &HirType) -> bool {
     match ty {
         HirType::Json => true,
+        // A native `Promise<T>` handle is a plain arena pointer (see
+        // thaw-llvm's `basic_type`), so a generic extern function can pass
+        // one into JS through the JSON arguments array: the pre-marshaling
+        // step (`typed_calls.rs`) detects the handle's `i64`/pointer kind
+        // and wraps it as the live handle placeholder. Real example:
+        // rxjs's own `from(Promise.resolve(...))` -- `from` is typed
+        // `from<O>(input: O)`, and `O` infers as `Promise<T>` from that
+        // argument; without this the whole `switchMap(n => from(...))`
+        // chain failed "cannot specialize for native layout Promise(Str)".
+        HirType::Promise(inner) => supports_generic_dynamic_layout(inner),
         HirType::Array(inner)
         | HirType::Optional(inner)
         | HirType::Nullable(inner)
