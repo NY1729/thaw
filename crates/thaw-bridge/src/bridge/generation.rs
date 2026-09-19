@@ -562,7 +562,8 @@ fn wrap_as_commonjs_module(
     let bind_default_export = |name: &str| {
         format!(
             "if (typeof module.exports === 'function' && typeof globalThis.{name} !== 'function') {{ globalThis.{name} = module.exports; }}\n\
-             else if (typeof module.exports === 'object' && module.exports !== null && module.exports.__esModule && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n"
+             else if (typeof module.exports === 'object' && module.exports !== null && module.exports.__esModule && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n\
+             else if (typeof module.exports === 'object' && module.exports !== null && !module.exports.__esModule && Object.keys(module.exports).length === 1 && (function() {{ var descriptor = Object.getOwnPropertyDescriptor(module.exports, 'default'); return descriptor !== undefined && typeof descriptor.value === 'function'; }})()) {{ globalThis.{name} = module.exports.default; }}\n"
         )
     };
     let bind_default_exports: String = fallback_names

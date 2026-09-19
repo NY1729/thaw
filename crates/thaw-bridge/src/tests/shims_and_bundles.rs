@@ -387,6 +387,38 @@ fn binds_esm_default_export_under_the_fallback_name() {
     assert_eq!(result, "\"[hi]\"");
 }
 
+/// A native-addon-backed package whose bundled entry exposes its single
+/// function as a plain `{ default: fn }` object *without* `__esModule` --
+/// real example: utf-8-validate's `module.exports =
+/// require('node-gyp-build')(...)`, which the bundle's own `require`
+/// wraps that way. `bind_default_export` only handled
+/// `module.exports.default` when `__esModule` was set, so the Fallback
+/// name was never bound and every call failed with "no such function
+/// `isValidUTF8` (was it loaded via loadScript?)". Runs through real
+/// QuickJS-NG to confirm the name is actually callable.
+#[test]
+fn binds_a_bare_default_only_object_under_the_fallback_name() {
+    use std::ffi::{CStr, CString};
+
+    let js_source = "module.exports = { default: function isValid(s) { return s.length > 0; } };";
+    let wrapped = wrap_as_commonjs_module(js_source, &["isValid".to_string()], &[], &[]);
+
+    let source = CString::new(wrapped).unwrap();
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        1,
+        "failed to load"
+    );
+
+    let func = CString::new("isValid").unwrap();
+    let args = CString::new("[\"x\"]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(result, "true");
+}
+
 /// `__thaw_bind_module_exports`'s own `for (var k in module.exports)`
 /// loop (binding every named export as a bare global) used to read
 /// *every* enumerable property's value just to bind it -- including a
