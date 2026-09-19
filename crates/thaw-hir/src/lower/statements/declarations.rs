@@ -442,12 +442,38 @@ impl<'a> FnLowerer<'a> {
                     Some(ty) => ty,
                     None => actual_type.clone(),
                 };
+                // `const err: any = <caught error>`: an `any`/`Dynamic` or
+                // bare-`Json` annotation on a *caught-exception string*
+                // must stay `Str`. Coercing it to `Json` (the default an
+                // `any` annotation otherwise gets for a string) would turn
+                // `err.name`/`err.message` into plain JSON key lookups on a
+                // JSON string -- both `undefined` -- and lose the
+                // `__thaw_error_name`/`__thaw_error_message` routing a
+                // `Str` value gets (real trigger: `catch (e) { const err:
+                // any = e; err.name }` vs. the working `String(e)`).
+                let ty = if actual_type == HirType::Str
+                    && matches!(ty, HirType::Dynamic | HirType::Json)
+                {
+                    HirType::Str
+                } else {
+                    ty
+                };
                 let mut value = self.coerce_to_declared(&ty, value)?;
 
                 let storage_type = if class_name_from_type(&actual_type).is_some()
                     && matches!(&ty, HirType::Object(fields) if fields.iter().any(|(_, field)| *field == HirType::Dynamic))
                 {
                     actual_type.clone()
+                } else if ty == HirType::Dynamic && actual_type == HirType::Str {
+                    // `const err: any = <caught error>` -- an `any`-annotated
+                    // copy of a caught-exception string. Storing it as
+                    // `Dynamic` would drop the `.name`/`.message`/`.code`
+                    // property routing a `Str` value gets (real trigger:
+                    // `catch (e) { const err: any = e; err.name }` came back
+                    // `undefined` while `String(e)` still worked). Keep the
+                    // concrete `Str` storage type; an `any` annotation never
+                    // requires a value to actually be widened.
+                    HirType::Str
                 } else {
                     ty.clone()
                 };
