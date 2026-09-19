@@ -336,6 +336,268 @@ fn resolve_generic_alias(
     result
 }
 
+/// Projects a generic function/method's declared return type into a
+/// *native tuple* skeleton, recording it on
+/// `DtsGenericFunction`'s `placeholder_return_type`. Every one of the
+/// function's own type parameters is substituted by the placeholder
+/// native type `HirType::Json`, and so is any leaf the ordinary
+/// classification can't represent (a `JsValue` handle, a `Union`, an
+/// interface field with no native layout, ...). Nested arrays/objects
+/// inside the tuple are preserved the same way (immer's `Patch[]` becomes
+/// `Json[]`).
+///
+/// The ordinary return classification (`lower_dts_*`'s own `ret`)
+/// degrades an unconstrained type parameter to the opaque
+/// `HirType::JsValue` handle, which the JSON marshaling has no tuple
+/// element case for -- so a generic-alias return like immer's
+/// `PatchesTuple<Base> = readonly [Base, Patch[], Patch[]]` couldn't be
+/// rendered as a real tuple at all ("unsupported JSON tuple element
+/// JsValue"). Resolving that alias normally also fails outright, because
+/// immer's own `Patch.path` is `(string | number)[]` with no native
+/// collection layout. This projection keeps the tuple *shape* (which is
+/// what makes destructuring and `result[0]` decode) while flattening each
+/// undecodable leaf to `Json`.
+///
+/// `None` for a non-generic function, a missing return annotation, or a
+/// return that isn't a tuple skeleton (every existing path then keeps its
+/// ordinary `ret`). Deliberately *not* extended to a top-level array or
+/// object: see the adoption comment in the body.
+fn placeholder_native_return_type(
+    return_type: Option<&swc_ecma_ast::TsTypeAnn>,
+    type_params: Option<&swc_ecma_ast::TsTypeParamDecl>,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Option<HirType> {
+    let type_params = type_params?;
+    let return_type = return_type?;
+    let mut substitution = HashMap::new();
+    for parameter in &type_params.params {
+        substitution.insert(parameter.name.sym.to_string(), HirType::Json);
+    }
+    let projected = project_native_aggregate(
+        &return_type.type_ann,
+        &substitution,
+        interfaces,
+        generic_interfaces,
+        &mut Vec::new(),
+    );
+    // Only a *tuple* is adopted. A generic `T[]`/`{ field: T }` return
+    // (`map`/`filter`/`reduce` and countless other library functions) must
+    // keep its ordinary `JsValue` fallback: rendering it as `Array(Json)`/
+    // `Object(..)` instead silently changes assignments like
+    // `const out: number[] = map(...)` from a coercible opaque handle into
+    // a hard `Array(Json)`/`Array(F64)` mismatch. A tuple is different in
+    // kind -- it carries a fixed *arity* that destructuring/`result[0]`
+    // actually needs, which no opaque handle can express.
+    match projected {
+        tuple @ HirType::Tuple(_) => Some(tuple),
+        _ => None,
+    }
+}
+
+/// Best-effort projection backing `placeholder_native_return_type`: keeps
+/// tuple/array/object structure (following generic aliases and `Array<T>`
+/// / `ReadonlyArray<T>` / `readonly` / parenthesized wrappers) and maps
+/// every other position to a native type via
+/// `resolve_ts_type_with_substitution`, falling back to `HirType::Json`
+/// for anything that doesn't resolve (including a `JsValue` handle, which
+/// can't sit inside a JSON aggregate).
+fn project_native_aggregate(
+    ty: &TsType,
+    substitution: &HashMap<String, HirType>,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<String>,
+) -> HirType {
+    match ty {
+        TsType::TsParenthesizedType(parenthesized) => project_native_aggregate(
+            &parenthesized.type_ann,
+            substitution,
+            interfaces,
+            generic_interfaces,
+            in_progress,
+        ),
+        TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::ReadOnly => {
+            project_native_aggregate(
+                &operator.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
+        }
+        TsType::TsArrayType(arr) => HirType::Array(Box::new(project_native_aggregate(
+            &arr.elem_type,
+            substitution,
+            interfaces,
+            generic_interfaces,
+            in_progress,
+        ))),
+        TsType::TsTupleType(tuple) => HirType::Tuple(
+            tuple
+                .elem_types
+                .iter()
+                .map(|element| {
+                    project_native_aggregate(
+                        &element.ty,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )
+                })
+                .collect(),
+        ),
+        TsType::TsTypeRef(ty_ref) => {
+            let ref_name = match &ty_ref.type_name {
+                TsEntityName::Ident(ident) => ident.sym.to_string(),
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
+            };
+            if let Some(concrete) = substitution.get(&ref_name) {
+                return concrete.clone();
+            }
+            // `Array<T>` / `ReadonlyArray<T>`: keep the array skeleton so
+            // an element that can't be represented still becomes `Json[]`
+            // rather than a bare `Json` (which wouldn't index/decode the
+            // same way).
+            if matches!(ref_name.as_str(), "Array" | "ReadonlyArray") {
+                if let Some([element]) = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                {
+                    return HirType::Array(Box::new(project_native_aggregate(
+                        element,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )));
+                }
+            }
+            if let Some(decl) = generic_interfaces.aliases.get(&ref_name) {
+                if in_progress.iter().any(|active| active == &ref_name) {
+                    return HirType::Json;
+                }
+                in_progress.push(ref_name.clone());
+                let inner =
+                    alias_argument_substitution(decl, ty_ref, substitution, interfaces, generic_interfaces, in_progress);
+                let projected = project_native_aggregate(
+                    &decl.type_ann,
+                    &inner,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+                in_progress.pop();
+                return projected;
+            }
+            best_effort_native_leaf(ty, substitution, interfaces, generic_interfaces)
+        }
+        _ => best_effort_native_leaf(ty, substitution, interfaces, generic_interfaces),
+    }
+}
+
+/// Builds the substitution an alias body is projected under: each own type
+/// parameter maps to the projection of its supplied argument, its default,
+/// or `Json` when neither is available. Arguments are projected in the
+/// *caller's* substitution, so an alias parameter never captures one from
+/// the alias body.
+fn alias_argument_substitution(
+    decl: &swc_ecma_ast::TsTypeAliasDecl,
+    ty_ref: &swc_ecma_ast::TsTypeRef,
+    outer: &HashMap<String, HirType>,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<String>,
+) -> HashMap<String, HirType> {
+    let parameters = decl
+        .type_params
+        .as_ref()
+        .map(|parameters| parameters.params.as_slice())
+        .unwrap_or_default();
+    let arguments = ty_ref
+        .type_params
+        .as_ref()
+        .map(|instantiation| instantiation.params.as_slice())
+        .unwrap_or_default();
+    let mut substitution = outer.clone();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let value = if let Some(argument) = arguments.get(index) {
+            project_native_aggregate(
+                argument,
+                outer,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
+        } else if let Some(default) = parameter.default.as_deref() {
+            project_native_aggregate(
+                default,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
+        } else {
+            HirType::Json
+        };
+        substitution.insert(parameter.name.sym.to_string(), value);
+    }
+    substitution
+}
+
+/// Resolves a non-aggregate position with the ordinary substitution-aware
+/// classifier and flattens anything it can't represent -- including the
+/// opaque `HirType::JsValue` handle -- to `HirType::Json`, so it can sit
+/// inside a JSON aggregate.
+fn best_effort_native_leaf(
+    ty: &TsType,
+    substitution: &HashMap<String, HirType>,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> HirType {
+    match resolve_ts_type_with_substitution(
+        ty,
+        substitution,
+        interfaces,
+        generic_interfaces,
+        &mut Vec::new(),
+    ) {
+        DtsType::Unsupported(_) => HirType::Json,
+        DtsType::Native(ty) => flatten_jsvalue_to_json(ty),
+    }
+}
+
+/// Recursively replaces every `HirType::JsValue` handle with
+/// `HirType::Json`, so a resolved object/tuple/array that still carries an
+/// opaque handle somewhere inside can be rendered and marshaled as JSON.
+fn flatten_jsvalue_to_json(ty: HirType) -> HirType {
+    match ty {
+        HirType::JsValue => HirType::Json,
+        HirType::Array(inner) => HirType::Array(Box::new(flatten_jsvalue_to_json(*inner))),
+        HirType::Tuple(elements) => {
+            HirType::Tuple(elements.into_iter().map(flatten_jsvalue_to_json).collect())
+        }
+        HirType::Object(fields) => HirType::Object(
+            fields
+                .into_iter()
+                .map(|(name, field)| (name, flatten_jsvalue_to_json(field)))
+                .collect(),
+        ),
+        HirType::Dictionary(inner) => {
+            HirType::Dictionary(Box::new(flatten_jsvalue_to_json(*inner)))
+        }
+        HirType::Optional(inner) => HirType::Optional(Box::new(flatten_jsvalue_to_json(*inner))),
+        HirType::Nullable(inner) => HirType::Nullable(Box::new(flatten_jsvalue_to_json(*inner))),
+        HirType::Nullish(inner) => HirType::Nullish(Box::new(flatten_jsvalue_to_json(*inner))),
+        HirType::Union(members) => {
+            HirType::Union(members.into_iter().map(flatten_jsvalue_to_json).collect())
+        }
+        other => other,
+    }
+}
+
 /// Like `classify_ts_type`, but a bare `TsTypeRef` matching one of `Name`'s
 /// type parameters resolves to the corresponding concrete type instead of
 /// an unknown-reference `Unsupported`. Mirrors

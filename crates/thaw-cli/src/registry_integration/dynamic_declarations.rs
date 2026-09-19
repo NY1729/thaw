@@ -1323,11 +1323,30 @@ fn typed_dynamic_declaration(
         // return has nothing to do with `DateType`. Rendering it as
         // `JsValue` unconditionally (as if every generic function's
         // return depended on its type parameters) would needlessly
-        // discard a plain, safely-reparseable type. Anything that does
-        // mention a type param, beyond the bare-type-param case above,
-        // still falls back to `JsValue` (same unresolved-scope limitation
-        // noted above).
-        let return_type = if returns_bare_type_param
+        // discard a plain, safely-reparseable type.
+        //
+        // A return type that *does* mention a type parameter is normally
+        // unresolvable here and collapses to `JsValue`. But when the
+        // bridge projected it to a *native tuple* -- a generic alias
+        // whose body is a tuple, every own type parameter standing in as
+        // the placeholder `Json` and every undecodable leaf flattened to
+        // `Json` too (immer's own `PatchesTuple<Base> = readonly [Base,
+        // Patch[], Patch[]]`, whose `Patch` has no native layout, becomes
+        // `Tuple([Json, Json[], Json[]])`) -- that fixed arity is
+        // decodable and must be used instead of the opaque handle. Real
+        // trigger: immer's `produceWithPatches`, whose tuple return
+        // otherwise arrived as an opaque `JsValue` with `result[0] ===
+        // undefined`; a plain `JsValue` *element* isn't even a legal tuple
+        // member ("unsupported JSON tuple element JsValue"), which is
+        // exactly why the bridge substitutes `Json`, not `JsValue`.
+        let substituted_native_return = generic
+            .placeholder_return_type
+            .as_ref()
+            .filter(|_| mentions_any_type_param(&generic.return_type, generic))
+            .and_then(render_dynamic_type);
+        let return_type = if let Some(rendered) = substituted_native_return.as_deref() {
+            rendered
+        } else if returns_bare_type_param
             || (!mentions_any_type_param(&generic.return_type, generic)
                 && is_reparseable_value_type(&generic.return_type))
         {

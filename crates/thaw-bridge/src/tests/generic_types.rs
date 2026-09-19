@@ -180,6 +180,101 @@ fn substitutes_constrained_generic_inside_returned_callable() {
     ));
 }
 
+/// A generic function returning a generic *type alias* over a tuple
+/// (immer's `produceWithPatches<Base>(base: Base): PatchesTuple<Base>`)
+/// records a `placeholder_return_type` with the alias's type parameter
+/// standing in as `Json`, while the ordinary `ret` keeps its opaque
+/// `JsValue` handle -- the difference tuple/JSON marshaling depends on.
+/// Covers each top-level extraction shape that builds a
+/// `DtsGenericFunction`: a plain `declare function`, a direct inline
+/// `const` function type, and a callable-interface `const`.
+#[test]
+fn records_placeholder_native_return_for_a_generic_alias_aggregate() {
+    let funcs = parse_dts(
+        "export interface Patch { op: string; path: string[] }\n\
+         export type PatchesTuple<T> = readonly [T, Patch[], Patch[]];\n\
+         export declare function plain<Base>(base: Base): PatchesTuple<Base>;\n\
+         export declare const direct: <Base>(base: Base) => PatchesTuple<Base>;\n\
+         export interface Callable { <Base>(base: Base): PatchesTuple<Base>; }\n\
+         export declare const viaInterface: Callable;",
+    )
+    .unwrap();
+    let patch = HirType::Object(vec![
+        ("op".into(), HirType::Str),
+        ("path".into(), HirType::Array(Box::new(HirType::Str))),
+    ]);
+    let expected = Some(HirType::Tuple(vec![
+        HirType::Json,
+        HirType::Array(Box::new(patch.clone())),
+        HirType::Array(Box::new(patch)),
+    ]));
+    for name in ["plain", "direct", "viaInterface"] {
+        let function = funcs
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("missing `{name}` in {funcs:?}"));
+        assert_eq!(
+            function.generic.as_ref().unwrap().placeholder_return_type,
+            expected,
+            "{name}"
+        );
+        // The ordinary classification is unchanged: the placeholder
+        // position stays the opaque `JsValue` handle.
+        assert!(
+            matches!(
+                &function.ret,
+                DtsType::Native(HirType::Tuple(elements))
+                    if elements.first() == Some(&HirType::JsValue)
+            ),
+            "{name}: {:?}",
+            function.ret
+        );
+    }
+}
+
+/// Real immer's `Patch` has no native layout (`path: (string | number)[]`,
+/// `value?: any`), so the alias body can't be classified normally at all.
+/// The projection still keeps the tuple *shape* and flattens the
+/// undecodable `Patch[]` positions to `Json[]` -- the difference between
+/// the caller's `result[1][0].op` working and the whole build failing.
+#[test]
+fn projects_undecodable_alias_leaves_to_json() {
+    let funcs = parse_dts(
+        "interface Patch {\n\
+         \x20\x20\x20\x20op: \"replace\" | \"remove\" | \"add\";\n\
+         \x20\x20\x20\x20path: (string | number)[];\n\
+         \x20\x20\x20\x20value?: any;\n\
+         }\n\
+         type PatchesTuple<T> = readonly [T, Patch[], Patch[]];\n\
+         export declare function produceWithPatches<Base>(base: Base): PatchesTuple<Base>;",
+    )
+    .unwrap();
+    let function = funcs
+        .iter()
+        .find(|function| function.name == "produceWithPatches")
+        .unwrap();
+    assert_eq!(
+        function.generic.as_ref().unwrap().placeholder_return_type,
+        Some(HirType::Tuple(vec![
+            HirType::Json,
+            HirType::Array(Box::new(HirType::Json)),
+            HirType::Array(Box::new(HirType::Json)),
+        ]))
+    );
+}
+
+/// The placeholder field stays `None` for a generic return that isn't a
+/// native aggregate, so every existing path keeps its ordinary `ret`
+/// exactly as before.
+#[test]
+fn omits_placeholder_native_return_for_a_non_aggregate() {
+    let funcs = parse_dts("export declare function identity<T>(value: T): T;").unwrap();
+    assert_eq!(
+        funcs[0].generic.as_ref().unwrap().placeholder_return_type,
+        None
+    );
+}
+
 #[test]
 fn classifies_union_parameter_as_fallback() {
     let funcs = parse_dts("export declare function f(x: string | number): void;").unwrap();

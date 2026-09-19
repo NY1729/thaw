@@ -70,6 +70,22 @@ pub struct DtsGenericFunction {
     /// (size?: number): Type`), where this is exactly one of
     /// `type_params`' own names.
     pub return_type: String,
+    /// The declared return type *projected* into a native tuple skeleton,
+    /// with each of this function's own type parameters substituted by
+    /// the placeholder native type `HirType::Json` and every other
+    /// undecodable leaf (including nested array/object elements) flattened
+    /// to `Json` as well. The ordinary `ret` degrades an unconstrained type
+    /// parameter to the opaque `HirType::JsValue` handle, which has no
+    /// JSON tuple/array/object marshaling at all, so a generic alias
+    /// return like immer's `PatchesTuple<Base> = readonly [Base, Patch[],
+    /// Patch[]]` collapsed to `[JsValue, ...]` and failed to compile
+    /// ("unsupported JSON tuple element JsValue") -- and, because immer's
+    /// `Patch` has no native layout either, resolving the alias normally
+    /// fails outright. This field carries the decodable skeleton instead
+    /// (see `dynamic_declarations.rs`'s `typed_dynamic_declaration`).
+    /// `None` when the skeleton isn't a native tuple or the function
+    /// isn't generic.
+    pub placeholder_return_type: Option<HirType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

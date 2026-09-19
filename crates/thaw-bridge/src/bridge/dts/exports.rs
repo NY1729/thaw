@@ -534,6 +534,12 @@ fn lower_dts_call_signature(
             .as_ref()
             .map(|annotation| describe_ts_type(&annotation.type_ann))
             .unwrap_or_else(|| "JsValue".into()),
+        placeholder_return_type: placeholder_native_return_type(
+            call.type_ann.as_deref(),
+            call.type_params.as_deref(),
+            interfaces,
+            generic_interfaces,
+        ),
     });
     let mut substitution = HashMap::new();
     if let Some(type_params) = &call.type_params {
@@ -706,6 +712,12 @@ fn lower_dts_fn_type(
             })
         }),
         return_type: describe_ts_type(&function.type_ann.type_ann),
+        placeholder_return_type: placeholder_native_return_type(
+            Some(function.type_ann.as_ref()),
+            function.type_params.as_deref(),
+            interfaces,
+            generic_interfaces,
+        ),
     });
     let mut substitution = HashMap::new();
     if let Some(type_params) = &function.type_params {
