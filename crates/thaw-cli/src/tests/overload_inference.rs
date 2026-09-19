@@ -1297,7 +1297,16 @@ fn declared_array_of_accepts_nullish_unions() {
     assert!(declared_array_of("T[]", "T"));
     assert!(declared_array_of("T[] | null | undefined", "T"));
     assert!(declared_array_of("T[] | undefined | null", "T"));
+    // The same type, written with the array member anywhere among the
+    // nullish ones.
+    assert!(declared_array_of("null | T[] | undefined", "T"));
+    assert!(declared_array_of("undefined | null | T[]", "T"));
+    assert!(declared_array_of("null | undefined | T[]", "T"));
     assert!(!declared_array_of("T[] | null | undefined", "U"));
     assert!(!declared_array_of("List<T>", "T"));
     assert!(!declared_array_of("T", "T"));
+    // A non-nullish extra member, or the array member twice, is not the
+    // shape being recognized.
+    assert!(!declared_array_of("null | T[] | number", "T"));
+    assert!(!declared_array_of("T[] | T[]", "T"));
 }

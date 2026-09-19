@@ -28,24 +28,29 @@ fn rewrite_fallback_function_overloads(
 }
 
 /// Whether `declared` is `<parameter>[]`, optionally unioned with
-/// `null`/`undefined` in any order -- real example: lodash's
+/// `null`/`undefined` *in any order and position* -- real example: lodash's
 /// `reduce<T, TResult>(collection: T[] | null | undefined, callback:
 /// MemoListIterator<T, TResult, T[]>, accumulator: TResult)`. Still enough
 /// to infer `T` from a real array argument, which is what lets
 /// `annotate_generic_callback_arguments` type the callback's own
-/// `prev`/`curr`.
+/// `prev`/`curr`. Judged member-by-member rather than by stripping a
+/// trailing suffix, so `null | T[] | undefined` and `undefined | null |
+/// T[]` are recognized identically (they are the same type).
 fn declared_array_of(declared: &str, parameter: &str) -> bool {
-    let mut core = declared.trim();
-    loop {
-        let stripped = core
-            .strip_suffix(" | null")
-            .or_else(|| core.strip_suffix(" | undefined"));
-        match stripped {
-            Some(rest) => core = rest.trim_end(),
-            None => break,
+    let array = format!("{parameter}[]");
+    let mut found = false;
+    for member in declared.split('|') {
+        let member = member.trim();
+        if member == array {
+            if found {
+                return false;
+            }
+            found = true;
+        } else if member != "null" && member != "undefined" {
+            return false;
         }
     }
-    core == format!("{parameter}[]")
+    found
 }
 
 #[allow(clippy::too_many_arguments)]
