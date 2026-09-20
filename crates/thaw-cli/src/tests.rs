@@ -342,7 +342,7 @@ fn run_executes_thaw_and_npm_project_scripts_with_prefix_and_arguments() {
     .unwrap();
     std::fs::write(
         directory.join("main.ts"),
-        "import { writeFileSync } from 'node:fs'; import { argv, cwd } from 'node:process'; function main(): void { writeFileSync('native.json', JSON.stringify({ cwd: cwd(), args: [String(argv[2]), String(argv[3])] })); }",
+        "import { writeFileSync } from 'node:fs'; import { argv, cwd } from 'node:process'; function main(): void { writeFileSync('native.json', JSON.stringify({ cwd: cwd(), args: argv.slice(2) })); }",
     )
     .unwrap();
     std::fs::write(

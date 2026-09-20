@@ -1328,7 +1328,7 @@ fn generate_registry_shims(
                             &dynamic
                         }
                     };
-                    if !matches!(ty, thaw_hir::HirType::Str | thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Json | thaw_hir::HirType::JsValue) {
+                    if !matches!(ty, thaw_hir::HirType::Str | thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Json | thaw_hir::HirType::JsValue | thaw_hir::HirType::Array(_)) {
                         return None;
                     }
                     let rendered = render_dynamic_type(ty)?;
