@@ -204,10 +204,16 @@ fn external_native_sidecars_replace_stale_contents() {
 
 #[test]
 fn run_uses_the_named_script_and_project_directory() {
-    let command = npm_run_command("build", Path::new("web"));
+    let command = npm_run_command("build", Path::new("web"), &[]);
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
         ["run", "build", "--prefix", "web"]
+    );
+    // Extra arguments are forwarded to the script after `--`.
+    let command = npm_run_command("build", Path::new("web"), &["--port".into(), "3000".into()]);
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["run", "build", "--prefix", "web", "--", "--port", "3000"]
     );
 }
 
@@ -215,8 +221,33 @@ fn run_uses_the_named_script_and_project_directory() {
 fn run_requires_a_script_name() {
     assert_eq!(
         run_script(&[]).unwrap_err(),
-        "usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>]"
+        "usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>] [--] [arguments...]"
     );
+}
+
+#[test]
+fn run_script_tail_parses_prefix_and_forwards_arguments() {
+    assert_eq!(
+        parse_script_tail(&[]).unwrap(),
+        (PathBuf::from("."), vec![])
+    );
+    assert_eq!(
+        parse_script_tail(&["--prefix".into(), "web".into()]).unwrap(),
+        (PathBuf::from("web"), vec![])
+    );
+    assert_eq!(
+        parse_script_tail(&["--port".into(), "3000".into()]).unwrap(),
+        (PathBuf::from("."), vec!["--port".into(), "3000".into()])
+    );
+    assert_eq!(
+        parse_script_tail(&["--prefix".into(), "web".into(), "a".into()]).unwrap(),
+        (PathBuf::from("web"), vec!["a".into()])
+    );
+    assert_eq!(
+        parse_script_tail(&["--".into(), "--flag".into()]).unwrap(),
+        (PathBuf::from("."), vec!["--flag".into()])
+    );
+    assert!(parse_script_tail(&["--prefix".into()]).is_err());
 }
 
 #[test]

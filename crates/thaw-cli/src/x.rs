@@ -29,8 +29,14 @@
 /// positional argument (`thaw x -p prisma prisma generate` style),
 /// matching `npx`; a package exposing several bins without one matching
 /// its name is rejected with the list of available commands.
+const X_USAGE: &str = "usage: thaw x <package>[@<version>] [--] [arguments...]\n       thaw x -p <package>[@<version>] [--] <command> [arguments...]";
+
 fn run_x(args: &[String]) -> Result<i32, String> {
     let invocation = parse_x_args(args)?;
+    if invocation.help {
+        println!("{X_USAGE}");
+        return Ok(0);
+    }
     let cwd = std::env::current_dir()
         .map_err(|error| format!("failed to read the current directory: {error}"))?;
     let specs = invocation.specs();
@@ -65,6 +71,8 @@ struct XInvocation {
     command: Option<String>,
     /// Everything after the spec/command, forwarded verbatim to the bin.
     arguments: Vec<String>,
+    /// `-h`/`--help` was given before the package spec.
+    help: bool,
 }
 
 impl XInvocation {
@@ -80,11 +88,17 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
     let mut packages = Vec::new();
     let mut positionals: Vec<String> = Vec::new();
     let mut options_done = false;
+    let mut help = false;
     let mut index = 0;
     while index < args.len() {
         let argument = args[index].as_str();
         if !options_done {
             match argument {
+                "-h" | "--help" => {
+                    help = true;
+                    index += 1;
+                    continue;
+                }
                 // `npx` compatibility: `thaw x` never prompts or writes to
                 // the project, so `-y`/`--yes` only has to be accepted.
                 "-y" | "--yes" => {
@@ -96,12 +110,12 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
                     let value = args
                         .get(index)
                         .ok_or("--package requires a package argument")?;
-                    packages.push(value.clone());
+                    packages.push(non_empty(value, "package")?);
                     index += 1;
                     continue;
                 }
                 other if other.starts_with("--package=") => {
-                    packages.push(other["--package=".len()..].to_string());
+                    packages.push(non_empty(&other["--package=".len()..], "package")?);
                     index += 1;
                     continue;
                 }
@@ -122,6 +136,15 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
         break;
     }
 
+    if help {
+        return Ok(XInvocation {
+            packages,
+            spec: None,
+            command: None,
+            arguments: Vec::new(),
+            help: true,
+        });
+    }
     if packages.is_empty() {
         let mut positionals = positionals.into_iter();
         let spec = positionals
@@ -129,9 +152,10 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
             .ok_or("usage: thaw x <package>[@<version>] [--] [arguments...] (missing package name)")?;
         return Ok(XInvocation {
             packages,
-            spec: Some(spec),
+            spec: Some(non_empty(&spec, "package")?),
             command: None,
             arguments: drop_separator(positionals.collect()),
+            help: false,
         });
     }
     let mut positionals = positionals.into_iter();
@@ -141,9 +165,19 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
     Ok(XInvocation {
         packages,
         spec: None,
-        command: Some(command),
+        command: Some(non_empty(&command, "command")?),
         arguments: drop_separator(positionals.collect()),
+        help: false,
     })
+}
+
+/// Rejects an empty package spec / command before it reaches `npm`, which
+/// would otherwise fail with a much less obvious message.
+fn non_empty(value: &str, what: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err(format!("{what} name cannot be empty"));
+    }
+    Ok(value.to_string())
 }
 
 /// Drops the single `--` that separates a `thaw x` spec/command from the
