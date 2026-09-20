@@ -177,6 +177,18 @@ impl<'a> FnLowerer<'a> {
                 self.lower_nullish_or(lhs, lhs_type, rhs, rhs_type)
             };
         }
+        // A dynamic call (`hljs.getLanguage(lang)`, `Json`-typed) as the
+        // *right* operand of `&&`/`||` -- `lang && hljs.getLanguage(lang)`,
+        // real highlight.js. The result is dynamic either way (the left
+        // operand when it's falsy, the dynamic value otherwise), so promote
+        // the left to `Json` and let the existing `lhs_type == Json` path
+        // below handle the rest. Only a `Json` *left* operand was handled
+        // before, which is why this mirrored shape failed with "logical
+        // operands have incompatible types Str and Json".
+        if rhs_type == HirType::Json && lhs_type != HirType::Json {
+            lhs = self.wrap_native_value_as_json(lhs, lhs_type.clone())?;
+            lhs_type = HirType::Json;
+        }
         if lhs_type != rhs_type && lhs_type != HirType::Json {
             return Err(format!(
                 "logical operands have incompatible types {lhs_type:?} and {rhs_type:?}"

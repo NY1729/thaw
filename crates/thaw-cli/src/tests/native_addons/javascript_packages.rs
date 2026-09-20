@@ -73,6 +73,65 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A real, fetched highlight.js -- its `types/index.d.ts` wraps its whole
+/// API in one `declare module 'highlight.js' { ... }` block (see
+/// `installed_package_unwraps_a_self_targeting_ambient_module`), so before
+/// this fix every `hljs.someMethod(...)` failed to build with "call to
+/// unknown function". Also exercises reading `.length` off the *string*
+/// returned by `highlight(...).value` (see
+/// `quickjs_dynamic_property_and_method_box_a_primitive_string`) and the
+/// `lang && hljs.getLanguage(lang)` shape (see
+/// `quickjs_dynamic_call_is_a_logical_operand`).
+#[test]
+fn registry_add_highlights_code_with_real_highlight_js_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("thaw-cli-auto-highlightjs-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "highlight.js").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import hljs from "highlight.js";
+function main(): void {
+    const result = hljs.highlight("const x = 1;", { language: "js" });
+    console.log(Number(result.value.length) > 0);
+    const lang = "js";
+    if (lang && hljs.getLanguage(lang)) {
+        console.log("has-js");
+    }
+    console.log(Number(hljs.highlightAuto("const x = 1;").value.length) > 0);
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["highlight.js".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nhas-js\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A real, fetched dayjs -- another Phase-4 validation target -- parses
 /// and formats dates through both a single-hop chain (`dayjs(date).
 /// format(...)`) and a double-hop one (`dayjs(date).add(...).format(

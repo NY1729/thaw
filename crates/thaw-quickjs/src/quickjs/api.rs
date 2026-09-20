@@ -744,6 +744,36 @@ fn object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, St
         })
 }
 
+/// Like [`object_for_handle`], but first auto-boxes a *primitive* handle
+/// (string/number/bool/symbol/bigint) via the JS `Object(value)` builtin --
+/// the spec's `ToObject`. Both `value.property` and `value.method()` box the
+/// receiver in JS, so a dynamic operation on a `JsValue` whose runtime value
+/// turned out to be a primitive should behave the same way. Real examples:
+/// highlight.js's `highlightAuto(code).value` is a string whose `.length` is
+/// then read, and gray-matter's `parsed.content` is a string whose `.trim()`
+/// is then called -- both previously failed with "JavaScript value handle N
+/// has non-object type String". Note `Reflect.get` is *not* a substitute:
+/// QuickJS's own implementation rejects non-object targets too.
+fn boxed_object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, String> {
+    let value = value_for_handle(ctx, handle)?;
+    if value.is_object() {
+        return object_for_handle(ctx, handle);
+    }
+    let object_constructor: Function = ctx
+        .globals()
+        .get("Object")
+        .map_err(|error| error.to_string())?;
+    let boxed: Value<'js> = object_constructor
+        .call((value,))
+        .map_err(|error| error.to_string())?;
+    boxed.as_object().cloned().ok_or_else(|| {
+        format!(
+            "JavaScript value handle {handle} has non-object type {:?}",
+            boxed.type_of()
+        )
+    })
+}
+
 /// Retains `value` in the realm-global handle registry and returns a
 /// stable opaque handle, lazily creating the registry itself (`__thaw_
 /// value_handles`/`__thaw_value_handle_live`) on first use -- unlike
@@ -1396,7 +1426,7 @@ pub extern "C" fn thaw_js_get_property_result(
 ) -> ThawHandleResult {
     let name = to_str(name);
     let result: Result<u64, String> = with_active_or_context(|ctx| {
-        let object = object_for_handle(&ctx, handle)?;
+        let object = boxed_object_for_handle(&ctx, handle)?;
         // See `invoke_raw`'s doc comment -- a getter can throw too.
         let value = object.get(name.as_str()).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
@@ -1505,7 +1535,10 @@ fn invoke_method<'js>(
     name: &str,
     args_json: &str,
 ) -> Result<Value<'js>, String> {
-    let object = object_for_handle(ctx, handle)?;
+    // `boxed_object_for_handle`, not `object_for_handle`: a method call on a
+    // primitive receiver (`"abc".trim()`, a `JsValue` whose runtime value is
+    // a string) needs the same auto-boxing `value.method()` gets in JS.
+    let object = boxed_object_for_handle(ctx, handle)?;
     // See `invoke_raw`'s doc comment -- a property getter backing this
     // method lookup can throw too (e.g. a class using an accessor), and
     // the *call* below already preserves the tag, so the lookup should
