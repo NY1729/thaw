@@ -126,6 +126,55 @@ fn x_runs_a_real_jest_suite_when_enabled() {
 }
 
 #[test]
+fn x_runs_a_real_typescript_file_with_tsx_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let root = temp_dir("tsx");
+    let script = root.join("main.ts");
+    std::fs::write(
+        &script,
+        "const value: number = 40 + 2; if (value !== 42 || process.argv[2] !== 'tail') process.exit(1);\n",
+    )
+    .unwrap();
+
+    let status = run_x(&[
+        "tsx@4.20.6".into(),
+        script.to_string_lossy().into_owned(),
+        "tail".into(),
+    ])
+    .unwrap();
+
+    assert_eq!(status, 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn x_runs_tsc_from_an_explicit_package_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let root = temp_dir("tsc");
+    let script = root.join("typecheck.ts");
+    std::fs::write(&script, "const answer: number = 40 + 2; void answer;\n").unwrap();
+
+    let status = run_x(&[
+        "-p".into(),
+        "typescript@5.9.3".into(),
+        "tsc".into(),
+        "--noEmit".into(),
+        "--skipLibCheck".into(),
+        "--target".into(),
+        "es2022".into(),
+        script.to_string_lossy().into_owned(),
+    ])
+    .unwrap();
+
+    assert_eq!(status, 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn x_exposes_multiple_real_packages_on_path_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
