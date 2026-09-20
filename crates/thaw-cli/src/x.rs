@@ -89,7 +89,7 @@ fn run_x(args: &[String]) -> Result<i32, String> {
     let mut command = bin_command(&bin)?;
     let path = executable_path(&bin_directories)?;
     command.env("PATH", path).args(&invocation.arguments).status()
-        .map(|status| status.code().unwrap_or(1))
+        .map(exit_status_code)
         .map_err(|error| format!("failed to run `{}`: {error}", bin.display()))
 }
 
