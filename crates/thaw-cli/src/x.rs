@@ -88,7 +88,19 @@ fn run_x(args: &[String]) -> Result<i32, String> {
     };
     let mut command = bin_command(&bin)?;
     let path = executable_path(&bin_directories)?;
-    command.env("PATH", path).args(&invocation.arguments).status()
+    command.env("PATH", path).args(&invocation.arguments);
+    #[cfg(all(unix, not(test)))]
+    {
+        use std::os::unix::process::CommandExt;
+        return Err(format!(
+            "failed to run `{}`: {}",
+            bin.display(),
+            command.exec()
+        ));
+    }
+    #[cfg(any(not(unix), test))]
+    command
+        .status()
         .map(exit_status_code)
         .map_err(|error| format!("failed to run `{}`: {error}", bin.display()))
 }
