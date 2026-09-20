@@ -39,6 +39,44 @@ fn builds_and_runs_a_constructor_overload() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An `any`-typed value is callable, both as a parameter
+/// (`function callIt(cb: any) { cb(41); }`) and as a local
+/// (`const f: any = (n: number) => ...; f(41);`), while a plain native
+/// value in an `any` slot (`function id(x: any)` called as `id(42)`) still
+/// works. `any` parameters used to lower to `Dynamic`, an opaque
+/// non-coercing placeholder, so a compiled closure passed in stayed a raw
+/// native function pointer and the call failed with "call to unknown
+/// function `cb`"; the `Json` lowering makes the closure a
+/// `registerNativeCallback` handle, which the dynamic-call path recovers.
+#[test]
+fn builds_and_runs_an_any_typed_callback() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-any-callback-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "function callIt(cb: any): void { cb(41); }\n\
+         function id(value: any): any { return value; }\n\
+         function main(): void {\n\
+         \x20\x20callIt((n: number) => console.log(n + 1));\n\
+         \x20\x20const f: any = (n: number) => console.log(n + 2);\n\
+         \x20\x20f(41);\n\
+         \x20\x20console.log(id(7));\n\
+         }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"42\n43\n7\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A fluent class method declared `: this` and returning `this`
 /// (`add(x): this { ...; return this; }`), called both through a `const`
 /// binding and chained directly off a call or `new` (`c.add(1).add(2)`).

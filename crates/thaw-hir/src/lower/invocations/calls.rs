@@ -856,6 +856,25 @@ impl<'a> FnLowerer<'a> {
                 expected_return_hint.as_ref(),
             );
         }
+        // An `any`- (or explicit `unknown`-) annotated callable is stored as
+        // `Json`, but the value itself is a `registerNativeCallback` handle
+        // placeholder (`coerce_to_declared`'s own `Function`-into-`Json`
+        // branch wraps it that way), so it is dynamically callable like a
+        // `JsValue` once the handle is recovered. Real trigger: calling an
+        // `any`-typed callback parameter -- cors's `CustomOrigin` is
+        // `(origin, callback: any) => void`, and `callback(null, origin)`
+        // used to fail with "call to unknown function" (`function
+        // callIt(cb: any) { cb(41); }` reproduces it with no package at
+        // all). Only a plain identifier bound in scope is handled here; a
+        // `Json` value that is genuinely data still fails, just at runtime
+        // instead of compile time, which is the honest behavior for `any`.
+        if self.scope.get(&callee_name) == Some(&HirType::Json) {
+            let callee = self.coerce_to_declared(
+                &HirType::JsValue,
+                HirExpr::Var(callee_name.clone()),
+            )?;
+            return self.lower_dynamic_value_call_on(callee, &call.args);
+        }
 
         if let Some(arrow) = self.generic_arrows.get(&callee_name).cloned() {
             return self.lower_generic_arrow_call(&callee_name, &arrow, call);
