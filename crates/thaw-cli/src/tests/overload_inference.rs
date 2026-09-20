@@ -147,6 +147,34 @@ fn selects_fallback_function_overloads_from_the_correct_colliding_package() {
     );
 }
 
+/// A bare call to a name imported from a package that contributes no
+/// overload candidates of its own (a single-overload function) must not be
+/// rewritten to an *unrelated* package's same-named overload. Real example:
+/// `import { watch } from "chokidar"` alongside `import { existsSync } from
+/// "node:fs"` -- chokidar's `watch` has one overload, so the only `watch`
+/// candidates are `node:fs`'s, and the bare call used to be rewritten to
+/// `fs.watch` (so chokidar's `ready` never fired). With no candidates for
+/// the imported package, nothing is rewritten, leaving the module graph's
+/// own import rename to map the call to chokidar's symbol.
+#[test]
+fn leaves_a_named_import_to_its_own_package_when_it_has_no_overloads() {
+    let source = "import { watch } from \"chokidar\";\nimport { existsSync } from \"node:fs\";\nwatch(\"/tmp\", { persistent: true });";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[(
+            "watch".into(),
+            "__node_fs_watch".into(),
+            2,
+            2,
+            vec![thaw_hir::HirType::Json, thaw_hir::HirType::Json],
+            vec![],
+            None,
+        )],
+    )
+    .unwrap();
+    assert_eq!(rewritten, source);
+}
+
 #[test]
 fn selects_same_arity_external_method_overloads_by_argument_type() {
     let source = "const box = new NativeBox(1); const n = 42; const s = \"hello\"; box.set(n); box.set(s); box.set(7); box.set(\"world\");";
