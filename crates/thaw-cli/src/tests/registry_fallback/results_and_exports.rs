@@ -2490,3 +2490,61 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "first\nsecond\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A dynamic-call result (`Json`) compared with `===`/`!==` against a
+/// concrete string/number/bool is coerced to that scalar first. Real-world
+/// example: cheerio's `$("p").text() === "W"` -- `text()` is a QuickJS
+/// Fallback method whose result is `Json`, and `coerce_strict_equality_
+/// operands` only handled `JsValue`, so the comparison failed at build
+/// time with "strict equality compares incompatible types Json and Str"
+/// (the bound form `const t = $("p").text()` had the same problem; only an
+/// explicit `: string` annotation worked). A JSON value that is genuinely
+/// a different type still compares unequal, matching JS.
+#[test]
+fn a_dynamic_call_result_compares_strictly_with_a_scalar() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-json-scalar-equality-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("value-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function tag(): unknown;\nexport declare function count(): unknown;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.tag = function() { return 'W'; };\n\
+         module.exports.count = function() { return 7; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { tag, count } from "value-kit";
+function main(): void {
+    console.log(tag() === "W");
+    console.log(tag() === "X");
+    console.log(tag() !== "W");
+    console.log(count() === 7);
+    console.log(count() === 8);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nfalse\nfalse\ntrue\nfalse\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

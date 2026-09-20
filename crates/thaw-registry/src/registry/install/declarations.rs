@@ -449,24 +449,31 @@ fn dts_source_with_reexported_functions(
     )
 }
 
-/// Unwraps a package whose entire declaration file is one
-/// `declare module "<own name>" { ... }` block, hoisting that block's body
-/// to the top level.
+/// Unwraps a top-level ambient container block, hoisting its body to the
+/// top level. Two shapes:
 ///
-/// Real-world example: highlight.js's `types/index.d.ts` is nothing but
-/// `declare module 'highlight.js/private' { ... }` followed by `declare
-/// module 'highlight.js' { ...; const hljs: HLJSApi; export default hljs;
-/// }`. thaw-bridge only reads a `.d.ts`'s *top-level* exports, so the whole
-/// API (including its default export) stayed invisible and every
-/// `hljs.someMethod(...)` failed with "call to unknown function". The
-/// block's own `import { ... } from "<own name>/private"` is left in place
-/// and unresolved, which is harmless: those types are never part of the
-/// bridgeable surface.
+/// - A `declare module "<own name>" { ... }` block covering the whole
+///   declaration file. Real-world example: highlight.js's
+///   `types/index.d.ts` is nothing but `declare module
+///   'highlight.js/private' { ... }` followed by `declare module
+///   'highlight.js' { ...; const hljs: HLJSApi; export default hljs; }`.
+///   thaw-bridge only reads a `.d.ts`'s *top-level* exports, so the whole
+///   API (including its default export) stayed invisible and every
+///   `hljs.someMethod(...)` failed with "call to unknown function". Only a
+///   block whose specifier resolves back to *this same file*
+///   (`declaration_reexport_path`, which already resolves a bare package
+///   name to its own entry point) is unwrapped; a sibling ambient module
+///   for a subpath, a wildcard, or an unrelated package is kept exactly as
+///   written.
+/// - A `declare global { ... }` augmentation, unwrapped unconditionally
+///   (it names no module). Real-world example: `@types/crypto-js`, whose
+///   entire `namespace CryptoJS { ... }` body is inside one, so `export =
+///   CryptoJS;` had no top-level namespace to expose members from and
+///   every `CryptoJS.SHA256(...)` was unknown.
 ///
-/// Only a block whose specifier resolves back to *this same file*
-/// (`declaration_reexport_path`, which already resolves a bare package name
-/// to its own entry point) is unwrapped; a sibling ambient module for a
-/// subpath, a wildcard, or an unrelated package is kept exactly as written.
+/// The block's own `import { ... } from "<own name>/private"` is left in
+/// place and unresolved, which is harmless: those types are never part of
+/// the bridgeable surface.
 fn unwrap_self_ambient_module(entry_path: &Path, entry_source: &str) -> Result<String, String> {
     use thaw_parser::ast::{Decl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
     use thaw_parser::common::{SourceMapper, Spanned};
@@ -480,16 +487,28 @@ fn unwrap_self_ambient_module(entry_path: &Path, entry_source: &str) -> Result<S
         let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
             continue;
         };
-        let TsModuleName::Str(target) = &module_decl.id else {
-            continue;
+        // A top-level `declare global { ... }` augmentation -- hoist its
+        // contents unconditionally. Real example: `@types/crypto-js` wraps
+        // its *entire* `namespace CryptoJS { ... }` body in one, so with
+        // nothing unwrapping it, `export = CryptoJS;` had no namespace to
+        // resolve members against and every `CryptoJS.SHA256(...)` failed
+        // with "call to unknown function". The rest of this function's
+        // self-targeting `declare module "<own name>"` rule doesn't apply
+        // (a global augmentation names no module).
+        let unwrap = if module_decl.global {
+            true
+        } else {
+            let TsModuleName::Str(target) = &module_decl.id else {
+                continue;
+            };
+            let Some(specifier) = target.value.as_str() else {
+                continue;
+            };
+            declaration_reexport_path(entry_path, specifier)
+                .map(|resolved| resolved.canonicalize().unwrap_or(resolved))
+                .is_some_and(|resolved| resolved == canonical_entry)
         };
-        let Some(specifier) = target.value.as_str() else {
-            continue;
-        };
-        let targets_entry = declaration_reexport_path(entry_path, specifier)
-            .map(|resolved| resolved.canonicalize().unwrap_or(resolved))
-            .is_some_and(|resolved| resolved == canonical_entry);
-        if !targets_entry {
+        if !unwrap {
             continue;
         }
         let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
