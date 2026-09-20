@@ -75,6 +75,31 @@ fn x_fetches_and_runs_a_real_package_when_enabled() {
 }
 
 #[test]
+fn x_runs_a_real_vitest_suite_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let root = temp_dir("vitest");
+    std::fs::write(
+        root.join("basic.test.js"),
+        "import { expect, test } from 'vitest'; test('works', () => expect(40 + 2).toBe(42));\n",
+    )
+    .unwrap();
+
+    let status = run_x(&[
+        "vitest@3.2.4".into(),
+        "run".into(),
+        "--root".into(),
+        root.to_string_lossy().into_owned(),
+        "basic.test.js".into(),
+    ])
+    .unwrap();
+
+    assert_eq!(status, 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn x_exposes_multiple_real_packages_on_path_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
