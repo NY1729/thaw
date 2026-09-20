@@ -2444,6 +2444,20 @@ fn reexported_class_or_interface_declarations_inner(
                 TsModuleName::Ident(id) => id.sym.as_ref() == local_name,
                 TsModuleName::Str(_) => false,
             },
+            // A non-callable `declare const X: T;` value (real example:
+            // graphql's `export declare const GraphQLString:
+            // GraphQLScalarType;`, reached through two barrel re-export
+            // hops). Not a class or interface, but this function is the
+            // only follower that inlines a named declaration from another
+            // file for the value/const machinery (`parse_dts_values`) to
+            // then pick up; without it `GraphQLString`/`GraphQLInt`/... were
+            // missing from the flattened `package.d.ts` entirely.
+            Decl::Var(var_decl) => var_decl.decls.iter().any(|declarator| {
+                matches!(
+                    &declarator.name,
+                    thaw_parser::ast::Pat::Ident(binding) if binding.id.sym == local_name
+                )
+            }),
             _ => false,
         };
         if matches {
@@ -2468,6 +2482,57 @@ fn reexported_class_or_interface_declarations_inner(
                 target_name,
                 visited,
             )?);
+        }
+    }
+    if declarations.is_empty() {
+        // The name isn't declared in this file at all -- follow a *barrel*
+        // re-export (`export { X } from "./y.js"`) into the target file,
+        // exactly the way `reexported_function_declarations` already does
+        // for functions/callable consts. Real-world example: graphql's
+        // `type/index.d.ts`, which has *no* declarations of its own and is
+        // entirely `export { ... } from "./definition.js"`-style lines, so
+        // `GraphQLObjectType`/`GraphQLSchema` (and every other class it
+        // re-exports) were silently missing from the flattened
+        // `package.d.ts` (``graphql` has no export named `GraphQLObjectType`).
+        for item in &module.body {
+            let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+                continue;
+            };
+            if export.type_only {
+                continue;
+            }
+            let Some(source) = export.src.as_ref().and_then(|source| source.value.as_str())
+            else {
+                continue;
+            };
+            let Some(target_path) = declaration_reexport_path(path, source) else {
+                continue;
+            };
+            for specifier in &export.specifiers {
+                let ExportSpecifier::Named(named) = specifier else {
+                    continue;
+                };
+                if named.is_type_only {
+                    continue;
+                }
+                let export_name = |candidate: &ModuleExportName| match candidate {
+                    ModuleExportName::Ident(ident) => Some(ident.sym.to_string()),
+                    ModuleExportName::Str(_) => None,
+                };
+                let original = export_name(&named.orig);
+                let exported = named
+                    .exported
+                    .as_ref()
+                    .and_then(export_name)
+                    .or_else(|| original.clone());
+                if exported.as_deref() == Some(local_name.as_str()) {
+                    return reexported_class_or_interface_declarations_inner(
+                        &target_path,
+                        original.as_deref().unwrap_or(name),
+                        visited,
+                    );
+                }
+            }
         }
     }
     Ok(declarations)

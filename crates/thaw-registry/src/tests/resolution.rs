@@ -1803,6 +1803,55 @@ fn installed_package_unwraps_a_self_targeting_ambient_module() {
 }
 
 #[test]
+fn installed_package_follows_a_barrel_reexport_for_classes_and_consts() {
+    // A package whose entry `.d.ts` has no declarations of its own, only
+    // `export { X } from "./inner.js"` lines (real-world example:
+    // graphql's `type/index.d.ts`, two hops from the root). Class/const
+    // re-exports were never followed -- only functions/callable consts
+    // were -- so `GraphQLObjectType`/`GraphQLSchema`/`GraphQLString` were
+    // all silently missing from the flattened `package.d.ts`
+    // ("`graphql` has no export named `GraphQLObjectType`").
+    let scratch = temp_registry("installed-dts-barrel-scratch");
+    let registry = temp_registry("installed-dts-barrel-registry");
+    let package = scratch.join("node_modules/barrel-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"barrel-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "export { Widget, COLOR } from \"./inner.js\";\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("inner.d.ts"),
+        "export declare class Widget { render(): string; }\n\
+         export declare const COLOR: { name: string };\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { Widget: class { render() { return 'w'; } }, COLOR: { name: 'red' } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "barrel-kit").unwrap();
+    let declarations = resolve(&registry, "barrel-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("class Widget"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("const COLOR"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn resolves_an_installed_package_subpath() {
     let registry = temp_registry("subpath");
     let dir = registry.join("math-kit/subpaths/advanced");
