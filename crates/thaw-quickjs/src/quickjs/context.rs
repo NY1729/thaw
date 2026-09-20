@@ -1,3 +1,10 @@
+fn cli_script(arguments: &[String]) -> Option<&str> {
+    let script = arguments.get(1)?;
+    matches!(std::path::Path::new(script).extension().and_then(|value| value.to_str()), Some("js" | "cjs"))
+        .then_some(script.as_str())
+        .filter(|script| std::path::Path::new(script).is_file())
+}
+
 fn ensure_context() {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -21,9 +28,17 @@ fn ensure_context() {
                     )
                     .expect("failed to install host environment");
                 let arguments = std::env::args().collect::<Vec<_>>();
+                let eval = arguments.get(1).is_some_and(|argument| argument == "-e");
+                let script = cli_script(&arguments).is_some();
                 let mut node_arguments = Vec::with_capacity(arguments.len() + 1);
                 node_arguments.push(arguments.first().cloned().unwrap_or_default());
-                node_arguments.extend(arguments);
+                if eval {
+                    node_arguments.extend(arguments.iter().skip(3).cloned());
+                } else if script {
+                    node_arguments.extend(arguments.iter().skip(1).cloned());
+                } else {
+                    node_arguments.extend(arguments.iter().cloned());
+                }
                 ctx.globals()
                     .set(
                         "__thaw_host_argv_json",
@@ -31,6 +46,17 @@ fn ensure_context() {
                             .expect("failed to serialize host arguments"),
                     )
                     .expect("failed to install host arguments");
+                ctx.globals()
+                    .set(
+                        "__thaw_host_exec_argv_json",
+                        serde_json::to_string(if eval {
+                            &arguments[1..arguments.len().min(3)]
+                        } else {
+                            &[]
+                        })
+                        .expect("failed to serialize host exec arguments"),
+                    )
+                    .expect("failed to install host exec arguments");
                 install_napi_bridge(&ctx).expect("failed to install N-API bridge");
                 let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
                 install_shared_environment_functions(&ctx, shared_env)

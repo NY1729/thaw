@@ -431,6 +431,71 @@ fn run_flushes_process_output_and_reports_non_tty_pipes() {
 }
 
 #[test]
+fn compiled_app_exec_path_supports_node_eval() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-run-exec-path-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "import { spawnSync } from 'node:child_process'; function main(): void { const child: any = spawnSync(process.execPath, ['-e', \"process.stdout.write(JSON.stringify({ argv: process.argv, execArgv: process.execArgv }))\", 'tail']); process.stdout.write(child.stdout); }",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["argv"], serde_json::json!([output, "tail"]));
+    assert_eq!(
+        value["execArgv"],
+        serde_json::json!(["-e", "process.stdout.write(JSON.stringify({ argv: process.argv, execArgv: process.execArgv }))"])
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn compiled_app_exec_path_runs_a_commonjs_file() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-run-child-file-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let child = directory.join("child.cjs");
+    let helper = directory.join("helper.js");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        format!(
+            "import {{ spawnSync }} from 'node:child_process'; function main(): void {{ const child: any = spawnSync(process.execPath, [{}, 'tail']); process.stdout.write(child.stdout); }}",
+            serde_json::to_string(child.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(&helper, "module.exports = 42;").unwrap();
+    std::fs::write(
+        &child,
+        "process.stdout.write(JSON.stringify({ value: require('./helper'), argv: process.argv, execArgv: process.execArgv }));",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["value"], 42);
+    assert_eq!(value["argv"], serde_json::json!([output, child, "tail"]));
+    assert_eq!(value["execArgv"], serde_json::json!([]));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn run_lists_project_scripts() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-run-list-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();

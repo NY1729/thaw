@@ -415,6 +415,35 @@
     stdinPending.push(...JSON.parse(globalThis.__thaw_process_poll_stdin()));
     drainStdin();
   };
+  globalThis.__thaw_run_main_file = filename => {
+    const builtinRequire = globalThis.require, cache = Object.create(null);
+    const normalize = path => {
+      const absolute = path.startsWith('/'), parts = [];
+      path.split('/').forEach(part => {
+        if (!part || part === '.') return;
+        if (part === '..') parts.pop(); else parts.push(part);
+      });
+      return (absolute ? '/' : '') + parts.join('/');
+    };
+    const load = (base, request) => {
+      request = String(request);
+      if (!request.startsWith('./') && !request.startsWith('../') && !request.startsWith('/')) return builtinRequire(request);
+      const target = normalize(request.startsWith('/') ? request : base + '/' + request);
+      const candidates = /\.[^/]+$/.test(target) ? [target] : [target, target + '.js', target + '.cjs', target + '.json', target + '/index.js', target + '/index.cjs', target + '/index.json'];
+      let source, resolved;
+      for (const candidate of candidates) {
+        try { source = globalThis.__thaw_worker_read_source(candidate); resolved = candidate; break; } catch (_) {}
+      }
+      if (!resolved) throw new Error("Cannot find module '" + request + "'");
+      if (cache[resolved]) return cache[resolved].exports;
+      const module = cache[resolved] = { exports: {} }, slash = resolved.lastIndexOf('/'), dirname = slash < 0 ? '.' : resolved.slice(0, slash);
+      if (resolved.endsWith('.json')) module.exports = JSON.parse(source);
+      else Function('module', 'exports', 'require', '__filename', '__dirname', source)(module, module.exports, name => load(dirname, name), resolved, dirname);
+      return module.exports;
+    };
+    const slash = String(filename).lastIndexOf('/');
+    return load(slash < 0 ? '.' : String(filename).slice(0, slash), String(filename));
+  };
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || JSON.parse(globalThis.__thaw_host_argv_json || '[]'),
     env: Object.assign({}, JSON.parse(globalThis.__thaw_host_env_json || '{}'),
@@ -423,6 +452,7 @@
     arch: globalThis.process.arch || hostInfo.arch || '',
     version: globalThis.process.version || '',
     execPath: globalThis.process.execPath || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
+    execArgv: globalThis.process.execArgv || JSON.parse(globalThis.__thaw_host_exec_argv_json || '[]'),
     config: globalThis.process.config || { variables: {} },
     versions: Object.assign({ node: '', modules: '', uv: '' },
                             globalThis.process.versions || {}),

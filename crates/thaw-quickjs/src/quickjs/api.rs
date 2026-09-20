@@ -88,6 +88,34 @@ pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
     })
 }
 
+/// Runs Node-compatible eval and CommonJS file forms when this compiled
+/// executable starts itself through `process.execPath`. Returns `-1` for an
+/// ordinary invocation.
+#[no_mangle]
+pub extern "C" fn thaw_js_run_cli() -> i32 {
+    let arguments = std::env::args().collect::<Vec<_>>();
+    let source = if arguments.get(1).map(String::as_str) == Some("-e") {
+        let Some(source) = arguments.get(2) else {
+            eprintln!("{}: -e requires an argument", arguments[0]);
+            return 1;
+        };
+        source.clone()
+    } else if let Some(script) = cli_script(&arguments) {
+        format!(
+            "globalThis.__thaw_run_main_file({})",
+            json_escape_string(script)
+        )
+    } else {
+        return -1;
+    };
+    let source = CString::new(source).unwrap_or_default();
+    if thaw_js_load(source.as_ptr()) == 0 {
+        1
+    } else {
+        thaw_js_run_event_loop()
+    }
+}
+
 /// Emits a compiled uncaught exception through Node's process event surface.
 #[no_mangle]
 pub extern "C" fn thaw_js_emit_uncaught(message: *const c_char) -> u8 {
