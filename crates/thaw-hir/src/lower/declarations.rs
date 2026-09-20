@@ -1766,7 +1766,20 @@ fn lower_param(
                         if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
                 ) =>
         {
-            HirType::Dynamic
+            // `Json`, not `Dynamic`: `Dynamic` made the parameter a
+            // non-coercing placeholder, so a compiled closure passed in
+            // stayed a raw native function pointer and calling it failed
+            // ("call to unknown function `cb`", real trigger: `function
+            // callIt(cb: any) { cb(41); }`). `Json` is also what a plain
+            // `any` annotation lowers to everywhere else
+            // (`resolve_ts_type`'s own keyword arm), and it can hold either
+            // a native value or -- via `coerce_to_declared`'s
+            // `Function`-into-`Json` branch -- a `registerNativeCallback`
+            // handle, so `cb(41)` resolves through the dynamic-call path.
+            // Deliberately *not* `JsValue`: that would reject an ordinary
+            // native argument (`id(42)` for `function id(x: any)`), which
+            // must keep working.
+            HirType::Json
         }
         Some(ann) => resolve_ts_type_with_substitution(
             &ann.type_ann,
