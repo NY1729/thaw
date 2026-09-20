@@ -847,13 +847,21 @@ impl<'a> FnLowerer<'a> {
         rhs: HirExpr,
     ) -> Result<(HirExpr, HirExpr), String> {
         let scalar = |ty: &HirType| matches!(ty, HirType::Str | HirType::F64 | HirType::Bool);
+        // A dynamic operand -- live `JsValue` handle, or a `Json` value
+        // (a Fallback/QuickJS method call's own result, e.g. cheerio's
+        // `$("p").text()`) -- against a concrete scalar is decoded to that
+        // scalar so the comparison is well-typed. Without the `Json` half,
+        // `$("p").text() === "W"` failed outright with "strict equality
+        // compares incompatible types Json and Str", even though the bound
+        // form (`const t = ...; t === "W"`) worked once annotated.
+        let dynamic = |ty: &HirType| matches!(ty, HirType::Json | HirType::JsValue);
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
-        if lhs_type == HirType::JsValue && scalar(&rhs_type) {
+        if dynamic(&lhs_type) && scalar(&rhs_type) {
             let lhs = self.coerce_to_declared(&rhs_type, lhs)?;
             return Ok((lhs, rhs));
         }
-        if rhs_type == HirType::JsValue && scalar(&lhs_type) {
+        if dynamic(&rhs_type) && scalar(&lhs_type) {
             let rhs = self.coerce_to_declared(&lhs_type, rhs)?;
             return Ok((lhs, rhs));
         }
