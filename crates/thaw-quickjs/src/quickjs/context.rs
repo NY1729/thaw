@@ -1,8 +1,23 @@
-fn cli_script(arguments: &[String]) -> Option<&str> {
-    let script = arguments.get(1)?;
+fn cli_eval(arguments: &[String]) -> Option<(usize, Option<&str>)> {
+    let index = arguments
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take_while(|(_, argument)| argument.starts_with('-'))
+        .find_map(|(index, argument)| (argument == "-e").then_some(index))?;
+    Some((index, arguments.get(index + 1).map(String::as_str)))
+}
+
+fn cli_script(arguments: &[String]) -> Option<(usize, &str)> {
+    let index = arguments
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, argument)| (!argument.starts_with('-')).then_some(index))?;
+    let script = arguments.get(index)?;
     matches!(std::path::Path::new(script).extension().and_then(|value| value.to_str()), Some("js" | "cjs"))
-        .then_some(script.as_str())
-        .filter(|script| std::path::Path::new(script).is_file())
+        .then_some((index, script.as_str()))
+        .filter(|(_, script)| std::path::Path::new(script).is_file())
 }
 
 fn ensure_context() {
@@ -28,14 +43,14 @@ fn ensure_context() {
                     )
                     .expect("failed to install host environment");
                 let arguments = std::env::args().collect::<Vec<_>>();
-                let eval = arguments.get(1).is_some_and(|argument| argument == "-e");
-                let script = cli_script(&arguments).is_some();
+                let eval = cli_eval(&arguments);
+                let script = cli_script(&arguments);
                 let mut node_arguments = Vec::with_capacity(arguments.len() + 1);
                 node_arguments.push(arguments.first().cloned().unwrap_or_default());
-                if eval {
-                    node_arguments.extend(arguments.iter().skip(3).cloned());
-                } else if script {
-                    node_arguments.extend(arguments.iter().skip(1).cloned());
+                if let Some((index, _)) = eval {
+                    node_arguments.extend(arguments.iter().skip(index + 2).cloned());
+                } else if let Some((index, _)) = script {
+                    node_arguments.extend(arguments.iter().skip(index).cloned());
                 } else {
                     node_arguments.extend(arguments.iter().cloned());
                 }
@@ -49,8 +64,10 @@ fn ensure_context() {
                 ctx.globals()
                     .set(
                         "__thaw_host_exec_argv_json",
-                        serde_json::to_string(if eval {
-                            &arguments[1..arguments.len().min(3)]
+                        serde_json::to_string(if let Some((index, _)) = eval {
+                            &arguments[1..arguments.len().min(index + 2)]
+                        } else if let Some((index, _)) = script {
+                            &arguments[1..index]
                         } else {
                             &[]
                         })
