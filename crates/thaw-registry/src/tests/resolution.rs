@@ -2430,6 +2430,32 @@ fn resolves_generated_declarations_from_a_dot_named_package() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// `declaration_reexport_path` must canonicalize its result, so a re-export
+/// cycle is seen as the *same* `PathBuf` on every hop. Without it, each
+/// `./x.js` hop appended another `./` segment (`a/./b.d.ts` ->
+/// `a/././b.d.ts` -> ...), so a path-keyed `visited` guard never matched
+/// and `local_type_declaration_snippets` recursed forever -- real trigger:
+/// drizzle-orm's `supabase/index.d.ts` re-export cycle, which made
+/// `thaw registry add drizzle-orm` hang for tens of minutes.
+#[test]
+fn declaration_reexport_path_is_canonicalized_for_cycle_detection() {
+    let root = temp_registry("canonical_reexport");
+    let a = root.join("a.d.ts");
+    let b = root.join("b.d.ts");
+    fs::write(&a, "export * from \"./b.js\";\n").unwrap();
+    fs::write(&b, "export * from \"./a.js\";\n").unwrap();
+
+    let resolved_b = declaration_reexport_path(&a, "./b.js").unwrap();
+    assert_eq!(resolved_b, b.canonicalize().unwrap());
+    // The hop back to `a` must return the original `a`'s canonical path,
+    // not a fresh `a/./a.d.ts`-style spelling that defeats `visited`.
+    assert_eq!(
+        declaration_reexport_path(&resolved_b, "./a.js").unwrap(),
+        a.canonicalize().unwrap()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn selects_a_single_addon_from_a_hidden_generated_package() {
     let node_modules = temp_registry("generated_native_addon");

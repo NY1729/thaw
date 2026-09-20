@@ -1240,7 +1240,10 @@ fn callable_const_declaration_snippet(
         use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt};
         use thaw_parser::common::{SourceMapper, Spanned};
 
-        if !visited.insert(path.to_path_buf()) {
+        // Canonicalize the visited key for the same reason
+        // `declaration_reexport_path` does: a non-normalized path (an
+        // extra `./` segment) must not defeat the cycle guard.
+        if !visited.insert(path.canonicalize().unwrap_or_else(|_| path.to_path_buf())) {
             return Ok(Vec::new());
         }
         let source = fs::read_to_string(path).map_err(|error| {
@@ -2439,7 +2442,15 @@ fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf>
         return [with_d_ts_suffix(&path), Some(path.join("index.d.ts"))]
             .into_iter()
             .flatten()
-            .find(|candidate| candidate.is_file());
+            .find(|candidate| candidate.is_file())
+            // Canonicalize so a re-export cycle is seen as the *same*
+            // `PathBuf` on every hop. Without this, each `./x.js` hop
+            // appends another `./` segment (`a/./b.d.ts` ->
+            // `a/././b.d.ts` -> ...), so a path-keyed `visited` guard
+            // never matches and `local_type_declaration_snippets` recurses
+            // forever (real trigger: drizzle-orm's `supabase/index.d.ts`
+            // re-export cycle).
+            .map(|candidate| candidate.canonicalize().unwrap_or(candidate));
     }
     // A bare specifier re-exports from a genuinely *different* installed
     // package, not another file within the same one -- real example:
@@ -2462,7 +2473,7 @@ fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf>
     if let Ok(manifest) = read_manifest(&package_dir) {
         if let Some((_, absolute)) = find_own_dts(&manifest, &package_dir) {
             if absolute.is_file() {
-                return Some(absolute);
+                return Some(absolute.canonicalize().unwrap_or(absolute));
             }
         }
     }
@@ -2471,6 +2482,7 @@ fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf>
         .into_iter()
         .flatten()
         .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.canonicalize().unwrap_or(candidate))
 }
 
 /// The name of the *type* that `export = X;`'s `X` is declared with in
