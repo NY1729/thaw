@@ -560,8 +560,20 @@ fn wrap_as_commonjs_module(
     // identifier (not a bracketed string) is safe -- same for a class
     // name, parsed out of a `declare class` statement.
     let bind_default_export = |name: &str| {
+        // The `globalThis.<name>` slot here is a *staging* value the
+        // immediately-following qualified-alias `loadScript` captures (see
+        // this function's caller), not a durable binding -- so it must be
+        // overwritten unconditionally. It used to be skipped when
+        // `globalThis.<name>` was already a function, which silently broke
+        // the *second* package exporting a whole-function under the same
+        // name: express's own `export = e` binds `globalThis.e`, so cors's
+        // identical `export = e` saw `typeof globalThis.e === 'function'`
+        // and left it as express -- `cors()` then called express, so
+        // `app.use(cors())` registered an express app and no CORS header
+        // was ever set. Both packages' `pkg::e` keys had already been
+        // captured before the next one ran, so overwriting is safe.
         format!(
-            "if (typeof module.exports === 'function' && typeof globalThis.{name} !== 'function') {{ globalThis.{name} = module.exports; }}\n\
+            "if (typeof module.exports === 'function') {{ globalThis.{name} = module.exports; }}\n\
              else if (typeof module.exports === 'object' && module.exports !== null && module.exports.__esModule && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n\
              else if (typeof module.exports === 'object' && module.exports !== null && !module.exports.__esModule && Object.keys(module.exports).length === 1 && (function() {{ var descriptor = Object.getOwnPropertyDescriptor(module.exports, 'default'); return descriptor !== undefined && typeof descriptor.value === 'function'; }})()) {{ globalThis.{name} = module.exports.default; }}\n"
         )

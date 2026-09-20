@@ -2431,3 +2431,62 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "1\nreplace\n1\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Two packages each exporting a *whole-function* CommonJS module under the
+/// same declared name (`declare function e(...); export = e;` -- the name
+/// both express and cors actually use). `wrap_as_commonjs_module`'s
+/// `bind_default_export` stages the package's whole `module.exports` in the
+/// bare `globalThis.<name>` slot for the immediately-following
+/// `pkg::<name>` capture, but used to skip that when the slot already held a
+/// function -- so the second package's capture read the *first* package's
+/// function. Real-world symptom: `app.use(cors())` called express instead of
+/// cors, so no `Access-Control-Allow-Origin` header was ever set.
+#[test]
+fn two_packages_exporting_a_whole_function_under_the_same_name_do_not_collide() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-default-name-collision-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    // Deliberately *generic* (`e<T>`): a trivial non-generic function gets
+    // JIT-compiled, which binds its runtime symbol without going through
+    // `wrap_as_commonjs_module`'s `globalThis.<name>` staging slot at all,
+    // hiding the collision. The real packages at fault (express, cors) are
+    // both rejected by the JIT and take the QuickJS path.
+    for (package, value) in [("first-kit", "first"), ("second-kit", "second")] {
+        let package_dir = registry.join(package);
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::write(
+            package_dir.join("package.d.ts"),
+            "declare function e<T>(value: T): string;\nexport = e;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package_dir.join("bundle.js"),
+            format!("module.exports = function(value) {{ return '{value}'; }};\n"),
+        )
+        .unwrap();
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import first from "first-kit";
+import second from "second-kit";
+function main(): void {
+    console.log(first(1));
+    console.log(second(2));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "first\nsecond\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
