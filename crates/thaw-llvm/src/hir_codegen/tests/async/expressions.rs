@@ -66,6 +66,26 @@ fn frame_split_extracts_awaits_from_arguments_and_literals_left_to_right() {
 }
 
 #[test]
+fn frame_split_extracts_awaits_from_conditional_expressions() {
+    let source = r#"
+        async function delayed(value: number): Promise<number> {
+            await sleep(1);
+            return value;
+        }
+        async function main(): Promise<void> {
+            const first: number = true ? await delayed(42) : 0;
+            const second: number = false ? 0 : await delayed(7);
+            console.log(first);
+            console.log(second);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "awaits_in_conditional_expressions"),
+        "42\n7\n"
+    );
+}
+
+#[test]
 fn frame_split_preserves_synchronous_call_arguments_before_await() {
     let source = r#"
         interface Trace { value: string; }
