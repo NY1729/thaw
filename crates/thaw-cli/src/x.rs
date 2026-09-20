@@ -283,7 +283,17 @@ fn local_package_matches(spec: &str, package: &str, directory: &Path) -> bool {
     serde_json::from_str::<serde_json::Value>(&source)
         .ok()
         .and_then(|manifest| manifest.get("version")?.as_str().map(str::to_owned))
-        .is_some_and(|version| version == requested)
+        .is_some_and(|version| requested_version_matches(requested, &version))
+}
+
+fn requested_version_matches(requested: &str, installed: &str) -> bool {
+    let Ok(installed) = semver::Version::parse(installed) else {
+        return false;
+    };
+    if let Ok(exact) = semver::Version::parse(requested) {
+        return installed == exact;
+    }
+    semver::VersionReq::parse(requested).is_ok_and(|requirement| requirement.matches(&installed))
 }
 
 /// Installs `specs` into one cache directory with the project's own `npm`,

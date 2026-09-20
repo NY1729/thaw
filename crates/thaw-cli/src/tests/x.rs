@@ -443,6 +443,20 @@ fn x_cache_only_skips_resolution_for_an_exact_version() {
 }
 
 #[test]
+fn local_packages_accept_compatible_version_ranges() {
+    let root = temp_dir("local-version-range");
+    write_manifest(&root, r#"{"name":"hello-cli","version":"2.1.0"}"#);
+
+    assert!(local_package_matches("hello-cli@^2", "hello-cli", &root));
+    assert!(local_package_matches("hello-cli@~2.1", "hello-cli", &root));
+    assert!(local_package_matches("hello-cli@2.1.0", "hello-cli", &root));
+    assert!(!local_package_matches("hello-cli@2.0.0", "hello-cli", &root));
+    assert!(!local_package_matches("hello-cli@^3", "hello-cli", &root));
+    assert!(!local_package_matches("hello-cli@latest", "hello-cli", &root));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn x_cache_rejects_a_package_with_a_missing_bin() {
     let root = temp_dir("cache-missing-bin");
     write_manifest(

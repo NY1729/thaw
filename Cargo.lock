@@ -2878,6 +2878,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "inkwell",
+ "semver",
  "serde_json",
  "swc_ecma_visit",
  "thaw-bridge",
