@@ -274,6 +274,26 @@ fn run_executes_a_file_and_forwards_arguments() {
 }
 
 #[test]
+fn run_propagates_process_exit_and_stops_execution() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-run-process-exit-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let marker = directory.join("continued");
+    let input = directory.join("main.ts");
+    std::fs::write(
+        &input,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs'; import {{ exit }} from 'node:process'; function main(): void {{ process.exitCode = 9; exit(); writeFileSync({}, 'bad'); }}",
+            serde_json::to_string(marker.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    assert_eq!(run_script(&[input.display().to_string()]).unwrap(), 9);
+    assert!(!marker.exists());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn run_lists_project_scripts() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-run-list-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
