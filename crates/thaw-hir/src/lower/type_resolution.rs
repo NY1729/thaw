@@ -387,6 +387,16 @@ fn lower_ts_type(
             if ref_name.is_some_and(|name| name.starts_with("__thaw_")) {
                 return Ok(HirType::JsValue);
             }
+            // The built-in error classes have no `interface` entry of their
+            // own (`new Error(m)` is lowered to a tagged string, see
+            // `expressions/lowering.rs`), so an annotation naming one --
+            // `(err: Error) => ...`, real example: rxjs's `catchError` --
+            // used to fall through to the generic "unsupported type
+            // reference" error. At runtime the value really is that tagged
+            // string, so lower it to `Str` (what `catch` already binds).
+            if ref_name.is_some_and(is_error_family_name) {
+                return Ok(HirType::Str);
+            }
             // A byte buffer, spelled either way (reached only when the
             // name isn't a resolved `interface` -- that's handled above --
             // and isn't a rewritten external `__thaw_` name). Type
