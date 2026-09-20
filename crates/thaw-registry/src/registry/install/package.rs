@@ -146,7 +146,7 @@ fn add_installed_inner(
         .unwrap_or("0.0.0")
         .to_string();
 
-    let main_field = package_export_target(&manifest, None, &["require", "node", "default", "import"])
+    let main_field = package_export_target(&manifest, None, &["require", "node", "default"])
         .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
         .unwrap_or("index.js");
     let mut bundle_source_cache = SourceCache::default();

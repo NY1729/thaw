@@ -594,7 +594,7 @@ fn bundled_direct_node_require_uses_the_loaded_addon() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
-/// A dependency subpath whose `exports` offers `{ node, import, default }`
+/// A dependency subpath whose `exports` offers `{ default, node, import }`
 /// but no `require` -- real-world example: `@babel/runtime/helpers/extends`
 /// (`{"node":"./helpers/extends.js","import":"./helpers/esm/extends.js",
 /// "default":"./helpers/extends.js"}`). The bundler is CommonJS, so it must
@@ -617,15 +617,17 @@ fn a_subpath_export_prefers_commonjs_over_an_esm_import_condition() {
     .unwrap();
     fs::write(
         dependency.join("package.json"),
-        r#"{"exports":{"./helper":{"node":"./cjs.js","import":"./esm.mjs","default":"./cjs.js"}}}"#,
+        r#"{"exports":{"./helper":{"default":"./default.cjs","node":"./node.cjs","import":"./esm.mjs"}}}"#,
     )
     .unwrap();
-    fs::write(dependency.join("cjs.js"), "module.exports = 7;").unwrap();
+    fs::write(dependency.join("default.cjs"), "module.exports = 7;").unwrap();
+    fs::write(dependency.join("node.cjs"), "module.exports = 8;").unwrap();
     fs::write(dependency.join("esm.mjs"), "export default 99;").unwrap();
 
     let (bundle, _, _, _) =
         bundle_commonjs_package(&node_modules, "uses-runtime", &package, "index.js").unwrap();
-    assert!(bundle.contains("cjs.js"), "{bundle}");
+    assert!(bundle.contains("default.cjs"), "{bundle}");
+    assert!(!bundle.contains("node.cjs"), "{bundle}");
     assert!(
         !bundle.contains("esm.mjs"),
         "the ESM condition must not be bundled for a CommonJS require:\n{bundle}"
