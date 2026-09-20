@@ -2424,7 +2424,9 @@ fn resolves_generated_declarations_from_a_dot_named_package() {
 
     assert_eq!(
         declaration_reexport_path(&entry, ".generated/client/default"),
-        Some(generated)
+        // `declaration_reexport_path` canonicalizes its result (for cycle
+        // detection), so compare against the canonical spelling.
+        Some(generated.canonicalize().unwrap())
     );
 
     let _ = fs::remove_dir_all(root);
