@@ -511,6 +511,46 @@ fn extracts_non_callable_values_without_duplicating_callable_consts() {
     );
 }
 
+/// mathjs publishes its API through an annotated object destructuring
+/// declaration instead of one declaration per named export.
+#[test]
+fn extracts_callable_exports_from_an_annotated_object_pattern() {
+    let functions = parse_dts(
+        r#"interface Add { (left: number, right: number): number; }
+            interface MathJsInstance {
+                add: Add;
+                sqrt(value: number): number;
+                label: string;
+            }
+            export declare const { add: sum, sqrt, label }: MathJsInstance;"#,
+    )
+    .unwrap();
+    assert_eq!(
+        functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect::<Vec<_>>(),
+        ["sum", "sqrt"]
+    );
+    assert!(functions
+        .iter()
+        .all(|function| matches!(classify(function), Classification::FastPath(_))));
+    assert_eq!(
+        parse_dts_values(
+            r#"interface MathJsInstance {
+                add(left: number, right: number): number;
+                label: string;
+            }
+            export declare const { add, label: title }: MathJsInstance;"#,
+        )
+        .unwrap(),
+        [DtsValue {
+            name: "title".into(),
+            ty: DtsType::Native(HirType::Str),
+        }]
+    );
+}
+
 /// `.d.ts` flattening (thaw-registry) concatenates every file a
 /// package's type declarations span into one source string; the same
 /// value name declared in more than one of those files (a genuine

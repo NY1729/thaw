@@ -539,14 +539,14 @@ impl<'a> FnLowerer<'a> {
                 vec![value],
             )),
             HirType::Json => Ok(HirExpr::JsonAsString(Box::new(value))),
-            // Mirrors `coerce_primitive_to_number`'s `JsValue` arm: read
-            // the handle back as JSON, then stringify. Lets `"" + x` /
-            // `x + ","` work on an opaque handle (a dynamic property read
-            // such as p-limit's `limit.activeCount`), not just a `Json`.
-            HirType::JsValue => Ok(HirExpr::JsonAsString(Box::new(HirExpr::Call(
-                Box::new(HirExpr::Var("readDynamicValue".to_string())),
+            // `String(value)` performs JavaScript ToPrimitive and therefore
+            // honors an opaque object's own `toString`/`valueOf`. Reading it
+            // back through JSON first loses that identity (real trigger:
+            // crypto-js WordArray implicitly renders as hex in `"x" + word`).
+            HirType::JsValue => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_js_handle_to_string".to_string())),
                 vec![value],
-            )))),
+            )),
             HirType::Null => Ok(HirExpr::Lit(HirLit::Str("null".to_string()))),
             HirType::Undefined => Ok(HirExpr::Lit(HirLit::Str("undefined".to_string()))),
             HirType::Optional(payload) => {
