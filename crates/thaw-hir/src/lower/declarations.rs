@@ -876,7 +876,14 @@ fn lower_class_methods(
             is_async: signature.is_async,
             body: lowered_body,
         });
-        if method.kind == MethodKind::Method && signature.uses_this {
+        // A method that returns its own class (`return this`) has no valid
+        // *detached* form: the unbound variant binds `this` to undefined, so
+        // the `return this` would be an `undefined` where the class is
+        // expected. Skip that variant (real example: a fluent `add(...): this`).
+        if method.kind == MethodKind::Method
+            && signature.uses_this
+            && signature.ret != instance_type
+        {
             let unbound_symbol = unbound_class_method_symbol(&symbol);
             let unbound_signature = signatures.get(&unbound_symbol).unwrap_or(signature);
             let unbound_params = params[receiver_offset..].to_vec();
@@ -965,7 +972,14 @@ fn lower_class_methods(
             global_types,
             immutable_globals,
         )?);
-        if method.kind == MethodKind::Method && signature.uses_this {
+        // A method that returns its own class (`return this`) has no valid
+        // *detached* form: the unbound variant binds `this` to undefined, so
+        // the `return this` would be an `undefined` where the class is
+        // expected. Skip that variant (real example: a fluent `add(...): this`).
+        if method.kind == MethodKind::Method
+            && signature.uses_this
+            && signature.ret != instance_type
+        {
             let unbound_symbol = unbound_class_method_symbol(&symbol);
             let unbound_params = params[receiver_offset..].to_vec();
             let unbound_context = Some((class_name.as_str(), method.is_static));
@@ -1653,6 +1667,9 @@ fn lower_fn_return_type(
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
     type_substitution: &HashMap<Symbol, HirType>,
+    // The enclosing class's instance type, for a `: this` return. `None`
+    // for a free function / closure, where `this` has no meaning.
+    this_type: Option<&HirType>,
 ) -> Result<HirType, String> {
     // `never` has no runtime representation: a correctly implemented
     // function cannot return a value at all, so it uses the existing void
@@ -1665,6 +1682,11 @@ fn lower_fn_return_type(
         return Ok(HirType::Void);
     }
     let declared = match return_type {
+        // A bare `: this` resolves to the enclosing class's own instance
+        // type (real example: a fluent `add(...): this { ...; return this; }`).
+        Some(ann) if matches!(ann.type_ann.as_ref(), TsType::TsThisType(_)) => this_type
+            .cloned()
+            .ok_or_else(|| format!("`this` return type is only valid in a class method (`{fn_name}`)"))?,
         Some(ann) => resolve_ts_type_with_substitution(
             &ann.type_ann,
             type_substitution,

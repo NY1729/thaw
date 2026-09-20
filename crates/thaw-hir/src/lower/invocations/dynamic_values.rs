@@ -291,9 +291,30 @@ impl<'a> FnLowerer<'a> {
                 // chain (`.a().b().c()`) resolves correctly at every
                 // link.
                 Callee::Expr(callee) => match callee.as_ref() {
-                    Expr::Member(inner_member) => self
-                        .infer_member_receiver_type(&inner_member.obj)
-                        .filter(|ty| *ty == HirType::JsValue),
+                    Expr::Member(inner_member) => {
+                        // A chained *native class* method call
+                        // (`cart.add(1).add(2)`, no `const` in between) has
+                        // a declared method return type to look up, exactly
+                        // like the `Ident` arm above does for a top-level
+                        // function. Real example: a fluent
+                        // `add(...): this { ...; return this; }`, whose
+                        // return is the class itself.
+                        if let (Some(method), Some(receiver)) = (
+                            member_property_name(&inner_member.prop),
+                            self.infer_member_receiver_type(&inner_member.obj),
+                        ) {
+                            if let Some(class_name) = class_name_from_type(&receiver) {
+                                if let Some(signature) = self
+                                    .signatures
+                                    .get(&class_method_symbol(class_name, &method))
+                                {
+                                    return Some(signature.ret.clone());
+                                }
+                            }
+                        }
+                        (self.infer_member_receiver_type(&inner_member.obj) == Some(HirType::JsValue))
+                            .then_some(HirType::JsValue)
+                    }
                     _ => None,
                 },
                 Callee::Super(_) | Callee::Import(_) => None,
