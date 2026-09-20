@@ -74,6 +74,26 @@ fn x_fetches_and_runs_a_real_package_when_enabled() {
     );
 }
 
+#[test]
+fn x_exposes_multiple_real_packages_on_path_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    assert_eq!(
+        run_x(&[
+            "-p".into(),
+            "cross-env@7.0.3".into(),
+            "-p".into(),
+            "cowsay@1.6.0".into(),
+            "cross-env".into(),
+            "cowsay".into(),
+            "hello from thaw".into(),
+        ])
+        .unwrap(),
+        0
+    );
+}
+
 /// `-p/--package <spec>` runs the explicitly named command from that
 /// package, `npx -p`-style.
 #[test]
