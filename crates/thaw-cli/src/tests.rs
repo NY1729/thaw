@@ -329,6 +329,52 @@ fn a_source_file_script_is_detected_for_thaw_execution() {
 }
 
 #[test]
+fn run_executes_thaw_and_npm_project_scripts_with_prefix_and_arguments() {
+    let directory = std::env::temp_dir().join(format!(
+        "thaw-cli-run-project-scripts-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"scripts":{"native":"main.ts declared","shell":"node shell.js declared"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("main.ts"),
+        "import { writeFileSync } from 'node:fs'; import { argv, cwd } from 'node:process'; function main(): void { writeFileSync('native.json', JSON.stringify({ cwd: cwd(), args: [String(argv[2]), String(argv[3])] })); }",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("shell.js"),
+        "require('node:fs').writeFileSync('shell.json', JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }));",
+    )
+    .unwrap();
+
+    for script in ["native", "shell"] {
+        assert_eq!(
+            run_script(&[
+                script.into(),
+                "--prefix".into(),
+                directory.display().to_string(),
+                "--".into(),
+                "forwarded".into(),
+            ])
+            .unwrap(),
+            0
+        );
+    }
+
+    for output in ["native.json", "shell.json"] {
+        let result: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join(output)).unwrap()).unwrap();
+        assert_eq!(result["cwd"], directory.display().to_string());
+        assert_eq!(result["args"], serde_json::json!(["declared", "forwarded"]));
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn a_project_script_builds_against_the_project_registry() {
     assert_eq!(
         run_build_args(
