@@ -294,6 +294,54 @@ fn run_propagates_process_exit_and_stops_execution() {
 }
 
 #[test]
+fn run_reads_piped_stdin() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-run-stdin-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "function main(): void { let value: string = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (chunk: string): void => { value += chunk; }); process.stdin.on('end', (): void => { process.stdout.write(value.toUpperCase()); }); }",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let mut child = Command::new(&output)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"hello stdin")
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"HELLO STDIN");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn run_flushes_process_output_and_reports_non_tty_pipes() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-run-stdio-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "import { exit } from 'node:process'; function main(): void { process.stdout.write('out:' + String(process.stdout.isTTY)); process.stderr.write('err:' + String(process.stderr.isTTY)); exit(4); }",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert_eq!(result.status.code(), Some(4));
+    assert_eq!(result.stdout, b"out:undefined");
+    assert_eq!(result.stderr, b"err:undefined");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn run_lists_project_scripts() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-run-list-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
