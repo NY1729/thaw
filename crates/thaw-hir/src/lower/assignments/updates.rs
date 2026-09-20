@@ -107,6 +107,14 @@ impl<'a> FnLowerer<'a> {
                                             HirType::F64,
                                         )
                                     }
+                                    HirType::JsValue | HirType::Dynamic => {
+                                        Target::DynamicProperty(
+                                            object,
+                                            Box::new(HirExpr::Lit(HirLit::Str(
+                                                prop.sym.to_string(),
+                                            ))),
+                                        )
+                                    }
                                     _ => {
                                         return Err(format!(
                                             "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -143,6 +151,10 @@ impl<'a> FnLowerer<'a> {
                                         HirType::F64,
                                     )
                                 }
+                                HirType::JsValue | HirType::Dynamic => Target::DynamicProperty(
+                                    object,
+                                    Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                                ),
                                 _ => {
                                     return Err(format!(
                                 "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -168,6 +180,48 @@ impl<'a> FnLowerer<'a> {
             UpdateOp::MinusMinus => BinOp::Sub,
         };
         let one = HirExpr::Lit(HirLit::F64(1.0));
+        if let Target::DynamicProperty(object, key) = target {
+            let object_name = format!("__thaw_update_dynamic_object_{}", self.next_binding);
+            self.next_binding += 1;
+            let key_name = format!("__thaw_update_dynamic_key_{}", self.next_binding);
+            self.next_binding += 1;
+            let old_name = format!("__thaw_update_dynamic_old_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(object_name.clone(), HirType::JsValue);
+            self.scope.insert(key_name.clone(), HirType::Str);
+            self.scope.insert(old_name.clone(), HirType::F64);
+
+            let current = HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicProperty".into())),
+                vec![
+                    HirExpr::Var(object_name.clone()),
+                    HirExpr::Var(key_name.clone()),
+                ],
+            );
+            let current = self.coerce_to_declared(&HirType::F64, current)?;
+            let old = HirExpr::Var(old_name.clone());
+            let updated = HirExpr::BinOp(op, Box::new(old.clone()), Box::new(one));
+            let encoded = self.coerce_to_declared(&HirType::Json, updated.clone())?;
+            let result = HirExpr::Block(vec![
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
+                    vec![
+                        HirExpr::Var(object_name.clone()),
+                        HirExpr::Var(key_name.clone()),
+                        encoded,
+                    ],
+                )),
+                HirStmt::Return(Some(if update.prefix { updated } else { old })),
+            ]);
+            return self.wrap_call_argument_bindings(
+                result,
+                &[
+                    (object_name, HirType::JsValue, object),
+                    (key_name, HirType::Str, *key),
+                    (old_name, HirType::F64, current),
+                ],
+            );
+        }
         let current = target_to_read_expr(&target)?;
         self.expect_type(&HirType::F64, &current, "update operand")?;
         if update.prefix {
@@ -233,9 +287,7 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var(index_name)),
                 )
             }
-            Target::DynamicProperty(_, _) => {
-                return Err("dynamic property updates are not supported yet".into())
-            }
+            Target::DynamicProperty(_, _) => unreachable!(),
         };
         let old_name = format!("__thaw_update_old_{}", self.next_binding);
         self.next_binding += 1;

@@ -1908,6 +1908,10 @@ fn compiles_quickjs_fallback_path() {
             const replacement: JsValue = getDynamicValue("dynamicReplacement");
             console.log(setDynamicProperty(box, "value", replacement));
             console.log(Number(callDynamicMethod(box, "add", JSON.parse("[1]"))));
+            console.log(box.value++);
+            console.log(++box.value);
+            console.log(box["value"]--);
+            console.log(--box.value);
             const throwing: JsValue = getDynamicValue("throwingBox");
             try {
                 const bad: JsValue = getDynamicProperty(throwing, "bad");
@@ -1928,7 +1932,7 @@ fn compiles_quickjs_fallback_path() {
     "#;
     assert_eq!(
         compile_and_run(source, "quickjs_fallback"),
-        "true\n5\nhello, thaw\n42\n84\n42\n42\ntrue\nfalse\n3\n3\ntrue\n10\ngetter failed\nsum:86\n42\ntrue\ntrue\n"
+        "true\n5\nhello, thaw\n42\n84\n42\n42\ntrue\nfalse\n3\n3\ntrue\n10\n10\n12\n12\n10\ngetter failed\nsum:86\n42\ntrue\ntrue\n"
     );
 }
 
