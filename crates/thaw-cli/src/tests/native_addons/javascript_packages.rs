@@ -3704,6 +3704,7 @@ function run(): void {
     const range = new semver.Range("^1.2.3");
     console.log(range.test("1.5.0"), range.test("2.0.0"));
 }
+
 run();
 "#,
     )
@@ -3729,5 +3730,539 @@ run();
         String::from_utf8_lossy(&result.stdout),
         "1 2 3 beta.1\ntrue false\n"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Real crypto-js covers its `export = CryptoJS` global namespace, the
+/// nested `CryptoJS.enc.Hex` value, and WordArray's custom string coercion.
+#[test]
+fn registry_add_hashes_with_real_crypto_js_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-crypto-js-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "crypto-js@4.2.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import CryptoJS from "crypto-js";
+function main(): void {
+    const digest = CryptoJS.SHA256("hello");
+    console.log(CryptoJS.enc.Hex.stringify(digest));
+    console.log("digest=" + digest);
+    console.log(digest.toString(CryptoJS.enc.Hex));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["crypto-js".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        format!("{hash}\ndigest={hash}\n{hash}\n")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// mathjs exposes most named exports through one annotated object pattern.
+#[test]
+fn registry_add_evaluates_with_real_mathjs_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-mathjs-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "mathjs@15.2.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { add, evaluate, sqrt } from "mathjs";
+function main(): void {
+    console.log(add(20, 22));
+    console.log(sqrt(81));
+    console.log(evaluate("2 + 3 * 4"));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["mathjs".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n9\n14\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Real rxjs covers a live Observable through an operator chain and Promise bridge.
+#[test]
+fn registry_add_runs_a_real_rxjs_pipeline_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-rxjs-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "rxjs@7.8.2").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { firstValueFrom, map, of, toArray } from "rxjs";
+async function main(): Promise<void> {
+    const values = await firstValueFrom(of(1, 2, 3).pipe(
+        map((value) => value * 10),
+        toArray(),
+    ));
+    console.log(values.join(","));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["rxjs".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "10,20,30\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// graphql's public classes and values cross multiple declaration barrels.
+#[test]
+fn registry_add_executes_a_real_graphql_query_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-graphql-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "graphql@17.0.2").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { buildSchema, graphqlSync } from "graphql";
+function main(): void {
+    const schema = buildSchema("type Query { hello: String! }");
+    const result = graphqlSync({
+        schema,
+        source: "{ hello }",
+        rootValue: { hello: () => "world" },
+    });
+    console.log(JSON.stringify(result));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["graphql".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "{\"data\":{\"hello\":\"world\"}}\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn registry_add_calculates_with_real_decimal_js_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-decimal-js-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "decimal.js@10.6.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import Decimal from "decimal.js";
+function main(): void {
+    const value = new Decimal("0.1").plus("0.2").times(10);
+    console.log(value.toString(), value.sqrt().toFixed(10));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["decimal.js".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3 1.7320508076\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn registry_add_calculates_with_real_big_js_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-big-js-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "big.js@7.0.1").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import Big from "big.js";
+function main(): void {
+    const value = new Big("0.1").plus("0.2").times(10);
+    console.log(value.toString(), value.sqrt().toFixed(10));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["big.js".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3 1.7320508076\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "undici named-import re-export is not flattened through export-star"]
+fn registry_add_requests_a_local_server_with_real_undici_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-undici-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "undici@8.10.2").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = conn.read(&mut buf).unwrap();
+        conn.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello thaw!",
+        )
+        .unwrap();
+    });
+
+    std::fs::write(
+        &source,
+        format!(
+            r#"import {{ request }} from "undici";
+async function main(): Promise<void> {{
+    const response = await request("http://127.0.0.1:{port}/hello");
+    console.log(response.statusCode, await response.body.text());
+}}"#
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["undici".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    server.join().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "200 hello thaw!\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "execa transitive unicorn-magic dependency is missing from the bundle"]
+fn registry_add_runs_a_child_process_with_real_execa_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-execa-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "execa@10.0.1").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { execa } from "execa";
+async function main(): Promise<void> {
+    const result = await execa("/usr/bin/printf", ["hello thaw"]);
+    console.log(result.exitCode, result.stdout);
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["execa".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "0 hello thaw\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "ioredis default class re-export is not flattened"]
+fn registry_add_constructs_a_real_ioredis_client_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-ioredis-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "ioredis@6.0.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import Redis from "ioredis";
+function main(): void {
+    const redis = new Redis({ lazyConnect: true });
+    console.log(redis.status);
+    redis.disconnect();
+    console.log(redis.status);
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["ioredis".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "wait\nend\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "protobufjs callback wrapper type cannot be determined"]
+fn registry_add_round_trips_a_real_protobufjs_message_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-protobufjs-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "protobufjs@8.8.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import * as protobuf from "protobufjs";
+function main(): void {
+    const message = protobuf.parse("message Greeting { string text = 1; }").root.lookupType("Greeting");
+    const bytes = message.encode({ text: "hello" }).finish();
+    console.log(bytes.length, JSON.stringify(message.toObject(message.decode(bytes))));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["protobufjs".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "7 {\"text\":\"hello\"}\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "esbuild transformSync reaches a non-callable runtime value"]
+fn registry_add_transforms_typescript_with_real_esbuild_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-esbuild-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "esbuild@0.28.2").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { transformSync } from "esbuild";
+function main(): void {
+    const result = transformSync("const value: number = 42", { loader: "ts", minify: true });
+    console.log(result.code.includes("value=42"));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["esbuild".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\n");
     let _ = std::fs::remove_dir_all(dir);
 }
