@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 use inkwell::context::Context;
 use thaw_llvm::HirCompiler;
@@ -119,6 +119,20 @@ fn is_script_path(path: &str) -> bool {
     )
 }
 
+fn exit_status_code(status: ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
+}
+
 fn run_file(input: &str, args: &[String]) -> Result<i32, String> {
     run_file_in(input, args, None, None)
 }
@@ -158,7 +172,7 @@ fn run_file_at(
         }
         command
             .status()
-            .map(|status| status.code().unwrap_or(1))
+            .map(exit_status_code)
             .map_err(|error| format!("failed to run `{}`: {error}", output.display()))
     });
     let _ = std::fs::remove_file(output);

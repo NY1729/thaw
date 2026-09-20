@@ -484,6 +484,16 @@ fn package_bin_directories_precede_the_inherited_path() {
 
 #[cfg(unix)]
 #[test]
+fn converts_a_child_signal_to_a_shell_exit_code() {
+    let status = Command::new("sh")
+        .args(["-c", "kill -TERM $$"])
+        .status()
+        .unwrap();
+    assert_eq!(exit_status_code(status), 143);
+}
+
+#[cfg(unix)]
+#[test]
 fn runs_an_executable_bin_directly() {
     use std::os::unix::fs::PermissionsExt;
 
