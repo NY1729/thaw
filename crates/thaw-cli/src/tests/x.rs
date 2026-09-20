@@ -175,6 +175,30 @@ fn x_runs_tsc_from_an_explicit_package_when_enabled() {
 }
 
 #[test]
+fn x_formats_a_file_with_real_prettier_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let root = temp_dir("prettier");
+    let input = root.join("input.ts");
+    std::fs::write(&input, "const answer={value:40+2}\n").unwrap();
+
+    let status = run_x(&[
+        "prettier@3.6.2".into(),
+        "--write".into(),
+        input.to_string_lossy().into_owned(),
+    ])
+    .unwrap();
+
+    assert_eq!(status, 0);
+    assert_eq!(
+        std::fs::read_to_string(&input).unwrap(),
+        "const answer = { value: 40 + 2 };\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn x_exposes_multiple_real_packages_on_path_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
