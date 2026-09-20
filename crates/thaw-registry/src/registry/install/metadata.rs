@@ -78,7 +78,7 @@ fn select_export_condition<'a>(
         }
     }
     if conditions == ["types"] {
-        for condition in ["require", "import", "default"] {
+        for condition in ["require", "node", "default", "import"] {
             if let Some(path) = object
                 .get(condition)
                 .and_then(|value| select_export_condition(value, conditions))
@@ -157,7 +157,7 @@ fn package_subpath_exports(
         let Some(subpath) = key.strip_prefix("./") else {
             continue;
         };
-        let Some(runtime) = select_export_condition(target, &["require", "import", "default"])
+        let Some(runtime) = select_export_condition(target, &["require", "node", "default", "import"])
         else {
             continue;
         };
@@ -305,7 +305,7 @@ fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBu
     if directory.is_dir() {
         if let Ok(manifest) = read_manifest(&directory) {
             let entry =
-                package_export_target(&manifest, None, &["require", "import", "node", "default"])
+                package_export_target(&manifest, None, &["require", "node", "default", "import"])
                     .or_else(|| manifest.get("main").and_then(|value| value.as_str()));
             if let Some(entry) = entry {
                 if let Ok((relative, absolute)) = resolve_module_path(&directory, entry) {
