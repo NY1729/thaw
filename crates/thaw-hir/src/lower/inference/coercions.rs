@@ -76,6 +76,21 @@ impl<'a> FnLowerer<'a> {
                 vec![value],
             ));
         }
+        if *declared == HirType::JsValue
+            && matches!(
+                self.infer_expr_type(&value)?,
+                HirType::Array(_)
+                    | HirType::Tuple(_)
+                    | HirType::Object(_)
+                    | HirType::Dictionary(_)
+            )
+        {
+            let json = self.coerce_to_declared(&HirType::Json, value)?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("retainDynamicJson".to_string())),
+                vec![json],
+            ));
+        }
         // The symmetric case to the `HirType::JsValue`-into-`Json` branch
         // above: a value whose own real, live type genuinely is `JsValue`
         // (e.g. a real npm class instance) can end up statically typed
