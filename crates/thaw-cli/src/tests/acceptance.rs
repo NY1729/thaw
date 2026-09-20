@@ -39,6 +39,42 @@ fn builds_and_runs_a_constructor_overload() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The built-in error classes (`Error`, `TypeError`, ...) as *type*
+/// annotations -- parameters, return types, and `const` bindings -- while
+/// their runtime representation stays the tagged string `new Error(m)`
+/// lowers to. Real trigger: rxjs's `catchError((err: Error) => ...)`, which
+/// failed to lower at all with the misleading "unsupported type reference
+/// (generics are not supported yet)" because the error family has no
+/// `interface` entry of its own.
+#[test]
+fn builds_and_runs_with_error_typed_annotations() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-error-type-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "function message(err: Error): string { return err.message; }\n\
+         function make(): Error { return new Error(\"boom\"); }\n\
+         function main(): void {\n\
+         \x20\x20console.log(make().message);\n\
+         \x20\x20console.log(message(new Error(\"direct\")));\n\
+         \x20\x20const typed: TypeError = new TypeError(\"typed\");\n\
+         \x20\x20console.log(typed.name + \":\" + typed.message);\n\
+         }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"boom\ndirect\nTypeError:typed\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// An `any`-typed value is callable, both as a parameter
 /// (`function callIt(cb: any) { cb(41); }`) and as a local
 /// (`const f: any = (n: number) => ...; f(41);`), while a plain native
