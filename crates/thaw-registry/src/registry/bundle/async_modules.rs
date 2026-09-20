@@ -1,4 +1,7 @@
-fn prepare_async_modules(modules: &mut [BundledModule]) -> Result<(), String> {
+fn prepare_async_modules(
+    modules: &mut [BundledModule],
+    source_cache: &mut SourceCache,
+) -> Result<(), String> {
     use std::collections::BTreeSet;
 
     for module in modules.iter_mut() {
@@ -70,9 +73,26 @@ fn prepare_async_modules(modules: &mut [BundledModule]) -> Result<(), String> {
     }
 
     for module in modules.iter_mut() {
-        let source = rewrite_esm_to_commonjs_mode(&module.source, module.async_module)
-            .unwrap_or_else(|| module.source.clone());
-        module.source = source;
+        // Reuse the rewrite of a file already rewritten in an earlier
+        // subpath bundle (same file, same async-ness); only a module with
+        // no real file behind it (a Node builtin polyfill) is rewritten
+        // unconditionally, which is cheap and rare.
+        let rewritten = match &module.source_path {
+            Some(path) => {
+                let cache_key = (path.clone(), module.async_module);
+                if let Some(cached) = source_cache.rewritten.get(&cache_key) {
+                    cached.clone()
+                } else {
+                    let result = rewrite_esm_to_commonjs_mode(&module.source, module.async_module);
+                    source_cache.rewritten.insert(cache_key, result.clone());
+                    result
+                }
+            }
+            None => rewrite_esm_to_commonjs_mode(&module.source, module.async_module),
+        };
+        if let Some(source) = rewritten {
+            module.source = source;
+        }
     }
     Ok(())
 }

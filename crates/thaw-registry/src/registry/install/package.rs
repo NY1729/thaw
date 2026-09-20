@@ -149,7 +149,7 @@ fn add_installed_inner(
     let main_field = package_export_target(&manifest, None, &["require", "import", "default"])
         .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
         .unwrap_or("index.js");
-    let mut bundle_source_cache = HashMap::new();
+    let mut bundle_source_cache = SourceCache::default();
     let (js_source, js_relative_path, bundled_file_count, mut dependency_versions) =
         bundle_commonjs_package_cached(
             node_modules_dir,
@@ -324,7 +324,7 @@ pub fn add_installed_subpath(
         name,
         &package_dir,
         &export,
-        &mut HashMap::new(),
+        &mut SourceCache::default(),
     )?;
     Ok(())
 }
@@ -335,7 +335,7 @@ fn write_installed_subpath(
     name: &str,
     package_dir: &Path,
     export: &PackageSubpathExport,
-    bundle_source_cache: &mut HashMap<PathBuf, (String, ModuleAnalysis)>,
+    bundle_source_cache: &mut SourceCache,
 ) -> Result<BTreeMap<String, String>, String> {
     let (subpath_js, _, _, dependencies) = bundle_commonjs_package_cached(
         node_modules_dir,

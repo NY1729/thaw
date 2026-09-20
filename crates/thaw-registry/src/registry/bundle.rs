@@ -17,6 +17,11 @@ struct BundledModule {
     has_esm: bool,
     has_top_level_await: bool,
     async_module: bool,
+    /// The file this module was read from, when it is a real file (a Node
+    /// builtin polyfill has none). Keys the shared ESM->CommonJS rewrite
+    /// cache in `SourceCache`, so the same shared dependency isn't
+    /// re-parsed for every one of a package's many subpath bundles.
+    source_path: Option<PathBuf>,
 }
 
 fn declared_runtime_dependencies(package_dir: &Path) -> Vec<String> {
