@@ -816,7 +816,9 @@ fn observed_bare_member_object_identifiers(
 /// `external_exports`'s `"default"` key is a package with *exactly one*
 /// function total, a fallback this bypasses entirely once it names one.
 fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
-    use thaw_parser::ast::{DefaultDecl, Expr, ModuleDecl, ModuleItem};
+    use thaw_parser::ast::{
+        DefaultDecl, ExportSpecifier, Expr, ModuleDecl, ModuleExportName, ModuleItem,
+    };
 
     let module = thaw_parser::parse_typescript(source)?;
     Ok(module.body.iter().find_map(|item| match item {
@@ -838,6 +840,35 @@ fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
             DefaultDecl::Fn(fn_expr) => fn_expr.ident.as_ref().map(|ident| ident.sym.to_string()),
             _ => None,
         },
+        // `export { helmet as default };` -- the ESM default spelled as a
+        // named-export specifier rather than `export default helmet;`.
+        // Real example: helmet's own `index.d.cts`, which ends with a single
+        // `export { contentSecurityPolicy, ..., helmet as default, ... }`.
+        // Without recognizing this, `commonjs_export_name` stayed `None`, so
+        // `package_exports["default"]` was never bound and a plain `import
+        // helmet from "helmet"` fell through to the *untyped*
+        // `(argsArray: Json)` Fallback shim instead of the typed wrapper
+        // (which rejected `helmet()` outright: "expects 1 argument(s), got
+        // 0"). Only a local specifier (no `from` clause) names a value
+        // declared in this same file.
+        ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(named)) if named.src.is_none() => {
+            named.specifiers.iter().find_map(|specifier| {
+                let ExportSpecifier::Named(specifier) = specifier else {
+                    return None;
+                };
+                let exported = match specifier.exported.as_ref()? {
+                    ModuleExportName::Ident(ident) => ident.sym.as_ref(),
+                    ModuleExportName::Str(value) => value.value.as_str()?,
+                };
+                if exported != "default" {
+                    return None;
+                }
+                match &specifier.orig {
+                    ModuleExportName::Ident(ident) => Some(ident.sym.to_string()),
+                    ModuleExportName::Str(value) => value.value.as_str().map(str::to_string),
+                }
+            })
+        }
         _ => None,
     }))
 }
