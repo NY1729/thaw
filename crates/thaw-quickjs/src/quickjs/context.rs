@@ -56,6 +56,27 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_console_stderr", stderr)
                     .expect("failed to install JavaScript stderr writer");
+                let stdin = Function::new(ctx.clone(), || -> rquickjs::Result<String> {
+                    let mut bytes = Vec::new();
+                    io::stdin().read_to_end(&mut bytes).map_err(|error| {
+                        rquickjs::Error::new_from_js_message("process", "stdin", error.to_string())
+                    })?;
+                    Ok(bytes
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect())
+                })
+                .expect("failed to create process stdin bridge");
+                ctx.globals()
+                    .set("__thaw_process_read_stdin", stdin)
+                    .expect("failed to install process stdin bridge");
+                let is_tty = Function::new(ctx.clone(), |fd: i32| unsafe {
+                    libc::isatty(fd) == 1
+                })
+                .expect("failed to create process TTY bridge");
+                ctx.globals()
+                    .set("__thaw_process_is_tty", is_tty)
+                    .expect("failed to install process TTY bridge");
                 let cwd = Function::new(ctx.clone(), || -> rquickjs::Result<String> {
                     std::env::current_dir()
                         .map(|path| path.to_string_lossy().into_owned())
