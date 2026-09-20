@@ -366,6 +366,12 @@
     stderr: globalThis.process.stderr || processStream(2, globalThis.__thaw_console_stderr),
     cwd: () => globalThis.__thaw_process_cwd(),
     chdir: directory => globalThis.__thaw_process_chdir(String(directory)),
+    exit: code => {
+      const status = code === undefined ? Number(globalThis.process.exitCode || 0) : Number(code);
+      globalThis.process.exitCode = status;
+      processEmit('exit', status);
+      globalThis.__thaw_process_exit(status);
+    },
     nextTick,
     uptime: () => (Date.now() - processStart) / 1000,
     hrtime,
