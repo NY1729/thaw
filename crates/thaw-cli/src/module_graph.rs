@@ -951,10 +951,24 @@ fn resolve_nested_namespaces(
             let resolved = members
                 .iter()
                 .map(|(member, target)| {
-                    let resolved_target = dependency_exports
-                        .get(target)
-                        .cloned()
-                        .unwrap_or_else(|| target.clone());
+                    // `target` is the member's bare name, which normally
+                    // matches a top-level flattened symbol (zod's own
+                    // `coerce.number` -> the hoisted `number` function). A
+                    // member declared *only* inside a nested namespace has no
+                    // top-level declaration though (crypto-js's
+                    // `enc.Hex`/`format.Hex` encoder/format consts), so fall
+                    // back to the namespace-qualified `namespace.member`
+                    // path the shim's value binding is keyed under --
+                    // otherwise every such member resolved to the same bare
+                    // name and collided.
+                    let resolved_target =
+                        dependency_exports.get(target).cloned().unwrap_or_else(|| {
+                            let qualified = format!("{namespace}.{member}");
+                            dependency_exports
+                                .get(&qualified)
+                                .cloned()
+                                .unwrap_or(qualified)
+                        });
                     (member.clone(), resolved_target)
                 })
                 .collect();

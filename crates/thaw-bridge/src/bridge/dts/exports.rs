@@ -61,6 +61,12 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
                     &local_type_aliases,
                     &call_signature_interfaces,
                 ),
+                CallableConstSignature::Method(method) => lower_dts_method_signature(
+                    &name,
+                    method,
+                    &interfaces,
+                    &generic_interfaces,
+                ),
             }),
     );
     Ok(functions)
@@ -71,6 +77,7 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
 pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
     let module = thaw_parser::parse_typescript(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
+    let interface_declarations = all_interface_decls_by_name(&module);
     let callable_objects = module
         .body
         .iter()
@@ -120,6 +127,65 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
             _ => continue,
         };
         for declarator in &declaration.decls {
+            if let Pat::Object(object) = &declarator.name {
+                let Some(annotation) = &object.type_ann else {
+                    continue;
+                };
+                let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() else {
+                    continue;
+                };
+                let interface_name = match &reference.type_name {
+                    TsEntityName::Ident(ident) => ident.sym.as_str(),
+                    TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
+                };
+                let Some(interface) = interface_declarations.get(interface_name) else {
+                    continue;
+                };
+                for property in &object.props {
+                    let (source_name, name) = match property {
+                        swc_ecma_ast::ObjectPatProp::Assign(assign) => {
+                            let name = assign.key.sym.to_string();
+                            (name.clone(), name)
+                        }
+                        swc_ecma_ast::ObjectPatProp::KeyValue(property) => {
+                            let swc_ecma_ast::PropName::Ident(source) = &property.key else {
+                                continue;
+                            };
+                            let Pat::Ident(binding) = property.value.as_ref() else {
+                                continue;
+                            };
+                            (source.sym.to_string(), binding.id.sym.to_string())
+                        }
+                        swc_ecma_ast::ObjectPatProp::Rest(_) => continue,
+                    };
+                    if callable.contains(&name)
+                        || class_names.contains(&name)
+                        || !seen_names.insert(name.clone())
+                    {
+                        continue;
+                    }
+                    let Some(type_annotation) = interface.body.body.iter().find_map(|member| {
+                        let TsTypeElement::TsPropertySignature(property) = member else {
+                            return None;
+                        };
+                        let Expr::Ident(key) = property.key.as_ref() else {
+                            return None;
+                        };
+                        (key.sym == source_name).then_some(property.type_ann.as_deref()).flatten()
+                    }) else {
+                        continue;
+                    };
+                    let ty = resolve_ts_type_with_substitution(
+                        &type_annotation.type_ann,
+                        &HashMap::new(),
+                        &interfaces,
+                        &generic_interfaces,
+                        &mut Vec::new(),
+                    );
+                    values.push(DtsValue { name, ty });
+                }
+                continue;
+            }
             let Pat::Ident(binding) = &declarator.name else {
                 continue;
             };
@@ -314,6 +380,7 @@ fn resolve_local_callable_fn_types<'a>(
 enum CallableConstSignature<'a> {
     Interface(&'a TsCallSignatureDecl),
     Direct(&'a TsFnType),
+    Method(&'a TsMethodSignature),
 }
 
 /// Every top-level `declare const NAME: T;` (`let`/`var` too, exported or
@@ -345,6 +412,90 @@ fn extract_const_call_signature_decls<'a>(
         .decls
         .iter()
         .filter_map(|declarator| {
+            if let Pat::Object(object) = &declarator.name {
+                let annotation = object.type_ann.as_ref()?;
+                let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() else {
+                    return None;
+                };
+                let interface_name = match &reference.type_name {
+                    TsEntityName::Ident(ident) => ident.sym.as_str(),
+                    TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
+                };
+                let interface = interfaces.get(interface_name)?;
+                let bindings = object
+                    .props
+                    .iter()
+                    .filter_map(|property| match property {
+                        swc_ecma_ast::ObjectPatProp::Assign(assign) => {
+                            let name = assign.key.sym.to_string();
+                            Some((name.clone(), name))
+                        }
+                        swc_ecma_ast::ObjectPatProp::KeyValue(property) => {
+                            let swc_ecma_ast::PropName::Ident(source) = &property.key else {
+                                return None;
+                            };
+                            let Pat::Ident(binding) = property.value.as_ref() else {
+                                return None;
+                            };
+                            Some((source.sym.to_string(), binding.id.sym.to_string()))
+                        }
+                        swc_ecma_ast::ObjectPatProp::Rest(_) => None,
+                    })
+                    .collect::<HashMap<_, _>>();
+                let mut signatures = Vec::new();
+                for member in &interface.body.body {
+                    match member {
+                        TsTypeElement::TsMethodSignature(method) => {
+                            let Expr::Ident(key) = method.key.as_ref() else {
+                                continue;
+                            };
+                            let Some(name) = bindings.get(key.sym.as_str()) else {
+                                continue;
+                            };
+                            signatures.push((name.clone(), CallableConstSignature::Method(method)));
+                        }
+                        TsTypeElement::TsPropertySignature(property) => {
+                            let Expr::Ident(key) = property.key.as_ref() else {
+                                continue;
+                            };
+                            let Some(name) = bindings.get(key.sym.as_str()) else {
+                                continue;
+                            };
+                            let Some(annotation) = &property.type_ann else {
+                                continue;
+                            };
+                            signatures.extend(
+                                resolve_local_callable_fn_types(
+                                    annotation.type_ann.as_ref(),
+                                    local_type_aliases,
+                                    &mut HashSet::new(),
+                                )
+                                .into_iter()
+                                .map(|signature| (name.clone(), signature)),
+                            );
+                            if let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() {
+                                let callable_name = match &reference.type_name {
+                                    TsEntityName::Ident(ident) => ident.sym.as_str(),
+                                    TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
+                                };
+                                if let Some(callable) = interfaces.get(callable_name) {
+                                    signatures.extend(callable.body.body.iter().filter_map(|member| {
+                                        match member {
+                                            TsTypeElement::TsCallSignatureDecl(call) => Some((
+                                                name.clone(),
+                                                CallableConstSignature::Interface(call),
+                                            )),
+                                            _ => None,
+                                        }
+                                    }));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return (!signatures.is_empty()).then_some(signatures);
+            }
             let Pat::Ident(binding) = &declarator.name else {
                 return None;
             };

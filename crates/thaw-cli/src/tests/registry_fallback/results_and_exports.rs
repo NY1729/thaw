@@ -2258,6 +2258,147 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A value declared only inside a nested namespace has no bare top-level
+/// declaration to bind. Real trigger: `crypto-js`, whose
+/// `CryptoJS.enc.Hex` encoder is a namespace `const`.
+#[test]
+fn a_nested_namespace_const_value_is_bound_from_its_runtime_path() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-nested-namespace-value-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("crypto-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "declare const CryptoKit: unknown;\n\
+         export = CryptoKit;\n\
+         export declare namespace enc {\n\
+             const Hex: unknown;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.enc = { Hex: { stringify: function() { return 'deadbeef'; } } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import CryptoKit from "crypto-kit";
+function main(): void {
+    console.log(CryptoKit.enc.Hex.stringify());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "deadbeef\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// String `+` must apply JavaScript ToPrimitive to a live opaque value,
+/// preserving an object's custom `toString`. Real trigger: crypto-js
+/// WordArray values implicitly render as hex.
+#[test]
+fn string_addition_uses_a_jsvalues_custom_to_string() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jsvalue-to-string-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("word-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Word { toString(): string; }\n\
+         export declare function word(): Word;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.word = function() { return { toString: function() { return 'deadbeef'; } }; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { word } from "word-kit";
+function main(): void {
+    console.log("x=" + word());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "x=deadbeef\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// mathjs-style annotated export destructuring exposes both callable and
+/// non-callable members as ordinary named imports.
+#[test]
+fn annotated_object_pattern_exports_are_reachable_by_name() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-object-pattern-exports-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("math-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "interface MathKit {\n\
+             add(left: number, right: number): number;\n\
+             sqrt(value: number): number;\n\
+             label: string;\n\
+         }\n\
+         export declare const { add, sqrt, label }: MathKit;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { add: (a, b) => a + b, sqrt: Math.sqrt, label: 'math' };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { add, sqrt, label } from "math-kit";
+function main(): void {
+    console.log(label + ":" + add(20, 22) + ":" + sqrt(81));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "math:42:9\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A real npm-exported class extending `Error` (real trigger: js-yaml's
 /// own `class YAMLException extends Error {...}`, see `[[project_npm_
 /// interop_gaps_19]]`) previously had no entry in thaw-hir's
