@@ -814,11 +814,15 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             escape_ts_string_literal(&wrapped)
         ));
         for (export_name, runtime_getter, _, _) in bundle.value_exports {
+            let value_path = export_name
+                .split('.')
+                .map(|part| format!("?.[\"{}\"]", escape_ts_string_literal(part)))
+                .collect::<String>();
             let getter_source = format!(
-                "globalThis[\"{}\"] = (function(value) {{ return function() {{ return value != null && Object.prototype.hasOwnProperty.call(value, \"{}\") ? value[\"{}\"] : value != null && Object.prototype.hasOwnProperty.call(value, \"default\") ? value.default : value; }}; }})(globalThis.module.exports);",
+                "globalThis[\"{}\"] = (function(value) {{ return function() {{ return value != null && typeof value{} !== 'undefined' ? value{} : value != null && Object.prototype.hasOwnProperty.call(value, \"default\") ? value.default : value; }}; }})(globalThis.module.exports);",
                 escape_ts_string_literal(runtime_getter),
-                escape_ts_string_literal(export_name),
-                escape_ts_string_literal(export_name),
+                value_path,
+                value_path,
             );
             out.push_str(&format!(
                 "    loadScript(\"{}\");\n",

@@ -1280,11 +1280,46 @@ fn generate_registry_shims(
                     ty: thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
                 })
                 .collect::<Vec<_>>();
+            let nested_values = pkg
+                .nested_namespaces
+                .iter()
+                .flat_map(|(namespace, members)| {
+                    members.iter().filter_map(move |(member, target)| {
+                        let declared = pkg.values.iter().any(|value| &value.name == target)
+                            || pkg.functions.iter().any(|function| &function.name == target)
+                            || pkg.classes.iter().any(|class| &class.name == target);
+                        if declared {
+                            return None;
+                        }
+                        // The value's own name is the *dotted* path, not the
+                        // bare member target: the same member name can appear
+                        // in more than one nested namespace (crypto-js has
+                        // `enc.Hex` and `format.Hex`), and naming the local
+                        // symbol / runtime getter after the bare target made
+                        // them collide ("duplicate top-level binding
+                        // `__thaw_value_crypto_js_Hex`").
+                        let path = format!("{namespace}.{member}");
+                        Some((
+                            path.clone(),
+                            thaw_bridge::DtsValue {
+                                name: path,
+                                ty: thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
+                            },
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>();
             let value_exports = pkg
                 .values
                 .iter()
-                .chain(bare_value_classes.iter())
-                .filter_map(|value| {
+                .map(|value| (value.name.clone(), value))
+                .chain(
+                    bare_value_classes
+                        .iter()
+                        .map(|value| (value.name.clone(), value)),
+                )
+                .chain(nested_values.iter().map(|(path, value)| (path.clone(), value)))
+                .filter_map(|(export_name, value)| {
                     let dynamic;
                     let ty = match &value.ty {
                         thaw_bridge::DtsType::Native(ty) => ty,
@@ -1297,10 +1332,15 @@ fn generate_registry_shims(
                         return None;
                     }
                     let rendered = render_dynamic_type(ty)?;
+                    // `value.name` can be a dotted nested-namespace path
+                    // (`kdf.OpenSSL`), so it must be sanitized too -- leaving
+                    // the dot in produced `let __thaw_value_pkg_kdf.OpenSSL`,
+                    // which parsed as a bare `__thaw_value_pkg_kdf` binding
+                    // with no initializer ("needs an initializer").
                     let local = format!(
                         "__thaw_value_{}_{}",
                         sanitize_identifier(&pkg.name),
-                        value.name
+                        sanitize_identifier(&value.name)
                     );
                     let runtime_getter = format!("{}::$value${}", pkg.name, value.name);
                     let encoded = runtime_getter
@@ -1314,7 +1354,7 @@ fn generate_registry_shims(
                     ));
                     value_targets.insert((pkg.name.clone(), value.name.clone()), local.clone());
                     Some((
-                        value.name.clone(),
+                        export_name,
                         runtime_getter,
                         local,
                         typed_getter,
@@ -1505,6 +1545,14 @@ fn generate_registry_shims(
         for value in &pkg.values {
             if let Some(target) = value_targets.get(&(pkg.name.clone(), value.name.clone())) {
                 package_exports.insert(value.name.clone(), target.clone());
+            }
+        }
+        for (namespace, members) in &pkg.nested_namespaces {
+            for member in members.keys() {
+                let path = format!("{namespace}.{member}");
+                if let Some(local) = value_targets.get(&(pkg.name.clone(), path.clone())) {
+                    package_exports.insert(path, local.clone());
+                }
             }
         }
         if let Some(target) = pkg
