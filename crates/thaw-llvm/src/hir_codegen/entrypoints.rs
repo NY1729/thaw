@@ -16,6 +16,38 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(quickjs_failure, self.context.i32_type().const_zero())
             .unwrap();
         self.call_module_init_if_present(cleanup);
+        if self.uses_quickjs {
+            let status = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_js_run_cli").unwrap(),
+                    &[],
+                    "run_quickjs_cli",
+                )
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_int_value();
+            self.builder.build_store(quickjs_failure, status).unwrap();
+            let handled = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::SGE,
+                    status,
+                    status.get_type().const_zero(),
+                    "quickjs_cli_handled",
+                )
+                .unwrap();
+            let ordinary_entry = self.context.append_basic_block(main_fn, "ordinary_entry");
+            self.builder
+                .build_conditional_branch(handled, cleanup, ordinary_entry)
+                .unwrap();
+            self.builder.position_at_end(ordinary_entry);
+            self.builder
+                .build_store(quickjs_failure, self.context.i32_type().const_zero())
+                .unwrap();
+        }
         self.configure_unhandled_rejection_reporter();
         let completion = user_main.and_then(|user_main| {
             self.builder

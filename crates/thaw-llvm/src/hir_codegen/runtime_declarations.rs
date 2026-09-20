@@ -1371,6 +1371,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_run_cli",
+            self.context.i32_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_run_until_native_resolved",
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
