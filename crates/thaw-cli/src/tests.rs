@@ -301,7 +301,7 @@ fn run_reads_piped_stdin() {
     let output = directory.join("app");
     std::fs::write(
         &input,
-        "function main(): void { let value: string = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (chunk: string): void => { value += chunk; }); process.stdin.on('end', (): void => { process.stdout.write(value.toUpperCase()); }); }",
+        "function main(): void { let chunks: number = 0; process.stdin.setEncoding('utf8'); process.stdin.on('data', (chunk: string): void => { chunks += 1; process.stdout.write('[' + chunk + ']'); if (chunks === 1) { process.stdin.pause(); setTimeout((): void => { process.stdin.resume(); }, 10); } }); process.stdin.on('end', (): void => { process.stdout.write('end'); }); }",
     )
     .unwrap();
     run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
@@ -310,15 +310,104 @@ fn run_reads_piped_stdin() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"hello stdin")
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    stdin.write_all(b"first").unwrap();
+    stdin.flush().unwrap();
+    let mut first = [0; 7];
+    stdout.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"[first]");
+    stdin.write_all(b"second").unwrap();
+    drop(stdin);
+    let mut remainder = Vec::new();
+    stdout.read_to_end(&mut remainder).unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(remainder, b"[second]end");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn run_answers_a_readline_prompt() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-run-readline-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "import { createInterface } from 'node:readline'; function main(): void { const rl = createInterface({ input: process.stdin, output: process.stdout }); rl.question('name? ', (answer: string): void => { process.stdout.write('hello ' + answer); rl.close(); }); }",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let mut child = Command::new(&output)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
         .unwrap();
+    child.stdin.take().unwrap().write_all(b"Ada\n").unwrap();
     let result = child.wait_with_output().unwrap();
     assert!(result.status.success());
-    assert_eq!(result.stdout, b"HELLO STDIN");
+    assert_eq!(result.stdout, b"name? hello Ada");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[cfg(unix)]
+#[test]
+fn run_reads_ctrl_c_as_input_in_raw_mode() {
+    use std::fs::File;
+    use std::os::fd::FromRawFd;
+
+    unsafe extern "C" {
+        fn openpty(
+            master: *mut i32,
+            slave: *mut i32,
+            name: *mut std::ffi::c_char,
+            termios: *const std::ffi::c_void,
+            window_size: *const std::ffi::c_void,
+        ) -> i32;
+    }
+
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-run-raw-mode-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "import { exit } from 'node:process'; function main(): void { process.stdin.setEncoding('utf8'); process.stdin.setRawMode(true); process.stdout.write('ready'); process.stdin.on('data', (chunk: string): void => { process.stdout.write('code:' + String(chunk.charCodeAt(0))); process.stdin.setRawMode(false); exit(0); }); }",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+
+    let (mut master_fd, mut slave_fd) = (-1, -1);
+    assert_eq!(
+        unsafe {
+            openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    let mut master = unsafe { File::from_raw_fd(master_fd) };
+    let slave = unsafe { File::from_raw_fd(slave_fd) };
+    let mut child = Command::new(&output)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave))
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 5];
+    master.read_exact(&mut ready).unwrap();
+    assert_eq!(&ready, b"ready");
+    master.write_all(&[3]).unwrap();
+    let mut code = [0; 6];
+    master.read_exact(&mut code).unwrap();
+    assert_eq!(&code, b"code:3");
+    assert!(child.wait().unwrap().success());
     let _ = std::fs::remove_dir_all(directory);
 }
 

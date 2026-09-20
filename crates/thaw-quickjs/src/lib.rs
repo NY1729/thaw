@@ -95,6 +95,11 @@ type NapiBridge = (
     NapiBridgePending,
 );
 static NAPI_BRIDGE: Mutex<Option<NapiBridge>> = Mutex::new(None);
+#[cfg(unix)]
+static ORIGINAL_STDIN_TERMIOS: Mutex<Option<libc::termios>> = Mutex::new(None);
+#[cfg(unix)]
+static STDIN_RESTORE_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 thread_local! {
     static ACTIVE_NAPI_CONTEXT: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
@@ -314,6 +319,16 @@ struct HostChildTable {
     children: HashMap<u32, HostChild>,
 }
 
+enum HostStdinEvent {
+    Data(Vec<u8>),
+    End,
+}
+
+struct HostStdin {
+    events: Receiver<HostStdinEvent>,
+    thread: Option<JoinHandle<()>>,
+}
+
 enum HostWorkerCommand {
     Message(String),
     Stdin(String),
@@ -406,6 +421,46 @@ fn hex_encode(value: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
         output
     })
+}
+
+#[cfg(unix)]
+extern "C" fn restore_stdin_termios() {
+    if let Some(termios) = ORIGINAL_STDIN_TERMIOS.lock().unwrap().take() {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &termios);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_stdin_raw_mode(enabled: bool) -> bool {
+    if !enabled {
+        restore_stdin_termios();
+        return true;
+    }
+    let mut termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut termios) } != 0 {
+        return false;
+    }
+    let mut original = ORIGINAL_STDIN_TERMIOS.lock().unwrap();
+    if original.is_none() {
+        *original = Some(termios);
+    }
+    unsafe {
+        libc::cfmakeraw(&mut termios);
+    }
+    let changed = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &termios) } == 0;
+    if changed && !STDIN_RESTORE_REGISTERED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        unsafe {
+            libc::atexit(restore_stdin_termios);
+        }
+    }
+    changed
+}
+
+#[cfg(not(unix))]
+fn set_stdin_raw_mode(_enabled: bool) -> bool {
+    false
 }
 
 fn digest_bytes(algorithm: &str, value: &[u8]) -> Vec<u8> {

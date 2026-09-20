@@ -462,7 +462,11 @@ fn finish_with_platform_events<'js>(
 }
 
 fn platform_activity_pending(ctx: &Ctx<'_>) -> bool {
-    ["__thaw_worker_active", "__thaw_child_process_active"]
+    [
+        "__thaw_worker_active",
+        "__thaw_child_process_active",
+        "__thaw_stdin_active",
+    ]
         .into_iter()
         .any(|name| {
             ctx.globals()

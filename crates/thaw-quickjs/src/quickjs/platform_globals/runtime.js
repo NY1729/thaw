@@ -353,18 +353,25 @@
   const stdinListeners = new Map();
   let stdinEncoding;
   let stdinStarted = false;
+  let stdinPaused = false;
+  let stdinPending = [];
+  const drainStdin = () => {
+    if (stdinPaused) return;
+    while (stdinPending.length) {
+      const event = stdinPending.shift();
+      if (event.type === 'data') {
+        const value = Buffer.from(event.value, 'hex');
+        const chunk = stdinEncoding ? value.toString(stdinEncoding) : value;
+        for (const listener of (stdinListeners.get('data') || []).slice()) listener(chunk);
+      } else {
+        for (const listener of (stdinListeners.get('end') || []).slice()) listener();
+      }
+    }
+  };
   const startStdin = () => {
     if (stdinStarted) return;
     stdinStarted = true;
-    // ponytail: read one chunk; add fd polling when interactive streaming is needed.
-    const value = Buffer.from(globalThis.__thaw_process_read_stdin(), 'hex');
-    nextTick(() => {
-      const chunk = stdinEncoding ? value.toString(stdinEncoding) : value;
-      if (value.length) {
-        for (const listener of (stdinListeners.get('data') || []).slice()) listener(chunk);
-      }
-      for (const listener of (stdinListeners.get('end') || []).slice()) listener();
-    });
+    globalThis.__thaw_process_start_stdin();
   };
   const stdin = {
     fd: 0,
@@ -388,10 +395,25 @@
       return this;
     },
     removeListener(name, listener) { return this.off(name, listener); },
-    resume() { startStdin(); return this; },
-    pause() { return this; },
+    resume() { stdinPaused = false; startStdin(); nextTick(drainStdin); return this; },
+    pause() { stdinPaused = true; return this; },
     ref() { return this; },
     unref() { return this; }
+  };
+  if (stdin.isTTY) {
+    stdin.isRaw = false;
+    stdin.setRawMode = enabled => {
+      const raw = Boolean(enabled);
+      if (!globalThis.__thaw_process_set_raw_mode(raw)) throw new Error('failed to set stdin raw mode');
+      stdin.isRaw = raw;
+      return stdin;
+    };
+  }
+  const previousPlatformPoll = globalThis.__thaw_poll_platform_events;
+  globalThis.__thaw_poll_platform_events = () => {
+    if (previousPlatformPoll) previousPlatformPoll();
+    stdinPending.push(...JSON.parse(globalThis.__thaw_process_poll_stdin()));
+    drainStdin();
   };
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || JSON.parse(globalThis.__thaw_host_argv_json || '[]'),
