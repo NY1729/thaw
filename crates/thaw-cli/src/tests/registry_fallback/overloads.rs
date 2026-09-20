@@ -586,6 +586,67 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `export { compute as default };` -- the ESM default spelled as a named
+/// export specifier, not `export default compute;`. Real-world example:
+/// helmet's own `index.d.cts`, whose *only* export statement is one
+/// `export { contentSecurityPolicy, ..., helmet as default, ... }`.
+/// `commonjs_export_name` recognized `export = X`/`export default X` but
+/// not this spelling, so `package_exports["default"]` was never bound: a
+/// plain `import helmet from "helmet"` fell through to the always-untyped
+/// `(argsArray: Json)` Fallback shim instead of the typed wrapper, which
+/// rejected `helmet()` outright ("function `helmet` expects 1 argument(s),
+/// got 0"). Also covers the callable-const shape (an optional parameter
+/// plus a property on the same object) that no single-export shortcut
+/// would resolve.
+#[test]
+fn esm_default_export_spelled_as_a_named_specifier_resolves_the_default_import() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-esm-default-specifier-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("compute-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "type Callable = {\n\
+         \x20\x20\x20\x20(options?: { flag?: boolean }): number;\n\
+         \x20\x20\x20\x20extra: string;\n\
+         };\n\
+         declare const compute: Callable;\n\
+         declare function other(): string;\n\
+         export { other, compute as default };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.compute = function(options) { return options && options.flag ? 2 : 1; };\n\
+         module.exports.other = function() { return 'other'; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import compute from "compute-kit";
+function main(): void {
+    console.log(compute());
+    console.log(compute({ flag: true }));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Fallback function whose parameter (or an object argument's own
 /// field) is a union type -- real-world example: camelcase's own
 /// `camelCase(input: string | readonly string[], options?: {

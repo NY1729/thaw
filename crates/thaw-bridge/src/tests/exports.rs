@@ -770,3 +770,27 @@ fn param_field_constraints_chase_aliases_through_intersections_and_unions() {
     assert_eq!(no_file.excluded, vec!["f".to_string(), "file".to_string()]);
 }
 
+
+/// A callable const whose type is a local `type` alias to an object literal
+/// with a call signature (not an interface), where that call signature's
+/// only parameter is optional -- real-world example: helmet's own
+/// `type Helmet = { (options?: Readonly<HelmetOptions>): ...; ... }` with
+/// `declare const helmet: Helmet;`. The optional marker must survive
+/// `resolve_local_callable_fn_types`/`lower_dts_call_signature` into
+/// `required_params`, or the generated arity dispatch declares the function
+/// with one *required* parameter and rejects `helmet()`.
+#[test]
+fn resolves_a_callable_alias_const_with_an_optional_call_signature_parameter() {
+    let source = r#"
+            type Helmet = {
+                (options?: { a?: string }): (x: number) => void;
+                someProp: string;
+            };
+            declare const helmet: Helmet;
+            export default helmet;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    let helmet = funcs.iter().find(|f| f.name == "helmet").unwrap();
+    assert_eq!(helmet.params.len(), 1);
+    assert_eq!(helmet.required_params, 0, "{helmet:?}");
+}
