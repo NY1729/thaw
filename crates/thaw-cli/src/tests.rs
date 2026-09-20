@@ -496,6 +496,77 @@ fn compiled_app_exec_path_runs_a_commonjs_file() {
 }
 
 #[test]
+fn compiled_app_runs_a_worker_file_with_process_identity() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-run-worker-file-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let worker = directory.join("worker.js");
+    let helper = directory.join("helper.cjs");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        format!(
+            "import {{ Worker }} from 'node:worker_threads'; function main(): Promise<void> {{ return new Promise((resolve, reject): void => {{ const worker = new Worker({}, {{ argv: ['tail'], workerData: {{ execPath: process.execPath }} }}); worker.on('message', (value: any): void => {{ process.stdout.write(JSON.stringify(value)); }}); worker.on('error', reject); worker.on('exit', (code: number): void => {{ if (code === 0) resolve(); else reject(new Error('worker exited ' + code)); }}); }}); }}",
+            serde_json::to_string(worker.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(&helper, "module.exports = 42;").unwrap();
+    std::fs::write(
+        &worker,
+        "const { parentPort, workerData } = require('node:worker_threads'); parentPort.postMessage({ value: require('./helper'), sameExecPath: process.execPath === workerData.execPath, argv: process.argv.slice(-1), execArgv: process.execArgv }); parentPort.close();",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap(),
+        serde_json::json!({ "value": 42, "sameExecPath": true, "argv": ["tail"], "execArgv": [] })
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn compiled_app_forks_itself_for_child_process_ipc() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-run-fork-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let child = directory.join("child.cjs");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        format!(
+            "import {{ fork }} from 'node:child_process'; function main(): Promise<void> {{ return new Promise((resolve, reject): void => {{ const child = fork({}, ['tail']); child.on('error', reject); child.on('message', (value: any): void => {{ if (value.ready) child.send({{ base: 40, execPath: process.execPath }}); else process.stdout.write(JSON.stringify(value)); }}); child.on('close', (code: number): void => {{ if (code === 0) resolve(); else reject(new Error('child exited ' + code)); }}); }}); }}",
+            serde_json::to_string(child.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &child,
+        "process.on('message', function(value) { process.send({ answer: value.base + 2, argument: process.argv[2], sameExecPath: process.execPath === value.execPath }, function() { process.disconnect(); }); }); process.send({ ready: true });",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap(),
+        serde_json::json!({ "answer": 42, "argument": "tail", "sameExecPath": true })
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn run_lists_project_scripts() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-run-list-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
