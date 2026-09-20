@@ -77,6 +77,7 @@ fn add_builtin_module(
         has_esm: false,
         has_top_level_await: false,
         async_module: false,
+        source_path: None,
     });
 }
 
@@ -85,8 +86,20 @@ fn bundle_builtin_module(name: &str) -> Result<String, String> {
     let mut visited = Vec::new();
     let mut modules = Vec::new();
     add_builtin_module(name, main_key.clone(), &mut visited, &mut modules);
-    prepare_async_modules(&mut modules)?;
+    prepare_async_modules(&mut modules, &mut SourceCache::default())?;
     Ok(render_bundle(&main_key, &modules))
+}
+
+/// Shared across every subpath bundle of one `registry add`: parsed module
+/// sources (`modules`) and their ESM->CommonJS rewrites (`rewritten`), so a
+/// package with many subpaths reuses the parse of every shared dependency
+/// instead of redoing it per subpath. Real trigger: drizzle-orm has dozens
+/// of subpaths over the same large `dist/cjs` files; without this,
+/// `thaw registry add drizzle-orm` re-parsed the whole graph for each one.
+#[derive(Default)]
+struct SourceCache {
+    modules: HashMap<PathBuf, (String, ModuleAnalysis)>,
+    rewritten: HashMap<(PathBuf, bool), Option<String>>,
 }
 
 #[cfg(test)]
@@ -101,7 +114,7 @@ fn bundle_commonjs_package(
         root_package,
         root_package_dir,
         main_relative,
-        &mut HashMap::new(),
+        &mut SourceCache::default(),
     )
 }
 
@@ -110,7 +123,7 @@ fn bundle_commonjs_package_cached(
     root_package: &str,
     root_package_dir: &Path,
     main_relative: &str,
-    source_cache: &mut HashMap<PathBuf, (String, ModuleAnalysis)>,
+    source_cache: &mut SourceCache,
 ) -> Result<(String, String, usize, BTreeMap<String, String>), String> {
     let (main_relative_key, main_abs) = resolve_module_path(root_package_dir, main_relative)?;
     let main_key = format!("{root_package}/{main_relative_key}");
@@ -134,7 +147,7 @@ fn bundle_commonjs_package_cached(
         {
             continue;
         }
-        let (source, analysis) = if let Some(cached) = source_cache.get(&abs_path) {
+        let (source, analysis) = if let Some(cached) = source_cache.modules.get(&abs_path) {
             cached.clone()
         } else {
             let source = fs::read_to_string(&abs_path)
@@ -152,7 +165,9 @@ fn bundle_commonjs_package_cached(
             };
             let source = rewrite_static_worker_urls(&source, &abs_path, &pkg_name, &pkg_dir)?;
             let analysis = analyze_module(&source);
-            source_cache.insert(abs_path.clone(), (source.clone(), analysis.clone()));
+            source_cache
+                .modules
+                .insert(abs_path.clone(), (source.clone(), analysis.clone()));
             (source, analysis)
         };
         uses_global_fetch |= analysis.uses_global_fetch;
@@ -356,6 +371,7 @@ fn bundle_commonjs_package_cached(
             has_esm: analysis.has_esm,
             has_top_level_await: analysis.has_top_level_await,
             async_module: false,
+            source_path: Some(abs_path),
         });
     }
 
@@ -368,7 +384,7 @@ fn bundle_commonjs_package_cached(
         );
     }
 
-    prepare_async_modules(&mut modules)?;
+    prepare_async_modules(&mut modules, source_cache)?;
 
     let file_count = modules.len();
     Ok((
