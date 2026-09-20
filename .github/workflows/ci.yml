@@ -70,22 +70,6 @@ jobs:
           cargo test -p thaw-cli -- --test-threads=1
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
-      - name: Test real web applications and packages
-        env:
-          THAW_RUN_NPM_INTEGRATION: "1"
-          THAW_SOAK_SECONDS: "30"
-        # The whole `THAW_RUN_NPM_INTEGRATION` package-interop suite, run
-        # serially (the parallel run has known contention). Every gated
-        # test in it is named `registry_add_*_when_enabled`; run them as
-        # one step so a real interop or package regression can't hide
-        # behind a hand-maintained allowlist that only ever named a
-        # handful. `--skip postgres` leaves the one pg test for the
-        # PostgreSQL step below (it needs `THAW_POSTGRES_URL`). The
-        # native `node:http` conformance test is gated on the same flag
-        # and needs `node`, which this runner has.
-        run: |
-          cargo test -p thaw-cli registry_add -- --test-threads=1 --nocapture --skip postgres
-          cargo test -p thaw-cli node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --nocapture
       - name: Test Hono, Prisma, and PostgreSQL
         env:
           THAW_POSTGRES_URL: postgresql://postgres:password@127.0.0.1:5432/app
@@ -99,6 +83,49 @@ jobs:
           name: acceptance-metrics
           path: target/acceptance/*.json
           if-no-files-found: ignore
+
+  npm-integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    env:
+      LLVM_SYS_220_PREFIX: /opt/llvm-22
+      LD_LIBRARY_PATH: /opt/llvm-22/lib
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      THAW_RUN_NPM_INTEGRATION: "1"
+      THAW_SOAK_SECONDS: "30"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev
+      - name: Install LLVM 22
+        run: |
+          curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz
+          echo "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384  /tmp/llvm.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/llvm-22
+          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
+      - name: Test real web applications and packages (shard ${{ matrix.shard }})
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mapfile -t tests < <(cargo test -p thaw-cli registry_add -- --list | sed -n 's/: test$//p')
+          index=0
+          for test in "${tests[@]}"; do
+            if [[ "$test" != *postgres* ]] && (( index % 4 == SHARD )); then
+              cargo test -p thaw-cli "$test" -- --exact --test-threads=1 --nocapture
+            fi
+            index=$((index + 1))
+          done
+          if (( SHARD == 0 )); then
+            cargo test -p thaw-cli node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --exact --nocapture
+          fi
 
   runtime-comparison:
     strategy:
