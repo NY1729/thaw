@@ -443,6 +443,28 @@ fn x_cache_only_skips_resolution_for_an_exact_version() {
 }
 
 #[test]
+fn x_cache_rejects_a_package_with_a_missing_bin() {
+    let root = temp_dir("cache-missing-bin");
+    write_manifest(
+        &root,
+        r#"{"name":"hello-cli","version":"2.1.0","bin":"cli.js"}"#,
+    );
+
+    assert!(!cached_package_matches(
+        "hello-cli@2.1.0",
+        "hello-cli",
+        &root
+    ));
+    std::fs::write(root.join("cli.js"), "#!/usr/bin/env node\n").unwrap();
+    assert!(cached_package_matches(
+        "hello-cli@2.1.0",
+        "hello-cli",
+        &root
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn multiple_packages_share_one_safe_cache_key() {
     let specs = vec!["@scope/tool@1.2.3".to_string(), "helper@latest".to_string()];
     let key = x_cache_key(&specs);
