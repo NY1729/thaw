@@ -92,11 +92,11 @@ fn run_x(args: &[String]) -> Result<i32, String> {
     #[cfg(all(unix, not(test)))]
     {
         use std::os::unix::process::CommandExt;
-        return Err(format!(
+        Err(format!(
             "failed to run `{}`: {}",
             bin.display(),
             command.exec()
-        ));
+        ))
     }
     #[cfg(any(not(unix), test))]
     command
