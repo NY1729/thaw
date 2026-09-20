@@ -1912,6 +1912,12 @@ fn compiles_quickjs_fallback_path() {
             console.log(++box.value);
             console.log(box["value"]--);
             console.log(--box.value);
+            const composite: JsValue = keepDynamic({ label: "kept", nested: box });
+            console.log(String(getDynamicProperty(composite, "label")));
+            console.log(getDynamicProperty(composite, "nested") === box);
+            const compositeArray: JsValue = keepDynamic([box, 7]);
+            console.log(getDynamicProperty(compositeArray, "0") === box);
+            console.log(Number(getDynamicProperty(compositeArray, "1")));
             const throwing: JsValue = getDynamicValue("throwingBox");
             try {
                 const bad: JsValue = getDynamicProperty(throwing, "bad");
@@ -1929,10 +1935,11 @@ fn compiles_quickjs_fallback_path() {
             const symbolValue: JsValue = callDynamicValueHandle(symbolFactory, JSON.parse("[\"token\"]"));
             console.log(releaseDynamicValue(symbolValue));
         }
+        function keepDynamic(value: JsValue): JsValue { return value; }
     "#;
     assert_eq!(
         compile_and_run(source, "quickjs_fallback"),
-        "true\n5\nhello, thaw\n42\n84\n42\n42\ntrue\nfalse\n3\n3\ntrue\n10\n10\n12\n12\n10\ngetter failed\nsum:86\n42\ntrue\ntrue\n"
+        "true\n5\nhello, thaw\n42\n84\n42\n42\ntrue\nfalse\n3\n3\ntrue\n10\n10\n12\n12\n10\nkept\ntrue\ntrue\n7\ngetter failed\nsum:86\n42\ntrue\ntrue\n"
     );
 }
 

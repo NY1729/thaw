@@ -22,6 +22,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamicMethodHandle" => self.compile_call_dynamic_method_handle(args, false),
             "callDynamicMethodHandleRaw" => self.compile_call_dynamic_method_handle(args, true),
             "readDynamicValue" => self.compile_read_dynamic_value(args),
+            "retainDynamicJson" => self.compile_retain_dynamic_json(args),
             "resolveDynamicValue" => self.compile_dynamic_handle_operation(
                 "thaw_js_resolve_handle_handle_result",
                 args,
@@ -56,6 +57,65 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map(Into::into)
             .map_err(|error| error.to_string())
+    }
+
+    fn compile_retain_dynamic_json(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("retainDynamicJson expects exactly one argument".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let compiling_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        self.compiling_quickjs_dynamic_arguments = true;
+        let value = self.compile_expr(value);
+        self.compiling_quickjs_dynamic_arguments = compiling_dynamic_arguments;
+        let value = value?.into_pointer_value();
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[value.into()],
+                "retained_dynamic_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_js_retain_json_result").unwrap(),
+                &[json.into()],
+                "retain_dynamic_json_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let retained = self
+            .builder
+            .build_extract_value(result, 0, "retained_dynamic_handle")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "retain_dynamic_json_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[json.into()],
+                "destroy_retained_dynamic_json",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(retained)
     }
 
     fn compile_set_dynamic_property_json(
