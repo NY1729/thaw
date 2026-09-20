@@ -2774,3 +2774,56 @@ fn bare_requires_prefer_a_dependents_own_nested_node_modules_over_the_flat_top_l
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn installed_package_unwraps_a_declare_global_augmentation() {
+    // A package whose entire API lives inside `declare global { namespace
+    // X { ... } }` -- real-world example: `@types/crypto-js`, whose
+    // `export = CryptoJS;` is paired with one big `declare global {
+    // namespace CryptoJS { function SHA256(...): ...; ... } }`. Nothing
+    // unwrapped the `declare global` block, so the namespace had no
+    // top-level declaration for `export = CryptoJS` to expose members
+    // from, and every `CryptoJS.SHA256(...)` failed ("call to unknown
+    // function").
+    let scratch = temp_registry("installed-dts-declare-global-scratch");
+    let registry = temp_registry("installed-dts-declare-global-registry");
+    let package = scratch.join("node_modules/global-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"global-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "export = GlobalKit;\n\
+         declare global {\n\
+             namespace GlobalKit {\n\
+                 function version(): string;\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { version: function() { return '1.0.0'; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "global-kit").unwrap();
+    let declarations = resolve(&registry, "global-kit").unwrap().dts_source;
+    assert!(
+        !declarations.contains("declare global"),
+        "the `declare global` wrapper should have been unwrapped:\n{declarations}"
+    );
+    assert!(
+        declarations.contains("namespace GlobalKit"),
+        "the hoisted namespace body should be present:\n{declarations}"
+    );
+    assert!(
+        declarations.contains("function version"),
+        "the hoisted namespace body should be present:\n{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
