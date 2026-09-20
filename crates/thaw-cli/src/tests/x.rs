@@ -63,6 +63,17 @@ fn no_install_rejects_an_absent_package_without_fetching() {
     assert!(error.contains("not installed locally"), "{error}");
 }
 
+#[test]
+fn x_fetches_and_runs_a_real_package_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    assert_eq!(
+        run_x(&["cowsay@1.6.0".into(), "hello from thaw".into()]).unwrap(),
+        0
+    );
+}
+
 /// `-p/--package <spec>` runs the explicitly named command from that
 /// package, `npx -p`-style.
 #[test]
