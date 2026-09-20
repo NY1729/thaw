@@ -1038,6 +1038,13 @@ impl<'a> FnLowerer<'a> {
             ));
         }
 
+        if callee_name == "Promise.withResolvers" {
+            return self.lower_promise_with_resolvers(call);
+        }
+        if callee_name == "Promise.try" {
+            return self.lower_promise_try(call);
+        }
+
         if matches!(callee_name.as_str(), "Promise.all" | "Promise.allSettled" | "Promise.race" | "Promise.any") {
             return self.lower_promise_static_call(&callee_name, call);
         }

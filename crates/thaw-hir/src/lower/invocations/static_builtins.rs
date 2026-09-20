@@ -187,12 +187,13 @@ impl<'a> FnLowerer<'a> {
             ("Array", "of" | "from" | "isArray")
                 | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
                 | ("Map", "groupBy")
-                | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
+                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
                 | ("JSON", "stringify")
+                | ("RegExp", "escape")
                 | ("Reflect", "ownKeys")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("String", "fromCharCode" | "fromCodePoint")
-                | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
+                | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "f16round" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
                 | ("Date", "now" | "UTC" | "parse")
                 | ("performance", "now")
         )
@@ -392,11 +393,15 @@ impl<'a> FnLowerer<'a> {
                             ));
                         };
                         let mut replacer_array = None;
+                        let mut replacer_function = None;
                         if let Some(replacer) = arguments.get(1) {
                             let replacer_type = self.infer_expr_type(replacer)?;
                             match &replacer_type {
                                 HirType::Array(element) if element.as_ref() == &HirType::Str => {
                                     replacer_array = Some(replacer.clone());
+                                }
+                                HirType::Function(_, _) | HirType::CallableFunction(_, _, _, _) => {
+                                    replacer_function = Some(replacer.clone());
                                 }
                                 HirType::Null | HirType::Undefined => {
                                     if !matches!(replacer, HirExpr::Lit(_)) {
@@ -409,12 +414,10 @@ impl<'a> FnLowerer<'a> {
                                         bindings.push((name, replacer_type, replacer.clone()));
                                     }
                                 }
-                                _ => {
-                                    return Err(
-                                        "`JSON.stringify` replacer must be null, undefined, or string[]; function replacers are not supported"
-                                            .into(),
-                                    )
-                                }
+                                _ => return Err(
+                                    "`JSON.stringify` replacer must be a function, null, undefined, or string[]"
+                                        .into(),
+                                ),
                             }
                         }
                         let space = match arguments.get(2) {
@@ -442,6 +445,32 @@ impl<'a> FnLowerer<'a> {
                                 }
                             },
                         };
+                        if let Some(replacer) = replacer_function {
+                            let space = space
+                                .map(|(value, _)| value)
+                                .unwrap_or(HirExpr::Lit(HirLit::Null));
+                            let arguments = self.coerce_to_declared(
+                                &HirType::Json,
+                                HirExpr::ArrayLit(vec![value, space]),
+                            )?;
+                            let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("callDynamicValueMixed".into())),
+                                vec![
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                                        vec![HirExpr::Lit(HirLit::Str(
+                                            "__thaw_json_stringify_replacer".into(),
+                                        ))],
+                                    ),
+                                    arguments,
+                                    HirExpr::ArrayLit(vec![HirExpr::Call(
+                                        Box::new(HirExpr::Var("registerNativeCallback".into())),
+                                        vec![replacer],
+                                    )]),
+                                ],
+                            )));
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let result = match (replacer_array, space) {
                             (None, None) => HirExpr::Call(
                                 Box::new(HirExpr::Var("JSON.stringify".into())),
@@ -474,6 +503,28 @@ impl<'a> FnLowerer<'a> {
                                 )
                             }
                         };
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"RegExp" && property.sym == *"escape" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "RegExp.escape")?;
+                        let [value] = arguments.as_slice() else {
+                            return Err("`RegExp.escape` expects exactly one argument".into());
+                        };
+                        let value = self.coerce_primitive_to_string(value.clone())?;
+                        let value = self.coerce_to_declared(&HirType::Json, value)?;
+                        let args = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![value]),
+                        )?;
+                        let regexp = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("RegExp".into()))],
+                        );
+                        let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicMethod".into())),
+                            vec![regexp, HirExpr::Lit(HirLit::Str("escape".into())), args],
+                        )));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"of" {
@@ -886,10 +937,14 @@ impl<'a> FnLowerer<'a> {
                         )?;
                         return self.wrap_call_argument_bindings(result, &spread_bindings);
                     }
-                    if object.sym == *"Map" && property.sym == *"groupBy" {
+                    if matches!(object.sym.as_ref(), "Map" | "Object")
+                        && property.sym == *"groupBy"
+                    {
+                        let label = format!("{}.groupBy", object.sym);
+                        let object_result = object.sym == *"Object";
                         let has_spread = call.args.iter().any(|argument| argument.spread.is_some());
                         let (arguments, spread_bindings) = if has_spread {
-                            self.lower_native_spread_values(&call.args, "Map.groupBy")?
+                            self.lower_native_spread_values(&call.args, &label)?
                         } else {
                             (Vec::new(), Vec::new())
                         };
@@ -899,7 +954,7 @@ impl<'a> FnLowerer<'a> {
                             call.args.len()
                         };
                         if argument_count != 2 {
-                            return Err("`Map.groupBy` expects exactly two arguments".into());
+                            return Err(format!("`{label}` expects exactly two arguments"));
                         }
                         let items = if has_spread {
                             arguments[0].clone()
@@ -909,7 +964,7 @@ impl<'a> FnLowerer<'a> {
                         let items_type = self.infer_expr_type(&items)?;
                         let HirType::Array(item_type) = &items_type else {
                             return Err(format!(
-                                "`Map.groupBy` requires a homogeneous array, got {items_type:?}"
+                                "`{label}` requires a homogeneous array, got {items_type:?}"
                             ));
                         };
                         let item_type = item_type.as_ref().clone();
@@ -920,13 +975,13 @@ impl<'a> FnLowerer<'a> {
                                 | HirType::CallableFunction(params, _, _, _) => params,
                                 _ => {
                                     return Err(
-                                        "Map.groupBy key function is not a function value".into()
+                                        format!("{label} key function is not a function value")
                                     )
                                 }
                             };
                             if params.len() > 2 {
                                 return Err(format!(
-                                    "Map.groupBy key function accepts at most two parameters, got {}",
+                                    "{label} key function accepts at most two parameters, got {}",
                                     params.len()
                                 ));
                             }
@@ -943,7 +998,8 @@ impl<'a> FnLowerer<'a> {
                             // `Map.groupBy`'s own `(item, index) => key` callback.
                             self.lower_array_from_callback(&call.args[1].expr, &item_type)?
                         };
-                        let result = self.lower_map_group_by(items, item_type, key_fn)?;
+                        let result =
+                            self.lower_group_by(items, item_type, key_fn, object_result)?;
                         return self.wrap_call_argument_bindings(result, &spread_bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"isArray" {
@@ -1447,6 +1503,28 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_math_random".to_string())),
                             Vec::new(),
                         ));
+                    }
+                    if object.sym == *"Math" && property.sym == *"f16round" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Math.f16round")?;
+                        let [value] = arguments.as_slice() else {
+                            return Err("`Math.f16round` expects exactly one argument".into());
+                        };
+                        let value = self.coerce_primitive_to_number(value.clone())?;
+                        let value = self.coerce_to_declared(&HirType::Json, value)?;
+                        let args = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![value]),
+                        )?;
+                        let math = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("Math".into()))],
+                        );
+                        let result = HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicMethod".into())),
+                            vec![math, HirExpr::Lit(HirLit::Str("f16round".into())), args],
+                        )));
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Math"
                         && matches!(

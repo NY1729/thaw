@@ -135,7 +135,7 @@ fn module_create_require_loads_relative_and_builtin_dependencies() {
              const localRequire = createRequire('pkg/index.js');\n\
              export default function () {\n\
              \x20 const dependency = localRequire('./dependency'); const path = localRequire('node:path'); const hooks = registerHooks({}); hooks.deregister();\n\
-             \x20 return [dependency.value, path.basename('/tmp/file.txt'), localRequire.resolve('./dependency'), Object.keys(localRequire.cache).length >= 3, isBuiltin('node:path'), isBuiltin('missing'), builtinModules.includes('stream'), hooks.active];\n\
+             \x20 return [dependency.value, path.basename('/tmp/file.txt'), localRequire.resolve('./dependency'), Object.keys(localRequire.cache).length >= 3, isBuiltin('node:path'), isBuiltin('missing'), builtinModules.includes('stream'), isBuiltin('child_process'), isBuiltin('node:https'), builtinModules.includes('child_process'), builtinModules.includes('https'), hooks.active];\n\
              }",
         )
         .unwrap();
@@ -159,10 +159,8 @@ fn module_create_require_loads_relative_and_builtin_dependencies() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[42,"file.txt","pkg/dependency.js",true,true,false,true,false]"#
+        r#"[42,"file.txt","pkg/dependency.js",true,true,false,true,true,true,true,true,false]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
-
-
