@@ -2338,15 +2338,22 @@ fn rewrite_external_class_methods_with_static(
                         .imported_from
                         .get(name.sym.as_str())
                         .map(|package| format!("{}_{}", sanitize_identifier(package), name.sym));
-                    let has_qualified_candidates = qualified_name.as_ref().is_some_and(|qualified| {
-                        self.functions
-                            .iter()
-                            .any(|(candidate_name, ..)| candidate_name == qualified)
-                    });
-                    let match_name: &str = if has_qualified_candidates {
-                        qualified_name.as_deref().unwrap()
-                    } else {
-                        name.sym.as_str()
+                    // A traceable named import always narrows to its own
+                    // package's alias, even when that package contributes no
+                    // overload candidates of its own (a single-overload
+                    // function). Falling back to the bare name in that case
+                    // lets an *unrelated* package that happens to export the
+                    // same name win the bare-name match -- real example:
+                    // `import { watch } from "chokidar"` alongside `import {
+                    // existsSync } from "node:fs"`, where the bare `watch`
+                    // matched `node:fs`'s overloads and called `fs.watch`
+                    // instead. With no candidates here nothing is rewritten,
+                    // leaving the call to the module graph's own import
+                    // rename (which already maps it to the right package's
+                    // symbol).
+                    let match_name: &str = match qualified_name.as_deref() {
+                        Some(qualified) => qualified,
+                        None => name.sym.as_str(),
                     };
                     let scored_candidates = self
                         .functions
