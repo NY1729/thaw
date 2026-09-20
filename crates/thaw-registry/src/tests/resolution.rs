@@ -1736,6 +1736,73 @@ fn installed_package_inlines_triple_slash_referenced_declarations() {
 }
 
 #[test]
+fn installed_package_unwraps_a_self_targeting_ambient_module() {
+    // A declaration file whose *entire* API is one `declare module
+    // "<own name>" { ... }` block -- real-world example: highlight.js's
+    // `types/index.d.ts`, which wraps its whole surface (including `export
+    // default hljs`) that way. thaw-bridge only reads top-level exports, so
+    // without unwrapping, every `hljs.someMethod(...)` failed with "call to
+    // unknown function". A sibling ambient module for a subpath/private
+    // surface must be left exactly as written.
+    let scratch = temp_registry("installed-dts-ambient-self-scratch");
+    let registry = temp_registry("installed-dts-ambient-self-registry");
+    let package = scratch.join("node_modules/ambient-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"ambient-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "declare module 'ambient-kit/private' {\n\
+             export type KeywordData = [string, number];\n\
+         }\n\
+         declare module 'ambient-kit' {\n\
+             export interface Api {\n\
+                 greet(name: string): string;\n\
+             }\n\
+             const api: Api;\n\
+             export default api;\n\
+         }\n\
+         declare module 'ambient-kit/sub' {\n\
+             export function extra(): void;\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { greet: function(name) { return 'hi ' + name; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "ambient-kit").unwrap();
+    let declarations = resolve(&registry, "ambient-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("greet(name: string): string"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("export default api"),
+        "{declarations}"
+    );
+    assert!(
+        !declarations.contains("declare module 'ambient-kit'"),
+        "the self-targeting ambient module should have been unwrapped:\n{declarations}"
+    );
+    assert!(
+        declarations.contains("declare module 'ambient-kit/private'"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("declare module 'ambient-kit/sub'"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn resolves_an_installed_package_subpath() {
     let registry = temp_registry("subpath");
     let dir = registry.join("math-kit/subpaths/advanced");

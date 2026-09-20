@@ -815,6 +815,27 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// Lowers the object of a member access, keeping a *dynamic* receiver a
+    /// live `JsValue` handle rather than letting it decay to a `Json`
+    /// snapshot.
+    ///
+    /// A bound dynamic call already gets this through
+    /// `member_receiver_bindings` (`const r = hljs.highlightAuto(code);
+    /// r.value.length`), but the inline form has no binding to mark:
+    /// `hljs.highlightAuto(code).value.length` lowered the call with no
+    /// expected type, so it defaulted to the JSON-decoding `callDynamicMethod`
+    /// and `.value` became a `JsonGet` on the handle placeholder -- silently
+    /// `undefined` instead of the string. `lower_expr_with_expected_type`
+    /// only acts on a `Call`/`Await`, so every other receiver shape (a
+    /// variable, `this`, `new C()`, a literal) is unaffected.
+    fn lower_member_receiver(&mut self, expr: &Expr) -> Result<HirExpr, String> {
+        if self.infer_member_receiver_type(expr) == Some(HirType::JsValue) {
+            self.lower_expr_with_expected_type(expr, Some(&HirType::JsValue))
+        } else {
+            self.lower_expr(expr)
+        }
+    }
+
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         if self.unbound_this_context && matches!(member.obj.as_ref(), Expr::This(_)) {
             let property = member_property_name(&member.prop)
@@ -940,7 +961,7 @@ impl<'a> FnLowerer<'a> {
 
         match &member.prop {
             MemberProp::Computed(computed) => {
-                let obj = self.lower_expr(&member.obj)?;
+                let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 match obj_ty {
                     HirType::Array(element) => {
@@ -1134,7 +1155,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     return Ok(HirExpr::Lit(HirLit::F64(value)));
                 }
-                let obj = self.lower_expr(&member.obj)?;
+                let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 // A custom property read on a *catch-bound* error string
                 // (`catch (e) { e.status }`, real trigger: koa's

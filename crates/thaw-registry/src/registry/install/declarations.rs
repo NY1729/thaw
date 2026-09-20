@@ -449,6 +449,69 @@ fn dts_source_with_reexported_functions(
     )
 }
 
+/// Unwraps a package whose entire declaration file is one
+/// `declare module "<own name>" { ... }` block, hoisting that block's body
+/// to the top level.
+///
+/// Real-world example: highlight.js's `types/index.d.ts` is nothing but
+/// `declare module 'highlight.js/private' { ... }` followed by `declare
+/// module 'highlight.js' { ...; const hljs: HLJSApi; export default hljs;
+/// }`. thaw-bridge only reads a `.d.ts`'s *top-level* exports, so the whole
+/// API (including its default export) stayed invisible and every
+/// `hljs.someMethod(...)` failed with "call to unknown function". The
+/// block's own `import { ... } from "<own name>/private"` is left in place
+/// and unresolved, which is harmless: those types are never part of the
+/// bridgeable surface.
+///
+/// Only a block whose specifier resolves back to *this same file*
+/// (`declaration_reexport_path`, which already resolves a bare package name
+/// to its own entry point) is unwrapped; a sibling ambient module for a
+/// subpath, a wildcard, or an unrelated package is kept exactly as written.
+fn unwrap_self_ambient_module(entry_path: &Path, entry_source: &str) -> Result<String, String> {
+    use thaw_parser::ast::{Decl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(entry_source)?;
+    let canonical_entry = entry_path
+        .canonicalize()
+        .unwrap_or_else(|_| entry_path.to_path_buf());
+    let mut output = entry_source.to_string();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
+            continue;
+        };
+        let TsModuleName::Str(target) = &module_decl.id else {
+            continue;
+        };
+        let Some(specifier) = target.value.as_str() else {
+            continue;
+        };
+        let targets_entry = declaration_reexport_path(entry_path, specifier)
+            .map(|resolved| resolved.canonicalize().unwrap_or(resolved))
+            .is_some_and(|resolved| resolved == canonical_entry);
+        if !targets_entry {
+            continue;
+        }
+        let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+            continue;
+        };
+        let wrapper = source_map
+            .span_to_snippet(module_decl.span())
+            .map_err(|error| format!("failed to read ambient module declaration: {error:?}"))?;
+        let mut unwrapped = String::new();
+        for body_item in &block.body {
+            unwrapped.push_str(
+                &source_map
+                    .span_to_snippet(body_item.span())
+                    .map_err(|error| format!("failed to read ambient module body: {error:?}"))?,
+            );
+            unwrapped.push('\n');
+        }
+        output = output.replacen(&wrapper, &unwrapped, 1);
+    }
+    Ok(output)
+}
+
 fn dts_source_with_reexported_functions_inner(
     entry_path: &Path,
     entry_source: &str,
@@ -458,6 +521,8 @@ fn dts_source_with_reexported_functions_inner(
         Decl, ExportSpecifier, Expr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem, Stmt,
     };
 
+    let unwrapped = unwrap_self_ambient_module(entry_path, entry_source)?;
+    let entry_source: &str = &unwrapped;
     let module = thaw_parser::parse_typescript(entry_source)?;
     let mut output = entry_source.to_string();
     output.push_str(&hoisted_export_equals_namespace_members(
