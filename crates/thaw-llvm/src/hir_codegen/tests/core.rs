@@ -1932,6 +1932,59 @@ fn compiles_quickjs_fallback_path() {
     );
 }
 
+/// A dynamic property read or method call on a `JsValue` whose runtime value
+/// is a *primitive* string must auto-box, exactly like `value.property` /
+/// `value.method()` do in JS. Real triggers: highlight.js's
+/// `highlightAuto(code).value` (a string) then `.length`, and gray-matter's
+/// `parsed.content` (a string) then `.trim()`. Both previously failed with
+/// "JavaScript value handle N has non-object type String", because the
+/// bridge required a real object handle.
+#[test]
+fn quickjs_dynamic_property_and_method_box_a_primitive_string() {
+    let source = r#"
+        function main(): void {
+            const ok: boolean = loadScript("globalThis.dynamicText = 'hello';");
+            console.log(ok);
+            const text: JsValue = getDynamicValue("dynamicText");
+            const length: JsValue = getDynamicProperty(text, "length");
+            console.log(Number(readDynamicValue(length)));
+            console.log(String(callDynamicMethod(text, "toUpperCase", JSON.parse("[]"))));
+            console.log(String(callDynamicMethod(text, "slice", JSON.parse("[1, 3]"))));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "quickjs_dynamic_primitive"),
+        "true\n5\nHELLO\nel\n"
+    );
+}
+
+/// A dynamic call (`Json`-typed) as the *right* operand of `&&`/`||` --
+/// `label && lookup()` where `lookup` is a QuickJS-backed method returning a
+/// dynamic value. Real trigger: highlight.js's `lang && hljs.getLanguage
+/// (lang)`, which used to fail with "logical operands have incompatible
+/// types Str and Json" because only a `Json` *left* operand was handled.
+#[test]
+fn quickjs_dynamic_call_is_a_logical_operand() {
+    let source = r#"
+        function main(): void {
+            const ok: boolean = loadScript(
+                "function truthy() { return 'yes'; } function falsy() { return ''; }"
+            );
+            console.log(ok);
+            const truthy: Json = callDynamic("truthy", JSON.parse("[]"));
+            const falsy: Json = callDynamic("falsy", JSON.parse("[]"));
+            console.log(String("x" && truthy));
+            console.log(String("" && truthy));
+            console.log(String("" || truthy));
+            console.log(String("x" || falsy));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "quickjs_dynamic_logical"),
+        "true\nyes\n\nyes\nx\n"
+    );
+}
+
 #[test]
 fn releases_a_discarded_dynamic_value() {
     let source = r#"
