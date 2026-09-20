@@ -821,6 +821,72 @@ fn host_children_active() -> bool {
     HOST_CHILDREN.with(|table| !table.borrow().children.is_empty())
 }
 
+fn start_host_stdin() {
+    HOST_STDIN.with(|slot| {
+        if slot.borrow().is_some() {
+            return;
+        }
+        let (sender, events) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut input = io::stdin();
+            let mut buffer = [0u8; 4096];
+            loop {
+                match input.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(length) => {
+                        if sender
+                            .send(HostStdinEvent::Data(buffer[..length].to_vec()))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            let _ = sender.send(HostStdinEvent::End);
+        });
+        *slot.borrow_mut() = Some(HostStdin {
+            events,
+            thread: Some(thread),
+        });
+    });
+}
+
+fn host_stdin_active() -> bool {
+    HOST_STDIN.with(|slot| slot.borrow().is_some())
+}
+
+fn poll_host_stdin() -> String {
+    HOST_STDIN.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(stdin) = slot.as_mut() else {
+            return "[]".into();
+        };
+        let mut output = Vec::new();
+        let mut finished = false;
+        loop {
+            match stdin.events.try_recv() {
+                Ok(HostStdinEvent::Data(value)) => {
+                    output.push(serde_json::json!({ "type": "data", "value": hex_encode(&value) }));
+                }
+                Ok(HostStdinEvent::End) | Err(TryRecvError::Disconnected) => {
+                    output.push(serde_json::json!({ "type": "end" }));
+                    finished = true;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        if finished {
+            if let Some(thread) = stdin.thread.take() {
+                let _ = thread.join();
+            }
+            *slot = None;
+        }
+        serde_json::to_string(&output).unwrap_or_else(|_| "[]".into())
+    })
+}
+
 fn poll_host_children() -> String {
     HOST_CHILDREN.with(|table| {
         let mut table = table.borrow_mut();
