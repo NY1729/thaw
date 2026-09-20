@@ -76,6 +76,15 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_process_chdir", chdir)
                     .expect("failed to install process chdir bridge");
+                let exit = Function::new(ctx.clone(), |code: i32| -> () {
+                    // `std::process::exit` runs TLS destructors, which try to
+                    // tear down this still-active QuickJS context.
+                    unsafe { libc::_exit(code) };
+                })
+                .expect("failed to create process exit bridge");
+                ctx.globals()
+                    .set("__thaw_process_exit", exit)
+                    .expect("failed to install process exit bridge");
                 let configure_signal = Function::new(ctx.clone(), configure_process_signal)
                     .expect("failed to create process signal bridge");
                 ctx.globals()
