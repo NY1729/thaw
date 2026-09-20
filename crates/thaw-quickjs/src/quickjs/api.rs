@@ -1236,6 +1236,16 @@ pub extern "C" fn thaw_js_register_native_callback(
         // parses `args_json` natively, never through QuickJS's own
         // `JSON.parse`). `1 << i` is a plain 32-bit JS bitwise op --
         // plenty for any real callback's own arity.
+        //
+        // The replacer additionally retains *any* function argument as a
+        // handle, not only the masked positions: a JS function handed to a
+        // compiled closure's `Json`/`any` parameter (real example: cors's
+        // `(origin: any, callback: any) => callback(null, origin)`) has no
+        // JSON encoding, so `JSON.stringify` would silently drop it and the
+        // parameter arrived `undefined`. The `{"__thaw_js_handle_id__": N}`
+        // shape is exactly what `compile_json_value_to_native`'s `Json`
+        // case passes through and what the `Json`-callee dynamic-call path
+        // recovers via `JsonAsNative`, so the function stays callable.
         let wrapper_source = format!(
             "(function() {{ \
              var raw = globalThis['{raw_name}']; \
@@ -1251,6 +1261,7 @@ pub extern "C" fn thaw_js_register_native_callback(
              }} \
              }} \
              var result = raw(JSON.stringify(args, function(key, value) {{ \
+             if (typeof value === 'function') return {{ __thaw_js_handle_id__: globalThis.__thaw_retain_dynamic_value(value) }}; \
              if (value === undefined) return {{ $__thaw_napi_undefined$: true }}; \
              return globalThis.__thaw_json_binary_replacer.call(this, key, value); \
              }})); \
