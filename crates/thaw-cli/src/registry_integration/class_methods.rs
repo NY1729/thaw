@@ -1737,6 +1737,7 @@ fn rewrite_external_class_methods_with_static(
         function_types: &'a std::collections::HashMap<String, SourceFunctionResult>,
         named_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
         callbacks: std::collections::HashSet<String>,
+        local_bindings: std::collections::HashSet<String>,
         edits: Vec<(u32, u32, String)>,
         switch_break_depth: usize,
         switch_break_exits: Vec<FlowState>,
@@ -1774,6 +1775,29 @@ fn rewrite_external_class_methods_with_static(
     }
 
     impl Visit for Finder<'_> {
+        fn visit_function(&mut self, function: &Function) {
+            let saved = self.local_bindings.clone();
+            self.local_bindings.clear();
+            for parameter in &function.params {
+                if let Pat::Ident(binding) = &parameter.pat {
+                    self.local_bindings.insert(binding.id.sym.to_string());
+                }
+            }
+            function.visit_children_with(self);
+            self.local_bindings = saved;
+        }
+
+        fn visit_arrow_expr(&mut self, arrow: &thaw_parser::ast::ArrowExpr) {
+            let saved = self.local_bindings.clone();
+            for parameter in &arrow.params {
+                if let Pat::Ident(binding) = parameter {
+                    self.local_bindings.insert(binding.id.sym.to_string());
+                }
+            }
+            arrow.visit_children_with(self);
+            self.local_bindings = saved;
+        }
+
         fn visit_new_expr(&mut self, expression: &NewExpr) {
             let class = match expression.callee.as_ref() {
                 Expr::Ident(class) => self
@@ -2050,6 +2074,7 @@ fn rewrite_external_class_methods_with_static(
 
         fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
             if let Pat::Ident(binding) = &declaration.name {
+                self.local_bindings.insert(binding.id.sym.to_string());
                 if let Some(ty) = binding
                     .type_ann
                     .as_ref()
@@ -2290,6 +2315,13 @@ fn rewrite_external_class_methods_with_static(
                         }
                     }
                 } else if let Expr::Ident(name) = callee.as_ref() {
+                    if self.local_bindings.contains(name.sym.as_str())
+                        || (!self.imported_from.contains_key(name.sym.as_str())
+                            && self.function_types.contains_key(name.sym.as_str()))
+                    {
+                        call.visit_children_with(self);
+                        return;
+                    }
                     // A bare function call against a registry Fallback
                     // name with more than one `.d.ts` overload -- real
                     // example: uuid's `v4(options?): string` vs. its
@@ -2871,6 +2903,7 @@ fn rewrite_external_class_methods_with_static(
         function_types: &function_types.types,
         named_types: &named_types,
         callbacks: std::collections::HashSet::new(),
+        local_bindings: std::collections::HashSet::new(),
         edits: Vec::new(),
         switch_break_depth: 0,
         switch_break_exits: Vec::new(),

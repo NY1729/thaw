@@ -701,12 +701,27 @@ fn renames_shadowed_block_locals_and_restores_outer_binding() {
     let HirStmt::If(_, then_body, _) = &body[1] else {
         panic!("expected lowered if");
     };
-    assert!(matches!(&then_body[0], HirStmt::Let(name, _, _) if name == "value__thaw_0"));
+    assert!(matches!(&then_body[0], HirStmt::Let(name, _, _) if name == "value__thaw_local_0"));
     assert!(
-        matches!(&then_body[1], HirStmt::Expr(HirExpr::Assign(name, _)) if name == "value__thaw_0")
+        matches!(&then_body[1], HirStmt::Expr(HirExpr::Assign(name, _)) if name == "value__thaw_local_0")
     );
-    assert!(format!("{:?}", then_body[2]).contains("value__thaw_0"));
+    assert!(format!("{:?}", then_body[2]).contains("value__thaw_local_0"));
     assert!(format!("{:?}", body[2]).contains("Var(\"value\")"));
+}
+
+#[test]
+fn renames_a_local_that_shadows_a_top_level_function() {
+    let program = lower(
+        r#"declare function template(value: Json): Json;
+        declare function template__thaw_local_0(value: Json): Json;
+        function main(): void {
+            const template = (value: number): number => value + 1;
+            console.log(template(1));
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(matches!(&main.body[0], HirStmt::Let(name, _, _) if name == "template__thaw_local_1"));
+    assert!(format!("{:?}", main.body[1]).contains("template__thaw_local_1"));
 }
 
 #[test]
@@ -734,13 +749,13 @@ fn lowers_typed_arrow_functions_and_restores_the_outer_scope() {
     assert_eq!(
         params,
         &[HirParam {
-            name: "value__thaw_0".into(),
+            name: "value__thaw_local_0".into(),
             ty: HirType::F64
         }]
     );
     assert!(matches!(
         lambda_body.as_ref(),
-        HirExpr::BinOp(_, left, _) if matches!(left.as_ref(), HirExpr::Var(name) if name == "value__thaw_0")
+        HirExpr::BinOp(_, left, _) if matches!(left.as_ref(), HirExpr::Var(name) if name == "value__thaw_local_0")
     ));
     assert!(format!("{:?}", body[2]).contains("Var(\"value\")"));
 }
