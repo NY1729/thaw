@@ -147,7 +147,7 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     let database_url = format!("file:{}", database.display());
 
     run_install(&[project.display().to_string()]).unwrap();
-    let status = npm_run_command("db:push", &project)
+    let status = npm_run_command("db:push", &project, &[])
         .env("DATABASE_URL", &database_url)
         .status()
         .unwrap();

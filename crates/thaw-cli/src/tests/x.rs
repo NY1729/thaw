@@ -20,6 +20,20 @@ fn parses_x_invocations() {
     assert!(parse_x_args(&["--unknown".into(), "pkg".into()]).is_err());
 }
 
+/// `-h`/`--help` is a request for usage, not a forwarded argument, and an
+/// empty package/command name is rejected before it reaches `npm`.
+#[test]
+fn parses_x_help_and_rejects_empty_specs() {
+    assert!(parse_x_args(&["-h".into()]).unwrap().help);
+    assert!(parse_x_args(&["--help".into()]).unwrap().help);
+    // After the spec, `-h` is forwarded to the bin, not treated as help.
+    assert!(!parse_x_args(&["pkg".into(), "-h".into()]).unwrap().help);
+    assert!(parse_x_args(&["--package=".into()]).is_err());
+    assert!(parse_x_args(&["-p".into(), "".into(), "cmd".into()]).is_err());
+    assert!(parse_x_args(&["".into()]).is_err());
+    assert!(parse_x_args(&["-p".into(), "pkg".into(), "".into()]).is_err());
+}
+
 /// `-p/--package <spec>` runs the explicitly named command from that
 /// package, `npx -p`-style.
 #[test]

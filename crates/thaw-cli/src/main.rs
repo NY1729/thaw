@@ -237,8 +237,7 @@ fn npm_add_command(packages: &[String], directory: &Path) -> Command {
     command
 }
 
-const RUN_USAGE: &str =
-    "usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>]";
+const RUN_USAGE: &str = "usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>] [--] [arguments...]";
 
 fn run_script(args: &[String]) -> Result<i32, String> {
     // `thaw run` with no arguments lists the project's scripts, like
@@ -254,11 +253,12 @@ fn run_script(args: &[String]) -> Result<i32, String> {
     if is_script_path(script) {
         return run_file(script, &args[1..]);
     }
-    let directory = match args.get(1).map(String::as_str) {
-        None => Path::new("."),
-        Some("--prefix") if args.len() == 3 => Path::new(&args[2]),
-        _ => return Err(RUN_USAGE.into()),
-    };
+    // `[--prefix <dir>] [--] [arguments...]` -- a `--prefix` anywhere before
+    // the arguments picks the project directory; the first non-option token
+    // ends it, and every token from there on is forwarded to the script
+    // (matching `npm run <script> -- ...`/`bun run <script> ...`).
+    let (directory, extra_args) = parse_script_tail(&args[1..])?;
+    let directory = directory.as_path();
     if !directory.join("package.json").is_file() {
         return Err(format!(
             "`{}` does not contain package.json",
@@ -267,8 +267,10 @@ fn run_script(args: &[String]) -> Result<i32, String> {
     }
     // A script whose command is just a supported source file is compiled
     // and run by thaw -- the point of `thaw run` -- from the project
-    // directory, with the remaining tokens forwarded as arguments.
-    if let Some((file, script_args)) = package_script_file(directory, script) {
+    // directory, with the script's own declared arguments plus any the
+    // caller added.
+    if let Some((file, mut script_args)) = package_script_file(directory, script) {
+        script_args.extend(extra_args);
         let input = directory.join(&file);
         let input = input
             .to_str()
@@ -279,7 +281,7 @@ fn run_script(args: &[String]) -> Result<i32, String> {
     // Anything wider (a shell pipeline, `tsx watch`, `vite build`, ...)
     // keeps running through npm, which is what actually provides that
     // shell and `node_modules/.bin` on PATH.
-    let status = npm_run_command(script, directory)
+    let status = npm_run_command(script, directory, &extra_args)
         .status()
         .map_err(|error| format!("failed to run npm script `{script}`: {error}"))?;
     if !status.success() {
@@ -363,9 +365,38 @@ fn is_simple_shell_token(token: &str) -> bool {
         })
 }
 
-fn npm_run_command(script: &str, directory: &Path) -> Command {
+/// Parses the `[--prefix <dir>] [--] [arguments...]` tail of `thaw run
+/// <script>`, returning the project directory and the arguments to forward.
+fn parse_script_tail(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
+    let mut directory = PathBuf::from(".");
+    let mut extra_args = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--prefix" => {
+                index += 1;
+                directory = PathBuf::from(args.get(index).ok_or(RUN_USAGE)?);
+                index += 1;
+            }
+            "--" => {
+                extra_args.extend(args[index + 1..].iter().cloned());
+                break;
+            }
+            _ => {
+                extra_args.extend(args[index..].iter().cloned());
+                break;
+            }
+        }
+    }
+    Ok((directory, extra_args))
+}
+
+fn npm_run_command(script: &str, directory: &Path, arguments: &[String]) -> Command {
     let mut command = Command::new("npm");
     command.args(["run", script, "--prefix"]).arg(directory);
+    if !arguments.is_empty() {
+        command.arg("--").args(arguments);
+    }
     command
 }
 

@@ -1082,12 +1082,12 @@ fn builds_and_serves_hono_react_prisma_postgres_when_enabled() {
         .join("../../examples/hono-react-prisma-board")
         .canonicalize()
         .unwrap();
-    assert!(npm_run_command("generate:postgres", &project)
+    assert!(npm_run_command("generate:postgres", &project, &[])
         .env("DATABASE_URL", &database_url)
         .status()
         .unwrap()
         .success());
-    assert!(npm_run_command("db:push:postgres", &project)
+    assert!(npm_run_command("db:push:postgres", &project, &[])
         .env("DATABASE_URL", &database_url)
         .status()
         .unwrap()
