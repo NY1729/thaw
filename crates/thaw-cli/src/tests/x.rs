@@ -199,6 +199,38 @@ fn x_formats_a_file_with_real_prettier_when_enabled() {
 }
 
 #[test]
+fn x_preserves_real_eslint_failure_status_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join(format!("thaw-cli-x-eslint-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let config = root.join("eslint.config.mjs");
+    let input = root.join("input.js");
+    std::fs::write(
+        &config,
+        "export default [{ rules: { 'no-unused-vars': 'error' } }];\n",
+    )
+    .unwrap();
+    std::fs::write(&input, "const unused = 42;\n").unwrap();
+
+    let status = run_x(&[
+        "eslint@9.36.0".into(),
+        "--config".into(),
+        config.to_string_lossy().into_owned(),
+        input.to_string_lossy().into_owned(),
+    ])
+    .unwrap();
+
+    assert_eq!(status, 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn x_exposes_multiple_real_packages_on_path_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
