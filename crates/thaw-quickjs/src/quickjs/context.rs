@@ -56,20 +56,26 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_console_stderr", stderr)
                     .expect("failed to install JavaScript stderr writer");
-                let stdin = Function::new(ctx.clone(), || -> rquickjs::Result<String> {
-                    let mut bytes = Vec::new();
-                    io::stdin().read_to_end(&mut bytes).map_err(|error| {
-                        rquickjs::Error::new_from_js_message("process", "stdin", error.to_string())
-                    })?;
-                    Ok(bytes
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect())
-                })
-                .expect("failed to create process stdin bridge");
+                let stdin_start = Function::new(ctx.clone(), start_host_stdin)
+                    .expect("failed to create process stdin starter");
+                let stdin_poll = Function::new(ctx.clone(), poll_host_stdin)
+                    .expect("failed to create process stdin poller");
+                let stdin_active = Function::new(ctx.clone(), host_stdin_active)
+                    .expect("failed to create process stdin activity probe");
                 ctx.globals()
-                    .set("__thaw_process_read_stdin", stdin)
-                    .expect("failed to install process stdin bridge");
+                    .set("__thaw_process_start_stdin", stdin_start)
+                    .expect("failed to install process stdin starter");
+                ctx.globals()
+                    .set("__thaw_process_poll_stdin", stdin_poll)
+                    .expect("failed to install process stdin poller");
+                ctx.globals()
+                    .set("__thaw_stdin_active", stdin_active)
+                    .expect("failed to install process stdin activity probe");
+                let stdin_raw_mode = Function::new(ctx.clone(), set_stdin_raw_mode)
+                    .expect("failed to create process stdin raw-mode bridge");
+                ctx.globals()
+                    .set("__thaw_process_set_raw_mode", stdin_raw_mode)
+                    .expect("failed to install process stdin raw-mode bridge");
                 let is_tty = Function::new(ctx.clone(), |fd: i32| unsafe {
                     libc::isatty(fd) == 1
                 })
@@ -100,6 +106,7 @@ fn ensure_context() {
                 let exit = Function::new(ctx.clone(), |code: i32| -> () {
                     // `std::process::exit` runs TLS destructors, which try to
                     // tear down this still-active QuickJS context.
+                    restore_stdin_termios();
                     unsafe { libc::_exit(code) };
                 })
                 .expect("failed to create process exit bridge");
