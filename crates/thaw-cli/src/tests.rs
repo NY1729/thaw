@@ -496,6 +496,40 @@ fn compiled_app_exec_path_runs_a_commonjs_file() {
 }
 
 #[test]
+fn compiled_app_exec_path_accepts_exec_argv_before_a_commonjs_file() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-run-exec-argv-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let child = directory.join("child.cjs");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        format!(
+            "import {{ spawnSync }} from 'node:child_process'; function main(): void {{ const child: any = spawnSync(process.execPath, ['--no-warnings', {}, 'tail']); process.stdout.write(child.stdout); }}",
+            serde_json::to_string(child.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &child,
+        "process.stdout.write(JSON.stringify({ argv: process.argv, execArgv: process.execArgv }));",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["argv"], serde_json::json!([output, child, "tail"]));
+    assert_eq!(value["execArgv"], serde_json::json!(["--no-warnings"]));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn compiled_app_runs_a_worker_file_with_process_identity() {
     let directory =
         std::env::temp_dir().join(format!("thaw-cli-run-worker-file-{}", std::process::id()));
@@ -542,14 +576,14 @@ fn compiled_app_forks_itself_for_child_process_ipc() {
     std::fs::write(
         &input,
         format!(
-            "import {{ fork }} from 'node:child_process'; function main(): Promise<void> {{ return new Promise((resolve, reject): void => {{ const child = fork({}, ['tail']); child.on('error', reject); child.on('message', (value: any): void => {{ if (value.ready) child.send({{ base: 40, execPath: process.execPath }}); else process.stdout.write(JSON.stringify(value)); }}); child.on('close', (code: number): void => {{ if (code === 0) resolve(); else reject(new Error('child exited ' + code)); }}); }}); }}",
+            "import {{ fork }} from 'node:child_process'; function main(): Promise<void> {{ return new Promise((resolve, reject): void => {{ const child = fork({}, ['tail'], {{ execArgv: ['--no-warnings'] }}); child.on('error', reject); child.on('message', (value: any): void => {{ if (value.ready) child.send({{ base: 40, execPath: process.execPath }}); else process.stdout.write(JSON.stringify(value)); }}); child.on('close', (code: number): void => {{ if (code === 0) resolve(); else reject(new Error('child exited ' + code)); }}); }}); }}",
             serde_json::to_string(child.to_str().unwrap()).unwrap()
         ),
     )
     .unwrap();
     std::fs::write(
         &child,
-        "process.on('message', function(value) { process.send({ answer: value.base + 2, argument: process.argv[2], sameExecPath: process.execPath === value.execPath }, function() { process.disconnect(); }); }); process.send({ ready: true });",
+        "process.on('message', function(value) { process.send({ answer: value.base + 2, argument: process.argv[2], sameExecPath: process.execPath === value.execPath, execArgv: process.execArgv.slice(0, 2) }, function() { process.disconnect(); }); }); process.send({ ready: true });",
     )
     .unwrap();
     run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
@@ -561,7 +595,7 @@ fn compiled_app_forks_itself_for_child_process_ipc() {
     );
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap(),
-        serde_json::json!({ "answer": 42, "argument": "tail", "sameExecPath": true })
+        serde_json::json!({ "answer": 42, "argument": "tail", "sameExecPath": true, "execArgv": ["--no-warnings", "-e"] })
     );
     let _ = std::fs::remove_dir_all(directory);
 }

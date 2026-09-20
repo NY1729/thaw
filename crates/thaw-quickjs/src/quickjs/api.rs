@@ -94,13 +94,13 @@ pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
 #[no_mangle]
 pub extern "C" fn thaw_js_run_cli() -> i32 {
     let arguments = std::env::args().collect::<Vec<_>>();
-    let source = if arguments.get(1).map(String::as_str) == Some("-e") {
-        let Some(source) = arguments.get(2) else {
+    let source = if let Some((_, source)) = cli_eval(&arguments) {
+        let Some(source) = source else {
             eprintln!("{}: -e requires an argument", arguments[0]);
             return 1;
         };
-        source.clone()
-    } else if let Some(script) = cli_script(&arguments) {
+        source.to_string()
+    } else if let Some((_, script)) = cli_script(&arguments) {
         format!(
             "globalThis.__thaw_run_main_file({})",
             json_escape_string(script)
