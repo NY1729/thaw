@@ -2103,6 +2103,21 @@ fn registers_a_callback_with_an_optional_void_result() {
     assert_eq!(compile_and_run(source, "optional_void_callback"), "true\n");
 }
 
+#[test]
+fn registers_a_callable_callback_with_rest_parameters() {
+    let source = r#"
+        function main(): void {
+            const callback: (first: number, ...rest: number[]) => void =
+                (first: number, ...rest: number[]): void => {
+                    console.log(first, rest.length);
+                };
+            const handle: JsValue = registerNativeCallback(callback);
+            console.log(releaseDynamicValue(handle));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "rest_callback"), "true\n");
+}
+
 /// Module auto-initialization: a registry-generated `__thaw_module_init`
 /// (thaw-bridge's `generate_module_init`, wired in via thaw-cli's
 /// `--use`) must run before `main`'s body, with no `loadScript` call

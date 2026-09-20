@@ -821,6 +821,37 @@ fn installed_package_inlines_default_reexports() {
 }
 
 #[test]
+fn installed_package_inlines_a_default_class_reexport() {
+    let scratch = temp_registry("installed-default-class-reexport-scratch");
+    let registry = temp_registry("installed-default-class-reexport-registry");
+    let package = scratch.join("node_modules/client");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"client","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "export { default } from './Client';\nexport { default as Client } from './Client';\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("Client.d.ts"),
+        "declare class Client { readonly status: string; }\nexport default Client;\n",
+    )
+    .unwrap();
+    fs::write(package.join("index.js"), "module.exports = class Client {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "client").unwrap();
+    let declarations = resolve(&registry, "client").unwrap().dts_source;
+    assert!(declarations.contains("class Client"), "{declarations}");
+
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_a_default_reexported_literal_constant() {
     // `export { default as NIL } from './nil.js'` -- the exact same
     // barrel shape as `installed_package_inlines_default_reexports`
@@ -951,6 +982,45 @@ fn installed_package_inlines_named_import_reexports() {
         "{declarations}"
     );
     assert!(declarations.contains("class Context"), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_package_follows_named_import_reexports_through_export_star() {
+    let scratch = temp_registry("installed-dts-transitive-named-import-scratch");
+    let registry = temp_registry("installed-dts-transitive-named-import-registry");
+    let package = scratch.join("node_modules/http-client");
+    fs::create_dir_all(package.join("types")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"http-client","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(package.join("index.d.ts"), "export * from './types/index';\n").unwrap();
+    fs::write(
+        package.join("types/index.d.ts"),
+        "import { close, request } from './api';\nexport { close, request };\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("types/api.d.ts"),
+        "declare function close(): Promise<void>;\ndeclare function request(url: string): Promise<string>;\nexport { close, request };\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { request: async function(url) { return url; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "http-client").unwrap();
+    let declarations = resolve(&registry, "http-client").unwrap().dts_source;
+    assert!(
+        declarations.contains("function close(): Promise<void>")
+            && declarations.contains("function request(url: string): Promise<string>"),
+        "{declarations}"
+    );
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }

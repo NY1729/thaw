@@ -334,6 +334,31 @@ fn worker_threads_builtin_exchanges_cloned_messages() {
 }
 
 #[test]
+fn bundled_commonjs_require_exposes_resolve() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("commonjs_require_resolve");
+    fs::write(
+        dir.join("index.js"),
+        "var dependency = require('./dependency'); module.exports = function () { return [dependency, typeof require.resolve, require.resolve('./dependency')]; };",
+    )
+    .unwrap();
+    fs::write(dir.join("dependency.js"), "module.exports = 42;").unwrap();
+    let node_modules = temp_registry("commonjs_require_resolve_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRequireResolve = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseRequireResolve").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[42,"function","pkg/dependency.js"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn worker_threads_eval_worker_isolates_state_and_exchanges_messages() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_eval");

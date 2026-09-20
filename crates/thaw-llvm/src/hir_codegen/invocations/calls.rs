@@ -627,7 +627,14 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_math_hypot" => return self.compile_math_hypot(args),
             "__thaw_math_sign" => return self.compile_math_sign(args),
             "__thaw_math_round" => return self.compile_math_round(args),
-            "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
+            "fetch"
+                if self
+                    .module
+                    .get_function(&Self::llvm_symbol_for(name))
+                    .is_none() =>
+            {
+                return self.compile_single_arg_call("thaw_fetch_get", args, "fetch");
+            }
             "sleep" => return self.compile_sleep(args),
             _ => {}
         }
