@@ -9,9 +9,10 @@
 /// 1. An already-installed `node_modules/<package>` walking up from the
 ///    current directory -- the common case, identical to what `npx` does
 ///    first.
-/// 2. Else `npm install --prefix <cache> <spec>` into a per-spec cache
+/// 2. Else `npm install --prefix <cache> <spec>` into an invocation cache
 ///    under the user cache directory, so a one-shot run never touches the
-///    project's own `node_modules` (and is reused next time). This reuses
+///    project's own `node_modules`. Fixed versions are reused; tags, ranges,
+///    and unversioned specs are re-resolved by npm. This reuses
 ///    thaw's existing npm dependency rather than reimplementing tarball
 ///    fetch/tag resolution.
 ///
@@ -23,13 +24,14 @@
 /// all forwarded untouched.
 ///
 /// Options: `-y`/`--yes` is accepted for `npx` compatibility (nothing is
-/// ever prompted for or written to the project). `--` separates the
+/// ever prompted for or written to the project), and `--no-install` rejects
+/// packages absent from the local `node_modules`. `--` separates the
 /// package spec from the command's own arguments. `-p`/`--package <spec>`
 /// resolves that package and runs the command named by the first
 /// positional argument (`thaw x -p prisma prisma generate` style),
 /// matching `npx`; a package exposing several bins without one matching
 /// its name is rejected with the list of available commands.
-const X_USAGE: &str = "usage: thaw x <package>[@<version>] [--] [arguments...]\n       thaw x -p <package>[@<version>] [--] <command> [arguments...]";
+const X_USAGE: &str = "usage: thaw x [--no-install] <package>[@<version>] [--] [arguments...]\n       thaw x [--no-install] -p <package>[@<version>] [--] <command> [arguments...]";
 
 fn run_x(args: &[String]) -> Result<i32, String> {
     let invocation = parse_x_args(args)?;
@@ -40,24 +42,65 @@ fn run_x(args: &[String]) -> Result<i32, String> {
     let cwd = std::env::current_dir()
         .map_err(|error| format!("failed to read the current directory: {error}"))?;
     let specs = invocation.specs();
+    let packages = specs
+        .iter()
+        .map(|spec| {
+            let package = thaw_registry::package_name(spec).to_string();
+            let local = find_local_package_dir(spec, &package, &cwd);
+            (spec, package, local)
+        })
+        .collect::<Vec<_>>();
+    let missing = packages
+        .iter()
+        .filter(|(_, _, local)| local.is_none())
+        .map(|(spec, _, _)| (*spec).clone())
+        .collect::<Vec<_>>();
+    if invocation.no_install && !missing.is_empty() {
+        return Err(format!(
+            "package(s) not installed locally: {}",
+            missing.join(", ")
+        ));
+    }
+    let installed = if missing.is_empty() {
+        None
+    } else {
+        Some(install_into_cache(&missing)?)
+    };
     let mut bins: Vec<(String, PathBuf)> = Vec::new();
-    for spec in &specs {
-        let package = thaw_registry::package_name(spec).to_string();
-        let package_dir = match find_local_package_dir(&package, &cwd) {
-            Some(directory) => directory,
-            None => install_into_cache(spec)?,
-        };
+    let mut bin_directories = Vec::new();
+    for (_, package, local) in packages {
+        let package_dir = local.unwrap_or_else(|| {
+            installed
+                .as_ref()
+                .expect("missing packages were installed")
+                .join(&package)
+        });
+        if let Some(node_modules) = package_dir.ancestors().find(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some("node_modules")
+        }) {
+            bin_directories.push(node_modules.join(".bin"));
+        }
         bins.extend(package_bins(&package_dir, &package)?);
     }
     let bin = match &invocation.command {
         Some(command) => select_bin(&bins, command, &specs)?,
         None => default_bin(&bins, thaw_registry::package_name(&specs[0]))?,
     };
-    bin_command(&bin)?
-        .args(&invocation.arguments)
-        .status()
+    let mut command = bin_command(&bin)?;
+    let path = executable_path(&bin_directories)?;
+    command.env("PATH", path).args(&invocation.arguments).status()
         .map(|status| status.code().unwrap_or(1))
         .map_err(|error| format!("failed to run `{}`: {error}", bin.display()))
+}
+
+fn executable_path(bin_directories: &[PathBuf]) -> Result<std::ffi::OsString, String> {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let paths = bin_directories
+        .iter()
+        .cloned()
+        .chain(std::env::split_paths(&inherited));
+    std::env::join_paths(paths)
+        .map_err(|error| format!("failed to construct executable PATH: {error}"))
 }
 
 /// Parsed form of a `thaw x` invocation.
@@ -73,6 +116,8 @@ struct XInvocation {
     arguments: Vec<String>,
     /// `-h`/`--help` was given before the package spec.
     help: bool,
+    /// Do not fetch a package absent from the local `node_modules` tree.
+    no_install: bool,
 }
 
 impl XInvocation {
@@ -89,6 +134,7 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
     let mut positionals: Vec<String> = Vec::new();
     let mut options_done = false;
     let mut help = false;
+    let mut no_install = false;
     let mut index = 0;
     while index < args.len() {
         let argument = args[index].as_str();
@@ -102,6 +148,11 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
                 // `npx` compatibility: `thaw x` never prompts or writes to
                 // the project, so `-y`/`--yes` only has to be accepted.
                 "-y" | "--yes" => {
+                    index += 1;
+                    continue;
+                }
+                "--no-install" => {
+                    no_install = true;
                     index += 1;
                     continue;
                 }
@@ -143,6 +194,7 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
             command: None,
             arguments: Vec::new(),
             help: true,
+            no_install,
         });
     }
     if packages.is_empty() {
@@ -156,6 +208,7 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
             command: None,
             arguments: drop_separator(positionals.collect()),
             help: false,
+            no_install,
         });
     }
     let mut positionals = positionals.into_iter();
@@ -168,6 +221,7 @@ fn parse_x_args(args: &[String]) -> Result<XInvocation, String> {
         command: Some(non_empty(&command, "command")?),
         arguments: drop_separator(positionals.collect()),
         help: false,
+        no_install,
     })
 }
 
@@ -192,27 +246,46 @@ fn drop_separator(mut arguments: Vec<String>) -> Vec<String> {
 
 /// Finds an installed `node_modules/<package>` by walking up from `start`,
 /// matching Node's own upward `node_modules` lookup.
-fn find_local_package_dir(package: &str, start: &Path) -> Option<PathBuf> {
+fn find_local_package_dir(spec: &str, package: &str, start: &Path) -> Option<PathBuf> {
     let mut directory = start.canonicalize().ok()?;
     loop {
         let candidate = directory.join("node_modules").join(package);
-        if candidate.join("package.json").is_file() {
+        if local_package_matches(spec, package, &candidate) {
             return Some(candidate);
         }
         directory = directory.parent()?.to_path_buf();
     }
 }
 
-/// Installs `spec` into a per-spec cache directory with the project's own
-/// `npm`, returning the installed package directory. Kept project-local-
+fn local_package_matches(spec: &str, package: &str, directory: &Path) -> bool {
+    let manifest_path = directory.join("package.json");
+    if !manifest_path.is_file() {
+        return false;
+    }
+    let Some(requested) = spec.strip_prefix(package).and_then(|rest| rest.strip_prefix('@')) else {
+        return spec == package;
+    };
+    let Ok(source) = std::fs::read_to_string(manifest_path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&source)
+        .ok()
+        .and_then(|manifest| manifest.get("version")?.as_str().map(str::to_owned))
+        .is_some_and(|version| version == requested)
+}
+
+/// Installs `specs` into one cache directory with the project's own `npm`,
+/// returning their shared `node_modules`. Kept project-local-
 /// only by construction: `--prefix` points at the cache, never at the
 /// caller's directory.
-fn install_into_cache(spec: &str) -> Result<PathBuf, String> {
-    let cache = x_cache_root()?.join(spec.replace(['/', '@'], "_"));
-    let package = thaw_registry::package_name(spec);
-    let package_dir = cache.join("node_modules").join(package);
-    if package_dir.join("package.json").is_file() {
-        return Ok(package_dir);
+fn install_into_cache(specs: &[String]) -> Result<PathBuf, String> {
+    let cache = x_cache_root()?.join(x_cache_key(specs));
+    let node_modules = cache.join("node_modules");
+    if specs.iter().all(|spec| {
+        let package = thaw_registry::package_name(spec);
+        cached_package_matches(spec, package, &node_modules.join(package))
+    }) {
+        return Ok(node_modules);
     }
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("failed to create `{}`: {error}", cache.display()))?;
@@ -220,19 +293,33 @@ fn install_into_cache(spec: &str) -> Result<PathBuf, String> {
         .args(["install", "--prefix"])
         .arg(&cache)
         .args(["--no-save", "--no-package-lock", "--no-audit", "--no-fund"])
-        .arg(spec)
+        .args(specs)
         .status()
         .map_err(|error| format!("failed to run npm install: {error}"))?;
     if !status.success() {
-        return Err(format!("npm install `{spec}` failed with {status}"));
+        return Err(format!("npm install `{}` failed with {status}", specs.join(" ")));
     }
-    if !package_dir.join("package.json").is_file() {
-        return Err(format!(
-            "`{spec}` did not install a package at `{}`",
-            package_dir.display()
-        ));
+    for spec in specs {
+        let package_dir = node_modules.join(thaw_registry::package_name(spec));
+        if !package_dir.join("package.json").is_file() {
+            return Err(format!(
+                "`{spec}` did not install a package at `{}`",
+                package_dir.display()
+            ));
+        }
     }
-    Ok(package_dir)
+    Ok(node_modules)
+}
+
+fn x_cache_key(specs: &[String]) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    specs.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn cached_package_matches(spec: &str, package: &str, directory: &Path) -> bool {
+    spec != package && local_package_matches(spec, package, directory)
 }
 
 /// `$XDG_CACHE_HOME/thaw/x` (or `$HOME/.cache/thaw/x`, or the temp
