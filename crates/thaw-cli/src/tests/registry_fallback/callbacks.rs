@@ -1522,3 +1522,63 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "count 42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A JS *function* passed by the package into a compiled closure's own
+/// `Json`-typed parameter (real-world shape: cors's `CustomOrigin`,
+/// `(origin: any, callback: any) => void`, where the callback's second
+/// argument is itself a JS function the user must call). The package
+/// invoked a native callback and handed it an inner JS function.
+///
+/// The QuickJS-side wrapper for a registered native callback only retained
+/// arguments at `JsValue`/callable-masked positions; every other argument
+/// went through `JSON.stringify`, which silently drops a function. The
+/// inner function reached the compiled closure as `undefined`, so calling
+/// it failed ("invalid JavaScript value handle 0"). The args replacer now
+/// retains any function argument as a `{"__thaw_js_handle_id__": N}`
+/// placeholder -- the same representation the `Json`-callee dynamic-call
+/// path already recovers via `JsonAsNative`.
+#[test]
+fn a_js_function_passed_into_a_compiled_closures_json_parameter_stays_callable() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-native-callback-json-function-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("invoker-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function withInner(cb: (inner: unknown) => string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.withInner = function(cb) { \
+         return cb(function(msg) { return 'js:' + msg; }); \
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { withInner } from "invoker-kit";
+function main(): void {
+    const result = withInner((inner: Json) => {
+        return String(inner("hi"));
+    });
+    console.log(result);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "js:hi\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
