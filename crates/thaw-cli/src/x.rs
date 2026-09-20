@@ -319,7 +319,11 @@ fn x_cache_key(specs: &[String]) -> String {
 }
 
 fn cached_package_matches(spec: &str, package: &str, directory: &Path) -> bool {
-    spec != package && local_package_matches(spec, package, directory)
+    spec != package
+        && local_package_matches(spec, package, directory)
+        && package_bins(directory, package).is_ok_and(|bins| {
+            bins.iter().all(|(_, path)| path.is_file())
+        })
 }
 
 /// `$XDG_CACHE_HOME/thaw/x` (or `$HOME/.cache/thaw/x`, or the temp
