@@ -100,6 +100,15 @@ fn resolve_generic_interface(
         }
     }
 
+    if decl
+        .body
+        .body
+        .iter()
+        .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
+    {
+        return DtsType::Native(HirType::JsValue);
+    }
+
     in_progress.push(name.to_string());
 
     let mut fields = Vec::with_capacity(decl.body.body.len());
@@ -624,6 +633,36 @@ fn resolve_ts_type_with_substitution(
     generic_interfaces: &GenericInterfaces,
     in_progress: &mut Vec<String>,
 ) -> DtsType {
+    if let TsType::TsTypeRef(ty_ref) = ty {
+        if let TsEntityName::TsQualifiedName(qualified) = &ty_ref.type_name {
+            let ref_name = qualified.right.sym.as_str();
+            if let Some(concrete) = substitution.get(ref_name) {
+                return DtsType::Native(concrete.clone());
+            }
+            if let Some(decl) = generic_interfaces.interfaces.get(ref_name) {
+                return resolve_generic_interface(
+                    ref_name,
+                    decl,
+                    ty_ref,
+                    Some(substitution),
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+            }
+            if let Some(decl) = generic_interfaces.aliases.get(ref_name) {
+                return resolve_generic_alias(
+                    ref_name,
+                    decl,
+                    ty_ref,
+                    Some(substitution),
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+            }
+        }
+    }
     if let TsType::TsTypeRef(ty_ref) = ty {
         if let TsEntityName::Ident(id) = &ty_ref.type_name {
             let ref_name = id.sym.as_str();

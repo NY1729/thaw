@@ -285,8 +285,7 @@ fn renames_catch_binding_that_shadows_an_outer_local() {
     let HirStmt::Try(_, catch_name, catch_body, _) = &body[1] else {
         panic!("expected lowered try");
     };
-    assert_eq!(catch_name, "error__thaw_0");
-    assert!(format!("{:?}", catch_body).contains("error__thaw_0"));
+    assert_eq!(catch_name, "error__thaw_local_0");
+    assert!(format!("{:?}", catch_body).contains("error__thaw_local_0"));
     assert!(format!("{:?}", body[2]).contains("Var(\"error\")"));
 }
-

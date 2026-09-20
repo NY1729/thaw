@@ -1,12 +1,16 @@
 impl<'a> FnLowerer<'a> {
     fn bind_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
         let hir_name = if self.scope.contains_key(source_name)
+            || self.signatures.contains_key(source_name)
             || self.used_hir_bindings.contains(source_name)
         {
             loop {
-                let name = format!("{source_name}__thaw_{}", self.next_binding);
+                let name = format!("{source_name}__thaw_local_{}", self.next_binding);
                 self.next_binding += 1;
-                if !self.scope.contains_key(&name) && !self.used_hir_bindings.contains(&name) {
+                if !self.scope.contains_key(&name)
+                    && !self.signatures.contains_key(&name)
+                    && !self.used_hir_bindings.contains(&name)
+                {
                     break name;
                 }
             }

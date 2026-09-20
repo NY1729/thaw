@@ -226,7 +226,11 @@ pub fn generate_shim(
                     .all(|candidate| {
                         matches!(
                             candidate.ret,
-                            DtsType::Native(HirType::Function(_, _) | HirType::JsValue)
+                            DtsType::Native(
+                                HirType::Function(_, _)
+                                    | HirType::CallableFunction(..)
+                                    | HirType::JsValue
+                            )
                         )
                     });
                 let qualified_entry = qualified.iter().find(|q| q.name == function);
@@ -573,7 +577,7 @@ fn wrap_as_commonjs_module(
         // was ever set. Both packages' `pkg::e` keys had already been
         // captured before the next one ran, so overwriting is safe.
         format!(
-            "if (typeof module.exports === 'function') {{ globalThis.{name} = module.exports; }}\n\
+            "if (typeof module.exports === 'function' && typeof module.exports.{name} === 'undefined') {{ globalThis.{name} = module.exports; }}\n\
              else if (typeof module.exports === 'object' && module.exports !== null && module.exports.__esModule && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n\
              else if (typeof module.exports === 'object' && module.exports !== null && !module.exports.__esModule && Object.keys(module.exports).length === 1 && (function() {{ var descriptor = Object.getOwnPropertyDescriptor(module.exports, 'default'); return descriptor !== undefined && typeof descriptor.value === 'function'; }})()) {{ globalThis.{name} = module.exports.default; }}\n"
         )

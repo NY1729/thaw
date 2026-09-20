@@ -40,6 +40,25 @@ fn selects_fallback_function_overloads_by_arity_range() {
     );
 }
 
+#[test]
+fn fallback_overload_rewrites_do_not_replace_local_callables() {
+    let source = "function main(): void { const template = (value: number): number => value; template(1); }";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[(
+            "template".into(),
+            "__external_template".into(),
+            1,
+            1,
+            vec![thaw_hir::HirType::Json],
+            vec![],
+            None,
+        )],
+    )
+    .unwrap();
+    assert_eq!(rewritten, source);
+}
+
 /// A registry Fallback function's overloads with *identical* arity,
 /// discriminated only by each argument's actual type -- the same
 /// disambiguation `selects_same_arity_external_method_overloads_by_
