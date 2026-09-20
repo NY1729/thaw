@@ -34,6 +34,35 @@ fn parses_x_help_and_rejects_empty_specs() {
     assert!(parse_x_args(&["-p".into(), "pkg".into(), "".into()]).is_err());
 }
 
+#[test]
+fn parses_no_install_before_the_package() {
+    let invocation = parse_x_args(&[
+        "--no-install".into(),
+        "prettier@3".into(),
+        "--check".into(),
+        "app.ts".into(),
+    ])
+    .unwrap();
+    assert!(invocation.no_install);
+    assert_eq!(invocation.spec.as_deref(), Some("prettier@3"));
+    assert_eq!(invocation.arguments, ["--check", "app.ts"]);
+
+    // Options after the package belong to the package executable.
+    assert!(!parse_x_args(&["pkg".into(), "--no-install".into()])
+        .unwrap()
+        .no_install);
+}
+
+#[test]
+fn no_install_rejects_an_absent_package_without_fetching() {
+    let error = run_x(&[
+        "--no-install".into(),
+        "thaw-definitely-absent-package".into(),
+    ])
+    .unwrap_err();
+    assert!(error.contains("not installed locally"), "{error}");
+}
+
 /// `-p/--package <spec>` runs the explicitly named command from that
 /// package, `npx -p`-style.
 #[test]
@@ -178,9 +207,70 @@ fn finds_a_package_by_walking_up_node_modules() {
     let nested = root.join("src/deep");
     std::fs::create_dir_all(&nested).unwrap();
 
-    assert_eq!(find_local_package_dir("hello-cli", &nested), Some(package));
-    assert_eq!(find_local_package_dir("missing", &nested), None);
+    assert_eq!(
+        find_local_package_dir("hello-cli", "hello-cli", &nested),
+        Some(package)
+    );
+    assert_eq!(
+        find_local_package_dir("missing", "missing", &nested),
+        None
+    );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn versioned_x_only_reuses_an_exact_local_version() {
+    let root = temp_dir("local-version");
+    let package = root.join("node_modules/hello-cli");
+    std::fs::create_dir_all(&package).unwrap();
+    write_manifest(
+        &package,
+        r#"{"name":"hello-cli","version":"2.1.0","bin":"cli.js"}"#,
+    );
+
+    assert_eq!(
+        find_local_package_dir("hello-cli@2.1.0", "hello-cli", &root),
+        Some(package)
+    );
+    assert_eq!(
+        find_local_package_dir("hello-cli@1.0.0", "hello-cli", &root),
+        None
+    );
+    assert_eq!(
+        find_local_package_dir("hello-cli@latest", "hello-cli", &root),
+        None
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn x_cache_only_skips_resolution_for_an_exact_version() {
+    let root = temp_dir("cache-version");
+    write_manifest(&root, r#"{"name":"hello-cli","version":"2.1.0"}"#);
+
+    assert!(cached_package_matches("hello-cli@2.1.0", "hello-cli", &root));
+    assert!(!cached_package_matches("hello-cli", "hello-cli", &root));
+    assert!(!cached_package_matches("hello-cli@latest", "hello-cli", &root));
+    assert!(!cached_package_matches("hello-cli@^2", "hello-cli", &root));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn multiple_packages_share_one_safe_cache_key() {
+    let specs = vec!["@scope/tool@1.2.3".to_string(), "helper@latest".to_string()];
+    let key = x_cache_key(&specs);
+    assert_eq!(key.len(), 16);
+    assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_ne!(key, x_cache_key(&[specs[1].clone(), specs[0].clone()]));
+}
+
+#[test]
+fn package_bin_directories_precede_the_inherited_path() {
+    let first = std::path::PathBuf::from("/tmp/thaw-first-bin");
+    let second = std::path::PathBuf::from("/tmp/thaw-second-bin");
+    let path = executable_path(&[first.clone(), second.clone()]).unwrap();
+    let paths = std::env::split_paths(&path).collect::<Vec<_>>();
+    assert_eq!(&paths[..2], &[first, second]);
 }
 
 #[cfg(unix)]
