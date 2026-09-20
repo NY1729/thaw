@@ -72,6 +72,7 @@ fn collect_native_classes<'a>(
                 interfaces,
                 generic_interfaces,
                 &substitution,
+                interfaces.get(class),
             )?
         });
         Ok(if rest.is_some() || optional.iter().any(|value| *value) {

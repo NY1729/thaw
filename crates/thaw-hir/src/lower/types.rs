@@ -1681,6 +1681,7 @@ fn lower_generic_instance(
             interfaces,
             generic_interfaces,
             &substitution,
+            None,
         )?
     };
     let mut concrete_signatures = signatures.clone();
