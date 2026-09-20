@@ -335,9 +335,12 @@ fn bundle_commonjs_package_cached(
                 }
                 continue;
             }
-            if let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
+            let resolved = if analysis.static_esm_specs.contains(&spec) {
+                resolve_bare_import(node_modules_dir, &pkg_dir, resolution_spec)
+            } else {
                 resolve_bare_require(node_modules_dir, &pkg_dir, resolution_spec)
-            {
+            };
+            if let Some((dep_name, dep_relative, dep_abs, dep_dir)) = resolved {
                 let dep_key = format!("{dep_name}/{dep_relative}{suffix}");
                 requires.push((spec, dep_key.clone()));
                 if !visited.contains(&dep_key) {

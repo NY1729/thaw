@@ -620,6 +620,9 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
             let mut names = BTreeSet::new();
             for parameter in &function.params {
                 pattern_names(&parameter.pat, &mut names);
+                self.shadowed.push(names.clone());
+                parameter.visit_with(self);
+                self.shadowed.pop();
             }
             self.shadowed.push(names);
             function.decorators.visit_with(self);
@@ -640,6 +643,9 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
             let mut names = BTreeSet::new();
             for parameter in &arrow.params {
                 pattern_names(parameter, &mut names);
+                self.shadowed.push(names.clone());
+                parameter.visit_with(self);
+                self.shadowed.pop();
             }
             self.shadowed.push(names);
             arrow.body.visit_with(self);

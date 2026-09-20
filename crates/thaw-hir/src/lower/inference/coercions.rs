@@ -68,12 +68,11 @@ impl<'a> FnLowerer<'a> {
                 return Ok(HirExpr::JsonAsNative(Box::new(value), declared.clone()));
             }
         }
-        if *declared == HirType::JsValue
-            && matches!(self.infer_expr_type(&value)?, HirType::Function(_, _))
-        {
+        let inferred = self.infer_expr_type(&value)?;
+        if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _)) {
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("registerNativeCallback".to_string())),
-                vec![value],
+                vec![HirExpr::TypedClosure(inferred, Box::new(value))],
             ));
         }
         if *declared == HirType::JsValue
@@ -299,7 +298,7 @@ impl<'a> FnLowerer<'a> {
                 // skips, never double-wrapping).
                 return Ok(HirExpr::JsValueAsJson(Box::new(HirExpr::Call(
                     Box::new(HirExpr::Var("registerNativeCallback".to_string())),
-                    vec![value],
+                    vec![HirExpr::TypedClosure(actual.clone(), Box::new(value))],
                 ))));
             }
             // A bare `undefined` literal (`schema.safeParse(undefined)`,

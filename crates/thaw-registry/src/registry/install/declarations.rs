@@ -1705,6 +1705,7 @@ fn all_reexported_function_declarations(
             }
         }
     }
+    let named_import_targets = named_import_targets(path, &module);
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
@@ -1731,14 +1732,22 @@ fn all_reexported_function_declarations(
                 .as_ref()
                 .and_then(export_name)
                 .unwrap_or_else(|| original.clone());
-            let Some(snippets) = local_declarations.get(&original) else {
+            let snippets = if let Some(snippets) = local_declarations.get(&original) {
+                snippets.clone()
+            } else if let Some((target, target_name)) = named_import_targets.get(&original) {
+                let mut nested_visited = visited.clone();
+                all_reexported_function_declarations(target, &mut nested_visited)?
+                    .into_iter()
+                    .filter_map(|(name, snippet)| (name == *target_name).then_some(snippet))
+                    .collect()
+            } else {
                 continue;
             };
             for snippet in snippets {
                 let snippet = if exported == original {
-                    snippet.clone()
+                    snippet
                 } else {
-                    rename_declared_function(snippet.clone(), &exported)
+                    rename_declared_function(snippet, &exported)
                 };
                 // The exported alias can be any identifier-like text at
                 // all in TS export-specifier syntax, including a real
@@ -2350,6 +2359,16 @@ fn reexported_class_or_interface_declarations_inner(
     })?;
     let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
     let mut local_name = name.to_string();
+    if name == "default" {
+        for item in &module.body {
+            let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(default_expr)) = item else {
+                continue;
+            };
+            if let thaw_parser::ast::Expr::Ident(identifier) = default_expr.expr.as_ref() {
+                local_name = identifier.sym.to_string();
+            }
+        }
+    }
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
@@ -2390,7 +2409,7 @@ fn reexported_class_or_interface_declarations_inner(
     // which isn't a valid identifier to splice into a declaration) --
     // the caller (`dts_source_with_reexported_functions`) renames it to
     // the local alias its own `extends` clause actually names.
-    if name == "default" {
+    if name == "default" && local_name == "default" {
         for item in &module.body {
             let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default_decl)) = item else {
                 continue;
@@ -2484,7 +2503,7 @@ fn reexported_class_or_interface_declarations_inner(
                 source_map
                     .span_to_snippet(declaration.span())
                     .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?;
-            if local_name != name {
+            if name != "default" && local_name != name {
                 snippet = rename_declared_function(snippet, name);
             }
             if !snippet.trim_start().starts_with("export ") {

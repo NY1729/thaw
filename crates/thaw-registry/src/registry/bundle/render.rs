@@ -81,6 +81,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20localRequire.addon = require.addon;\n\
+         \x20\x20\x20\x20localRequire.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
          \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
          \x20\x20\x20\x20\x20\x20if (!target) return Promise.resolve().then(function() { return require(spec); });\n\
