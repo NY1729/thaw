@@ -20,7 +20,7 @@ fn selects_package_exports_conditions_for_runtime_and_types() {
     )
     .unwrap();
     assert_eq!(
-        package_export_target(&manifest, None, &["require", "import", "default"]),
+        package_export_target(&manifest, None, &["require", "node", "default"]),
         Some("./dist/index.cjs")
     );
     assert_eq!(
@@ -55,6 +55,22 @@ fn selects_package_exports_conditions_for_runtime_and_types() {
     );
     assert_eq!(
         package_export_target(&nested, Some("package.json"), &["types"]),
+        None
+    );
+
+    let ordered: serde_json::Value = serde_json::from_str(
+        r#"{"exports":{".":{"default":"./default.js","node":"./node.js"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        package_export_target(&ordered, None, &["require", "node", "default"]),
+        Some("./default.js")
+    );
+
+    let import_only: serde_json::Value =
+        serde_json::from_str(r#"{"exports":{".":{"import":"./index.mjs"}}}"#).unwrap();
+    assert_eq!(
+        package_export_target(&import_only, None, &["require", "node", "default"]),
         None
     );
 }

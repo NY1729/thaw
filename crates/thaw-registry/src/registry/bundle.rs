@@ -106,7 +106,7 @@ fn runtime_export_specifiers(
         let Some(subpath) = key.strip_prefix("./") else {
             continue;
         };
-        let Some(runtime) = select_export_condition(target, &["require", "node", "default", "import"])
+        let Some(runtime) = select_export_condition(target, &["require", "node", "default"])
         else {
             continue;
         };
