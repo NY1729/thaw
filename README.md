@@ -100,12 +100,15 @@ Run a package's own command without installing it, like `npx` / `bun x`:
 ```sh
 target/release/thaw x cowsay hello
 target/release/thaw x prettier@3 --write app.ts
+target/release/thaw x --no-install eslint .
 ```
 
-`thaw x` resolves an installed `node_modules/<package>` first, otherwise
-installs the package into a cache under `$XDG_CACHE_HOME/thaw/x` and runs
-its `bin` entry, forwarding arguments and the exit code. `thaw x -p <package>
-<command>` selects a specific command (`npx -p` style).
+`thaw x` resolves a matching installed `node_modules/<package>` first,
+otherwise installs the package into a cache under `$XDG_CACHE_HOME/thaw/x`
+and runs its `bin` entry, forwarding arguments and the exit code. Fixed
+versions are reused while tags, ranges, and unversioned requests are refreshed
+through npm. `thaw x -p <package> <command>` selects a specific command
+(`npx -p` style); repeat `-p` to expose several packages in one execution.
 
 A bare `import` that is not in the registry or an adjacent `node_modules` is
 fetched from npm during the build, so no prior `thaw install`/`registry add`
