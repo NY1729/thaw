@@ -451,16 +451,22 @@ impl<'a> FnLowerer<'a> {
     /// bucket starts as a fresh empty array and is grown in place with
     /// `.push()`'s own handle-mutation, so repeated keys accumulate
     /// correctly without re-inserting into the map on every match.
-    fn lower_map_group_by(
+    fn lower_group_by(
         &mut self,
         items: HirExpr,
         item_type: HirType,
         key_fn: HirExpr,
+        object_result: bool,
     ) -> Result<HirExpr, String> {
         let HirType::Function(_, key_type) = self.infer_expr_type(&key_fn)? else {
             unreachable!("Map.groupBy key function was validated as a function")
         };
         let key_type = key_type.as_ref().clone();
+        if object_result && key_type != HirType::Str {
+            return Err(format!(
+                "Object.groupBy key function must return a string, got {key_type:?}"
+            ));
+        }
         let key_suffix = map_key_intrinsic_suffix(&key_type)?;
         let (value_suffix, needs_type_wrap) =
             map_value_get_suffix(&HirType::Array(Box::new(item_type.clone())))?;
@@ -487,7 +493,11 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let bucket_name = format!("__thaw_group_by_bucket_{}", self.next_binding);
         self.next_binding += 1;
-        let result_type = HirType::Map(Box::new(key_type.clone()), Box::new(items_type.clone()));
+        let result_type = if object_result {
+            HirType::Dictionary(Box::new(items_type.clone()))
+        } else {
+            HirType::Map(Box::new(key_type.clone()), Box::new(items_type.clone()))
+        };
         let bucket_type = items_type.clone();
         self.scope.insert(length_name.clone(), HirType::F64);
         self.scope.insert(result_name.clone(), result_type.clone());
@@ -496,17 +506,62 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(key_name.clone(), key_type.clone());
         self.scope.insert(bucket_name.clone(), bucket_type.clone());
         let var = |name: &str| HirExpr::Var(name.to_string());
-        let has_intrinsic = format!("__thaw_map_{key_suffix}_has");
-        let set_intrinsic = format!("__thaw_map_{key_suffix}_set");
-        let get_intrinsic = format!("__thaw_map_{key_suffix}_get_{value_suffix}");
-        let raw_get = HirExpr::Call(
-            Box::new(HirExpr::Var(get_intrinsic)),
-            vec![var(&result_name), var(&key_name)],
-        );
-        let bucket_value = if needs_type_wrap {
+        let raw_get = if object_result {
+            HirExpr::JsonKey(Box::new(var(&result_name)), Box::new(var(&key_name)))
+        } else {
+            HirExpr::Call(
+                Box::new(HirExpr::Var(format!(
+                    "__thaw_map_{key_suffix}_get_{value_suffix}"
+                ))),
+                vec![var(&result_name), var(&key_name)],
+            )
+        };
+        let bucket_value = if object_result {
+            HirExpr::JsonAsNative(Box::new(raw_get), bucket_type.clone())
+        } else if needs_type_wrap {
             HirExpr::TypedClosure(bucket_type.clone(), Box::new(raw_get))
         } else {
             raw_get
+        };
+        let empty_bucket = HirExpr::ArrayAlloc(
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            item_type.clone(),
+        );
+        let insert_bucket = if object_result {
+            HirExpr::JsonSet(
+                Box::new(var(&result_name)),
+                Box::new(var(&key_name)),
+                Box::new(empty_bucket),
+                bucket_type.clone(),
+                false,
+            )
+        } else {
+            HirExpr::Call(
+                Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
+                vec![var(&result_name), var(&key_name), empty_bucket],
+            )
+        };
+        let has_bucket = if object_result {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_has_own".into())),
+                vec![var(&result_name), var(&key_name)],
+            )
+        } else {
+            HirExpr::Call(
+                Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_has"))),
+                vec![var(&result_name), var(&key_name)],
+            )
+        };
+        let persist_bucket = if object_result {
+            HirExpr::JsonSet(
+                Box::new(var(&result_name)),
+                Box::new(var(&key_name)),
+                Box::new(var(&bucket_name)),
+                bucket_type.clone(),
+                false,
+            )
+        } else {
+            HirExpr::Lit(HirLit::Bool(true))
         };
         let body = HirExpr::Block(vec![
             HirStmt::Let(
@@ -517,7 +572,14 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(
                 result_name.clone(),
                 result_type,
-                HirExpr::Call(Box::new(HirExpr::Var("__thaw_map_new".to_string())), Vec::new()),
+                if object_result {
+                    HirExpr::JsonObjectLit(Vec::new(), bucket_type.clone())
+                } else {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_map_new".to_string())),
+                        Vec::new(),
+                    )
+                },
             ),
             HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
             HirStmt::While(
@@ -545,28 +607,16 @@ impl<'a> FnLowerer<'a> {
                         ),
                     ),
                     HirStmt::If(
-                        HirExpr::Call(
-                            Box::new(HirExpr::Var(has_intrinsic)),
-                            vec![var(&result_name), var(&key_name)],
-                        ),
+                        has_bucket,
                         Vec::new(),
-                        vec![HirStmt::Expr(HirExpr::Call(
-                            Box::new(HirExpr::Var(set_intrinsic)),
-                            vec![
-                                var(&result_name),
-                                var(&key_name),
-                                HirExpr::ArrayAlloc(
-                                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                                    item_type.clone(),
-                                ),
-                            ],
-                        ))],
+                        vec![HirStmt::Expr(insert_bucket)],
                     ),
                     HirStmt::Let(bucket_name.clone(), bucket_type, bucket_value),
                     HirStmt::Expr(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_array_push".to_string())),
                         vec![var(&bucket_name), var(&item_name)],
                     )),
+                    HirStmt::Expr(persist_bucket),
                     HirStmt::Expr(HirExpr::Assign(
                         index_name.clone(),
                         Box::new(HirExpr::BinOp(

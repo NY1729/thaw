@@ -1172,6 +1172,39 @@ fn compiles_map_group_by_a_native_array() {
 }
 
 #[test]
+fn compiles_object_group_by_a_native_array() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const items: number[] = [1, 2, 3, 4, 5];
+            const groups: Record<string, number[]> = Object.groupBy(
+                items,
+                (value, index) => {
+                    console.log("key", value, index);
+                    return value % 2 === 0 ? "even" : "odd";
+                },
+            );
+            console.log(groups.even.join(","));
+            console.log(groups.odd.join(","));
+            console.log(Object.keys(groups).join(","));
+
+            const empty: number[] = [];
+            const emptyGroups: Record<string, number[]> = Object.groupBy(
+                empty,
+                value => "all",
+            );
+            console.log(Object.keys(emptyGroups).length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_group_by"),
+        concat!(
+            "key 1 0\n", "key 2 1\n", "key 3 2\n", "key 4 3\n", "key 5 4\n",
+            "2,4\n", "1,3,5\n", "odd,even\n", "0\n",
+        )
+    );
+}
+
+#[test]
 fn compiles_set_union_intersection_and_difference() {
     // Each builds a fresh Set from `__thaw_map_snapshot_keys` snapshots of
     // its operand(s), the same conversion `[...set]`/`Array.from(set)`
@@ -1228,4 +1261,3 @@ fn compiles_set_symmetric_difference_and_relational_predicates() {
         "1,4\nfalse\ntrue\ntrue\nfalse\nfalse\ntrue\n3 3\n"
     );
 }
-

@@ -18,6 +18,211 @@ fn is_untyped_promise_reject(expr: &Expr) -> bool {
 }
 
 impl<'a> FnLowerer<'a> {
+    fn lower_promise_try(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        let Some((callback_arg, argument_exprs)) = call.args.split_first() else {
+            return Err("`Promise.try` expects a callback".into());
+        };
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return Err("`Promise.try` does not yet support spread arguments".into());
+        }
+        let arguments = argument_exprs
+            .iter()
+            .map(|argument| self.lower_expr(&argument.expr))
+            .collect::<Result<Vec<_>, _>>()?;
+        let argument_types = arguments
+            .iter()
+            .map(|argument| self.infer_expr_type(argument))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = match &call.type_args {
+            Some(type_args) => {
+                let [expected] = type_args.params.as_slice() else {
+                    return Err("`Promise.try` expects at most one type argument".into());
+                };
+                Some(lower_ts_type(
+                    expected,
+                    self.interfaces,
+                    self.generic_interfaces,
+                )?)
+            }
+            None => None,
+        };
+        let callback = self.lower_promise_callback(
+            &callback_arg.expr,
+            &argument_types,
+            None,
+        )?;
+        let HirType::Function(_, output) = self.infer_expr_type(&callback)? else {
+            unreachable!("Promise.try callback was lowered as a function")
+        };
+        let (resolved, assimilates) = match output.as_ref() {
+            HirType::Promise(inner) => (inner.as_ref().clone(), true),
+            output => (output.clone(), false),
+        };
+        if expected.as_ref().is_some_and(|expected| expected != &resolved) {
+            return Err(format!(
+                "Promise.try callback resolves to {resolved:?}, expected {:?}",
+                expected.unwrap()
+            ));
+        }
+        let callback_name = format!("__thaw_promise_try_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_type = self.infer_expr_type(&callback)?;
+        self.scope
+            .insert(callback_name.clone(), callback_type.clone());
+        let mut bindings = vec![(callback_name.clone(), callback_type, callback)];
+        let mut call_arguments = Vec::with_capacity(arguments.len());
+        let mut captures = vec![HirParam {
+            name: callback_name.clone(),
+            ty: self.scope[&callback_name].clone(),
+        }];
+        for (argument, ty) in arguments.into_iter().zip(argument_types) {
+            let name = format!("__thaw_promise_try_arg_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            call_arguments.push(HirExpr::Var(name.clone()));
+            captures.push(HirParam {
+                name: name.clone(),
+                ty: ty.clone(),
+            });
+            bindings.push((name, ty, argument));
+        }
+        let resolve_name = format!("__thaw_promise_try_resolve_{}", self.next_binding);
+        self.next_binding += 1;
+        let resolve_params = if resolved == HirType::Void && !assimilates {
+            Vec::new()
+        } else {
+            vec![if assimilates {
+                HirType::Promise(Box::new(resolved.clone()))
+            } else {
+                resolved.clone()
+            }]
+        };
+        let resolve_type = HirType::Function(resolve_params, Box::new(HirType::Void));
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name)),
+            call_arguments,
+        );
+        let body = if resolved == HirType::Void && !assimilates {
+            HirExpr::Block(vec![
+                HirStmt::Expr(result),
+                HirStmt::Return(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var(resolve_name.clone())),
+                    Vec::new(),
+                ))),
+            ])
+        } else {
+            HirExpr::Call(
+                Box::new(HirExpr::Var(resolve_name.clone())),
+                vec![result],
+            )
+        };
+        let executor = HirExpr::Lambda(
+            captures,
+            vec![HirParam {
+                name: resolve_name.clone(),
+                ty: resolve_type,
+            }],
+            HirType::Void,
+            Box::new(body),
+        );
+        self.wrap_call_argument_bindings(
+            HirExpr::PromiseNew(Box::new(executor), resolved, assimilates),
+            &bindings,
+        )
+    }
+
+    fn lower_promise_with_resolvers(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        if !call.args.is_empty() {
+            return Err("`Promise.withResolvers` expects no arguments".into());
+        }
+        let resolved = match &call.type_args {
+            Some(type_args) => {
+                let [resolved] = type_args.params.as_slice() else {
+                    return Err("`Promise.withResolvers` expects one type argument".into());
+                };
+                lower_ts_type(resolved, self.interfaces, self.generic_interfaces)?
+            }
+            None => HirType::Json,
+        };
+        let resolve_params = if resolved == HirType::Void {
+            Vec::new()
+        } else {
+            vec![resolved.clone()]
+        };
+        let resolve_type = HirType::Function(resolve_params, Box::new(HirType::Void));
+        let reject_type = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
+        let promise_type = HirType::Promise(Box::new(resolved.clone()));
+        let result_type = HirType::Object(vec![
+            ("promise".into(), promise_type.clone()),
+            ("resolve".into(), resolve_type.clone()),
+            ("reject".into(), reject_type.clone()),
+        ]);
+        let result_name = format!("__thaw_with_resolvers_{}", self.next_binding);
+        self.next_binding += 1;
+        let promise_name = format!("__thaw_with_resolvers_promise_{}", self.next_binding);
+        self.next_binding += 1;
+        let resolve_name = format!("__thaw_with_resolvers_resolve_{}", self.next_binding);
+        self.next_binding += 1;
+        let reject_name = format!("__thaw_with_resolvers_reject_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(result_name.clone(), result_type.clone());
+        self.scope.insert(promise_name.clone(), promise_type.clone());
+
+        let assign = |field: &str, value: &str| {
+            HirStmt::Expr(HirExpr::PropAssign(
+                Box::new(HirExpr::Var(result_name.clone())),
+                result_type.clone(),
+                field.into(),
+                Box::new(HirExpr::Var(value.into())),
+            ))
+        };
+        let executor = HirExpr::Lambda(
+            vec![HirParam {
+                name: result_name.clone(),
+                ty: result_type.clone(),
+            }],
+            vec![
+                HirParam {
+                    name: resolve_name.clone(),
+                    ty: resolve_type,
+                },
+                HirParam {
+                    name: reject_name.clone(),
+                    ty: reject_type,
+                },
+            ],
+            HirType::Void,
+            Box::new(HirExpr::Block(vec![
+                assign("resolve", &resolve_name),
+                assign("reject", &reject_name),
+                HirStmt::Return(None),
+            ])),
+        );
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                result_name.clone(),
+                result_type.clone(),
+                HirExpr::ObjectAlloc(result_type.clone()),
+            ),
+            HirStmt::Let(
+                promise_name.clone(),
+                promise_type,
+                HirExpr::PromiseNew(Box::new(executor), resolved, false),
+            ),
+            assign("promise", &promise_name),
+            HirStmt::Return(Some(HirExpr::Var(result_name))),
+        ]);
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                Vec::new(),
+                result_type,
+                Box::new(body),
+            )),
+            Vec::new(),
+        ))
+    }
+
     fn lower_promise_member_call(
         &mut self,
         member: &MemberExpr,

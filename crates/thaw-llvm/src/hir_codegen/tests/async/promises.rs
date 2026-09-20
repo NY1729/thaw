@@ -803,3 +803,51 @@ fn a_bare_unawaited_async_call_resumes_after_a_settimeout_resolved_promise() {
         "before\nafter\n"
     );
 }
+
+#[test]
+fn promise_with_resolvers_exposes_settlement_functions() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const fulfilled = Promise.withResolvers<number>();
+            fulfilled.resolve(42);
+            console.log(await fulfilled.promise);
+
+            const rejected = Promise.withResolvers<number>();
+            rejected.reject("nope");
+            console.log(await rejected.promise.catch(error => {
+                console.log(error);
+                return 7;
+            }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_with_resolvers"),
+        "42\nnope\n7\n"
+    );
+}
+
+#[test]
+fn promise_try_wraps_values_promises_and_throws() {
+    let source = r#"
+        function fail(): number {
+            throw new Error("boom");
+        }
+        async function main(): Promise<void> {
+            console.log(await Promise.try(
+                (left: number, right: number) => left + right,
+                20,
+                22,
+            ));
+            console.log(await Promise.try<number>(() => Promise.resolve(7)));
+            try {
+                await Promise.try<number>(fail);
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_try"),
+        "42\n7\nboom\n"
+    );
+}
