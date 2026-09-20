@@ -681,6 +681,55 @@ fn compiles_regex_test() {
 }
 
 #[test]
+fn compiles_regexp_escape() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(RegExp.escape("foo.bar"));
+            console.log(RegExp.escape("foo-bar"));
+            console.log(RegExp.escape("(foo)"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regexp_escape"),
+        "\\x66oo\\.bar\n\\x66oo\\x2dbar\n\\(foo\\)\n"
+    );
+}
+
+#[test]
+fn compiles_regexp_modifiers() {
+    let source = r#"
+        function main(): void {
+            console.log(/a(?i:b)c/.test("aBc"));
+            console.log(/(?i:a(?-i:b)c)/.test("Abc"));
+            console.log(/(?i:a(?-i:b)c)/.test("ABC"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regexp_modifiers"),
+        "true\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn compiles_float16_builtins() {
+    let source = r#"
+        function main(): void {
+            const values = new Float16Array([1.337, 2.5]);
+            const buffer = new ArrayBuffer(2);
+            const view = new DataView(buffer);
+            view.setFloat16(0, 1.337, true);
+            console.log(values.length, values[0], values[1]);
+            console.log(view.getFloat16(0, true));
+            console.log(Math.f16round(1.337));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "float16_builtins"),
+        "2 1.3369140625 2.5\n1.3369140625\n1.3369140625\n"
+    );
+}
+
+#[test]
 fn compiles_string_search() {
     let source = r#"
         function value(): string {

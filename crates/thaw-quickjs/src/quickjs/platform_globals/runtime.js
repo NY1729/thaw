@@ -33,6 +33,8 @@
   globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
+  globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
+    JSON.stringify(value, replacer, space);
   globalThis.__thaw_instanceof_date_dynamic_value = value => value instanceof Date;
   // General sibling of the Date-only check above, for `value instanceof C`
   // where both sides are live handles (e.g. a decorated class's own

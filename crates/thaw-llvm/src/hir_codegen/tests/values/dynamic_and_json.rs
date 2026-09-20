@@ -832,19 +832,25 @@ fn compiles_structured_clone_of_a_map_or_set() {
 }
 
 #[test]
-fn rejects_json_stringify_function_replacers() {
-    let module = thaw_parser::parse_typescript(
-        r#"function main(): void {
-            const value: Json = JSON.parse("{}");
-            console.log(JSON.stringify(
-                value,
-                (key: string, current: Json): Json => current
-            ));
-        }"#,
-    )
-    .unwrap();
-    let error = thaw_hir::lower_module(&module).unwrap_err();
-    assert!(error.contains("function replacers"), "{error}");
+fn json_stringify_calls_function_replacers() {
+    let source = r#"function main(): void {
+        const value: Json = JSON.parse('{"keep":2,"other":3}');
+        console.log(JSON.stringify(value, (key: string, current: Json): Json => {
+            return key === "keep" ? JSON.parse("4") : current;
+        }));
+        console.log(JSON.stringify(
+            value,
+            (key: string, current: Json): Json => current,
+            2
+        ));
+        console.log(JSON.stringify(value, (key: string, current: Json): any => {
+            return key === "other" ? undefined : current;
+        }));
+    }"#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_function_replacer"),
+        "{\"keep\":4,\"other\":3}\n{\n  \"keep\": 2,\n  \"other\": 3\n}\n{\"keep\":2}\n"
+    );
 }
 
 #[test]
@@ -954,4 +960,3 @@ fn compiles_dynamic_uniform_tagged_object_reads_without_nested_tags() {
         "1\nundefined\nundefined\n2\nnull\nundefined\n3\nnull\nundefined\nundefined\n"
     );
 }
-
