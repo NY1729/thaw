@@ -39,6 +39,55 @@ fn builds_and_runs_a_constructor_overload() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A fluent class method declared `: this` and returning `this`
+/// (`add(x): this { ...; return this; }`), called both through a `const`
+/// binding and chained directly off a call or `new` (`c.add(1).add(2)`).
+///
+/// Two gaps, fixed together: `: this` was rejected outright ("unsupported
+/// type annotation TsThisType"), and a method call used as a receiver of
+/// another call wasn't recognized (`infer_member_receiver_type` only
+/// recovered a `JsValue` receiver, not a native class's declared method
+/// return). A `return this` method also can't have the detached/unbound
+/// variant thaw otherwise generates, since there `this` is undefined.
+#[test]
+fn builds_and_runs_a_fluent_this_returning_method() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-fluent-this-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "class Cart {\n\
+         \x20\x20items: number[] = [];\n\
+         \x20\x20add(value: number): this {\n\
+         \x20\x20\x20\x20this.items.push(value);\n\
+         \x20\x20\x20\x20return this;\n\
+         \x20\x20}\n\
+         \x20\x20count(): number { return this.items.length; }\n\
+         }\n\
+         function main(): void {\n\
+         \x20\x20const cart = new Cart().add(1).add(2).add(3);\n\
+         \x20\x20console.log(cart.count());\n\
+         \x20\x20const bound = new Cart();\n\
+         \x20\x20bound.add(9);\n\
+         \x20\x20console.log(bound.count());\n\
+         }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"3\n1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `instanceof` against an ordinary, non-Error, same-module class (and a
 /// subclass) must work end to end. The module rename pass used to leave an
 /// `instanceof` right operand completely unrenamed while the class

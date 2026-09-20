@@ -380,6 +380,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         &interfaces,
                         &generic_interfaces,
                         &type_substitution,
+                        None,
                     )?
                 };
                 let type_predicate = match func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()) {
@@ -697,6 +698,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             &interfaces,
                             &generic_interfaces,
                             &HashMap::new(),
+                            interfaces.get(name.as_str()),
                         )?
                     };
                     let symbol = match method.kind {
@@ -751,7 +753,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .expect("class method signature")
                         .native_rest = native_rest;
                     let unbound_symbol = (method.kind == MethodKind::Method
-                        && signatures[&symbol].uses_this)
+                        && signatures[&symbol].uses_this
+                        // A `return this` method's detached form can't bind
+                        // `this` (see `declarations.rs`'s matching gate).
+                        && signatures[&symbol].ret != instance_type)
                         .then(|| unbound_class_method_symbol(&symbol));
                     if let Some(unbound_symbol) = &unbound_symbol {
                         let mut unbound = signatures[&symbol].clone();
