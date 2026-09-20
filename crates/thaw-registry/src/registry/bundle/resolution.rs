@@ -71,16 +71,43 @@ fn resolve_bare_require(
     requiring_pkg_dir: &Path,
     spec: &str,
 ) -> Option<(String, String, PathBuf, PathBuf)> {
+    resolve_bare_specifier(
+        node_modules_dir,
+        requiring_pkg_dir,
+        spec,
+        &["require", "node", "default"],
+    )
+}
+
+fn resolve_bare_import(
+    node_modules_dir: &Path,
+    requiring_pkg_dir: &Path,
+    spec: &str,
+) -> Option<(String, String, PathBuf, PathBuf)> {
+    resolve_bare_specifier(
+        node_modules_dir,
+        requiring_pkg_dir,
+        spec,
+        &["import", "node", "default"],
+    )
+}
+
+fn resolve_bare_specifier(
+    node_modules_dir: &Path,
+    requiring_pkg_dir: &Path,
+    spec: &str,
+    conditions: &[&str],
+) -> Option<(String, String, PathBuf, PathBuf)> {
     let (dep_name, subpath) = split_bare_spec(spec);
     let dep_dir = resolve_dependency_dir(node_modules_dir, requiring_pkg_dir, dep_name);
     let target = match subpath {
         Some(sub) => read_manifest(&dep_dir)
             .ok()
-            .and_then(|manifest| package_subpath_runtime_target(&manifest, sub))
+            .and_then(|manifest| package_subpath_runtime_target(&manifest, sub, conditions))
             .unwrap_or_else(|| sub.to_string()),
         None => {
             let manifest = read_manifest(&dep_dir).ok()?;
-            package_export_target(&manifest, None, &["require", "node", "default"])
+            package_export_target(&manifest, None, conditions)
                 .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
                 .unwrap_or("index.js")
                 .to_string()
@@ -90,12 +117,12 @@ fn resolve_bare_require(
     Some((dep_name.to_string(), dep_relative, dep_abs, dep_dir))
 }
 
-fn package_subpath_runtime_target(manifest: &serde_json::Value, subpath: &str) -> Option<String> {
-    if let Some(target) = package_export_target(
-        manifest,
-        Some(subpath),
-        &["require", "node", "default"],
-    ) {
+fn package_subpath_runtime_target(
+    manifest: &serde_json::Value,
+    subpath: &str,
+    conditions: &[&str],
+) -> Option<String> {
+    if let Some(target) = package_export_target(manifest, Some(subpath), conditions) {
         return Some(target.to_string());
     }
     let exports = manifest.get("exports")?.as_object()?;
@@ -106,9 +133,7 @@ fn package_subpath_runtime_target(manifest: &serde_json::Value, subpath: &str) -
         let Some(capture) = wildcard_capture(pattern, subpath) else {
             continue;
         };
-        if let Some(target) =
-            select_export_condition(value, &["require", "node", "default"])
-        {
+        if let Some(target) = select_export_condition(value, conditions) {
             return Some(target.replace('*', capture));
         }
     }

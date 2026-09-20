@@ -279,6 +279,21 @@ fn live_import_rewrite_respects_function_local_shadowing() {
     );
 }
 
+#[test]
+fn live_import_rewrite_updates_destructured_parameter_defaults() {
+    let rewritten = rewrite_esm_to_commonjs(
+        "import process from 'node:process';\n\
+         import pathKey from 'path-key';\n\
+         export const run = ({ path = process.env[pathKey()], execPath = process.execPath } = {}) => [path, execPath];",
+    )
+    .unwrap();
+    assert!(
+        rewritten.contains("__thaw_esm_import_0") && rewritten.contains("__thaw_esm_import_1"),
+        "{rewritten}"
+    );
+    assert!(!rewritten.contains("process.env[pathKey()]"), "{rewritten}");
+}
+
 /// The bundle isn't just plausible-looking text: an ESM main file
 /// importing from an ESM sibling file must actually run correctly
 /// through the real QuickJS-NG engine, exactly like the equivalent

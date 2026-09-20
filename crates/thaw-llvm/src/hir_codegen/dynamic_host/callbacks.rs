@@ -944,10 +944,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let [closure_expr] = args else {
             return Err("registerNativeCallback expects exactly one argument".into());
         };
-        let (params, ret, optional) = match self.expr_hir_type(closure_expr) {
-            Some(HirType::Function(params, ret)) => (params, *ret, false),
+        let (params, ret, optional, has_rest) = match self.expr_hir_type(closure_expr) {
+            Some(HirType::Function(params, ret)) => (params, *ret, false, false),
+            Some(HirType::CallableFunction(mut params, _, rest, ret)) => {
+                let has_rest = rest.is_some();
+                if let Some(rest) = rest {
+                    params.push(HirType::Array(rest));
+                }
+                (params, *ret, false, has_rest)
+            }
             Some(HirType::Optional(inner)) => match *inner {
-                HirType::Function(params, ret) => (params, *ret, true),
+                HirType::Function(params, ret) => (params, *ret, true, false),
                 _ => {
                     return Err(
                         "registerNativeCallback: could not determine the callback's own function type"
@@ -980,7 +987,9 @@ impl<'ctx> HirCompiler<'ctx> {
             closure
         }
         .into_pointer_value();
-        self.compile_register_native_callback_from_closure(closure, &params, &ret)
+        self.compile_register_native_callback_from_closure_with_rest(
+            closure, &params, &ret, has_rest,
+        )
     }
 
     pub(super) fn compile_register_native_callback_from_closure(

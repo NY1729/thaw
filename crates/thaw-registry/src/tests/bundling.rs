@@ -635,3 +635,46 @@ fn a_subpath_export_prefers_commonjs_over_an_esm_import_condition() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn bundles_transitive_bare_esm_imports() {
+    let root = temp_registry("bundle_transitive_bare_esm_imports");
+    let node_modules = root.join("node_modules");
+    let package = node_modules.join("runner");
+    let middle = node_modules.join("npm-run-path");
+    let leaf = node_modules.join("unicorn-magic");
+    for directory in [&package, &middle, &leaf] {
+        fs::create_dir_all(directory).unwrap();
+        fs::write(
+            directory.join("package.json"),
+            r#"{"type":"module","exports":{"default":"./index.js"}}"#,
+        )
+        .unwrap();
+    }
+    fs::write(
+        leaf.join("package.json"),
+        r#"{"type":"module","exports":{"node":{"import":"./index.js"}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "import { npmRunPath } from 'npm-run-path'; export default npmRunPath();",
+    )
+    .unwrap();
+    fs::write(
+        middle.join("index.js"),
+        "import { toPath } from 'unicorn-magic'; export const npmRunPath = () => toPath('ok');",
+    )
+    .unwrap();
+    fs::write(
+        leaf.join("index.js"),
+        "export const toPath = value => value;",
+    )
+    .unwrap();
+
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "runner", &package, "index.js").unwrap();
+    assert!(bundle.contains("unicorn-magic/./index.js"), "{bundle}");
+
+    let _ = fs::remove_dir_all(root);
+}
