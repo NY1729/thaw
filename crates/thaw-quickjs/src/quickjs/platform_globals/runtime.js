@@ -335,7 +335,7 @@
   hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
   const processStream = (fd, writer) => ({
     fd,
-    isTTY: false,
+    isTTY: globalThis.__thaw_process_is_tty(fd) ? true : undefined,
     write(value, encoding, callback) {
       if (typeof encoding === 'function') callback = encoding;
       writer(String(value));
@@ -350,6 +350,49 @@
     ref() { return this; },
     unref() { return this; }
   });
+  const stdinListeners = new Map();
+  let stdinEncoding;
+  let stdinStarted = false;
+  const startStdin = () => {
+    if (stdinStarted) return;
+    stdinStarted = true;
+    // ponytail: read one chunk; add fd polling when interactive streaming is needed.
+    const value = Buffer.from(globalThis.__thaw_process_read_stdin(), 'hex');
+    nextTick(() => {
+      const chunk = stdinEncoding ? value.toString(stdinEncoding) : value;
+      if (value.length) {
+        for (const listener of (stdinListeners.get('data') || []).slice()) listener(chunk);
+      }
+      for (const listener of (stdinListeners.get('end') || []).slice()) listener();
+    });
+  };
+  const stdin = {
+    fd: 0,
+    isTTY: globalThis.__thaw_process_is_tty(0) ? true : undefined,
+    setEncoding(encoding) { stdinEncoding = String(encoding); return this; },
+    on(name, listener) {
+      const key = String(name), listeners = stdinListeners.get(key) || [];
+      listeners.push(listener);
+      stdinListeners.set(key, listeners);
+      if (key === 'data' || key === 'end') startStdin();
+      return this;
+    },
+    once(name, listener) {
+      const wrapped = value => { this.off(name, wrapped); listener(value); };
+      wrapped.listener = listener;
+      return this.on(name, wrapped);
+    },
+    off(name, listener) {
+      const key = String(name), listeners = stdinListeners.get(key) || [];
+      stdinListeners.set(key, listeners.filter(entry => entry !== listener && entry.listener !== listener));
+      return this;
+    },
+    removeListener(name, listener) { return this.off(name, listener); },
+    resume() { startStdin(); return this; },
+    pause() { return this; },
+    ref() { return this; },
+    unref() { return this; }
+  };
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || JSON.parse(globalThis.__thaw_host_argv_json || '[]'),
     env: Object.assign({}, JSON.parse(globalThis.__thaw_host_env_json || '{}'),
@@ -361,7 +404,7 @@
     config: globalThis.process.config || { variables: {} },
     versions: Object.assign({ node: '', modules: '', uv: '' },
                             globalThis.process.versions || {}),
-    stdin: globalThis.process.stdin || processStream(0, () => {}),
+    stdin: globalThis.process.stdin || stdin,
     stdout: globalThis.process.stdout || processStream(1, globalThis.__thaw_console_stdout),
     stderr: globalThis.process.stderr || processStream(2, globalThis.__thaw_console_stderr),
     cwd: () => globalThis.__thaw_process_cwd(),
