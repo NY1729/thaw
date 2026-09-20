@@ -104,7 +104,22 @@ target/release/thaw x prettier@3 --write app.ts
 
 `thaw x` resolves an installed `node_modules/<package>` first, otherwise
 installs the package into a cache under `$XDG_CACHE_HOME/thaw/x` and runs
-its `bin` entry, forwarding arguments and the exit code.
+its `bin` entry, forwarding arguments and the exit code. `thaw x -p <package>
+<command>` selects a specific command (`npx -p` style).
+
+A bare `import` that is not in the registry or an adjacent `node_modules` is
+fetched from npm during the build, so no prior `thaw install`/`registry add`
+is needed. Pass `--no-install` to keep the build offline.
+
+Run a project script with `thaw run` (`bun run` style):
+
+```sh
+target/release/thaw run                 # list the project's scripts
+target/release/thaw run build           # run one (a source-file script is
+                                        # compiled by thaw; anything wider
+                                        # goes through `npm run`)
+target/release/thaw run start -- --port 3000   # forward arguments
+```
 
 For a Vite frontend, pass its project directory:
 
