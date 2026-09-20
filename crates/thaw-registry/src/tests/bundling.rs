@@ -593,3 +593,43 @@ fn bundled_direct_node_require_uses_the_loaded_addon() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
     let _ = fs::remove_dir_all(node_modules);
 }
+
+/// A dependency subpath whose `exports` offers `{ node, import, default }`
+/// but no `require` -- real-world example: `@babel/runtime/helpers/extends`
+/// (`{"node":"./helpers/extends.js","import":"./helpers/esm/extends.js",
+/// "default":"./helpers/extends.js"}`). The bundler is CommonJS, so it must
+/// pick the CJS `node`/`default` file; preferring `import` bundled the ESM
+/// source as if it were commonjs, and mathjs died at load time with
+/// "not a function" (`_interopRequireDefault(esm).default`).
+#[test]
+fn a_subpath_export_prefers_commonjs_over_an_esm_import_condition() {
+    let root = temp_registry("bundle_subpath_condition");
+    let node_modules = root.join("node_modules");
+    let package = node_modules.join("uses-runtime");
+    let dependency = node_modules.join("dual-runtime");
+    fs::create_dir_all(&package).unwrap();
+    fs::create_dir_all(&dependency).unwrap();
+    fs::write(package.join("package.json"), r#"{"main":"index.js"}"#).unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = require('dual-runtime/helper');",
+    )
+    .unwrap();
+    fs::write(
+        dependency.join("package.json"),
+        r#"{"exports":{"./helper":{"node":"./cjs.js","import":"./esm.mjs","default":"./cjs.js"}}}"#,
+    )
+    .unwrap();
+    fs::write(dependency.join("cjs.js"), "module.exports = 7;").unwrap();
+    fs::write(dependency.join("esm.mjs"), "export default 99;").unwrap();
+
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "uses-runtime", &package, "index.js").unwrap();
+    assert!(bundle.contains("cjs.js"), "{bundle}");
+    assert!(
+        !bundle.contains("esm.mjs"),
+        "the ESM condition must not be bundled for a CommonJS require:\n{bundle}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
