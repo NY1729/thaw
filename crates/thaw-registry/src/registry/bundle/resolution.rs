@@ -80,7 +80,7 @@ fn resolve_bare_require(
             .unwrap_or_else(|| sub.to_string()),
         None => {
             let manifest = read_manifest(&dep_dir).ok()?;
-            package_export_target(&manifest, None, &["require", "import", "default"])
+            package_export_target(&manifest, None, &["require", "node", "default", "import"])
                 .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
                 .unwrap_or("index.js")
                 .to_string()
@@ -94,7 +94,7 @@ fn package_subpath_runtime_target(manifest: &serde_json::Value, subpath: &str) -
     if let Some(target) = package_export_target(
         manifest,
         Some(subpath),
-        &["require", "import", "node", "default"],
+        &["require", "node", "default", "import"],
     ) {
         return Some(target.to_string());
     }
@@ -107,7 +107,7 @@ fn package_subpath_runtime_target(manifest: &serde_json::Value, subpath: &str) -
             continue;
         };
         if let Some(target) =
-            select_export_condition(value, &["require", "import", "node", "default"])
+            select_export_condition(value, &["require", "node", "default", "import"])
         {
             return Some(target.replace('*', capture));
         }
@@ -122,7 +122,7 @@ fn resolve_package_import(path: &Path, spec: &str) -> Option<(String, PathBuf)> 
     let manifest = read_manifest(package_dir).ok()?;
     let imports = manifest.get("imports")?.as_object()?;
     if let Some(value) = imports.get(spec) {
-        let target = select_export_condition(value, &["require", "import", "node", "default"])?;
+        let target = select_export_condition(value, &["require", "node", "default", "import"])?;
         return resolve_module_path(package_dir, target).ok();
     }
     for (pattern, value) in imports {
@@ -130,7 +130,7 @@ fn resolve_package_import(path: &Path, spec: &str) -> Option<(String, PathBuf)> 
             continue;
         };
         if let Some(target) =
-            select_export_condition(value, &["require", "import", "node", "default"])
+            select_export_condition(value, &["require", "node", "default", "import"])
         {
             return resolve_module_path(package_dir, &target.replace('*', capture)).ok();
         }
