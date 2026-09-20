@@ -831,16 +831,6 @@ function main(): void {
 /// ever sees them -- confirmed by checking each field's real
 /// `typeof`/`.name` from inside the called function itself, not just
 /// that the call didn't crash.
-///
-/// Known, deliberately out-of-scope companion gap found while writing
-/// this test: the *same* object literal coerced to a declared
-/// `JsValue` parameter (rather than `Json`) still fails
-/// ("value has type Object(...), expected JsValue") -- there is no
-/// existing HIR node for "materialize a live JsValue directly from an
-/// object literal with mixed native/JsValue fields" the way
-/// `JsValueAsJson` already covers the reverse direction. Left for a
-/// separate effort: it would need a new HIR node threaded through both
-/// codegen backends, not a small extension of this fix.
 #[test]
 fn json_dynamic_call_argument_carries_real_string_number_boolean_values() {
     let dir = std::env::temp_dir().join(format!(

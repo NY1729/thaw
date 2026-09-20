@@ -1458,6 +1458,33 @@ pub extern "C" fn thaw_js_get_property_result(
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_js_retain_json_result(value_json: *const c_char) -> ThawHandleResult {
+    let value_json = to_str(value_json);
+    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+        let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
+        let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+        let reviver: Function = ctx
+            .globals()
+            .get("__thaw_json_date_reviver")
+            .map_err(|error| error.to_string())?;
+        let value: Value = parse
+            .call((value_json.as_str(), reviver))
+            .map_err(|error| error.to_string())?;
+        retain_value(&ctx, value)
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_js_set_property_result(
     handle: u64,
     name: *const c_char,
