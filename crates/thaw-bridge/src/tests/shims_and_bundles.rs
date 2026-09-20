@@ -348,6 +348,21 @@ fn wraps_real_commonjs_source_and_binds_default_export() {
 }
 
 #[test]
+fn function_modules_do_not_replace_globals_with_their_named_methods() {
+    use std::ffi::{CStr, CString};
+
+    let js_source = "module.exports = function lodash() {}; module.exports.isNaN = function() { return false; };";
+    let wrapped = wrap_as_commonjs_module(js_source, &["isNaN".to_string()], &[], &[]);
+    let source = CString::new(wrapped).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+
+    let name = CString::new("isNaN").unwrap();
+    let args = CString::new("[1]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(name.as_ptr(), args.as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "false");
+}
+
+#[test]
 fn native_class_proxies_retain_js_properties_and_release_native_handles() {
     let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
     assert!(wrapped.contains("__thaw_napi_proxy_finalizers.register(proxy"));

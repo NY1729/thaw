@@ -53,6 +53,17 @@ fn callable_interface_return_is_preserved_as_javascript_value() {
 }
 
 #[test]
+fn callable_function_return_is_preserved_as_a_javascript_handle() {
+    let functions = parse_dts(
+        "declare namespace Handlebars { export interface TemplateDelegate<T = any> { (context: T): string; } } export type Template<T = any> = Handlebars.TemplateDelegate<T>; export declare function compile<T = any>(input: any): Template<T>;",
+    )
+    .unwrap();
+    assert_eq!(functions[0].ret, DtsType::Native(HirType::JsValue));
+    let shim = generate_shim(&functions, false, &[], &Default::default());
+    assert!(shim.contains("callDynamicValueHandle(callable, argsArray)"));
+}
+
+#[test]
 fn classifies_simple_primitive_signature_as_fast_path() {
     let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
     assert_eq!(funcs.len(), 1);
