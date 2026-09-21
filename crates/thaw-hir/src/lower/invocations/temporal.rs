@@ -38,6 +38,28 @@ impl<'a> FnLowerer<'a> {
         ])
     }
 
+    /// A `ZonedDateTime`: the instant plus the IANA/fixed-offset zone name
+    /// it is expressed in (the timezone-aware extra field).
+    fn temporal_zoned_object(
+        timestamp: HirExpr,
+        nanoseconds: HirExpr,
+        time_zone: HirExpr,
+    ) -> HirExpr {
+        HirExpr::ObjectLit(vec![
+            ("timestamp".to_string(), timestamp),
+            ("nanoseconds".to_string(), nanoseconds),
+            ("time_zone".to_string(), time_zone),
+            (
+                "__temporal_zonedDateTime".to_string(),
+                HirExpr::Lit(HirLit::F64(1.0)),
+            ),
+        ])
+    }
+
+    fn temporal_zone(value: HirExpr, ty: &HirType) -> HirExpr {
+        HirExpr::PropAccess(Box::new(value), ty.clone(), "time_zone".to_string())
+    }
+
     fn temporal_formatter(kind: &str) -> &'static str {
         match kind {
             "plainDate" => "__thaw_temporal_plain_date_to_string",
@@ -188,6 +210,26 @@ impl<'a> FnLowerer<'a> {
         let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
 
         if namespace.sym == *"Now" {
+            if method.sym == *"zonedDateTimeISO" {
+                // Optional time-zone argument (thaw has no system zone, so
+                // it defaults to UTC).
+                if arguments.len() > 1 {
+                    return Err(format!("`{label}` expects at most one argument"));
+                }
+                let time_zone = match arguments.first() {
+                    Some(zone) => self.coerce_primitive_to_string(zone.clone())?,
+                    None => HirExpr::Lit(HirLit::Str("UTC".to_string())),
+                };
+                let result = Self::temporal_zoned_object(
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_temporal_now".into())),
+                        Vec::new(),
+                    ),
+                    HirExpr::Lit(HirLit::F64(0.0)),
+                    time_zone,
+                );
+                return self.wrap_call_argument_bindings(result, &bindings).map(Some);
+            }
             if !arguments.is_empty() {
                 return Err(format!("`{label}` expects no arguments"));
             }
@@ -196,7 +238,6 @@ impl<'a> FnLowerer<'a> {
                 "plainDateISO" => Self::temporal_now("plainDate"),
                 "plainDateTimeISO" => Self::temporal_now("plainDateTime"),
                 "plainTimeISO" => Self::temporal_now("plainTime"),
-                "zonedDateTimeISO" => Self::temporal_now("zonedDateTime"),
                 "timeZoneId" => HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_temporal_time_zone_id".into())),
                     Vec::new(),
@@ -320,6 +361,29 @@ impl<'a> FnLowerer<'a> {
             _ => return Ok(None),
         };
         let result = match method.sym.as_ref() {
+            "from" if kind == "zonedDateTime" => {
+                let [value] = arguments.as_slice() else {
+                    return Err(format!("`{label}` expects exactly one argument"));
+                };
+                let text = self.coerce_primitive_to_string(value.clone())?;
+                let milliseconds = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_zoned_from_string".into())),
+                    vec![text.clone()],
+                );
+                let nanoseconds = HirExpr::Call(
+                    Box::new(HirExpr::Var(
+                        "__thaw_temporal_zoned_nanos_from_string".into(),
+                    )),
+                    vec![text.clone()],
+                );
+                let time_zone = HirExpr::Call(
+                    Box::new(HirExpr::Var(
+                        "__thaw_temporal_zoned_zone_from_string".into(),
+                    )),
+                    vec![text],
+                );
+                Self::temporal_zoned_object(milliseconds, nanoseconds, time_zone)
+            }
             "from" => {
                 let [value] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
@@ -379,7 +443,9 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         };
         let timestamp = Self::temporal_timestamp(receiver.clone(), &receiver_type);
-        let nanoseconds = Self::temporal_nanoseconds(receiver, &receiver_type);
+        let nanoseconds = Self::temporal_nanoseconds(receiver.clone(), &receiver_type);
+        let time_zone = (kind == "zonedDateTime")
+            .then(|| Self::temporal_zone(receiver, &receiver_type));
         let label = format!("Temporal {kind}.{}", property.sym);
         let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
         let result = match property.sym.as_ref() {
@@ -387,10 +453,16 @@ impl<'a> FnLowerer<'a> {
                 if !arguments.is_empty() {
                     return Err(format!("`{label}` expects no arguments"));
                 }
-                HirExpr::Call(
-                    Box::new(HirExpr::Var(Self::temporal_formatter(kind).into())),
-                    vec![timestamp, nanoseconds],
-                )
+                match &time_zone {
+                    Some(zone) => HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_temporal_zoned_to_string".into())),
+                        vec![timestamp, nanoseconds, zone.clone()],
+                    ),
+                    None => HirExpr::Call(
+                        Box::new(HirExpr::Var(Self::temporal_formatter(kind).into())),
+                        vec![timestamp, nanoseconds],
+                    ),
+                }
             }
             "equals" => {
                 let [other] = arguments.as_slice() else {
@@ -456,7 +528,16 @@ impl<'a> FnLowerer<'a> {
                     )),
                     Box::new(carry),
                 );
-                Self::temporal_object(kind, result_milliseconds, result_nanoseconds)
+                match &time_zone {
+                    Some(zone) => Self::temporal_zoned_object(
+                        result_milliseconds,
+                        result_nanoseconds,
+                        zone.clone(),
+                    ),
+                    None => {
+                        Self::temporal_object(kind, result_milliseconds, result_nanoseconds)
+                    }
+                }
             }
             "since" | "until" => {
                 let [other] = arguments.as_slice() else {
@@ -475,15 +556,59 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::Lit(HirLit::F64(0.0)),
                 )
             }
-            "toPlainDate" => {
-                Self::temporal_object("plainDate", timestamp, nanoseconds)
+            "toPlainDate" | "toPlainDateTime" | "toPlainTime" => {
+                let plain_kind = match property.sym.as_ref() {
+                    "toPlainDate" => "plainDate",
+                    "toPlainTime" => "plainTime",
+                    _ => "plainDateTime",
+                };
+                match &time_zone {
+                    Some(zone) => {
+                        // The plain value is the local wall clock in the
+                        // zone, stored as a UTC timestamp of the same
+                        // fields so the shared formatter renders it.
+                        let mode = match property.sym.as_ref() {
+                            "toPlainDate" => 0.0,
+                            "toPlainTime" => 1.0,
+                            _ => 2.0,
+                        };
+                        let local = HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_temporal_zoned_plain_timestamp".into(),
+                            )),
+                            vec![
+                                timestamp,
+                                nanoseconds.clone(),
+                                zone.clone(),
+                                HirExpr::Lit(HirLit::F64(mode)),
+                            ],
+                        );
+                        Self::temporal_object(plain_kind, local, nanoseconds)
+                    }
+                    None => Self::temporal_object(plain_kind, timestamp, nanoseconds),
+                }
             }
-            "toPlainDateTime" => {
-                Self::temporal_object("plainDateTime", timestamp, nanoseconds)
+            "toInstant" => {
+                Self::temporal_object("instant", timestamp, nanoseconds)
             }
-            "toPlainTime" => Self::temporal_object("plainTime", timestamp, nanoseconds),
+            "withTimeZone" => {
+                let [zone] = arguments.as_slice() else {
+                    return Err(format!("`{label}` expects exactly one time zone"));
+                };
+                let zone = self.coerce_primitive_to_string(zone.clone())?;
+                Self::temporal_zoned_object(timestamp, nanoseconds, zone)
+            }
             "toZonedDateTimeISO" => {
-                Self::temporal_object("zonedDateTime", timestamp, nanoseconds)
+                let zone = match arguments.first() {
+                    Some(zone) => self.coerce_primitive_to_string(zone.clone())?,
+                    None => match &time_zone {
+                        Some(zone) => zone.clone(),
+                        None => {
+                            return Err(format!("`{label}` requires a time zone"));
+                        }
+                    },
+                };
+                Self::temporal_zoned_object(timestamp, nanoseconds, zone)
             }
             "total" if kind == "duration" => {
                 let [unit] = arguments.as_slice() else {
@@ -585,6 +710,49 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("callDynamicValueHandle".into())),
                 vec![constructor, arguments],
             )));
+        }
+        // A `ZonedDateTime`'s zone-dependent reads: `timeZoneId`, `offset`,
+        // and the calendar/time fields in its own zone.
+        if kind == "zonedDateTime" {
+            if property.sym == *"timeZoneId" {
+                let receiver = self.lower_expr(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                return Ok(Some(Self::temporal_zone(receiver, &receiver_type)));
+            }
+            let field = match property.sym.as_ref() {
+                "year" => Some(0.0),
+                "month" => Some(1.0),
+                "day" => Some(2.0),
+                "hour" => Some(3.0),
+                "minute" => Some(4.0),
+                "second" => Some(5.0),
+                "millisecond" => Some(6.0),
+                "dayOfWeek" => Some(7.0),
+                "offset" => None,
+                _ => None,
+            };
+            if property.sym == *"offset" || field.is_some() {
+                let receiver = self.lower_expr(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                let milliseconds = Self::temporal_timestamp(receiver.clone(), &receiver_type);
+                let nanoseconds = Self::temporal_nanoseconds(receiver.clone(), &receiver_type);
+                let zone = Self::temporal_zone(receiver, &receiver_type);
+                if property.sym == *"offset" {
+                    return Ok(Some(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_temporal_zoned_offset".into())),
+                        vec![milliseconds, nanoseconds, zone],
+                    )));
+                }
+                return Ok(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_zoned_field".into())),
+                    vec![
+                        milliseconds,
+                        nanoseconds,
+                        zone,
+                        HirExpr::Lit(HirLit::F64(field.unwrap())),
+                    ],
+                )));
+            }
         }
         let getter = match property.sym.as_ref() {
             "epochMilliseconds" => None,

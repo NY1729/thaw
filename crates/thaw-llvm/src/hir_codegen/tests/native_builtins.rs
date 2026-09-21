@@ -3363,6 +3363,37 @@ fn compiles_reflect_set_and_object_descriptor_queries() {
     );
 }
 
+/// `Temporal.ZonedDateTime` with real time zones (jiff's tzdb): parsing
+/// with a `[Zone]` annotation, DST-correct offsets, `toString`, field
+/// reads in the zone, and the `toInstant`/`withTimeZone`/`toPlain*`
+/// casts. `Temporal.Now.zonedDateTimeISO(zone)` uses the given zone.
+#[test]
+fn compiles_temporal_zoned_date_time() {
+    let source = r#"
+        function main(): void {
+            const z = Temporal.ZonedDateTime.from("2020-01-02T03:04:05.678123456+09:00[Asia/Tokyo]");
+            console.log(z.toString());
+            console.log(z.timeZoneId, z.offset);
+            console.log(z.year, z.month, z.day, z.hour, z.minute, z.second, z.millisecond, z.dayOfWeek);
+            console.log(z.epochMilliseconds);
+            console.log(z.toInstant().toString());
+            console.log(z.withTimeZone("UTC").toString());
+            console.log(z.toPlainDate().toString(), z.toPlainTime().toString());
+            console.log(Temporal.ZonedDateTime.from("2021-07-01T12:00:00[America/New_York]").offset);
+            console.log(Temporal.ZonedDateTime.from("2021-01-01T12:00:00[America/New_York]").offset);
+            console.log(Temporal.Now.zonedDateTimeISO("Asia/Tokyo").timeZoneId);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_zoned_date_time"),
+        "2020-01-02T03:04:05.678123456+09:00[Asia/Tokyo]\n\
+         Asia/Tokyo +09:00\n2020 1 2 3 4 5 678 4\n1577901845678\n\
+         2020-01-01T18:04:05.678123456Z\n\
+         2020-01-01T18:04:05.678123456+00:00[UTC]\n\
+         2020-01-02 03:04:05.678123456\n-04:00\n-05:00\nAsia/Tokyo\n"
+    );
+}
+
 /// The resizable/transferable `ArrayBuffer` and growable
 /// `SharedArrayBuffer` API (`transfer`, `transferToFixedLength`, `resize`,
 /// `grow`, `detached`/`resizable`/`growable`/`maxByteLength`), plus the
@@ -3960,8 +3991,9 @@ fn compiles_large_bigint_literals() {
 /// The native `Temporal` slice: `Now`, `Instant`, `PlainDate`/`PlainDateTime`/
 /// `PlainTime`/`PlainYearMonth`/`PlainMonthDay`, and `Duration`, on the
 /// epoch-millisecond `f64` `Date` uses plus a sub-millisecond nanoseconds
-/// field (so fractional seconds keep nanosecond precision; there is no
-/// timezone database, and the zone is always UTC).
+/// field (so fractional seconds keep nanosecond precision; see
+/// `compiles_temporal_zoned_date_time` for the timezone-aware
+/// `ZonedDateTime`).
 #[test]
 fn compiles_temporal_values() {
     let source = r#"

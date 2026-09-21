@@ -1068,6 +1068,55 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        // `ZonedDateTime` (timezone-aware) helpers.
+        self.module.add_function(
+            "thaw_temporal_zone_valid",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_zoned_from_string",
+            "thaw_temporal_zoned_nanos_from_string",
+        ] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_temporal_zoned_zone_from_string",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_zoned_to_string",
+            "thaw_temporal_zoned_offset",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[f64_type.into(), f64_type.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in [
+            "thaw_temporal_zoned_field",
+            "thaw_temporal_zoned_plain_timestamp",
+        ] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(
+                    &[
+                        f64_type.into(),
+                        f64_type.into(),
+                        i8_ptr.into(),
+                        f64_type.into(),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_temporal_duration_from_string",
             f64_type.fn_type(&[i8_ptr.into()], false),
