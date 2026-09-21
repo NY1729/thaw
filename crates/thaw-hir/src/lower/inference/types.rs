@@ -717,7 +717,9 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_string_trim_start"
                     | "__thaw_string_trim_end"
                     | "__thaw_string_to_lower_case"
-                    | "__thaw_string_to_upper_case" => {
+                    | "__thaw_string_to_upper_case"
+                    | "__thaw_atob"
+                    | "__thaw_btoa" => {
                         let [argument] = args.as_slice() else {
                             return Err("string trim expects one operand".into());
                         };

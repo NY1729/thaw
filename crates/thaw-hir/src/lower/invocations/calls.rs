@@ -920,17 +920,18 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
-        if matches!(callee_name.as_str(), "encodeURIComponent" | "encodeURI") {
+        if matches!(callee_name.as_str(), "encodeURIComponent" | "encodeURI" | "atob" | "btoa") {
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, &callee_name)?;
             let [value] = arguments.as_slice() else {
                 return Err(format!("`{callee_name}` expects exactly one argument"));
             };
             let value = self.coerce_primitive_to_string(value.clone())?;
-            let intrinsic = if callee_name == "encodeURIComponent" {
-                "__thaw_encode_uri_component"
-            } else {
-                "__thaw_encode_uri"
+            let intrinsic = match callee_name.as_str() {
+                "encodeURIComponent" => "__thaw_encode_uri_component",
+                "encodeURI" => "__thaw_encode_uri",
+                "atob" => "__thaw_atob",
+                _ => "__thaw_btoa",
             };
             let result = HirExpr::Call(Box::new(HirExpr::Var(intrinsic.to_string())), vec![value]);
             return self.wrap_call_argument_bindings(result, &bindings);
