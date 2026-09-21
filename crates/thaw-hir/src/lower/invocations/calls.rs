@@ -1330,6 +1330,26 @@ impl<'a> FnLowerer<'a> {
                 return self.coerce_primitive_to_number(value);
             }
             if callee_name == "BigInt" {
+                // A literal string beyond Thaw's fixed-width `i64` is kept
+                // as the real QuickJS BigInt (exact `.toString()`/radix);
+                // a non-literal string still goes through the saturating
+                // native parser.
+                if let HirExpr::Lit(HirLit::Str(text)) = &value {
+                    if text.trim().parse::<i64>().is_err() {
+                        let constructor = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                        );
+                        let arguments = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![value.clone()]),
+                        )?;
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+                            vec![constructor, arguments],
+                        ));
+                    }
+                }
                 return match ty {
                     HirType::I64 => Ok(value),
                     HirType::F64 => Ok(HirExpr::Call(
