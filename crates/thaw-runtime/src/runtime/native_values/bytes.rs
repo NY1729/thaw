@@ -175,6 +175,42 @@ pub unsafe extern "C" fn thaw_bytes_from_string(
 }
 
 #[no_mangle]
+/// `Uint8Array.prototype.setFromHex`/`setFromBase64`: decode `text` and
+/// write its bytes into `array` from offset 0, up to the array's length.
+/// Returns the number of bytes written (the HIR reports `read` as the
+/// source length and `written` as this count, matching a fully valid
+/// input).
+///
+/// # Safety
+///
+/// `array` must point to a Thaw array of `f64` element slots; `text` /
+/// `encoding` must be null or valid NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_bytes_set_from_string(
+    array: *mut u8,
+    text: *const c_char,
+    encoding: *const c_char,
+) -> f64 {
+    if array.is_null() || text.is_null() {
+        return 0.0;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
+    let decoded = decode_string(&text, &encoding_str(encoding));
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return 0.0;
+    };
+    let written = decoded.len().min(length);
+    for (index, byte) in decoded.iter().take(written).enumerate() {
+        unsafe {
+            array
+                .add(8 + index * 8)
+                .cast::<f64>()
+                .write_unaligned(f64::from(*byte));
+        }
+    }
+    written as f64
+}
+
+#[no_mangle]
 /// `Buffer.from(array)` for a `number[]` / byte buffer source -- a fresh
 /// byte array holding each element truncated toward zero and taken mod
 /// 256 (`300` -> `44`, `-1` -> `255`, `NaN` -> `0`), matching `Buffer`'s

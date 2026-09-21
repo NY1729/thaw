@@ -186,6 +186,7 @@ impl<'a> FnLowerer<'a> {
             (object, property),
             ("Array", "of" | "from" | "isArray" | "fromAsync")
                 | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
+                | ("Uint8Array", "fromHex" | "fromBase64")
                 | ("BigInt", "asIntN" | "asUintN")
                 | ("Error", "isError")
                 | ("Proxy", "revocable")
@@ -1193,6 +1194,35 @@ impl<'a> FnLowerer<'a> {
                             Some(argument) => argument.clone(),
                             None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
                         };
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),
+                                vec![source, encoding],
+                            ),
+                            &bindings,
+                        );
+                    }
+                    if object.sym == *"Uint8Array"
+                        && matches!(property.sym.as_ref(), "fromHex" | "fromBase64")
+                    {
+                        // `Uint8Array.fromHex(text)` / `fromBase64(text)` --
+                        // the same decode `Buffer.from(text, enc)` already
+                        // performs.
+                        let label = format!("Uint8Array.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [source] = arguments.as_slice() else {
+                            return Err(format!("`{label}` expects exactly one argument"));
+                        };
+                        let source = self.coerce_primitive_to_string(source.clone())?;
+                        let encoding = HirExpr::Lit(HirLit::Str(
+                            if property.sym == *"fromHex" {
+                                "hex"
+                            } else {
+                                "base64"
+                            }
+                            .to_string(),
+                        ));
                         return self.wrap_call_argument_bindings(
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),

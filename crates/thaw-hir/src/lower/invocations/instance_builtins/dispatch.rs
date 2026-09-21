@@ -117,6 +117,7 @@ impl<'a> FnLowerer<'a> {
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
                 | "next" | "return" | "throw"
                 | "includes" | "startsWith" | "endsWith" | "equals" | "copy" | "toString"
+                | "toHex" | "toBase64" | "setFromHex" | "setFromBase64"
                 | "valueOf" | "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString"
                 | "getTime"
                 | "setTime" | "toISOString" | "getFullYear" | "getYear" | "setYear"
@@ -194,6 +195,9 @@ impl<'a> FnLowerer<'a> {
                 self.lower_native_conversion_method(member, property, call)
             }
             "copy" => self.lower_native_bytes_copy(member, call),
+            "toHex" | "toBase64" | "setFromHex" | "setFromBase64" => {
+                self.lower_native_bytes_encoding_method(member, property, call)
+            }
             other if Self::bytes_numeric_accessor(other).is_some() => {
                 self.lower_native_bytes_accessor(member, property, call)
             }
