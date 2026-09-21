@@ -198,7 +198,7 @@ impl<'a> FnLowerer<'a> {
                 | ("Reflect", "ownKeys" | "has" | "get" | "set" | "deleteProperty" | "apply" | "construct" | "defineProperty" | "getOwnPropertyDescriptor" | "getPrototypeOf" | "setPrototypeOf" | "isExtensible" | "preventExtensions")
                 | ("Symbol", "for" | "keyFor")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
-                | ("String", "fromCharCode" | "fromCodePoint")
+                | ("String", "fromCharCode" | "fromCodePoint" | "raw")
                 | ("Math", "sumPrecise" | "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "f16round" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
                 | ("Date", "now" | "UTC" | "parse")
                 | ("performance", "now")
@@ -2912,6 +2912,92 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Lit(HirLit::Bool(false)),
                             &bindings,
                         );
+                    }
+                    if object.sym == *"String" && property.sym == *"raw" {
+                        // `String.raw({ raw: [...] }, ...substitutions)`.
+                        // Requires an object-literal `raw` array of
+                        // string-literal segments (the direct-call form;
+                        // the tagged-template form is lowered separately).
+                        let [strings, substitutions @ ..] = call.args.as_slice() else {
+                            return Err("`String.raw` expects a strings argument".into());
+                        };
+                        if strings.spread.is_some() {
+                            return Err("`String.raw` does not support a spread strings argument".into());
+                        }
+                        let Expr::Object(object) = strings.expr.as_ref() else {
+                            return Err(
+                                "`String.raw` currently requires an object-literal strings argument"
+                                    .into(),
+                            );
+                        };
+                        let mut raw = None;
+                        for property in &object.props {
+                            let swc_ecma_ast::PropOrSpread::Prop(property) = property else {
+                                continue;
+                            };
+                            let swc_ecma_ast::Prop::KeyValue(property) = property.as_ref() else {
+                                continue;
+                            };
+                            let name = match &property.key {
+                                swc_ecma_ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                swc_ecma_ast::PropName::Str(value) => {
+                                    value.value.to_string_lossy().into_owned()
+                                }
+                                _ => continue,
+                            };
+                            if name == "raw" {
+                                raw = Some(property.value.as_ref());
+                            }
+                        }
+                        let Some(Expr::Array(array)) = raw else {
+                            return Err(
+                                "`String.raw` currently requires a `raw` array literal".into()
+                            );
+                        };
+                        let mut parts = Vec::with_capacity(array.elems.len() * 2);
+                        for (index, element) in array.elems.iter().enumerate() {
+                            let Some(element) = element else {
+                                return Err("`String.raw` does not support holes".into());
+                            };
+                            if element.spread.is_some() {
+                                return Err("`String.raw` does not support a spread segment".into());
+                            }
+                            let Expr::Lit(Lit::Str(text)) = element.expr.as_ref() else {
+                                return Err(
+                                    "`String.raw` currently requires string-literal raw segments"
+                                        .into(),
+                                );
+                            };
+                            let text = text.value.to_string_lossy().into_owned();
+                            if !text.is_empty() {
+                                parts.push(HirExpr::Lit(HirLit::Str(text)));
+                            }
+                            // A substitution is only inserted *between* raw
+                            // segments, so the last segment has none.
+                            if index + 1 < array.elems.len() {
+                                if let Some(substitution) = substitutions.get(index) {
+                                    if substitution.spread.is_some() {
+                                        return Err(
+                                            "`String.raw` does not support a spread substitution"
+                                                .into(),
+                                        );
+                                    }
+                                    let value = self.lower_expr(&substitution.expr)?;
+                                    parts.push(self.coerce_primitive_to_string(value)?);
+                                }
+                            }
+                        }
+                        let mut parts = parts.into_iter();
+                        let Some(mut result) = parts.next() else {
+                            return Ok(HirExpr::Lit(HirLit::Str(String::new())));
+                        };
+                        for part in parts {
+                            result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                                vec![result, part],
+                            );
+                        }
+                        return Ok(result);
                     }
                     if object.sym == *"String" && property.sym == *"fromCharCode" {
                         let (arguments, bindings) =
