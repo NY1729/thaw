@@ -763,3 +763,25 @@ fn recognizes_set_size_for_jit() {
     let export = export.expect("Set.size should be JIT-specializable");
     assert!(export.contains("dlen"), "expected Set.size -> dlen: {export}");
 }
+
+
+#[test]
+fn recognizes_set_for_of_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "findValue".into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let export = jit_numeric_export(
+        "function findValue() { const s = new Set(['a', 'b', 'c']); for (const value of s) { if (value === 'b') return 1; } return 0; } module.exports = { findValue };",
+        "findValue",
+        false,
+        &function,
+    );
+    let export = export.expect("for...of over a Set should be JIT-specializable");
+    assert!(export.contains("dkeys"), "expected Set iteration -> dkeys: {export}");
+}
