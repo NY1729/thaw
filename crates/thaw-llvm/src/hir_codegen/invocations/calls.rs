@@ -108,6 +108,104 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date string conversion returned no value".into());
             }
+            "__thaw_temporal_now" => {
+                if !args.is_empty() {
+                    return Err("Temporal.Now expects no operands".into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_temporal_now").unwrap(),
+                        &[],
+                        "temporal_now",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal.Now returned no value".into());
+            }
+            "__thaw_temporal_time_zone_id" => {
+                if !args.is_empty() {
+                    return Err("Temporal.Now.timeZoneId expects no operands".into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_time_zone_id")
+                            .unwrap(),
+                        &[],
+                        "temporal_time_zone_id",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal.Now.timeZoneId returned no value".into());
+            }
+            "__thaw_temporal_instant_from_string" | "__thaw_temporal_duration_from_string" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let value = self.compile_expr(value)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[value.into()],
+                        "temporal_from_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal conversion returned no value".into());
+            }
+            "__thaw_temporal_instant_to_string"
+            | "__thaw_temporal_plain_date_to_string"
+            | "__thaw_temporal_plain_date_time_to_string"
+            | "__thaw_temporal_plain_time_to_string"
+            | "__thaw_temporal_plain_year_month_to_string"
+            | "__thaw_temporal_plain_month_day_to_string"
+            | "__thaw_temporal_duration_to_string" => {
+                let [timestamp] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let timestamp = self.compile_expr(timestamp)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[timestamp.into()],
+                        "temporal_to_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal string conversion returned no value".into());
+            }
+            "__thaw_temporal_shift" | "__thaw_temporal_compare" => {
+                let [left, right] = args else {
+                    return Err(format!("{name} expects two operands"));
+                };
+                let left = self.compile_expr(left)?;
+                let right = self.compile_expr(right)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[left.into(), right.into()],
+                        "temporal_binary",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal operation returned no value".into());
+            }
             "__thaw_error_message"
             | "__thaw_error_name"
             | "__thaw_error_cause"
