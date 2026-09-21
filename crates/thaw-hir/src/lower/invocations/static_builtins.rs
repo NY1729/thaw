@@ -193,7 +193,7 @@ impl<'a> FnLowerer<'a> {
                 | ("Map", "groupBy")
                 | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions" | "isFrozen" | "isSealed" | "isExtensible" | "getOwnPropertyDescriptor" | "getOwnPropertyDescriptors" | "defineProperty" | "defineProperties" | "create" | "getPrototypeOf")
                 | ("JSON", "stringify" | "parse")
-                | ("Iterator", "from")
+                | ("Iterator", "from" | "concat" | "zip" | "zipKeyed")
                 | ("RegExp", "escape")
                 | ("Reflect", "ownKeys" | "has" | "get" | "set" | "deleteProperty" | "apply" | "construct" | "defineProperty" | "getOwnPropertyDescriptor" | "getPrototypeOf" | "setPrototypeOf" | "isExtensible" | "preventExtensions")
                 | ("Symbol", "for" | "keyFor")
@@ -2380,6 +2380,41 @@ impl<'a> FnLowerer<'a> {
                         };
                         bindings.push((left_name, left_type, left_value));
                         bindings.push((right_name, right_type, right_value));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Iterator"
+                        && matches!(property.sym.as_ref(), "concat" | "zip" | "zipKeyed")
+                    {
+                        // Lazy iterator composition lives in the JS realm
+                        // (the bundled QuickJS provides
+                        // `Iterator.concat`/`zip`/`zipKeyed`), so keep the
+                        // result a live handle and let its own
+                        // `.toArray()`/`.next()` run there too.
+                        let label = format!("Iterator.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let json_arguments = arguments
+                            .iter()
+                            .map(|argument| {
+                                self.coerce_to_declared(&HirType::Json, argument.clone())
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        let json_arguments = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(json_arguments),
+                        )?;
+                        let holder = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                            vec![HirExpr::Lit(HirLit::Str("Iterator".to_string()))],
+                        );
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
+                            vec![
+                                holder,
+                                HirExpr::Lit(HirLit::Str(property.sym.to_string())),
+                                json_arguments,
+                            ],
+                        );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Proxy" && property.sym == *"revocable" {
