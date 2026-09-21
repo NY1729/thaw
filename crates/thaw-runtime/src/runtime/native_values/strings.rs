@@ -518,6 +518,42 @@ pub unsafe extern "C" fn thaw_string_substring(
     .map_or(std::ptr::null(), |value| value.cast())
 }
 
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+///
+/// `String.prototype.substr(start, length)` (Annex B): a negative `start`
+/// counts from the end (clamped to 0), and `length` is a count (an omitted
+/// argument arrives as `Infinity`, and a negative count is 0).
+pub unsafe extern "C" fn thaw_string_substr(
+    value: *const c_char,
+    start: f64,
+    length: f64,
+) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let units = value.encode_utf16().collect::<Vec<_>>();
+    let count = units.len() as f64;
+    let start = if start.is_nan() { 0.0 } else { start.trunc() };
+    let start = if start < 0.0 {
+        (count + start).max(0.0)
+    } else {
+        start.min(count)
+    } as usize;
+    let length = if length.is_nan() { 0.0 } else { length.trunc() };
+    let length = if length < 0.0 {
+        0.0
+    } else {
+        length.min(count - start as f64)
+    } as usize;
+    arena_c_string(&String::from_utf16_lossy(
+        &units[start..start + length],
+    ))
+    .map_or(std::ptr::null(), |value| value.cast())
+}
+
 fn is_javascript_whitespace(character: char) -> bool {
     matches!(
         character,

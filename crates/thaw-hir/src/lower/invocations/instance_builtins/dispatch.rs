@@ -109,7 +109,7 @@ impl<'a> FnLowerer<'a> {
                 | "toWellFormed" | "toReversed" | "sort" | "toSorted" | "some" | "every"
                 | "find" | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
                 | "toSpliced" | "at" | "with" | "flat" | "flatMap" | "map" | "filter"
-                | "forEach" | "slice" | "subarray" | "substring" | "hasOwnProperty"
+                | "forEach" | "slice" | "subarray" | "substring" | "substr" | "hasOwnProperty"
                 | "copyWithin" | "fill" | "reverse" | "join"
                 | "push"
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
@@ -152,8 +152,8 @@ impl<'a> FnLowerer<'a> {
             | "with" | "flat" | "flatMap" | "map" | "filter" => {
                 self.lower_native_array_transform_method(member, property, call)
             }
-            "forEach" | "slice" | "subarray" | "substring" | "copyWithin" | "fill" | "reverse"
-            | "join" | "push" | "pop" | "shift" | "unshift" | "splice" | "indexOf"
+            "forEach" | "slice" | "subarray" | "substring" | "substr" | "copyWithin" | "fill"
+            | "reverse" | "join" | "push" | "pop" | "shift" | "unshift" | "splice" | "indexOf"
             | "lastIndexOf" | "includes" | "startsWith" | "endsWith" | "next" | "return"
             | "throw" => self.lower_native_array_mutation_method(member, property, call),
             "hasOwnProperty" => self.lower_native_has_own_property(member, call),

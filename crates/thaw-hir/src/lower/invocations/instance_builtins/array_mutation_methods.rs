@@ -633,9 +633,12 @@ impl<'a> FnLowerer<'a> {
                         this_arg,
                     );
                 }
-                if property.sym == *"slice" || property.sym == *"subarray" || property.sym == *"substring" {
+                if matches!(
+                    property.sym.as_ref(),
+                    "slice" | "subarray" | "substring" | "substr"
+                ) {
                     let is_subarray = property.sym == *"subarray";
-                    let is_substring = property.sym == *"substring";
+                    let is_substring = property.sym == *"substring" || property.sym == *"substr";
                     let mut receiver = self.lower_expr(&member.obj)?;
                     // `slice`/`subarray` keep the byte-buffer identity: a
                     // sliced `Buffer` is still a `Buffer`, so a chained
@@ -656,11 +659,16 @@ impl<'a> FnLowerer<'a> {
                     }
                     if is_substring && receiver_type != HirType::Str {
                         return Err(format!(
-                            "`.substring()` requires a string receiver, got {receiver_type:?}"
+                            "`.{}()` requires a string receiver, got {receiver_type:?}",
+                            property.sym
                         ));
                     }
                     if receiver_type == HirType::Str {
-                        let label = if is_substring { "String.substring" } else { "String.slice" };
+                        let label = match property.sym.as_ref() {
+                            "substring" => "String.substring",
+                            "substr" => "String.substr",
+                            _ => "String.slice",
+                        };
                         let (arguments, bindings) =
                             self.lower_native_spread_values(&call.args, label)?;
                         if arguments.len() > 2 {
@@ -678,10 +686,10 @@ impl<'a> FnLowerer<'a> {
                             .map(|value| self.coerce_primitive_to_number(value))
                             .transpose()?
                             .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
-                        let intrinsic = if is_substring {
-                            "__thaw_string_substring"
-                        } else {
-                            "__thaw_string_slice"
+                        let intrinsic = match property.sym.as_ref() {
+                            "substring" => "__thaw_string_substring",
+                            "substr" => "__thaw_string_substr",
+                            _ => "__thaw_string_slice",
                         };
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var(intrinsic.into())),

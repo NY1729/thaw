@@ -367,24 +367,37 @@ impl<'a> FnLowerer<'a> {
         member: &MemberExpr,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
-        let (arguments, mut bindings) =
+        let (arguments, bindings) =
             self.lower_native_spread_values(&call.args, "hasOwnProperty")?;
         let [key_value] = arguments.as_slice() else {
             return Err("`hasOwnProperty` expects exactly one argument".into());
         };
-        let key_value = self.coerce_primitive_to_string(key_value.clone())?;
         let receiver = self.lower_expr(&member.obj)?;
+        let result = self.lower_has_own_value(receiver, key_value.clone())?;
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    /// Whether `receiver` has `key` as an own property. A fixed native
+    /// object compares the key against its known field names; a
+    /// `Json`/dictionary object defers to `__thaw_json_has_own`. Shared by
+    /// `obj.hasOwnProperty(key)`, static `Object.hasOwn`, and
+    /// `Reflect.has`.
+    fn lower_has_own_value(
+        &mut self,
+        receiver: HirExpr,
+        key_value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let key_value = self.coerce_primitive_to_string(key_value)?;
         let receiver_type = self.infer_expr_type(&receiver)?;
         if matches!(receiver_type, HirType::Json | HirType::Dictionary(_)) {
-            let result = HirExpr::Call(
+            return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_json_has_own".to_string())),
                 vec![receiver, key_value],
-            );
-            return self.wrap_call_argument_bindings(result, &bindings);
+            ));
         }
         let HirType::Object(fields) = &receiver_type else {
             return Err(format!(
-                "`.hasOwnProperty()` currently requires a fixed object or dictionary, got {receiver_type:?}"
+                "`hasOwn` currently requires a fixed object or dictionary, got {receiver_type:?}"
             ));
         };
         let field_names = fields
@@ -410,8 +423,12 @@ impl<'a> FnLowerer<'a> {
         for comparison in comparisons {
             result = self.lower_logical_expr(result, comparison, false)?;
         }
-        bindings.push((object_name, receiver_type, receiver));
-        bindings.push((key_name, HirType::Str, key_value));
-        self.wrap_call_argument_bindings(result, &bindings)
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (object_name, receiver_type, receiver),
+                (key_name, HirType::Str, key_value),
+            ],
+        )
     }
 }
