@@ -724,7 +724,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
                         return Ok(HirType::Str);
                     }
-                    "__thaw_string_slice" | "__thaw_string_substring" => {
+                    "__thaw_string_slice" | "__thaw_string_substring" | "__thaw_string_substr" => {
                         if args.len() != 3 {
                             return Err("string slice expects three operands".into());
                         }

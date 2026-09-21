@@ -667,6 +667,11 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_string_substr",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
         let string_transform_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         for name in [
             "thaw_string_trim",
