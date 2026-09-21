@@ -3782,6 +3782,8 @@ fn compiles_large_bigint_literals() {
             console.log((a >> 8n).toString());
             console.log(((-a) & 255n).toString());
             console.log(((-a) >> 8n).toString());
+            console.log((a + a).toString());
+            console.log((-a + a).toString());
         }
     "#;
     assert_eq!(
@@ -3796,7 +3798,8 @@ fn compiles_large_bigint_literals() {
          -123456789012345678901234567890\n-123456789012345678901234567891\n\
          14083847773837265618\n123456789012345678901234567891\n0\n\
          31604937987160493798716049379840\n482253082079475308207947530\n46\n\
-         -482253082079475308207947531\n"
+         -482253082079475308207947531\n\
+         246913578024691357802469135780\n0\n"
     );
 }
 

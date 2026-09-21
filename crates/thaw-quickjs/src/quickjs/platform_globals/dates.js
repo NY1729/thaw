@@ -154,6 +154,11 @@
     }
     return value;
   };
+  // `JsValue + JsValue`: a compiled `String(x) + String(y)` can't tell a
+  // dynamic bigint from a dynamic string, so the compiled `+` delegates
+  // here and lets JS pick numeric addition, concatenation, or BigInt
+  // addition.
+  globalThis.__thaw_dynamic_add = (left, right) => left + right;
   globalThis.__thaw_json_binary_replacer = function (key, value) {
     const source = this[key];
     if (source instanceof ArrayBuffer) {
