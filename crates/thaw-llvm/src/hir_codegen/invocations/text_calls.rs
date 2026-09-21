@@ -18,6 +18,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     | "__thaw_array_is_null"
                     | "__thaw_number_to_fixed"
                     | "__thaw_number_to_precision"
+                    | "__thaw_number_to_exponential"
                     | "__thaw_number_to_radix_string"
             );
         if !text_call {
@@ -130,7 +131,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return Ok(result);
             }
-            "__thaw_string_slice" => {
+            "__thaw_string_slice" | "__thaw_string_substring" => {
+                let runtime = if name == "__thaw_string_slice" {
+                    "thaw_string_slice"
+                } else {
+                    "thaw_string_substring"
+                };
                 let arguments = args
                     .iter()
                     .map(|argument| self.compile_expr(argument).map(Into::into))
@@ -138,7 +144,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_string_slice").unwrap(),
+                        self.module.get_function(runtime).unwrap(),
                         &arguments,
                         "string_slice",
                     )
@@ -504,23 +510,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("number toFixed returned no value".into());
             }
-            "__thaw_number_to_precision" => {
+            "__thaw_number_to_precision" | "__thaw_number_to_exponential" => {
+                let runtime = if name == "__thaw_number_to_precision" {
+                    "thaw_number_to_precision"
+                } else {
+                    "thaw_number_to_exponential"
+                };
                 let [value, digits] = args else {
-                    return Err("number toPrecision expects two operands".into());
+                    return Err("number precision format expects two operands".into());
                 };
                 let value = self.compile_expr(value)?;
                 let digits = self.compile_expr(digits)?;
                 return self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_number_to_precision").unwrap(),
+                        self.module.get_function(runtime).unwrap(),
                         &[value.into(), digits.into()],
-                        "number_to_precision",
+                        "number_precision_format",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("number toPrecision returned no value".into());
+                    .ok_or("number precision format returned no value".into());
             }
             "__thaw_number_to_radix_string" => {
                 let [value, radix] = args else {
