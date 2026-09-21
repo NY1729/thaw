@@ -732,3 +732,31 @@ pub extern "C" fn thaw_i64_to_radix_string(value: i64, radix: f64) -> *const c_c
     let text = String::from_utf8(buffer).unwrap_or_default();
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
+
+#[no_mangle]
+/// `Math.sumPrecise(numbers)`: a Neumaier-compensated sum over the native
+/// `number[]` layout (`[len: u64][value: f64]...`). A null pointer yields
+/// `0`.
+///
+/// # Safety
+/// `array` must be null or point to a valid native `number[]` block.
+pub unsafe extern "C" fn thaw_math_sum_precise(array: *const u8) -> f64 {
+    if array.is_null() {
+        return 0.0;
+    }
+    let length = unsafe { array.cast::<u64>().read_unaligned() } as usize;
+    let values = unsafe { array.add(8) }.cast::<f64>();
+    let mut sum = 0.0f64;
+    let mut compensation = 0.0f64;
+    for index in 0..length {
+        let value = unsafe { values.add(index).read_unaligned() };
+        let total = sum + value;
+        if sum.abs() >= value.abs() {
+            compensation += (sum - total) + value;
+        } else {
+            compensation += (value - total) + sum;
+        }
+        sum = total;
+    }
+    sum + compensation
+}

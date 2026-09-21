@@ -46,6 +46,77 @@ impl<'a> FnLowerer<'a> {
                     bindings.push((value_name, HirType::F64, value));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
+                if property.sym == *"setYear" {
+                    // Deprecated Annex B setter: a two-digit year (0..=99)
+                    // means 1900 + year; the month/day are preserved.
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(&date_type, &receiver, "Date.setYear receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Date.setYear")?;
+                    let [year] = arguments.as_slice() else {
+                        return Err("native `.setYear()` expects exactly one argument".into());
+                    };
+                    let year = self.coerce_primitive_to_number(year.clone())?;
+                    let receiver_name = format!("__thaw_date_setyear_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let year_name = format!("__thaw_date_setyear_year_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), date_type.clone());
+                    self.scope.insert(year_name.clone(), HirType::F64);
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
+                    let normalized = HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Lt,
+                            Box::new(var(&year_name)),
+                            Box::new(number(100.0)),
+                        )),
+                        Box::new(HirExpr::Conditional(
+                            Box::new(HirExpr::BinOp(
+                                BinOp::GtEq,
+                                Box::new(var(&year_name)),
+                                Box::new(number(0.0)),
+                            )),
+                            Box::new(HirExpr::BinOp(
+                                BinOp::Add,
+                                Box::new(var(&year_name)),
+                                Box::new(number(1900.0)),
+                            )),
+                            Box::new(var(&year_name)),
+                            HirType::F64,
+                        )),
+                        Box::new(var(&year_name)),
+                        HirType::F64,
+                    );
+                    let timestamp = HirExpr::PropAccess(
+                        Box::new(var(&receiver_name)),
+                        date_type.clone(),
+                        "timestamp".to_string(),
+                    );
+                    let month = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_date_get_month".to_string())),
+                        vec![timestamp.clone()],
+                    );
+                    let date = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_date_get_date".to_string())),
+                        vec![timestamp.clone()],
+                    );
+                    let new_timestamp = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_date_set_full_year".to_string())),
+                        vec![timestamp, normalized, month, date],
+                    );
+                    let result = HirExpr::PropAssign(
+                        Box::new(var(&receiver_name)),
+                        date_type.clone(),
+                        "timestamp".to_string(),
+                        Box::new(new_timestamp),
+                    );
+                    let mut bindings = vec![(receiver_name, date_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((year_name, HirType::F64, year));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
                 // Each entry pairs a setter's native intrinsic with, per
                 // parameter position, the getter intrinsic that supplies
                 // that position's default when the caller omits it -- `None`
@@ -151,6 +222,28 @@ impl<'a> FnLowerer<'a> {
                         Box::new(new_timestamp),
                     );
                     return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"getYear" {
+                    // Deprecated Annex B getter: `getFullYear() - 1900`.
+                    if !call.args.is_empty() {
+                        return Err("native `.getYear()` expects no arguments".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(&date_type, &receiver, "Date.getYear receiver")?;
+                    let timestamp = HirExpr::PropAccess(
+                        Box::new(receiver),
+                        date_type,
+                        "timestamp".to_string(),
+                    );
+                    return Ok(HirExpr::BinOp(
+                        BinOp::Sub,
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_date_get_full_year".to_string())),
+                            vec![timestamp],
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(1900.0))),
+                    ));
                 }
                 let date_getter_intrinsic = match property.sym.as_ref() {
                     "getFullYear" | "getUTCFullYear" => Some("__thaw_date_get_full_year"),
