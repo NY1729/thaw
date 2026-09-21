@@ -203,6 +203,7 @@ impl NumericProgram {
                     "setissubset" => Some(NumericValue::SetIsSubsetOf),
                     "setissuperset" => Some(NumericValue::SetIsSupersetOf),
                     "setisdisjoint" => Some(NumericValue::SetIsDisjointFrom),
+                    "setfromarray" => Some(NumericValue::SetFromArray),
                     "dnappend" => Some(NumericValue::DictionaryAppend(0)),
                     "dbappend" => Some(NumericValue::DictionaryAppend(1)),
                     "dsappend" => Some(NumericValue::DictionaryAppend(2)),

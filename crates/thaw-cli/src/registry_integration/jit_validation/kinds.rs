@@ -281,6 +281,12 @@ fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
             "untagdn" => return Some("dn"),
             "untagdb" => return Some("db"),
             "untagds" => return Some("ds"),
+            // A native `Set` is a string-keyed dictionary.
+            "setunion"
+            | "setintersection"
+            | "setdifference"
+            | "setsymmetricdiff"
+            | "setfromarray" => return Some("ds"),
             _ => {}
         }
         if token.starts_with("objo")

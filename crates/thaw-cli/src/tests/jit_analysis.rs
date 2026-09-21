@@ -785,3 +785,38 @@ fn recognizes_set_for_of_for_jit() {
     let export = export.expect("for...of over a Set should be JIT-specializable");
     assert!(export.contains("dkeys"), "expected Set iteration -> dkeys: {export}");
 }
+
+#[test]
+fn recognizes_set_from_iterable_for_jit() {
+    let function = |name: &str| thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: name.into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let from_array = jit_numeric_export(
+        "function fromArray() { const values = ['a', 'b', 'c']; const s = new Set(values); return s.has('b') ? 1 : 0; } module.exports = { fromArray };",
+        "fromArray",
+        false,
+        &function("fromArray"),
+    );
+    let from_array = from_array.expect("new Set(array) should be JIT-specializable");
+    assert!(
+        from_array.contains("setfromarray"),
+        "expected new Set(array) -> setfromarray: {from_array}"
+    );
+    let from_string = jit_numeric_export(
+        "function fromString() { const text = 'abc'; const s = new Set(text); return s.has('c') ? 1 : 0; } module.exports = { fromString };",
+        "fromString",
+        false,
+        &function("fromString"),
+    );
+    let from_string = from_string.expect("new Set(string) should be JIT-specializable");
+    assert!(
+        from_string.contains("setfromarray"),
+        "expected new Set(string) -> setfromarray: {from_string}"
+    );
+}
