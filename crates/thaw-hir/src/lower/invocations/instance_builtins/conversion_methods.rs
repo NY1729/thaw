@@ -334,6 +334,19 @@ impl<'a> FnLowerer<'a> {
                         bindings.push((radix_name, HirType::F64, radix));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
+                    if receiver_type == HirType::I64 && !call.args.is_empty() {
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "BigInt.toString")?;
+                        let [radix] = arguments.as_slice() else {
+                            return Err("native `.toString()` expects zero or one argument".into());
+                        };
+                        let radix = self.coerce_primitive_to_number(radix.clone())?;
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_i64_to_radix_string".into())),
+                            vec![receiver, radix],
+                        );
+                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                    }
                     if !call.args.is_empty() {
                         return Err("native `.toString()` does not accept arguments yet".into());
                     }

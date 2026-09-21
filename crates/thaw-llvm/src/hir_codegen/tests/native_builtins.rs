@@ -3231,7 +3231,7 @@ fn byte_buffer_bigint_accessors() {
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_bigint_accessors"),
-        "0000000000000000\n0\n0\nffffffffffffff7f\n9223372036854775807\n9223372036854775807\n8\n8000000000000000\n-9223372036854775808\n-9223372036854775808\nffffffffffffffff\n-1\n-1\n0\n"
+        "0000000000000000\n0n\n0n\nffffffffffffff7f\n9223372036854775807n\n9223372036854775807n\n8\n8000000000000000\n-9223372036854775808n\n-9223372036854775808n\nffffffffffffffff\n-1n\n-1n\n0n\n"
     );
 }
 
@@ -3577,5 +3577,41 @@ fn compiles_weak_ref_finalization_registry_and_proxy() {
     assert_eq!(
         compile_and_run(source, "weak_ref_proxy"),
         "1\n2\n9\ndone\n7\n{\"n\":7}\n"
+    );
+}
+
+/// `BigInt` support beyond literals/arithmetic: `console.log`'s `n`
+/// suffix, radix `toString`, `BigInt(number|string|boolean)` conversion,
+/// and `BigInt.asIntN`/`asUintN`. thaw's BigInt is a fixed-width `i64`
+/// (not arbitrary precision), and `BigInt(fractional)` truncates where
+/// real JS throws a `RangeError`.
+#[test]
+fn compiles_bigint_operations() {
+    let source = r#"
+        function main(): void {
+            const a = 9007199254740991n;
+            console.log(a);
+            console.log(a.toString());
+            console.log(a.toString(16));
+            console.log((-255n).toString(16));
+            console.log(typeof a);
+            console.log(BigInt(42));
+            console.log(BigInt("123"));
+            console.log(BigInt("-42"));
+            console.log(BigInt(true));
+            console.log(BigInt.asIntN(8, 255n));
+            console.log(BigInt.asUintN(8, -1n));
+            console.log(a + 1n);
+            console.log(a * 2n);
+            console.log(a / 3n);
+            console.log(a % 7n);
+            console.log(10n / 3n);
+            console.log(-5n / 2n);
+            console.log(a > 1n);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bigint_operations"),
+        "9007199254740991n\n9007199254740991\n1fffffffffffff\n-ff\nbigint\n42n\n123n\n-42n\n1n\n-1n\n255n\n9007199254740992n\n18014398509481982n\n3002399751580330n\n3n\n3n\n-2n\ntrue\n"
     );
 }

@@ -42,6 +42,33 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i64_type.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_i64_to_bigint_string",
+            i8_ptr.fn_type(&[i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_i64_from_number",
+            i64_type.fn_type(&[self.context.f64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_i64_from_string",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["thaw_i64_as_int_n", "thaw_i64_as_uint_n"] {
+            self.module.add_function(
+                name,
+                i64_type.fn_type(&[i64_type.into(), self.context.f64_type().into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_i64_to_radix_string",
+            i8_ptr.fn_type(&[i64_type.into(), self.context.f64_type().into()], false),
+            Some(Linkage::External),
+        );
         for name in [
             "thaw_symbol_new",
             "thaw_symbol_to_string",
