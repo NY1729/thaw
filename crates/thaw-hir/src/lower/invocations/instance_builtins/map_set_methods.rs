@@ -124,6 +124,118 @@ impl<'a> FnLowerer<'a> {
                     bindings.push((value_name, value_type, value.clone()));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
+                if property.sym == *"getOrInsert" || property.sym == *"getOrInsertComputed" {
+                    let label = format!("Map.{}", property.sym);
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Map(key_type, value_type) = &receiver_type else {
+                        return Err(format!(
+                            "native `.{}()` requires a Map receiver, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    };
+                    let key_type = key_type.as_ref().clone();
+                    let value_type = value_type.as_ref().clone();
+                    let key_suffix = map_key_intrinsic_suffix(&key_type)?;
+                    let (value_suffix, needs_type_wrap) = map_value_get_suffix(&value_type)?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, &label)?;
+                    let [key, second] = arguments.as_slice() else {
+                        return Err(format!(
+                            "native `.{}()` expects exactly two arguments",
+                            property.sym
+                        ));
+                    };
+                    let key = self.coerce_map_key(&key_type, key.clone())?;
+                    let receiver_name =
+                        format!("__thaw_map_get_or_insert_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let key_name = format!("__thaw_map_get_or_insert_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                    self.scope.insert(key_name.clone(), key_type.clone());
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let has_intrinsic = format!("__thaw_map_{key_suffix}_has");
+                    let get_intrinsic = format!("__thaw_map_{key_suffix}_get_{value_suffix}");
+                    let set_intrinsic = format!("__thaw_map_{key_suffix}_set");
+                    let raw_get = HirExpr::Call(
+                        Box::new(HirExpr::Var(get_intrinsic)),
+                        vec![var(&receiver_name), var(&key_name)],
+                    );
+                    let decoded = if needs_type_wrap {
+                        HirExpr::TypedClosure(value_type.clone(), Box::new(raw_get))
+                    } else {
+                        raw_get
+                    };
+                    let mut body = vec![HirStmt::If(
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var(has_intrinsic)),
+                            vec![var(&receiver_name), var(&key_name)],
+                        ),
+                        vec![HirStmt::Return(Some(decoded))],
+                        Vec::new(),
+                    )];
+                    let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((key_name.clone(), key_type, key.clone()));
+                    let inserted = if property.sym == *"getOrInsertComputed" {
+                        // The callback runs only when the key is absent
+                        // (after the early return above) and is called with
+                        // the key.
+                        let computed_name =
+                            format!("__thaw_map_get_or_insert_computed_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(computed_name.clone(), value_type.clone());
+                        let call = HirExpr::Call(Box::new(second.clone()), vec![key]);
+                        self.expect_type(
+                            &value_type,
+                            &call,
+                            "Map.getOrInsertComputed callback result",
+                        )?;
+                        body.push(HirStmt::Let(computed_name.clone(), value_type.clone(), call));
+                        var(&computed_name)
+                    } else {
+                        self.expect_type(&value_type, second, "Map.getOrInsert value")?;
+                        let value_name =
+                            format!("__thaw_map_get_or_insert_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let value = second.clone();
+                        bindings.push((value_name.clone(), value_type.clone(), value));
+                        self.scope.insert(value_name.clone(), value_type.clone());
+                        var(&value_name)
+                    };
+                    body.push(HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var(set_intrinsic)),
+                        vec![
+                            var(&receiver_name),
+                            var(&key_name),
+                            inserted.clone(),
+                        ],
+                    )));
+                    body.push(HirStmt::Return(Some(inserted)));
+                    let body = HirExpr::Block(body);
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            value_type,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
                 if property.sym == *"add" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;

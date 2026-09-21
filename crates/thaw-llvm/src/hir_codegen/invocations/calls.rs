@@ -597,6 +597,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     &format!("Math.{operation}"),
                 );
             }
+            "__thaw_math_sum_precise" => {
+                let [array] = args else {
+                    return Err("Math.sumPrecise expects one operand".to_string());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_math_sum_precise").unwrap(),
+                        &[buffer.into()],
+                        "math_sum_precise",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Math.sumPrecise returned no value".into());
+            }
             "__thaw_math_random" => {
                 if !args.is_empty() {
                     return Err("Math.random expects no operands".to_string());

@@ -1464,6 +1464,17 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, argument, "Math operand")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_math_sum_precise" => {
+                        let [array] = args.as_slice() else {
+                            return Err("Math.sumPrecise expects one operand".into());
+                        };
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::F64)),
+                            array,
+                            "Math.sumPrecise argument",
+                        )?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_math_random" => {
                         if !args.is_empty() {
                             return Err("Math.random expects no operands".into());

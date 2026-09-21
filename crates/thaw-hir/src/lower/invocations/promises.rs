@@ -273,6 +273,72 @@ impl<'a> FnLowerer<'a> {
                     );
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
+                if property.sym == *"then"
+                    && call.args.len() == 2
+                    && call.args.iter().all(|argument| argument.spread.is_none())
+                {
+                    // `p.then(onFulfilled, onRejected)` is exactly
+                    // `p.then(onFulfilled).catch(onRejected)` in behavior.
+                    let source = self.lower_expr(&member.obj)?;
+                    let HirType::Promise(input) = self.infer_expr_type(&source)? else {
+                        return Err("`.then` requires a Promise receiver".into());
+                    };
+                    let input = input.as_ref().clone();
+                    let fulfilled_params = if input == HirType::Void {
+                        Vec::new()
+                    } else {
+                        vec![input.clone()]
+                    };
+                    let on_fulfilled = self.lower_promise_callback(
+                        &call.args[0].expr,
+                        &fulfilled_params,
+                        None,
+                    )?;
+                    let HirType::Function(_, fulfilled_output) =
+                        self.infer_expr_type(&on_fulfilled)?
+                    else {
+                        unreachable!()
+                    };
+                    let (output, flatten_fulfilled) = match fulfilled_output.as_ref() {
+                        HirType::Promise(inner) => (inner.as_ref().clone(), true),
+                        other => (other.clone(), false),
+                    };
+                    let on_rejected = self.lower_promise_callback(
+                        &call.args[1].expr,
+                        &[HirType::Str],
+                        None,
+                    )?;
+                    let HirType::Function(_, rejected_output) =
+                        self.infer_expr_type(&on_rejected)?
+                    else {
+                        unreachable!()
+                    };
+                    let rejected_output = match rejected_output.as_ref() {
+                        HirType::Promise(inner) => inner.as_ref().clone(),
+                        other => other.clone(),
+                    };
+                    if rejected_output != output {
+                        return Err(format!(
+                            "`.then` rejection callback resolves to {rejected_output:?}, expected {output:?}"
+                        ));
+                    }
+                    let fulfilled = HirExpr::PromiseThen(
+                        Box::new(source),
+                        Box::new(on_fulfilled),
+                        input,
+                        output.clone(),
+                        false,
+                        flatten_fulfilled,
+                    );
+                    return Ok(HirExpr::PromiseThen(
+                        Box::new(fulfilled),
+                        Box::new(on_rejected),
+                        output.clone(),
+                        output,
+                        true,
+                        false,
+                    ));
+                }
                 if property.sym == *"then" || property.sym == *"catch" {
                     let source = self.lower_expr(&member.obj)?;
                     let HirType::Promise(input) = self.infer_expr_type(&source)? else {

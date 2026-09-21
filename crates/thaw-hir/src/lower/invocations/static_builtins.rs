@@ -188,6 +188,8 @@ impl<'a> FnLowerer<'a> {
                 | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
                 | ("BigInt", "asIntN" | "asUintN")
                 | ("Error", "isError")
+                | ("Proxy", "revocable")
+                | ("Intl", "getCanonicalLocales" | "supportedValuesOf")
                 | ("Map", "groupBy")
                 | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions" | "isFrozen" | "isSealed" | "isExtensible" | "getOwnPropertyDescriptor" | "getOwnPropertyDescriptors" | "defineProperty" | "defineProperties" | "create" | "getPrototypeOf")
                 | ("JSON", "stringify" | "parse")
@@ -197,7 +199,7 @@ impl<'a> FnLowerer<'a> {
                 | ("Symbol", "for" | "keyFor")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("String", "fromCharCode" | "fromCodePoint")
-                | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "f16round" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
+                | ("Math", "sumPrecise" | "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "f16round" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
                 | ("Date", "now" | "UTC" | "parse")
                 | ("performance", "now")
         )
@@ -2380,6 +2382,110 @@ impl<'a> FnLowerer<'a> {
                         bindings.push((right_name, right_type, right_value));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
+                    if object.sym == *"Proxy" && property.sym == *"revocable" {
+                        // `Proxy.revocable(target, handler)` constructs a
+                        // genuine JS proxy. The result holds a `revoke`
+                        // *function*, which a JSON snapshot can't carry, so
+                        // it stays a live handle.
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Proxy.revocable")?;
+                        let [target, handler] = arguments.as_slice() else {
+                            return Err("`Proxy.revocable` expects two arguments".into());
+                        };
+                        let target = self.coerce_to_declared(&HirType::Json, target.clone())?;
+                        let handler = self.coerce_to_declared(&HirType::Json, handler.clone())?;
+                        let json_arguments = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![target, handler]),
+                        )?;
+                        let holder = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                            vec![HirExpr::Lit(HirLit::Str("Proxy".to_string()))],
+                        );
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
+                            vec![
+                                holder,
+                                HirExpr::Lit(HirLit::Str("revocable".to_string())),
+                                json_arguments,
+                            ],
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Intl"
+                        && matches!(
+                            property.sym.as_ref(),
+                            "getCanonicalLocales" | "supportedValuesOf"
+                        )
+                    {
+                        // The bundled QuickJS `Intl` polyfill doesn't expose
+                        // these statics, so thaw approximates them: locale
+                        // tags are canonicalized at compile time when they
+                        // are literals, and `supportedValuesOf` returns a
+                        // small representative list per key.
+                        if call.args.len() != 1 || call.args[0].spread.is_some() {
+                            return Err(format!(
+                                "`Intl.{}` expects exactly one argument",
+                                property.sym
+                            ));
+                        }
+                        let argument = call.args[0].expr.as_ref();
+                        if property.sym == *"supportedValuesOf" {
+                            let Expr::Lit(Lit::Str(key)) = argument else {
+                                return Err(
+                                    "`Intl.supportedValuesOf` requires a string-literal key".into()
+                                );
+                            };
+                            let values = supported_values_of(&key.value.to_string_lossy());
+                            return Ok(HirExpr::ArrayLit(
+                                values
+                                    .into_iter()
+                                    .map(|value| HirExpr::Lit(HirLit::Str(value)))
+                                    .collect(),
+                            ));
+                        }
+                        let canonical = |value: &str| {
+                            HirExpr::Lit(HirLit::Str(canonicalize_locale(value)))
+                        };
+                        match argument {
+                            Expr::Lit(Lit::Str(value)) => {
+                                return Ok(HirExpr::ArrayLit(vec![canonical(
+                                    &value.value.to_string_lossy(),
+                                )]));
+                            }
+                            Expr::Array(array) => {
+                                let mut locales = Vec::with_capacity(array.elems.len());
+                                for element in &array.elems {
+                                    let Some(element) = element else {
+                                        return Err(
+                                            "`Intl.getCanonicalLocales` does not support holes"
+                                                .into(),
+                                        );
+                                    };
+                                    if element.spread.is_some() {
+                                        return Err(
+                                            "`Intl.getCanonicalLocales` does not support spread"
+                                                .into(),
+                                        );
+                                    }
+                                    let Expr::Lit(Lit::Str(value)) = element.expr.as_ref() else {
+                                        return Err(
+                                            "`Intl.getCanonicalLocales` requires string-literal locales"
+                                                .into(),
+                                        );
+                                    };
+                                    locales.push(canonical(&value.value.to_string_lossy()));
+                                }
+                                return Ok(HirExpr::ArrayLit(locales));
+                            }
+                            _ => {
+                                return Err(
+                                    "`Intl.getCanonicalLocales` requires a string or string-array literal"
+                                        .into(),
+                                )
+                            }
+                        }
+                    }
                     if object.sym == *"Error" && property.sym == *"isError" {
                         // `Error.isError(value)`: true for a tagged error
                         // string (`new Error(...)`-family / a QuickJS-thrown
@@ -2531,6 +2637,25 @@ impl<'a> FnLowerer<'a> {
                         );
                         let mut bindings = spread_bindings;
                         bindings.push((text_name, HirType::Str, text));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Math" && property.sym == *"sumPrecise" {
+                        // `Math.sumPrecise(numbers)`: the array's elements are
+                        // summed natively with Neumaier compensation.
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Math.sumPrecise")?;
+                        let [array] = arguments.as_slice() else {
+                            return Err("`Math.sumPrecise` expects exactly one argument".into());
+                        };
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::F64)),
+                            array,
+                            "Math.sumPrecise argument",
+                        )?;
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_math_sum_precise".to_string())),
+                            vec![array.clone()],
+                        );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Math" && property.sym == *"random" {
@@ -2821,4 +2946,52 @@ impl<'a> FnLowerer<'a> {
                     }
         unreachable!("static builtin dispatch was checked before lowering")
     }
+}
+
+/// Simplified BCP-47 canonicalization: the language subtag is lowercased,
+/// a 4-letter script subtag is title-cased, and a 2/3-letter region subtag
+/// is uppercased. `Intl.getCanonicalLocales`'s step beyond this (likely
+/// subtags, grandfathered tags, extension ordering) is not modeled.
+fn canonicalize_locale(value: &str) -> String {
+    value
+        .replace('_', "-")
+        .split('-')
+        .enumerate()
+        .map(|(index, part)| {
+            if index == 0 {
+                part.to_ascii_lowercase()
+            } else if part.len() == 4 {
+                let mut characters = part.chars();
+                match characters.next() {
+                    Some(first) => {
+                        first.to_ascii_uppercase().to_string()
+                            + &characters.as_str().to_ascii_lowercase()
+                    }
+                    None => String::new(),
+                }
+            } else if part.len() == 2 || part.len() == 3 {
+                part.to_ascii_uppercase()
+            } else {
+                part.to_ascii_lowercase()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// A small representative list for `Intl.supportedValuesOf(key)` (the full
+/// ICU data set is not bundled). An unknown key yields an empty array.
+fn supported_values_of(key: &str) -> Vec<String> {
+    match key {
+        "calendar" => vec!["gregory", "iso8601"],
+        "collation" => vec!["emoji", "eor"],
+        "currency" => vec!["USD", "EUR", "JPY", "GBP"],
+        "numberingSystem" => vec!["latn", "arab"],
+        "timeZone" => vec!["UTC", "America/New_York", "Europe/London"],
+        "unit" => vec!["meter", "second", "kilogram", "celsius"],
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
