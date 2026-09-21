@@ -111,7 +111,7 @@ impl<'a> FnLowerer<'a> {
                 | "find" | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
                 | "toSpliced" | "at" | "with" | "flat" | "flatMap" | "map" | "filter"
                 | "forEach" | "slice" | "subarray" | "substring" | "substr" | "hasOwnProperty"
-                | "propertyIsEnumerable" | "group" | "groupToMap"
+                | "propertyIsEnumerable" | "deref" | "group" | "groupToMap"
                 | "copyWithin" | "fill" | "reverse" | "join"
                 | "push"
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
@@ -163,6 +163,7 @@ impl<'a> FnLowerer<'a> {
             "hasOwnProperty" | "propertyIsEnumerable" => {
                 self.lower_native_has_own_property(member, call)
             }
+            "deref" => self.lower_native_weakref_deref(member, call),
             "group" | "groupToMap" => self.lower_native_array_group(member, property, call),
             "getTime" | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate"
             | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
@@ -195,5 +196,33 @@ impl<'a> FnLowerer<'a> {
             }
             _ => unreachable!("native instance builtin dispatch was checked before lowering"),
         }
+    }
+
+    /// `WeakRef<T>.deref()`: the constructor is modeled as a one-element
+    /// array holding a *strong* reference (see `lower/expressions/lowering.rs`),
+    /// so `deref()` is an index-0 read that always yields the target.
+    fn lower_native_weakref_deref(
+        &mut self,
+        member: &MemberExpr,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        if !call.args.is_empty() {
+            return Err("native `.deref()` expects no arguments".into());
+        }
+        let receiver = self.lower_expr(&member.obj)?;
+        let receiver_type = self.infer_expr_type(&receiver)?;
+        let element = match &receiver_type {
+            HirType::Array(element) => element.as_ref().clone(),
+            HirType::Tuple(elements) => elements
+                .first()
+                .cloned()
+                .ok_or("native `.deref()` expects a non-empty `WeakRef`")?,
+            _ => return Err("native `.deref()` expects a `WeakRef`".into()),
+        };
+        Ok(HirExpr::TypedIndex(
+            Box::new(receiver),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            element,
+        ))
     }
 }
