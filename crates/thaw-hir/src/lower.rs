@@ -33,8 +33,8 @@ use swc_ecma_ast::{
     ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat,
     Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, SuperProp, TsEntityName,
     TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsParamPropParam,
-    TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclKind,
-    VarDeclOrExpr,
+    TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, UsingDecl, VarDecl,
+    VarDeclKind, VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 

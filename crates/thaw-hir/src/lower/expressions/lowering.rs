@@ -2145,7 +2145,13 @@ impl<'a> FnLowerer<'a> {
                         let target = self.lower_expr(&target.expr)?;
                         return Ok(HirExpr::ArrayLit(vec![target]));
                     }
-                    if matches!(class.sym.as_ref(), "FinalizationRegistry" | "Proxy") {
+                    if matches!(
+                        class.sym.as_ref(),
+                        "FinalizationRegistry"
+                            | "Proxy"
+                            | "DisposableStack"
+                            | "AsyncDisposableStack"
+                    ) {
                         // No compiled object model exists for these, so
                         // construct the real QuickJS global and keep it as
                         // a dynamic handle instead of approximating it:

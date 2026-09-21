@@ -3501,6 +3501,87 @@ fn compiles_array_from_async() {
     );
 }
 
+/// A computed well-known-symbol method key (`[Symbol.dispose]`) is stored
+/// under the symbol's sentinel and found by the matching member call.
+#[test]
+fn compiles_symbol_keyed_object_methods() {
+    let source = r#"
+        function main(): void {
+            const x = { [Symbol.dispose]() { console.log("disposed"); } };
+            x[Symbol.dispose]();
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "symbol_keyed_method"),
+        "disposed\n"
+    );
+}
+
+/// `using` disposes its resources in reverse declaration order, including
+/// on an early `return` (the finalizer is injected before the exit).
+#[test]
+fn compiles_using_declarations() {
+    let source = r#"
+        function make(name: string) {
+            return { [Symbol.dispose]() { console.log("dispose " + name); } };
+        }
+        function early(): void {
+            using a = make("a");
+            using b = make("b");
+            console.log("body");
+            return;
+        }
+        function main(): void {
+            early();
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_decl"),
+        "body\ndispose b\ndispose a\n"
+    );
+}
+
+/// `await using` disposes through `Symbol.asyncDispose` and awaits it.
+#[test]
+fn compiles_await_using_declarations() {
+    let source = r#"
+        function makeAsync(name: string) {
+            return { async [Symbol.asyncDispose](): Promise<void> { console.log("dispose " + name); } };
+        }
+        async function main(): Promise<void> {
+            await using a = makeAsync("a");
+            console.log("body");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "await_using_decl"),
+        "body\ndispose a\n"
+    );
+}
+
+/// `DisposableStack`/`AsyncDisposableStack` are real QuickJS handles, so
+/// `defer`/`dispose` (and `disposeAsync`) delegate exactly. `use` with a
+/// compiled resource isn't transferred (the sentinel key isn't a real
+/// symbol on the JS side).
+#[test]
+fn compiles_disposable_stack() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const stack = new DisposableStack();
+            stack.defer(() => console.log("deferred"));
+            console.log("body");
+            stack.dispose();
+            const asyncStack = new AsyncDisposableStack();
+            asyncStack.defer(async () => console.log("async deferred"));
+            await asyncStack.disposeAsync();
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "disposable_stack"),
+        "body\ndeferred\nasync deferred\n"
+    );
+}
+
 /// Locale-sensitive string/date spellings, approximated with the
 /// locale-independent transforms (`toLocaleString` over an array/number
 /// has no grouping; a Date's locale spellings reuse its UTC rendering).
