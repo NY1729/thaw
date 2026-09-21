@@ -66,11 +66,32 @@ fn zoned_for(
     Some(jiff::Zoned::new(timestamp, time_zone))
 }
 
+/// The wall clock as `(seconds, nanoseconds since the epoch)` from
+/// `CLOCK_REALTIME`, or the epoch on failure.
+fn realtime_now() -> (i64, i64) {
+    let mut timespec = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut timespec) } != 0 {
+        return (0, 0);
+    }
+    (timespec.tv_sec, timespec.tv_nsec)
+}
+
 #[no_mangle]
-/// `Temporal.Now.instant()` and friends: the current time in epoch
-/// milliseconds, exactly `Date.now()`.
+/// `Temporal.Now.instant()` and friends: the current time as epoch
+/// milliseconds.
 pub extern "C" fn thaw_temporal_now() -> f64 {
-    thaw_date_now()
+    let (seconds, nanoseconds) = realtime_now();
+    seconds as f64 * 1000.0 + (nanoseconds / 1_000_000) as f64
+}
+
+#[no_mangle]
+/// The sub-millisecond nanoseconds of the current time, complementing
+/// `thaw_temporal_now` for a nanosecond-precision `Temporal.Now`.
+pub extern "C" fn thaw_temporal_now_nanos() -> f64 {
+    (realtime_now().1 % 1_000_000) as f64
 }
 
 #[no_mangle]
@@ -85,6 +106,44 @@ pub unsafe extern "C" fn thaw_temporal_zone_valid(zone: *const c_char) -> bool {
     }
     let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
     jiff_time_zone(&zone).is_some()
+}
+
+#[no_mangle]
+/// A `PlainDate`-family calendar helper. `field` is `0`=daysInMonth,
+/// `1`=daysInYear, `2`=monthsInYear, `3`=inLeapYear (1/0).
+pub extern "C" fn thaw_temporal_plain_date_field(milliseconds: f64, field: f64) -> f64 {
+    let Some(fields) = civil_from_timestamp(milliseconds) else {
+        return f64::NAN;
+    };
+    let Ok(date) = jiff::civil::Date::new(
+        fields.year as i16,
+        fields.month as i8,
+        fields.day as i8,
+    ) else {
+        return f64::NAN;
+    };
+    match field as i64 {
+        0 => date.days_in_month() as f64,
+        1 => date.days_in_year() as f64,
+        2 => 12.0,
+        _ => {
+            if date.in_leap_year() {
+                1.0
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+#[no_mangle]
+/// `Temporal.PlainDate.prototype.monthCode`: `"M01"`..`"M12"` (ISO).
+pub extern "C" fn thaw_temporal_month_code(milliseconds: f64) -> *const c_char {
+    let Some(fields) = civil_from_timestamp(milliseconds) else {
+        return std::ptr::null();
+    };
+    let text = format!("M{:02}", fields.month);
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
