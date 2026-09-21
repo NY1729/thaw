@@ -7,11 +7,279 @@
 // precision. There is no nanosecond clock or timezone database, so `Now`
 // and the zone are millisecond/UTC.
 
+/// Parses an offset string (`"Z"`, `"+09:00"`, `"-0500"`, `"+09"`) into
+/// seconds east of UTC, or `None`.
+fn temporal_offset_seconds(text: &str) -> Option<i32> {
+    let text = text.trim();
+    if text == "Z" || text == "z" {
+        return Some(0);
+    }
+    let (sign, rest) = match text.strip_prefix('-') {
+        Some(rest) => (-1, rest),
+        None => (1, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (hours, minutes) = match rest.split_once(':') {
+        Some((hours, minutes)) => (hours.parse::<i32>().ok()?, minutes.parse::<i32>().ok()?),
+        None if rest.len() == 4 => (rest[..2].parse().ok()?, rest[2..].parse().ok()?),
+        None if rest.len() == 2 => (rest.parse().ok()?, 0),
+        None => return None,
+    };
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+fn temporal_offset_string(seconds: i32) -> String {
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let magnitude = seconds.abs();
+    format!("{sign}{:02}:{:02}", magnitude / 3600, (magnitude % 3600) / 60)
+}
+
+/// A jiff time zone for an IANA name, `"UTC"`, or a fixed offset string.
+fn jiff_time_zone(name: &str) -> Option<jiff::tz::TimeZone> {
+    let name = name.trim();
+    if name.is_empty() || name == "UTC" {
+        return Some(jiff::tz::TimeZone::UTC);
+    }
+    if let Ok(zone) = jiff::tz::TimeZone::get(name) {
+        return Some(zone);
+    }
+    let seconds = temporal_offset_seconds(name)?;
+    jiff::tz::Offset::from_seconds(seconds)
+        .ok()
+        .map(jiff::tz::TimeZone::fixed)
+}
+
+fn jiff_timestamp(milliseconds: f64, nanoseconds: f64) -> Option<jiff::Timestamp> {
+    if !milliseconds.is_finite() {
+        return None;
+    }
+    let total = (milliseconds.round() as i128) * 1_000_000 + nanoseconds.round() as i128;
+    jiff::Timestamp::from_nanosecond(total).ok()
+}
+
+fn zoned_for(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: &str,
+) -> Option<jiff::Zoned> {
+    let time_zone = jiff_time_zone(zone)?;
+    let timestamp = jiff_timestamp(milliseconds, nanoseconds)?;
+    Some(jiff::Zoned::new(timestamp, time_zone))
+}
+
 #[no_mangle]
 /// `Temporal.Now.instant()` and friends: the current time in epoch
 /// milliseconds, exactly `Date.now()`.
 pub extern "C" fn thaw_temporal_now() -> f64 {
     thaw_date_now()
+}
+
+#[no_mangle]
+/// Whether `zone` names a valid IANA time zone, `"UTC"`, or a fixed offset
+/// string.
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zone_valid(zone: *const c_char) -> bool {
+    if zone.is_null() {
+        return false;
+    }
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    jiff_time_zone(&zone).is_some()
+}
+
+#[no_mangle]
+/// `Temporal.ZonedDateTime.prototype.toString()`: RFC 9557, e.g.
+/// `2020-01-02T03:04:05.678+09:00[Asia/Tokyo]`.
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_to_string(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: *const c_char,
+) -> *const c_char {
+    if zone.is_null() {
+        return std::ptr::null();
+    }
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+        return std::ptr::null();
+    };
+    arena_c_string(&zoned.to_string()).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// `Temporal.ZonedDateTime.prototype.offset`: `±HH:MM`.
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_offset(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: *const c_char,
+) -> *const c_char {
+    if zone.is_null() {
+        return std::ptr::null();
+    }
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+        return std::ptr::null();
+    };
+    let text = temporal_offset_string(zoned.offset().seconds());
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// `Temporal.ZonedDateTime.from(text)`: the instant's epoch milliseconds.
+/// Accepts an RFC 9557 string with a `[Zone]` annotation, or a plain
+/// ISO 8601 string with an offset.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_from_string(text: *const c_char) -> f64 {
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    if let Ok(zoned) = text.parse::<jiff::Zoned>() {
+        let total = zoned.timestamp().as_nanosecond();
+        return (total.div_euclid(1_000_000)) as f64;
+    }
+    match text.parse::<jiff::Timestamp>() {
+        Ok(timestamp) => (timestamp.as_nanosecond().div_euclid(1_000_000)) as f64,
+        Err(_) => f64::NAN,
+    }
+}
+
+#[no_mangle]
+/// The sub-millisecond nanoseconds of
+/// `Temporal.ZonedDateTime.from(text)`.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_nanos_from_string(
+    text: *const c_char,
+) -> f64 {
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    let total = if let Ok(zoned) = text.parse::<jiff::Zoned>() {
+        zoned.timestamp().as_nanosecond()
+    } else if let Ok(timestamp) = text.parse::<jiff::Timestamp>() {
+        timestamp.as_nanosecond()
+    } else {
+        return f64::NAN;
+    };
+    (total.rem_euclid(1_000_000)) as f64
+}
+
+#[no_mangle]
+/// The time zone of `Temporal.ZonedDateTime.from(text)`: the `[Zone]`
+/// annotation when present, otherwise `"UTC"` for a zero offset or the
+/// offset string itself.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_zone_from_string(
+    text: *const c_char,
+) -> *const c_char {
+    if text.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    let zone = if let Ok(zoned) = text.parse::<jiff::Zoned>() {
+        zoned
+            .time_zone()
+            .iana_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| temporal_offset_string(zoned.offset().seconds()))
+    } else if let Ok(timestamp) = text.parse::<jiff::Timestamp>() {
+        // No `[Zone]`: derive it from the trailing offset (an instant has
+        // no zone of its own).
+        let offset = text
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .rsplit(['T', 't'])
+            .next()
+            .and_then(temporal_offset_seconds)
+            .unwrap_or_else(|| {
+                // A trailing `Z` (or no offset) is UTC.
+                let _ = timestamp;
+                0
+            });
+        if offset == 0 {
+            "UTC".to_string()
+        } else {
+            temporal_offset_string(offset)
+        }
+    } else {
+        return std::ptr::null();
+    };
+    arena_c_string(&zone).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// A `Temporal.ZonedDateTime` field in its own zone. `field` is `0`=year,
+/// `1`=month, `2`=day, `3`=hour, `4`=minute, `5`=second, `6`=millisecond,
+/// `7`=day of week (1=Monday..7=Sunday).
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_field(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: *const c_char,
+    field: f64,
+) -> f64 {
+    if zone.is_null() {
+        return f64::NAN;
+    }
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+        return f64::NAN;
+    };
+    match field as i64 {
+        0 => zoned.year() as f64,
+        1 => zoned.month() as f64,
+        2 => zoned.day() as f64,
+        3 => zoned.hour() as f64,
+        4 => zoned.minute() as f64,
+        5 => zoned.second() as f64,
+        6 => zoned.millisecond() as f64,
+        _ => zoned.weekday().to_monday_one_offset() as f64,
+    }
+}
+
+#[no_mangle]
+/// The UTC timestamp (epoch milliseconds) of a `ZonedDateTime`'s local
+/// wall clock, for its `toPlain*` casts. `mode` is `0`=date (local
+/// midnight), `1`=time (local time-of-day on 1970-01-01), `2`=date-time.
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_plain_timestamp(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: *const c_char,
+    mode: f64,
+) -> f64 {
+    if zone.is_null() {
+        return f64::NAN;
+    }
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+        return f64::NAN;
+    };
+    let time_of_day = zoned.hour() as f64 * 3_600_000.0
+        + zoned.minute() as f64 * 60_000.0
+        + zoned.second() as f64 * 1_000.0
+        + zoned.millisecond() as f64;
+    let days = days_from_civil(zoned.year() as i64, zoned.month() as u32, zoned.day() as u32);
+    match mode as i64 {
+        0 => days as f64 * 86_400_000.0,
+        1 => time_of_day,
+        _ => days as f64 * 86_400_000.0 + time_of_day,
+    }
 }
 
 #[no_mangle]

@@ -910,6 +910,8 @@ impl<'a> FnLowerer<'a> {
                 "epochMilliseconds"
                     | "epochSeconds"
                     | "epochNanoseconds"
+                    | "timeZoneId"
+                    | "offset"
                     | "year"
                     | "month"
                     | "day"
@@ -924,10 +926,19 @@ impl<'a> FnLowerer<'a> {
                     | "seconds"
                     | "milliseconds"
             ) {
-                if let Some(kind) = self
-                    .peek_type_without_lowering(&member.obj)
-                    .and_then(|ty| Self::temporal_kind(&ty))
-                {
+                // A receiver that's itself a Temporal-returning call
+                // (`Temporal.Now.zonedDateTimeISO(tz).timeZoneId`) can't be
+                // typed by `peek_type_without_lowering`; lower it (pure) and
+                // infer. `lower_temporal_property` returns `None` when the
+                // receiver isn't Temporal, so the caller falls through.
+                let kind = match self.peek_type_without_lowering(&member.obj) {
+                    Some(ty) => Self::temporal_kind(&ty),
+                    None => {
+                        let receiver = self.lower_expr(&member.obj)?;
+                        Self::temporal_kind(&self.infer_expr_type(&receiver)?)
+                    }
+                };
+                if let Some(kind) = kind {
                     if let Some(result) = self.lower_temporal_property(member, property, kind)? {
                         return Ok(result);
                     }

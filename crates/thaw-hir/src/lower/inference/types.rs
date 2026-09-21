@@ -1086,6 +1086,20 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, right, "bigint arithmetic right")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_temporal_zone_valid" => {
+                        let [zone] = args.as_slice() else {
+                            return Err("a time zone check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, zone, "time zone")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_temporal_zoned_from_string"
+                    | "__thaw_temporal_zoned_nanos_from_string"
+                    | "__thaw_temporal_zoned_field"
+                    | "__thaw_temporal_zoned_plain_timestamp" => return Ok(HirType::F64),
+                    "__thaw_temporal_zoned_to_string"
+                    | "__thaw_temporal_zoned_offset"
+                    | "__thaw_temporal_zoned_zone_from_string" => return Ok(HirType::Str),
                     "__thaw_temporal_now"
                     | "__thaw_temporal_instant_from_string"
                     | "__thaw_temporal_instant_nanos_from_string"

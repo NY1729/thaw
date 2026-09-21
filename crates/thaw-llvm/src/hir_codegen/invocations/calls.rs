@@ -265,6 +265,110 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal comparison returned no value".into());
             }
+            "__thaw_temporal_zone_valid" => {
+                let [zone] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let zone = self.compile_expr(zone)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_temporal_zone_valid").unwrap(),
+                        &[zone.into()],
+                        "temporal_zone_valid",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal zone check returned no value".into());
+            }
+            "__thaw_temporal_zoned_from_string"
+            | "__thaw_temporal_zoned_nanos_from_string" => {
+                let [text] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let text = self.compile_expr(text)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[text.into()],
+                        "temporal_zoned_from_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal zoned parse returned no value".into());
+            }
+            "__thaw_temporal_zoned_zone_from_string" => {
+                let [text] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let text = self.compile_expr(text)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_zoned_zone_from_string")
+                            .unwrap(),
+                        &[text.into()],
+                        "temporal_zoned_zone_from_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal zoned zone parse returned no value".into());
+            }
+            "__thaw_temporal_zoned_to_string" | "__thaw_temporal_zoned_offset" => {
+                let [milliseconds, nanoseconds, zone] = args else {
+                    return Err(format!("{name} expects three operands"));
+                };
+                let milliseconds = self.compile_expr(milliseconds)?;
+                let nanoseconds = self.compile_expr(nanoseconds)?;
+                let zone = self.compile_expr(zone)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[milliseconds.into(), nanoseconds.into(), zone.into()],
+                        "temporal_zoned_to_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal zoned string conversion returned no value".into());
+            }
+            "__thaw_temporal_zoned_field" | "__thaw_temporal_zoned_plain_timestamp" => {
+                let [milliseconds, nanoseconds, zone, field] = args else {
+                    return Err(format!("{name} expects four operands"));
+                };
+                let milliseconds = self.compile_expr(milliseconds)?;
+                let nanoseconds = self.compile_expr(nanoseconds)?;
+                let zone = self.compile_expr(zone)?;
+                let field = self.compile_expr(field)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[
+                            milliseconds.into(),
+                            nanoseconds.into(),
+                            zone.into(),
+                            field.into(),
+                        ],
+                        "temporal_zoned_field",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal zoned field returned no value".into());
+            }
             "__thaw_temporal_shift" | "__thaw_temporal_duration_component" => {
                 let [left, right] = args else {
                     return Err(format!("{name} expects two operands"));
