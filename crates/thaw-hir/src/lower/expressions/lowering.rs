@@ -733,6 +733,9 @@ impl<'a> FnLowerer<'a> {
                     bindings.push((rhs_name.clone(), rhs_type, rhs));
                     rhs = HirExpr::Var(rhs_name);
                 }
+                if let Some(result) = self.lower_bigint_arithmetic(&lhs, &rhs, bin.op)? {
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
                 let value = match bin.op {
                     BinaryOp::In => {
                         let right_type = self.infer_expr_type(&rhs)?;

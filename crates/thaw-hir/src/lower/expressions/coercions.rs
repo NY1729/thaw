@@ -1071,6 +1071,61 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `+`/`-`/`*`/`/`/`%` between a native `bigint` and a beyond-`i64` one
+    /// (a live handle), which the ordinary numeric path rejects. Both
+    /// sides become decimal strings, the operation runs in the runtime
+    /// (arbitrary precision), and the digits are wrapped back into a real
+    /// BigInt handle so chained arithmetic keeps working.
+    fn lower_bigint_arithmetic(
+        &mut self,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        op: BinaryOp,
+    ) -> Result<Option<HirExpr>, String> {
+        let intrinsic = match op {
+            BinaryOp::Add => "__thaw_bigint_decimal_add",
+            BinaryOp::Sub => "__thaw_bigint_decimal_sub",
+            BinaryOp::Mul => "__thaw_bigint_decimal_mul",
+            BinaryOp::Div => "__thaw_bigint_decimal_div",
+            BinaryOp::Mod => "__thaw_bigint_decimal_mod",
+            _ => return Ok(None),
+        };
+        let lhs_type = self.infer_expr_type(lhs)?;
+        let rhs_type = self.infer_expr_type(rhs)?;
+        let mixed = matches!(
+            (&lhs_type, &rhs_type),
+            (HirType::JsValue, HirType::I64) | (HirType::I64, HirType::JsValue)
+        );
+        // Two beyond-`i64` handles (e.g. two large literals) only for the
+        // operations the ordinary path rejects outright; `+` between two
+        // dynamic values keeps its existing string-concatenation behavior
+        // (thaw can't tell a dynamic bigint from a dynamic string).
+        let both_dynamic = lhs_type == HirType::JsValue
+            && rhs_type == HirType::JsValue
+            && op != BinaryOp::Add;
+        if !mixed && !both_dynamic {
+            return Ok(None);
+        }
+        let left = self.bigint_decimal_string(lhs.clone(), &lhs_type)?;
+        let right = self.bigint_decimal_string(rhs.clone(), &rhs_type)?;
+        let digits = HirExpr::Call(
+            Box::new(HirExpr::Var(intrinsic.into())),
+            vec![left, right],
+        );
+        let constructor = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+        );
+        let arguments = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(vec![digits]),
+        )?;
+        Ok(Some(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+            vec![constructor, arguments],
+        )))
+    }
+
     /// Strict equality between a native `bigint` and a beyond-`i64` one
     /// (a live handle), which `coerce_strict_equality_operands` would
     /// reject as incompatible: equal exactly when their decimal digits

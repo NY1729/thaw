@@ -3743,9 +3743,10 @@ fn compiles_bigint_operations() {
 
 /// A `bigint` literal (or a literal `BigInt("...")` argument) beyond
 /// Thaw's fixed-width `i64` is kept as the real QuickJS BigInt, so
-/// `.toString()`/radix conversion stay exact. Comparing it with a native
-/// `bigint` (`>`, `==`, `===`, ...) goes through a decimal-digit
-/// comparison; arithmetic still needs the native `i64` range.
+/// `.toString()`/radix conversion stay exact. Comparing (`>`, `==`,
+/// `===`, ...) and doing arithmetic (`+`, `-`, `*`, `/`, `%`) with another
+/// `bigint` goes through arbitrary-precision decimal-digit helpers, so the
+/// result is exact for any magnitude.
 #[test]
 fn compiles_large_bigint_literals() {
     let source = r#"
@@ -3763,13 +3764,25 @@ fn compiles_large_bigint_literals() {
             console.log(a === 123456789012345678901234567890n);
             console.log(a !== 1n);
             console.log(5n < a);
+            console.log((a + 1n).toString());
+            console.log((a - 1n).toString());
+            console.log((a * 2n).toString());
+            console.log((a / 7n).toString());
+            console.log((a % 7n).toString());
+            console.log((1n - a).toString());
+            console.log((a * a).toString());
+            console.log((a / a).toString());
         }
     "#;
     assert_eq!(
         compile_and_run(source, "large_bigint"),
         "123456789012345678901234567890\n18ee90ff6c373e0ee4e3f0ad2\n\
          123456789012345678901234567890\n123456789012345678901234567890\n5\n\
-         true\nfalse\nfalse\ntrue\ntrue\ntrue\ntrue\n"
+         true\nfalse\nfalse\ntrue\ntrue\ntrue\ntrue\n\
+         123456789012345678901234567891\n123456789012345678901234567889\n\
+         246913578024691357802469135780\n17636684144620811271604938270\n0\n\
+         -123456789012345678901234567889\n\
+         15241578753238836750495351562536198787501905199875019052100\n1\n"
     );
 }
 

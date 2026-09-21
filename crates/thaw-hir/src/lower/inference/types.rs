@@ -1066,6 +1066,18 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, right, "bigint comparison right")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_bigint_decimal_add"
+                    | "__thaw_bigint_decimal_sub"
+                    | "__thaw_bigint_decimal_mul"
+                    | "__thaw_bigint_decimal_div"
+                    | "__thaw_bigint_decimal_mod" => {
+                        let [left, right] = args.as_slice() else {
+                            return Err("bigint arithmetic expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, left, "bigint arithmetic left")?;
+                        self.expect_type(&HirType::Str, right, "bigint arithmetic right")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_temporal_now"
                     | "__thaw_temporal_instant_from_string"
                     | "__thaw_temporal_plain_time_from_string"
