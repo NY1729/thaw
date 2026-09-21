@@ -22,6 +22,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     | "__thaw_number_to_radix_string"
                     | "__thaw_atob"
                     | "__thaw_btoa"
+                    | "__thaw_escape"
+                    | "__thaw_unescape"
             );
         if !text_call {
             return None;
@@ -161,7 +163,9 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_string_to_lower_case"
             | "__thaw_string_to_upper_case"
             | "__thaw_atob"
-            | "__thaw_btoa" => {
+            | "__thaw_btoa"
+            | "__thaw_escape"
+            | "__thaw_unescape" => {
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
                 return self.compile_single_arg_call(&runtime, args, "string transform");
             }

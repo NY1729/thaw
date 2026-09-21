@@ -152,6 +152,7 @@ fn collect_native_classes<'a>(
                         | "EvalError"
                         | "URIError"
                         | "AggregateError"
+                        | "SuppressedError"
                 ) {
                     return Err(format!(
                         "class `{name}` extends unknown native class `{base_name}`"

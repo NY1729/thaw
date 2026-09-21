@@ -3615,3 +3615,120 @@ fn compiles_bigint_operations() {
         "9007199254740991n\n9007199254740991\n1fffffffffffff\n-ff\nbigint\n42n\n123n\n-42n\n1n\n-1n\n255n\n9007199254740992n\n18014398509481982n\n3002399751580330n\n3n\n3n\n-2n\ntrue\n"
     );
 }
+
+/// `String.prototype.replace`/`replaceAll` with a *function* replacer,
+/// delegated to QuickJS (`callDynamicMethod`) so the compiled closure is
+/// invoked per match with the real `(match, captures..., offset, string)`
+/// arguments -- including the `replaceAll` + non-global-`RegExp`
+/// `TypeError`.
+#[test]
+fn compiles_replace_with_function() {
+    let source = r#"
+        function main(): void {
+            console.log("abc".replace(/b/, (m: string) => "X"));
+            console.log("a-b-c".replaceAll("-", (m: string) => "_"));
+            console.log(
+                "hello world".replace(
+                    /(\w+)\s(\w+)/,
+                    (m: string, p1: string, p2: string) => p2 + " " + p1,
+                ),
+            );
+            console.log("x1y22z".replace(/\d+/g, (m: string) => "[" + m + "]"));
+            console.log("aaa".replaceAll("a", (m: string, off: number) => String(off)));
+            try {
+                "abc".replaceAll(/b/, (m: string) => "X");
+            } catch (e) {
+                console.log(e.name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "replace_with_function"),
+        "aXc\na_b_c\nworld hello\nx[1]y[22]z\n012\nTypeError\n"
+    );
+}
+
+/// Annex B `escape`/`unescape`, `Error.isError`, and `Error("x")` without
+/// `new` (identical to `new Error("x")`).
+#[test]
+fn compiles_escape_and_error_statics() {
+    let source = r#"
+        function main(): void {
+            console.log(escape("a b/c?d=1&x"));
+            console.log(escape("日本"));
+            console.log(unescape("a%20b%2Fc"));
+            console.log(unescape("%u65E5%u672C"));
+            console.log(Error.isError(new Error("x")));
+            console.log(Error.isError("plain"));
+            console.log(Error.isError(42));
+            try {
+                throw Error("boom");
+            } catch (e) {
+                console.log(e.name);
+                console.log(e.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "escape_and_error_statics"),
+        "a%20b/c%3Fd%3D1%26x\n%u65E5%u672C\na b/c\n日本\ntrue\nfalse\nfalse\nError\nboom\n"
+    );
+}
+
+/// `Reflect.defineProperty`/`getOwnPropertyDescriptor`/`isExtensible`/
+/// `preventExtensions`/`setPrototypeOf` and
+/// `Object.getOwnPropertyDescriptors`/`defineProperties`.
+#[test]
+fn compiles_reflect_and_object_descriptors() {
+    let source = r#"
+        function main(): void {
+            const o: { a: number, b: number } = { a: 1, b: 2 };
+            console.log(Reflect.defineProperty(o, "a", { value: 5 }));
+            console.log(o.a);
+            console.log(Reflect.getOwnPropertyDescriptor(o, "a")!.value);
+            console.log(Reflect.isExtensible(o));
+            console.log(Reflect.preventExtensions(o));
+            console.log(Reflect.setPrototypeOf(o, null));
+            const d = Object.getOwnPropertyDescriptors(o);
+            console.log(d.a.value);
+            console.log(d.b.value);
+            console.log(d.a.enumerable, d.b.writable);
+            const p: { x: number } = { x: 1 };
+            Object.defineProperties(p, { x: { value: 9 } });
+            console.log(p.x);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "reflect_object_descriptors"),
+        "true\n5\n5\ntrue\ntrue\ntrue\n5\n2\ntrue true\n9\n"
+    );
+}
+
+/// `JSON.parse` with a reviver callback (delegated to QuickJS) and
+/// `SuppressedError`.
+#[test]
+fn compiles_json_reviver_and_suppressed_error() {
+    let source = r#"
+        function main(): void {
+            const o = JSON.parse('{"a":1,"b":[2,3]}');
+            console.log(JSON.stringify(o));
+            const r = JSON.parse('{"a":1,"b":2}', (k: string, v: Json) => {
+                if (k === "b") return 99;
+                return v;
+            });
+            console.log(JSON.stringify(r));
+            try {
+                throw new SuppressedError(new Error("a"), new Error("b"), "both");
+            } catch (e) {
+                console.log(e.name);
+                console.log(e instanceof SuppressedError);
+                console.log(e instanceof Error);
+                console.log(e.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_reviver_suppressed_error"),
+        "{\"a\":1,\"b\":[2,3]}\n{\"a\":1,\"b\":99}\nSuppressedError\ntrue\ntrue\nboth\n"
+    );
+}

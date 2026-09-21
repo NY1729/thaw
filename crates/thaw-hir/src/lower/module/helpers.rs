@@ -25,6 +25,7 @@ fn is_error_family_name(name: &str) -> bool {
             | "EvalError"
             | "URIError"
             | "AggregateError"
+            | "SuppressedError"
     )
 }
 

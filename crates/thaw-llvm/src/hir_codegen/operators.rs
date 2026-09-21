@@ -263,7 +263,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         "loadNativeAddon" | "loadNativeAddonEmbedded" | "loadNativeSharedLibrary" | "loadNativeSharedLibraryEmbedded" | "loadScript"
                         | "releaseDynamicValue"
                         | "setDynamicProperty"
-                        | "setDynamicPropertyJson" => {
+                        | "setDynamicPropertyJson"
+                        | "__thaw_error_is_error"
+                        | "__thaw_error_is_instance" => {
                             return Some(HirType::Bool)
                         }
                         "callNativeAddon" | "callNativeAddonWithCallback" | "callNativeAddonValue" => {
