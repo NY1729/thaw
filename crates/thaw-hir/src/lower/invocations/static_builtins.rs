@@ -184,10 +184,10 @@ impl<'a> FnLowerer<'a> {
     fn is_static_builtin_call(object: &str, property: &str) -> bool {
         matches!(
             (object, property),
-            ("Array", "of" | "from" | "isArray")
+            ("Array", "of" | "from" | "isArray" | "fromAsync")
                 | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
                 | ("Map", "groupBy")
-                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions" | "isFrozen" | "isSealed" | "isExtensible" | "getOwnPropertyDescriptor" | "defineProperty")
+                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions" | "isFrozen" | "isSealed" | "isExtensible" | "getOwnPropertyDescriptor" | "defineProperty" | "create" | "getPrototypeOf")
                 | ("JSON", "stringify")
                 | ("Iterator", "from")
                 | ("RegExp", "escape")
@@ -311,6 +311,35 @@ impl<'a> FnLowerer<'a> {
                             ("configurable".to_string(), HirExpr::Lit(HirLit::Bool(true))),
                         ]);
                         return self.wrap_call_argument_bindings(descriptor, &bindings);
+                    }
+                    if object.sym == *"Object" && property.sym == *"create" {
+                        // Approx: a fresh object with no modeled prototype,
+                        // returned as an empty dictionary so dynamic
+                        // `obj[key]` reads/writes and `Object.keys` work.
+                        // `Object.create(null)` (or with a prototype) is
+                        // treated the same -- thaw has no prototype chain.
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Object.create")?;
+                        if arguments.is_empty() || arguments.len() > 2 {
+                            return Err("`Object.create` expects one or two arguments".into());
+                        }
+                        let result = HirExpr::JsonObjectLit(Vec::new(), HirType::Json);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Object" && property.sym == *"getPrototypeOf" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Object.getPrototypeOf")?;
+                        let [_value] = arguments.as_slice() else {
+                            return Err(
+                                "`Object.getPrototypeOf` expects exactly one argument".into()
+                            );
+                        };
+                        // Approx: thaw models no prototype chain, so report
+                        // `null` (correct for an `Object.create(null)` map).
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Lit(HirLit::Null),
+                            &bindings,
+                        );
                     }
                     if object.sym == *"Object" && property.sym == *"defineProperty" {
                         // A `value`-only descriptor, and only for a field
@@ -1595,6 +1624,54 @@ impl<'a> FnLowerer<'a> {
                         let result =
                             self.lower_group_by(items, item_type, key_fn, object_result)?;
                         return self.wrap_call_argument_bindings(result, &spread_bindings);
+                    }
+                    if object.sym == *"Array" && property.sym == *"fromAsync" {
+                        // Approx: `Array.fromAsync(items, mapFn?)` desugars
+                        // to `Promise.resolve(items.map(mapFn))` -- correct
+                        // for an array-like input and a synchronous mapper.
+                        // Promise *elements* aren't awaited individually,
+                        // and a non-array iterable (a Set, a generator) isn't
+                        // accepted.
+                        if call.args.is_empty() || call.args.len() > 3 {
+                            return Err("`Array.fromAsync` expects one to three arguments".into());
+                        }
+                        let mut items = call.args[0].expr.clone();
+                        if call.args.len() >= 2 {
+                            if call.args[1].spread.is_some() {
+                                return Err(
+                                    "`Array.fromAsync` does not support a spread mapper".into()
+                                );
+                            }
+                            items = Box::new(Expr::Call(CallExpr {
+                                span: call.span,
+                                ctxt: call.ctxt,
+                                callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                    span: call.span,
+                                    obj: items,
+                                    prop: MemberProp::Ident(IdentName::new("map".into(), call.span)),
+                                }))),
+                                args: vec![call.args[1].clone()],
+                                type_args: None,
+                            }));
+                        }
+                        let promise = CallExpr {
+                            span: call.span,
+                            ctxt: call.ctxt,
+                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                span: call.span,
+                                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                    "Promise".into(),
+                                    call.span,
+                                ))),
+                                prop: MemberProp::Ident(IdentName::new("resolve".into(), call.span)),
+                            }))),
+                            args: vec![swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: items,
+                            }],
+                            type_args: None,
+                        };
+                        return self.lower_call(&promise);
                     }
                     if object.sym == *"Array" && property.sym == *"isArray" {
                         let (arguments, mut bindings) =
