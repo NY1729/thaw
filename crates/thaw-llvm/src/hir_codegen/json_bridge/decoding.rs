@@ -87,6 +87,10 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(element) => self.compile_json_to_native_array(json, element),
             HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
+            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) => {
+                self.compile_json_value_to_native(json, ty)
+            }
+            HirType::Union(elements) => self.compile_json_to_union_result(json, elements),
             // A `Json`-typed value that is genuinely the
             // `{"__thaw_js_handle_id__": id}` placeholder `JsValueAsJson`
             // builds for a live handle coerced into a `Json`-declared

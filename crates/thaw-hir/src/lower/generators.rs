@@ -294,6 +294,11 @@ fn generator_placeholder(ty: &HirType) -> Option<HirExpr> {
         HirType::Optional(value) => HirExpr::OptionalNone(value.as_ref().clone()),
         HirType::Nullable(value) => HirExpr::NullableNone(value.as_ref().clone()),
         HirType::Nullish(value) => HirExpr::NullishUndefined(value.as_ref().clone()),
+        HirType::Union(elements) => HirExpr::UnionInject(
+            Box::new(generator_placeholder(elements.first()?)?),
+            0,
+            elements.clone(),
+        ),
         HirType::Undefined => HirExpr::Lit(HirLit::Undefined),
         HirType::Null => HirExpr::Lit(HirLit::Null),
         _ => return None,

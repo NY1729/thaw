@@ -156,8 +156,25 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(forced_name.clone()),
                         ], Some((name, input_type.clone(), input)))
                     };
+                    let return_is_optional_element = matches!(
+                        &return_element,
+                        HirType::Optional(payload) if payload.as_ref() == &element
+                    );
+                    let return_union_members = match &return_element {
+                        HirType::Union(members) if members.contains(&element) => {
+                            Some(members.clone())
+                        }
+                        _ => None,
+                    };
                     let value_type = if return_element == HirType::Undefined {
                         HirType::Optional(Box::new(element.clone()))
+                    } else if return_is_optional_element {
+                        return_element.clone()
+                    } else if let Some(mut members) = return_union_members.clone() {
+                        if !members.contains(&HirType::Undefined) {
+                            members.push(HirType::Undefined);
+                        }
+                        HirType::Union(members)
                     } else {
                         let mut members = vec![element.clone()];
                         if !members.contains(&return_element) {
@@ -211,11 +228,17 @@ impl<'a> FnLowerer<'a> {
                         vec![HirExpr::Var(forced_name.clone())],
                     );
                     let (undefined, completion, yielded, forced) = match &value_type {
-                        HirType::Optional(_) => (
+                        HirType::Optional(_) if return_element == HirType::Undefined => (
                             HirExpr::OptionalNone(element.clone()),
                             HirExpr::OptionalNone(element.clone()),
                             HirExpr::OptionalSome(Box::new(yielded_shift), element.clone()),
                             HirExpr::OptionalNone(element.clone()),
+                        ),
+                        HirType::Optional(_) => (
+                            HirExpr::OptionalNone(element.clone()),
+                            completion_shift,
+                            HirExpr::OptionalSome(Box::new(yielded_shift), element.clone()),
+                            forced_shift,
                         ),
                         HirType::Union(members) => (
                             HirExpr::UnionInject(
@@ -223,27 +246,38 @@ impl<'a> FnLowerer<'a> {
                                 members.len() - 1,
                                 members.clone(),
                             ),
-                            HirExpr::UnionInject(
-                                Box::new(completion_shift),
-                                members
-                                    .iter()
-                                    .position(|member| member == &return_element)
-                                    .expect("generator return type is a result union member"),
-                                members.clone(),
-                            ),
+                            if return_union_members.is_some() {
+                                completion_shift
+                            } else {
+                                HirExpr::UnionInject(
+                                    Box::new(completion_shift),
+                                    members
+                                        .iter()
+                                        .position(|member| member == &return_element)
+                                        .expect("generator return type is a result union member"),
+                                    members.clone(),
+                                )
+                            },
                             HirExpr::UnionInject(
                                 Box::new(yielded_shift),
-                                0,
-                                members.clone(),
-                            ),
-                            HirExpr::UnionInject(
-                                Box::new(forced_shift),
                                 members
                                     .iter()
-                                    .position(|member| member == &return_element)
-                                    .expect("generator return type is a result union member"),
+                                    .position(|member| member == &element)
+                                    .expect("generator yield type is a result union member"),
                                 members.clone(),
                             ),
+                            if return_union_members.is_some() {
+                                forced_shift
+                            } else {
+                                HirExpr::UnionInject(
+                                    Box::new(forced_shift),
+                                    members
+                                        .iter()
+                                        .position(|member| member == &return_element)
+                                        .expect("generator return type is a result union member"),
+                                    members.clone(),
+                                )
+                            },
                         ),
                         _ => unreachable!("generator result value is optional or a union"),
                     };
