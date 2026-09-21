@@ -1338,3 +1338,57 @@ fn compiles_iterator_from() {
         "1 false\n2 false\n2,3\n4,6\n6\n2\ntrue\ntrue\n3,4\na 1\n14,16\n6\n7\n2\nclosed\n1\n4\n4\ncontrolled closed\n9 true\n"
     );
 }
+
+#[test]
+fn iterator_from_forwards_structured_generator_values() {
+    let source = r#"
+        interface Input { value: number }
+        interface Result { label: string }
+
+        function* objects(): Generator<number, Result, Input> {
+            const input = yield 1;
+            console.log(input.value);
+            return { label: "natural" };
+        }
+
+        function* arrays(): Generator<number, number[], number[]> {
+            const input = yield 2;
+            console.log(input.join(","));
+            return [3, 4];
+        }
+
+        function* optional(): Generator<number, number | undefined, string | undefined> {
+            const input = yield 3;
+            console.log(input === undefined ? "missing" : input);
+            return undefined;
+        }
+
+        function* unions(): Generator<number, string | number, string | number> {
+            const input = yield 4;
+            console.log(input);
+            return "natural";
+        }
+
+        function main(): void {
+            const objectIterator = Iterator.from(objects());
+            objectIterator.next();
+            console.log(objectIterator.next({ value: 7 }).done);
+
+            const arrayIterator = Iterator.from(arrays());
+            arrayIterator.next();
+            console.log(arrayIterator.return([8, 9]).done);
+
+            const optionalIterator = Iterator.from(optional());
+            optionalIterator.next();
+            console.log(optionalIterator.next(undefined).done);
+
+            const unionIterator = Iterator.from(unions());
+            unionIterator.next();
+            console.log(unionIterator.next("text").done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "iterator_from_structured_values"),
+        "7\ntrue\ntrue\nmissing\ntrue\ntext\ntrue\n"
+    );
+}

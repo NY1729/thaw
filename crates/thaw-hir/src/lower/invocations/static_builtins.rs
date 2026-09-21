@@ -535,6 +535,12 @@ impl<'a> FnLowerer<'a> {
                             return Err("`Iterator.from` expects exactly one argument".into());
                         };
                         let source_type = self.infer_expr_type(source)?;
+                        if matches!(&source_type, HirType::Function(params, result)
+                            if matches!(params.as_slice(), [HirType::I64, HirType::Str, _, HirType::Array(_), HirType::Array(_), HirType::Array(_)])
+                                && matches!(result.as_ref(), HirType::Promise(generated) if matches!(generated.as_ref(), HirType::Array(_))))
+                        {
+                            return Err("`Iterator.from` does not accept an async generator".into());
+                        }
                         let source = if matches!(&source_type, HirType::Function(params, result)
                             if matches!(params.as_slice(), [HirType::I64, HirType::Str, _, HirType::Array(_), HirType::Array(_), HirType::Array(_)])
                                 && matches!(result.as_ref(), HirType::Array(_)))

@@ -463,3 +463,22 @@ fn lowers_fetch_and_json_parse_field_access() {
         )
     );
 }
+#[test]
+fn iterator_from_rejects_async_generators_clearly() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            async function* values(): AsyncGenerator<number, void, undefined> {
+                yield 1;
+            }
+            function main(): void {
+                Iterator.from(values());
+            }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(
+        error.contains("`Iterator.from` does not accept an async generator"),
+        "{error}"
+    );
+}
