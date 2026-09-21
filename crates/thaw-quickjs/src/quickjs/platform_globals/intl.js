@@ -779,5 +779,177 @@
     globalThis.Intl.RelativeTimeFormat = RelativeTimeFormat;
   }
 
-  globalThis.Intl = Object.assign({ DateTimeFormat, NumberFormat, ListFormat }, globalThis.Intl);
+  // `Intl.DisplayNames`/`Intl.DurationFormat`. Neither is provided by the
+  // native icu4x primitives this file wraps, so both are pure-JS tables.
+  // The tables are keyed by *language* so a new language is added by
+  // dropping another entry into `DISPLAY_NAMES_TABLES`/`DURATION_TABLES`
+  // (an unknown language falls back to `en`).
+  const DISPLAY_NAMES_TABLES = {
+    en: {
+      language: {
+        en: 'English', fr: 'French', de: 'German', es: 'Spanish',
+        ja: 'Japanese', zh: 'Chinese', ko: 'Korean', ru: 'Russian',
+        ar: 'Arabic', pt: 'Portuguese', it: 'Italian',
+      },
+      region: {
+        US: 'United States', GB: 'United Kingdom', JP: 'Japan',
+        FR: 'France', DE: 'Germany', CN: 'China', KR: 'South Korea',
+        CA: 'Canada', AU: 'Australia', IN: 'India',
+      },
+      script: {
+        Latn: 'Latin', Cyrl: 'Cyrillic', Hans: 'Simplified Han',
+        Hant: 'Traditional Han', Jpan: 'Japanese', Kore: 'Korean',
+        Arab: 'Arabic', Grek: 'Greek', Hebr: 'Hebrew',
+      },
+      currency: {
+        USD: 'US Dollar', EUR: 'Euro', JPY: 'Japanese Yen',
+        GBP: 'British Pound', CNY: 'Chinese Yuan',
+      },
+    },
+    ja: {
+      language: {
+        en: '英語', fr: 'フランス語', de: 'ドイツ語', es: 'スペイン語',
+        ja: '日本語', zh: '中国語', ko: '韓国語', ru: 'ロシア語',
+        ar: 'アラビア語', pt: 'ポルトガル語', it: 'イタリア語',
+      },
+      region: {
+        US: 'アメリカ合衆国', GB: 'イギリス', JP: '日本', FR: 'フランス',
+        DE: 'ドイツ', CN: '中国', KR: '韓国', CA: 'カナダ',
+        AU: 'オーストラリア', IN: 'インド',
+      },
+      script: {
+        Latn: 'ラテン文字', Cyrl: 'キリル文字', Hans: '簡体字',
+        Hant: '繁体字', Jpan: '日本語', Kore: 'ハングル', Arab: 'アラビア文字',
+      },
+      currency: {
+        USD: '米ドル', EUR: 'ユーロ', JPY: '日本円', GBP: '英ポンド',
+        CNY: '中国人民元',
+      },
+    },
+  };
+  const DISPLAY_NAMES_TYPES = ['language', 'region', 'script', 'currency', 'calendar', 'dateTimeField'];
+
+  function primarylanguage(locale) {
+    const language = String(locale || 'en').split('-')[0].toLowerCase();
+    return DISPLAY_NAMES_TABLES[language] ? language : 'en';
+  }
+
+  class DisplayNames {
+    constructor(locales, options) {
+      const opts = options || {};
+      const list = locales === undefined ? [] : (Array.isArray(locales) ? locales : [locales]);
+      this.locale = list.length > 0 ? String(list[0]) : 'en';
+      this._language = primarylanguage(this.locale);
+      this._type = opts.type === undefined ? 'language' : String(opts.type);
+      this._style = opts.style === undefined ? 'long' : String(opts.style);
+      this._fallback = opts.fallback === undefined ? 'code' : String(opts.fallback);
+      if (!DISPLAY_NAMES_TYPES.includes(this._type)) {
+        throw new RangeError(`Invalid type: ${this._type}`);
+      }
+    }
+
+    of(code) {
+      const table = DISPLAY_NAMES_TABLES[this._language][this._type];
+      const value = table === undefined ? undefined : table[String(code)];
+      if (value !== undefined) return value;
+      return this._fallback === 'none' ? undefined : String(code);
+    }
+
+    resolvedOptions() {
+      return {
+        locale: this.locale,
+        style: this._style,
+        type: this._type,
+        fallback: this._fallback,
+      };
+    }
+  }
+
+  const DURATION_UNITS = [
+    'years', 'months', 'weeks', 'days', 'hours',
+    'minutes', 'seconds', 'milliseconds', 'microseconds', 'nanoseconds',
+  ];
+  const DURATION_TABLES = {
+    en: {
+      long: {
+        years: 'year', months: 'month', weeks: 'week', days: 'day',
+        hours: 'hour', minutes: 'minute', seconds: 'second',
+        milliseconds: 'millisecond', microseconds: 'microsecond',
+        nanoseconds: 'nanosecond',
+      },
+      short: {
+        years: 'yr', months: 'mth', weeks: 'wk', days: 'day',
+        hours: 'hr', minutes: 'min', seconds: 'sec',
+        milliseconds: 'ms', microseconds: 'μs', nanoseconds: 'ns',
+      },
+      narrow: {
+        years: 'y', months: 'm', weeks: 'w', days: 'd',
+        hours: 'h', minutes: 'm', seconds: 's',
+        milliseconds: 'ms', microseconds: 'μs', nanoseconds: 'ns',
+      },
+      separator: ', ',
+      unit: ' ',
+    },
+    ja: {
+      long: {
+        years: '年', months: 'か月', weeks: '週間', days: '日',
+        hours: '時間', minutes: '分', seconds: '秒',
+        milliseconds: 'ミリ秒', microseconds: 'マイクロ秒', nanoseconds: 'ナノ秒',
+      },
+      short: {
+        years: '年', months: 'か月', weeks: '週', days: '日',
+        hours: '時間', minutes: '分', seconds: '秒',
+        milliseconds: 'ミリ秒', microseconds: 'マイクロ秒', nanoseconds: 'ナノ秒',
+      },
+      narrow: {
+        years: '年', months: 'か月', weeks: '週', days: '日',
+        hours: '時間', minutes: '分', seconds: '秒',
+        milliseconds: 'ミリ秒', microseconds: 'マイクロ秒', nanoseconds: 'ナノ秒',
+      },
+      separator: ' ',
+      unit: ' ',
+    },
+  };
+
+  class DurationFormat {
+    constructor(locales, options) {
+      const opts = options || {};
+      const list = locales === undefined ? [] : (Array.isArray(locales) ? locales : [locales]);
+      this.locale = list.length > 0 ? String(list[0]) : 'en';
+      this._language = primarylanguage(this.locale);
+      this._style = opts.style === undefined ? 'short' : String(opts.style);
+      if (!['long', 'short', 'narrow', 'digital'].includes(this._style)) {
+        throw new RangeError(`Invalid style: ${this._style}`);
+      }
+    }
+
+    format(duration) {
+      const table = DURATION_TABLES[this._language];
+      const style = this._style === 'digital' ? 'short' : this._style;
+      const value = duration || {};
+      const parts = [];
+      for (const unit of DURATION_UNITS) {
+        const raw = value[unit];
+        if (raw === undefined || raw === null) continue;
+        const number = Number(raw);
+        if (!Number.isFinite(number) || number === 0) continue;
+        let name = table[style][unit];
+        // English long form pluralizes a non-unit count ("30 minutes").
+        if (this._language === 'en' && style === 'long' && number !== 1) {
+          name += 's';
+        }
+        parts.push(`${number}${table.unit}${name}`);
+      }
+      return parts.join(table.separator);
+    }
+
+    resolvedOptions() {
+      return { locale: this.locale, style: this._style, numberingSystem: 'latn' };
+    }
+  }
+
+  globalThis.Intl = Object.assign(
+    { DateTimeFormat, NumberFormat, ListFormat, DisplayNames, DurationFormat },
+    globalThis.Intl,
+  );
 })();
