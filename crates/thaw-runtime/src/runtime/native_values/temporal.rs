@@ -462,8 +462,20 @@ fn duration_string_to_milliseconds(text: &str) -> Option<f64> {
     any.then_some(sign * total)
 }
 
+/// Splits a duration held as (possibly fractional) milliseconds into whole
+/// milliseconds (floored) and a non-negative sub-millisecond remainder.
+fn split_duration_nanoseconds(milliseconds: f64) -> (f64, f64) {
+    let total_nanoseconds = (milliseconds * 1_000_000.0).round();
+    let whole_milliseconds = (total_nanoseconds / 1_000_000.0).floor();
+    (
+        whole_milliseconds,
+        total_nanoseconds - whole_milliseconds * 1_000_000.0,
+    )
+}
+
 #[no_mangle]
-/// `Temporal.Duration.from(text)`: an ISO 8601 duration as milliseconds.
+/// `Temporal.Duration.from(text)`: an ISO 8601 duration's whole
+/// milliseconds.
 ///
 /// # Safety
 /// `text` must be null or a valid NUL-terminated UTF-8 string.
@@ -472,28 +484,48 @@ pub unsafe extern "C" fn thaw_temporal_duration_from_string(text: *const c_char)
         return f64::NAN;
     }
     let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
-    duration_string_to_milliseconds(&text).unwrap_or(f64::NAN)
+    duration_string_to_milliseconds(&text)
+        .map(|milliseconds| split_duration_nanoseconds(milliseconds).0)
+        .unwrap_or(f64::NAN)
 }
 
 #[no_mangle]
-/// `Temporal.Duration.prototype.total()`/`.toString()` support: a duration
-/// held as milliseconds renders back as an ISO 8601 string with the
-/// largest exact components (hours/minutes/seconds/milliseconds).
+/// The sub-millisecond nanoseconds of `Temporal.Duration.from(text)`.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_temporal_duration_nanos_from_string(
+    text: *const c_char,
+) -> f64 {
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    duration_string_to_milliseconds(&text)
+        .map(|milliseconds| split_duration_nanoseconds(milliseconds).1)
+        .unwrap_or(f64::NAN)
+}
+
+#[no_mangle]
+/// `Temporal.Duration.prototype.toString()`: an ISO 8601 string with the
+/// largest exact components (hours/minutes/seconds, with up to 9
+/// fractional-second digits).
 pub extern "C" fn thaw_temporal_duration_to_string(
     milliseconds: f64,
-    _nanoseconds: f64,
+    nanoseconds: f64,
 ) -> *const c_char {
     if !milliseconds.is_finite() {
         return std::ptr::null();
     }
-    let negative = milliseconds < 0.0;
-    let mut remaining = milliseconds.abs().round() as i64;
-    let hours = remaining / 3_600_000;
-    remaining %= 3_600_000;
-    let minutes = remaining / 60_000;
-    remaining %= 60_000;
-    let seconds = remaining / 1_000;
-    let millis = remaining % 1_000;
+    let total_nanoseconds =
+        (milliseconds.round() as i128) * 1_000_000 + nanoseconds.round() as i128;
+    let negative = total_nanoseconds < 0;
+    let total = total_nanoseconds.abs();
+    let hours = total / 3_600_000_000_000;
+    let minutes = (total / 60_000_000_000) % 60;
+    let seconds_total = total % 60_000_000_000;
+    let seconds = seconds_total / 1_000_000_000;
+    let fraction = seconds_total % 1_000_000_000;
     let mut parts = String::new();
     if hours != 0 {
         parts.push_str(&format!("{hours}H"));
@@ -501,9 +533,14 @@ pub extern "C" fn thaw_temporal_duration_to_string(
     if minutes != 0 {
         parts.push_str(&format!("{minutes}M"));
     }
-    if seconds != 0 || millis != 0 {
-        if millis != 0 {
-            parts.push_str(&format!("{seconds}.{millis:03}S"));
+    if seconds != 0 || fraction != 0 {
+        if fraction != 0 {
+            let mut seconds_text = format!("{seconds}.{fraction:09}");
+            while seconds_text.ends_with('0') {
+                seconds_text.pop();
+            }
+            parts.push_str(&seconds_text);
+            parts.push('S');
         } else {
             parts.push_str(&format!("{seconds}S"));
         }

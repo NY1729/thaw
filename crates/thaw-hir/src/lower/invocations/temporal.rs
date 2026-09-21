@@ -93,25 +93,38 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
-    /// A Duration operand as milliseconds: a native `Duration.from` result
-    /// (`F64`), an object literal of components, or an ISO 8601 string.
-    fn temporal_duration_milliseconds(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+    /// A Duration operand as `(whole milliseconds, sub-millisecond
+    /// nanoseconds)`, preserving sub-millisecond precision.
+    fn temporal_duration_operand(
+        &mut self,
+        value: HirExpr,
+    ) -> Result<(HirExpr, HirExpr), String> {
         let ty = self.infer_expr_type(&value)?;
         if ty == HirType::F64 {
-            return Ok(value);
+            return Ok((value, HirExpr::Lit(HirLit::F64(0.0))));
         }
         if Self::temporal_kind(&ty) == Some("duration") {
-            return Ok(Self::temporal_timestamp(value, &ty));
+            let milliseconds = Self::temporal_timestamp(value.clone(), &ty);
+            let nanoseconds = Self::temporal_nanoseconds(value, &ty);
+            return Ok((milliseconds, nanoseconds));
         }
         if ty == HirType::Str {
             let text = self.coerce_primitive_to_string(value)?;
-            return Ok(HirExpr::Call(
+            let milliseconds = HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_temporal_duration_from_string".into())),
+                vec![text.clone()],
+            );
+            let nanoseconds = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_temporal_duration_nanos_from_string".into())),
                 vec![text],
-            ));
+            );
+            return Ok((milliseconds, nanoseconds));
         }
         if let HirExpr::ObjectLit(fields) = &value {
-            return Self::duration_fields_milliseconds(fields);
+            return Ok((
+                Self::duration_fields_milliseconds(fields)?,
+                HirExpr::Lit(HirLit::F64(0.0)),
+            ));
         }
         Err(format!(
             "expected a Duration, an ISO 8601 duration string, or an object of components, got {ty:?}"
@@ -199,8 +212,9 @@ impl<'a> FnLowerer<'a> {
                     let [value] = arguments.as_slice() else {
                         return Err(format!("`{label}` expects exactly one argument"));
                     };
-                    let milliseconds = self.temporal_duration_milliseconds(value.clone())?;
-                    Self::temporal_object("duration", milliseconds, HirExpr::Lit(HirLit::F64(0.0)))
+                    let (milliseconds, nanoseconds) =
+                        self.temporal_duration_operand(value.clone())?;
+                    Self::temporal_object("duration", milliseconds, nanoseconds)
                 }
                 other => return Err(format!("`Temporal.Duration.{other}` is not supported")),
             };
@@ -262,7 +276,7 @@ impl<'a> FnLowerer<'a> {
                         }
                     };
                     let milliseconds = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                        Box::new(HirExpr::Var("__thaw_math_floor".into())),
                         vec![HirExpr::BinOp(
                             BinOp::Div,
                             Box::new(value.clone()),
@@ -396,26 +410,53 @@ impl<'a> FnLowerer<'a> {
                 let [duration] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
                 };
-                let milliseconds = self.temporal_duration_milliseconds(duration.clone())?;
-                let delta = if property.sym == *"add" {
-                    milliseconds
-                } else {
+                let (delta_ms, delta_ns) =
+                    self.temporal_duration_operand(duration.clone())?;
+                let negate = |value: HirExpr| {
                     HirExpr::BinOp(
                         BinOp::Mul,
-                        Box::new(milliseconds),
+                        Box::new(value),
                         Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
                     )
                 };
-                // The shift is millisecond-granular, so the sub-millisecond
-                // nanoseconds carry through unchanged.
-                Self::temporal_object(
-                    kind,
-                    HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_temporal_shift".into())),
-                        vec![timestamp, delta],
-                    ),
-                    nanoseconds,
-                )
+                let (delta_ms, delta_ns) = if property.sym == *"add" {
+                    (delta_ms, delta_ns)
+                } else {
+                    (negate(delta_ms), negate(delta_ns))
+                };
+                // Add the nanosecond parts, carrying whole milliseconds into
+                // the timestamp so sub-millisecond durations aren't lost.
+                let nanosecond_sum =
+                    HirExpr::BinOp(BinOp::Add, Box::new(nanoseconds), Box::new(delta_ns));
+                // Floor (not truncate) so a negative sum borrows a whole
+                // millisecond and leaves a non-negative remainder.
+                let carry = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_math_floor".into())),
+                    vec![HirExpr::BinOp(
+                        BinOp::Div,
+                        Box::new(nanosecond_sum.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(1_000_000.0))),
+                    )],
+                );
+                let result_nanoseconds = HirExpr::BinOp(
+                    BinOp::Sub,
+                    Box::new(nanosecond_sum),
+                    Box::new(HirExpr::BinOp(
+                        BinOp::Mul,
+                        Box::new(carry.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(1_000_000.0))),
+                    )),
+                );
+                let result_milliseconds = HirExpr::BinOp(
+                    BinOp::Add,
+                    Box::new(HirExpr::BinOp(
+                        BinOp::Add,
+                        Box::new(timestamp),
+                        Box::new(delta_ms),
+                    )),
+                    Box::new(carry),
+                );
+                Self::temporal_object(kind, result_milliseconds, result_nanoseconds)
             }
             "since" | "until" => {
                 let [other] = arguments.as_slice() else {
