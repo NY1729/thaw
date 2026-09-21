@@ -835,12 +835,42 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, radix, "toString radix")?;
                         return Ok(HirType::Str);
                     }
-                    "__thaw_i64_to_string" => {
+                    "__thaw_i64_to_string" | "__thaw_i64_to_bigint_string" => {
                         let [value] = args.as_slice() else {
                             return Err("bigint string conversion expects one operand".into());
                         };
                         self.expect_type(&HirType::I64, value, "String bigint argument")?;
                         return Ok(HirType::Str);
+                    }
+                    "__thaw_i64_to_radix_string" => {
+                        let [value, radix] = args.as_slice() else {
+                            return Err("bigint radix string conversion expects two operands".into());
+                        };
+                        self.expect_type(&HirType::I64, value, "bigint toString receiver")?;
+                        self.expect_type(&HirType::F64, radix, "bigint toString radix")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_i64_from_number" => {
+                        let [value] = args.as_slice() else {
+                            return Err("bigint number conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::F64, value, "BigInt number argument")?;
+                        return Ok(HirType::I64);
+                    }
+                    "__thaw_i64_from_string" => {
+                        let [value] = args.as_slice() else {
+                            return Err("bigint string parsing expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "BigInt string argument")?;
+                        return Ok(HirType::I64);
+                    }
+                    "__thaw_i64_as_int_n" | "__thaw_i64_as_uint_n" => {
+                        let [value, bits] = args.as_slice() else {
+                            return Err("`BigInt.asIntN`/`asUintN` expects two operands".into());
+                        };
+                        self.expect_type(&HirType::I64, value, "BigInt.asIntN/asUintN value")?;
+                        self.expect_type(&HirType::F64, bits, "BigInt.asIntN/asUintN bits")?;
+                        return Ok(HirType::I64);
                     }
                     "__thaw_symbol_new" => {
                         let [description] = args.as_slice() else {

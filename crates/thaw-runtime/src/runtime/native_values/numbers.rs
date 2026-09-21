@@ -615,3 +615,120 @@ mod radix_string_tests {
 pub extern "C" fn thaw_i64_to_string(value: i64) -> *const c_char {
     arena_c_string(&value.to_string()).map_or(std::ptr::null(), |value| value.cast())
 }
+
+/// `console.log`'s rendering of a real BigInt: the decimal digits with a
+/// trailing `n`, matching JavaScript. `thaw_i64_to_string` (no suffix)
+/// backs `String(value)` / `.toString()` instead.
+#[no_mangle]
+pub extern "C" fn thaw_i64_to_bigint_string(value: i64) -> *const c_char {
+    arena_c_string(&format!("{value}n")).map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// `BigInt(number)`: truncates toward zero (real JS throws on a fractional
+/// input; thaw's BigInt is a fixed-width `i64`, so the integer part is the
+/// approximation), saturating at the `i64` bounds where a real BigInt
+/// would be unbounded.
+#[no_mangle]
+pub extern "C" fn thaw_i64_from_number(value: f64) -> i64 {
+    if value.is_nan() {
+        0
+    } else if value >= i64::MAX as f64 {
+        i64::MAX
+    } else if value <= i64::MIN as f64 {
+        i64::MIN
+    } else {
+        value.trunc() as i64
+    }
+}
+
+/// `BigInt(string)`: parses an optional sign then decimal digits, stopping
+/// at the first non-digit (real JS rejects trailing garbage with a
+/// `SyntaxError`; thaw keeps the leading integer, or `0` when there is
+/// none), saturating at the `i64` bounds.
+#[no_mangle]
+pub extern "C" fn thaw_i64_from_string(value: *const c_char) -> i64 {
+    let text = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let trimmed = text.trim();
+    let (negative, digits) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let mut magnitude: i64 = 0;
+    let mut any = false;
+    for ch in digits.chars() {
+        let Some(digit) = ch.to_digit(10) else { break };
+        any = true;
+        magnitude = magnitude.saturating_mul(10).saturating_add(digit as i64);
+    }
+    if !any {
+        return 0;
+    }
+    if negative {
+        magnitude.saturating_neg()
+    } else {
+        magnitude
+    }
+}
+
+/// `BigInt.asIntN(bits, value)`: reinterprets the low `bits` of `value` as a
+/// two's-complement signed integer.
+#[no_mangle]
+pub extern "C" fn thaw_i64_as_int_n(value: i64, bits: f64) -> i64 {
+    let bits = bits.trunc();
+    if !(bits > 0.0) {
+        return 0;
+    }
+    let bits = if bits >= 64.0 { 64 } else { bits as u32 };
+    if bits == 64 {
+        return value;
+    }
+    let mask = (1u64 << bits) - 1;
+    let truncated = (value as u64) & mask;
+    if (truncated >> (bits - 1)) & 1 == 1 {
+        (truncated | !mask) as i64
+    } else {
+        truncated as i64
+    }
+}
+
+/// `BigInt.asUintN(bits, value)`: the low `bits` of `value` as an unsigned
+/// magnitude. Values that don't fit a signed `i64` (only possible for
+/// `bits == 64`) come back with their bit pattern reinterpreted.
+#[no_mangle]
+pub extern "C" fn thaw_i64_as_uint_n(value: i64, bits: f64) -> i64 {
+    let bits = bits.trunc();
+    if !(bits > 0.0) {
+        return 0;
+    }
+    let bits = if bits >= 64.0 { 64 } else { bits as u32 };
+    if bits == 64 {
+        return value;
+    }
+    let mask = (1u64 << bits) - 1;
+    ((value as u64) & mask) as i64
+}
+
+/// `BigInt.prototype.toString(radix)`: the digit string in `radix` (2..=36,
+/// clamped), lowercase, prefixed with `-` for a negative value.
+#[no_mangle]
+pub extern "C" fn thaw_i64_to_radix_string(value: i64, radix: f64) -> *const c_char {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let radix = if radix.is_finite() { radix.trunc() as i64 } else { 10 };
+    let radix = radix.clamp(2, 36) as u64;
+    let negative = value.is_negative();
+    let mut magnitude = value.unsigned_abs();
+    let mut buffer = Vec::new();
+    if magnitude == 0 {
+        buffer.push(b'0');
+    }
+    while magnitude > 0 {
+        buffer.push(DIGITS[(magnitude % radix) as usize]);
+        magnitude /= radix;
+    }
+    if negative {
+        buffer.push(b'-');
+    }
+    buffer.reverse();
+    let text = String::from_utf8(buffer).unwrap_or_default();
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
