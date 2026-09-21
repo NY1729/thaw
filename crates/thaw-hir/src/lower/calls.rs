@@ -842,6 +842,15 @@ impl<'a> FnLowerer<'a> {
         if operation_name != "call" && operation_name != "apply" {
             return Ok(None);
         }
+        // `Reflect.apply(...)` (a static builtin whose own name is `apply`)
+        // isn't a function value's `.apply` -- leave it to
+        // `is_static_builtin_call`'s dispatch below instead of trying to
+        // lower `Reflect` as a variable.
+        if let Expr::Ident(object) = operation.obj.as_ref() {
+            if Self::is_static_builtin_call(object.sym.as_ref(), &operation_name) {
+                return Ok(None);
+            }
+        }
         let target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
         let (params, optional, rest, ret) = match &target_type {
