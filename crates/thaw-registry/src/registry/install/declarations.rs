@@ -437,14 +437,80 @@ fn exported_const_object_type_member_names(flattened_source: &str) -> Vec<(Strin
         .unwrap_or_default()
 }
 
+/// A `.d.cts` (CommonJS) entry that delegates its whole API to a sibling
+/// ESM declaration file via `declare const X: typeof import("./x.mjs").
+/// default; export = X;` -- real example: markdown-it's
+/// `dist/markdown-it.d.cts`, which only re-exports the namespace types and
+/// the default from `./markdown-it.mjs` (`dist/markdown-it.d.mts`). The
+/// delegated file holds the real `declare class`/`declare const`, so
+/// without following it `new MarkdownIt()` had no constructor to resolve
+/// ("only `new Promise<T>(...)` is supported").
+///
+/// Returns the sibling file's own path and source, so subsequent relative
+/// resolution happens against *that* file. Only the exact
+/// `typeof import("<relative>").default` delegation shape is followed;
+/// anything else is left untouched.
+fn dts_delegation_target(entry_path: &Path, entry_source: &str) -> Option<(PathBuf, String)> {
+    use thaw_parser::ast::{
+        Decl, Expr, ModuleDecl, ModuleItem, Pat, Stmt, TsEntityName, TsType, TsTypeQueryExpr,
+    };
+
+    let module = thaw_parser::parse_typescript(entry_source).ok()?;
+    let exported = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref()
+        {
+            Expr::Ident(ident) => Some(ident.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    })?;
+    let specifier = module.body.iter().find_map(|item| {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl))) = item else {
+            return None;
+        };
+        var_decl.decls.iter().find_map(|declarator| {
+            let Pat::Ident(binding) = &declarator.name else {
+                return None;
+            };
+            if binding.id.sym.as_str() != exported {
+                return None;
+            }
+            let annotation = binding.type_ann.as_ref()?;
+            let TsType::TsTypeQuery(query) = annotation.type_ann.as_ref() else {
+                return None;
+            };
+            let TsTypeQueryExpr::Import(import) = &query.expr_name else {
+                return None;
+            };
+            let is_default = matches!(
+                import.qualifier.as_ref(),
+                Some(TsEntityName::Ident(ident)) if ident.sym == "default"
+            );
+            (is_default)
+                .then(|| import.arg.value.as_str().map(str::to_string))
+                .flatten()
+        })
+    })?;
+    // Resolve `./impl.mjs` to `./impl.d.mts` (not `./impl.d.ts`), which
+    // `declaration_reexport_path` alone would miss.
+    let sibling = with_explicit_d_ts_suffix(&entry_path.parent()?.join(&specifier))
+        .filter(|candidate| candidate.is_file())?;
+    let source = fs::read_to_string(&sibling).ok()?;
+    Some((sibling, source))
+}
+
 fn dts_source_with_reexported_functions(
     entry_path: &Path,
     entry_source: &str,
 ) -> Result<String, String> {
+    let (entry_path, entry_source) = match dts_delegation_target(entry_path, entry_source) {
+        Some((path, source)) => (path, source),
+        None => (entry_path.to_path_buf(), entry_source.to_string()),
+    };
     let mut visited_namespace_wraps = std::collections::BTreeSet::new();
     dts_source_with_reexported_functions_inner(
-        entry_path,
-        entry_source,
+        &entry_path,
+        &entry_source,
         &mut visited_namespace_wraps,
     )
 }
@@ -2602,6 +2668,26 @@ fn with_d_ts_suffix(path: &Path) -> Option<PathBuf> {
     }
     let file_name = path.file_name()?.to_str()?;
     Some(path.with_file_name(format!("{file_name}.d.ts")))
+}
+
+/// `with_d_ts_suffix` for the ESM/CJS-explicit extensions: `.mjs`/`.mts`
+/// declarations are `.d.mts`, `.cjs`/`.cts` are `.d.cts`. Deliberately
+/// separate from `with_d_ts_suffix` (which maps every source extension to
+/// `.d.ts`) so this precise mapping is used only where the delegation
+/// shape is already known, not for every re-export hop -- mapping `.mjs`
+/// globally pulled a package's *own* ESM declarations into its CJS
+/// flattening and produced duplicate declarations (real trigger:
+/// csv-parse's `CsvError` class, declared in both its `.d.cts` and ESM
+/// `.d.ts`, then lowered as a duplicate class).
+fn with_explicit_d_ts_suffix(path: &Path) -> Option<PathBuf> {
+    let extension = path.extension().and_then(|extension| extension.to_str())?;
+    let declaration_extension = match extension {
+        "mjs" | "mts" => "d.mts",
+        "cjs" | "cts" => "d.cts",
+        "js" | "jsx" | "ts" | "tsx" => "d.ts",
+        _ => return None,
+    };
+    Some(path.with_extension(declaration_extension))
 }
 
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {

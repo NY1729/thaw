@@ -2913,3 +2913,55 @@ fn installed_package_unwraps_a_declare_global_augmentation() {
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
+
+#[test]
+fn installed_package_follows_a_dcts_esm_default_delegation() {
+    // A CommonJS `.d.cts` entry that delegates its whole API to a sibling
+    // ESM declaration file via `declare const X: typeof import("./x.mjs").
+    // default; export = X;` -- real-world example: markdown-it's
+    // `dist/markdown-it.d.cts` + `dist/markdown-it.d.mts`. The `.d.mts` holds
+    // the real class, so without following the delegation `new MarkdownIt()`
+    // had no constructor.
+    let scratch = temp_registry("installed-dts-dcts-delegation-scratch");
+    let registry = temp_registry("installed-dts-dcts-delegation-registry");
+    let package = scratch.join("node_modules/dual-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"dual-kit","version":"1.0.0","types":"./index.d.cts","main":"./index.cjs"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.cts"),
+        "declare namespace Kit {\n\
+             type Options = import(\"./impl.mjs\").Options;\n\
+         }\n\
+         declare const Kit: typeof import(\"./impl.mjs\").default;\n\
+         export = Kit;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("impl.d.mts"),
+        "export interface Options { value: number; }\n\
+         declare class Kit {\n\
+             constructor(options?: Options);\n\
+             run(): string;\n\
+         }\n\
+         export { Kit as default };\n",
+    )
+    .unwrap();
+    fs::write(package.join("index.cjs"), "module.exports = class Kit {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "dual-kit").unwrap();
+    let declarations = resolve(&registry, "dual-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("class Kit"),
+        "the delegated ESM declaration should be flattened in:\n{declarations}"
+    );
+    assert!(
+        declarations.contains("constructor(options?: Options)"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
