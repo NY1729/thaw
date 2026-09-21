@@ -909,6 +909,7 @@ impl<'a> FnLowerer<'a> {
                 property.sym.as_ref(),
                 "epochMilliseconds"
                     | "epochSeconds"
+                    | "epochNanoseconds"
                     | "year"
                     | "month"
                     | "day"

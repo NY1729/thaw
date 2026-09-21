@@ -1014,7 +1014,9 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         for name in [
             "thaw_temporal_instant_from_string",
+            "thaw_temporal_instant_nanos_from_string",
             "thaw_temporal_plain_time_from_string",
+            "thaw_temporal_plain_time_nanos_from_string",
         ] {
             self.module.add_function(
                 name,
@@ -1030,24 +1032,29 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_temporal_plain_year_month_to_string",
             "thaw_temporal_plain_month_day_to_string",
             "thaw_temporal_duration_to_string",
+            "thaw_temporal_epoch_nanoseconds",
         ] {
             self.module.add_function(
                 name,
-                i8_ptr.fn_type(&[f64_type.into()], false),
+                i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
                 Some(Linkage::External),
             );
         }
-        for name in [
-            "thaw_temporal_shift",
-            "thaw_temporal_compare",
-            "thaw_temporal_duration_component",
-        ] {
+        for name in ["thaw_temporal_shift", "thaw_temporal_duration_component"] {
             self.module.add_function(
                 name,
                 f64_type.fn_type(&[f64_type.into(), f64_type.into()], false),
                 Some(Linkage::External),
             );
         }
+        self.module.add_function(
+            "thaw_temporal_compare",
+            f64_type.fn_type(
+                &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_temporal_duration_from_string",
             f64_type.fn_type(&[i8_ptr.into()], false),
