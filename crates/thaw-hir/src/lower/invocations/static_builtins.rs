@@ -191,7 +191,7 @@ impl<'a> FnLowerer<'a> {
                 | ("Proxy", "revocable")
                 | ("Intl", "getCanonicalLocales" | "supportedValuesOf")
                 | ("Map", "groupBy")
-                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions" | "isFrozen" | "isSealed" | "isExtensible" | "getOwnPropertyDescriptor" | "getOwnPropertyDescriptors" | "defineProperty" | "defineProperties" | "create" | "getPrototypeOf")
+                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions" | "isFrozen" | "isSealed" | "isExtensible" | "getOwnPropertyDescriptor" | "getOwnPropertyDescriptors" | "defineProperty" | "defineProperties" | "create" | "getPrototypeOf" | "setPrototypeOf" | "getOwnPropertySymbols")
                 | ("JSON", "stringify" | "parse")
                 | ("Iterator", "from" | "concat" | "zip" | "zipKeyed")
                 | ("RegExp", "escape")
@@ -346,6 +346,35 @@ impl<'a> FnLowerer<'a> {
                         // `null` (correct for an `Object.create(null)` map).
                         return self.wrap_call_argument_bindings(
                             HirExpr::Lit(HirLit::Null),
+                            &bindings,
+                        );
+                    }
+                    if object.sym == *"Object" && property.sym == *"setPrototypeOf" {
+                        // Approx: thaw models no prototype chain, so setting
+                        // one is a no-op that returns the object.
+                        let (arguments, bindings) = self
+                            .lower_native_spread_values(&call.args, "Object.setPrototypeOf")?;
+                        let [target, _prototype] = arguments.as_slice() else {
+                            return Err(
+                                "`Object.setPrototypeOf` expects exactly two arguments".into()
+                            );
+                        };
+                        return self.wrap_call_argument_bindings(target.clone(), &bindings);
+                    }
+                    if object.sym == *"Object" && property.sym == *"getOwnPropertySymbols" {
+                        // Approx: symbol-keyed properties aren't representable
+                        // as object fields, so there are never any.
+                        let (arguments, bindings) = self.lower_native_spread_values(
+                            &call.args,
+                            "Object.getOwnPropertySymbols",
+                        )?;
+                        let [_target] = arguments.as_slice() else {
+                            return Err(
+                                "`Object.getOwnPropertySymbols` expects exactly one argument".into()
+                            );
+                        };
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::ArrayLit(Vec::new()),
                             &bindings,
                         );
                     }

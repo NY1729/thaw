@@ -3973,3 +3973,24 @@ fn compiles_regex_backreferences_and_lookaround() {
         "true\ntrue\ntrue\nXX\naa,bb,cc\n1\naXc\n"
     );
 }
+
+/// `Object.setPrototypeOf` (no-op returning the object),
+/// `Object.getOwnPropertySymbols` (always empty) and
+/// `Object.prototype.isPrototypeOf` (always false) -- thaw models no
+/// prototype chain or symbol-keyed fields.
+#[test]
+fn compiles_object_prototype_statics() {
+    let source = r#"
+        function main(): void {
+            const o = { a: 1 };
+            const same = Object.setPrototypeOf(o, null);
+            console.log(same.a);
+            console.log(Object.getOwnPropertySymbols(o).length);
+            console.log(o.isPrototypeOf({ b: 2 }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_prototype_statics"),
+        "1\n0\nfalse\n"
+    );
+}
