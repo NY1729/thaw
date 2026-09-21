@@ -3892,3 +3892,28 @@ fn compiles_intl_display_names_and_duration_format() {
         "French\nフランス語\nJapan\n米ドル\n1 hour, 30 minutes\n2 時間 5 分\n"
     );
 }
+
+/// General well-known symbol support: `Symbol.iterator` (via
+/// `Iterator.from`), `Symbol.toPrimitive` on a Date, and
+/// `Symbol.toStringTag` reads.
+#[test]
+fn compiles_well_known_symbols() {
+    let source = r#"
+        function main(): void {
+            const a = [10, 20, 30];
+            const it = a[Symbol.iterator]();
+            console.log(it.next().value);
+            console.log(it.next().value);
+            const d = new Date(86400000);
+            console.log(d[Symbol.toPrimitive]("number"));
+            console.log(typeof d[Symbol.toPrimitive]("string"));
+            console.log(a[Symbol.toStringTag]);
+            const m = new Map<string, number>();
+            console.log(m[Symbol.toStringTag]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "well_known_symbols"),
+        "10\n20\n86400000\nstring\nundefined\nMap\n"
+    );
+}

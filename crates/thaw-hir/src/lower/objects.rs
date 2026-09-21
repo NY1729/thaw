@@ -842,6 +842,54 @@ impl<'a> FnLowerer<'a> {
                 .ok_or("unbound `this` member access requires a statically known property")?;
             return self.lower_unbound_this_member(&property);
         }
+        // `Symbol.<wellKnown>` as a value -- lowered to a distinctive
+        // sentinel string a computed access/call can dispatch on. These are
+        // not registered symbols (`Symbol.for`), so no runtime symbol is
+        // created.
+        if let Expr::Ident(receiver) = member.obj.as_ref() {
+            if receiver.sym == *"Symbol" {
+                if let MemberProp::Ident(property) = &member.prop {
+                    if well_known_symbol_name(property.sym.as_ref()).is_some() {
+                        return Ok(HirExpr::Lit(HirLit::Str(well_known_symbol_key(
+                            property.sym.as_ref(),
+                        ))));
+                    }
+                }
+            }
+        }
+        // `obj[Symbol.toStringTag]` -- a compile-time tag per receiver type.
+        if let MemberProp::Computed(computed) = &member.prop {
+            if well_known_symbol_from_expr(&computed.expr) == Some("toStringTag") {
+                let receiver = self.lower_expr(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                // Only the built-ins that actually define a
+                // `Symbol.toStringTag` getter report one; an Array/plain
+                // object has none, so this reads `undefined` (its "Array"
+                // tag comes from `Object.prototype.toString`, not here).
+                let tag = if receiver_type == date_object_type() {
+                    Some("Date")
+                } else if receiver_type == regex_object_type() {
+                    Some("RegExp")
+                } else {
+                    match &receiver_type {
+                        HirType::F64 => Some("Number"),
+                        HirType::Str => Some("String"),
+                        HirType::Bool => Some("Boolean"),
+                        HirType::Map(_, _) => Some("Map"),
+                        HirType::Set(_) => Some("Set"),
+                        HirType::Bytes => Some("Uint8Array"),
+                        HirType::Symbol => Some("Symbol"),
+                        HirType::Promise(_) => Some("Promise"),
+                        HirType::I64 => Some("BigInt"),
+                        _ => None,
+                    }
+                };
+                return Ok(match tag {
+                    Some(tag) => HirExpr::Lit(HirLit::Str(tag.to_string())),
+                    None => HirExpr::Lit(HirLit::Undefined),
+                });
+            }
+        }
         if let Expr::Ident(enum_name) = member.obj.as_ref() {
             let member_name = match &member.prop {
                 MemberProp::Ident(member) => Some(member.sym.to_string()),
@@ -1491,4 +1539,61 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, object_type, object)])
     }
 
+}
+
+/// The ECMAScript well-known symbols (`Symbol.<name>`) that thaw recognizes
+/// as computed member keys.
+const WELL_KNOWN_SYMBOLS: &[&str] = &[
+    "asyncDispose",
+    "asyncIterator",
+    "dispose",
+    "hasInstance",
+    "isConcatSpreadable",
+    "iterator",
+    "match",
+    "matchAll",
+    "replace",
+    "search",
+    "species",
+    "split",
+    "toPrimitive",
+    "toStringTag",
+    "unscopables",
+];
+
+fn well_known_symbol_name(name: &str) -> Option<&'static str> {
+    WELL_KNOWN_SYMBOLS.iter().copied().find(|known| *known == name)
+}
+
+/// The distinctive sentinel a `Symbol.<name>` value lowers to. The
+/// `\u{1f}` prefix cannot appear as an ordinary property-name literal in
+/// source, so it can't collide with a real string key.
+fn well_known_symbol_key(name: &str) -> String {
+    format!("\u{1f}@@{name}")
+}
+
+/// Extracts a well-known symbol name from a computed member key expression
+/// (`Symbol.iterator`, etc.).
+fn well_known_symbol_from_expr(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Member(member) => {
+            let Expr::Ident(object) = member.obj.as_ref() else {
+                return None;
+            };
+            if object.sym != *"Symbol" {
+                return None;
+            }
+            let MemberProp::Ident(property) = &member.prop else {
+                return None;
+            };
+            well_known_symbol_name(property.sym.as_ref())
+        }
+        // `Symbol.iterator` in a computed key is normalized by thaw's
+        // iterator-protocol support into this internal string before
+        // lowering.
+        Expr::Lit(swc_ecma_ast::Lit::Str(value)) => {
+            well_known_symbol_name(value.value.to_string_lossy().strip_prefix("__thaw_symbol_")?)
+        }
+        _ => None,
+    }
 }
