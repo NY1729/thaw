@@ -831,6 +831,41 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
             };
             f64::from(result)
         }
+        // `new Set(stringIterable)` (22): `object` is a JIT array value.
+        // Its bits are either a tagged raw buffer (`buffer | 1`) or a
+        // handle cell holding the buffer pointer (see thaw-jit's
+        // `array_data`). Build a string-keyed dictionary from its elements.
+        22 => {
+            const ARRAY_RESULT_TAG: usize = 1;
+            let bits = object as usize;
+            let buffer = if bits & ARRAY_RESULT_TAG != 0 {
+                (bits & !ARRAY_RESULT_TAG) as *const u8
+            } else {
+                let handle = bits as *const *const u8;
+                if handle.is_null() {
+                    return 0.0;
+                }
+                unsafe { handle.read() }
+            };
+            if buffer.is_null() {
+                return 0.0;
+            }
+            let length = unsafe { buffer.cast::<i64>().read() }.max(0) as usize;
+            let slots = unsafe { buffer.add(8) }.cast::<*const std::ffi::c_char>();
+            let mut fields = serde_json::Map::new();
+            for index in 0..length {
+                let pointer = unsafe { slots.add(index).read() };
+                let key = if pointer.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(pointer) }
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                fields.insert(key.clone(), Value::String(key));
+            }
+            f64::from_bits(leak(Value::Object(fields)) as usize as u64)
+        }
         _ => 0.0,
     }
 }

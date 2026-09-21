@@ -402,6 +402,12 @@ extern "C" fn set_is_disjoint_from(object: f64, other: f64) -> f64 {
     dictionary_query(object, other, 21)
 }
 
+/// `new Set(iterable)`: builds a string-keyed dictionary from an array-like
+/// handle (every element stringified as its key).
+extern "C" fn set_from_array(array: f64) -> f64 {
+    dictionary_query(array, 0.0, 22)
+}
+
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]

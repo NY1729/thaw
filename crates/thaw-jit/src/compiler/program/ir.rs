@@ -354,6 +354,7 @@ enum NumericValue {
     SetIsSubsetOf,
     SetIsSupersetOf,
     SetIsDisjointFrom,
+    SetFromArray,
     EmptyDictionary,
     DictionaryAppend(u8),
     DictionaryStaticAppend(u8, *const c_char),
