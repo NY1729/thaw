@@ -1471,15 +1471,16 @@ impl<'a> FnLowerer<'a> {
                 if array_lit
                     .elems
                     .iter()
-                    .all(|element| element.as_ref().is_some_and(|element| element.spread.is_none()))
+                    .all(|element| element.as_ref().is_none_or(|element| element.spread.is_none()))
                 {
+                    // A hole (`[1, , 3]`) reads as `undefined`; thaw's dense
+                    // arrays represent it as an explicit `undefined` element.
                     let values = array_lit
                         .elems
                         .iter()
-                        .map(|element| {
-                            self.lower_expr(
-                                &element.as_ref().expect("checked array element").expr,
-                            )
+                        .map(|element| match element {
+                            None => Ok(HirExpr::Lit(HirLit::Undefined)),
+                            Some(element) => self.lower_expr(&element.expr),
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     let preserve_order = values.iter().any(contains_await);

@@ -35,6 +35,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_index_of"
                 | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
+                | "__thaw_bytes_set_from_string"
         );
         if !typed_array_call && !generic_array_call {
             return None;
@@ -218,6 +219,30 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or_else(|| format!("`{name}` returned no value"));
+            }
+            "__thaw_bytes_set_from_string" => {
+                let [buffer, text, encoding] = args else {
+                    return Err(
+                        "bytes setFrom expects a buffer, text, and an encoding".into(),
+                    );
+                };
+                let handle = self.compile_expr(buffer)?.into_pointer_value();
+                let data = self.compile_array_data(handle)?;
+                let text = self.compile_expr(text)?;
+                let encoding = self.compile_expr(encoding)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_bytes_set_from_string")
+                            .unwrap(),
+                        &[data.into(), text.into(), encoding.into()],
+                        "bytes_set_from_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("bytes setFrom returned no value".into());
             }
             "__thaw_bytes_read" | "__thaw_bytes_write" | "__thaw_bytes_read_i64"
             | "__thaw_bytes_write_i64" => {

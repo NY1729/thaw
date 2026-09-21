@@ -3363,6 +3363,54 @@ fn compiles_reflect_set_and_object_descriptor_queries() {
     );
 }
 
+/// The ECMAScript 2026 `Uint8Array` base64/hex API: `fromHex`/`fromBase64`
+/// statics, `toHex`/`toBase64` instance methods, and `setFromHex`/
+/// `setFromBase64` (returning `{ read, written }`).
+#[test]
+fn compiles_bytes_base64_hex() {
+    let source = r#"
+        function main(): void {
+            const h = Uint8Array.fromHex("48656c6c6f");
+            console.log(h.toString("utf8"));
+            const b = Uint8Array.fromBase64("aGVsbG8=");
+            console.log(b.toString("utf8"));
+            console.log(h.toHex());
+            console.log(h.toBase64());
+            const target = Buffer.alloc(8);
+            const result = target.setFromHex("deadbeef");
+            console.log(result.read, result.written);
+            console.log(target.toHex());
+            const small = Buffer.alloc(3);
+            const truncated = small.setFromBase64("aGVsbG8=");
+            console.log(truncated.read, truncated.written);
+            console.log(small.toHex());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bytes_base64_hex"),
+        "Hello\nhello\n48656c6c6f\nSGVsbG8=\n8 4\ndeadbeef00000000\n4 3\n68656c\n"
+    );
+}
+
+/// A sparse array literal (`[1, , 3]`) compiles: thaw's dense arrays
+/// represent a hole as an explicit `undefined` element, so `length` and an
+/// indexed read match a real hole's observable behavior.
+#[test]
+fn compiles_array_holes() {
+    let source = r#"
+        function main(): void {
+            const a = [1, , 3];
+            console.log(a.length, a[1] === undefined);
+            const b = [, ,];
+            console.log(b.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_holes"),
+        "3 true\n2\n"
+    );
+}
+
 /// `Object.freeze`/`seal`/`preventExtensions` record observable state, so
 /// `isFrozen`/`isSealed`/`isExtensible` (and the `Reflect` equivalents)
 /// report the real transitions, including through a `const` alias and an
