@@ -3451,3 +3451,48 @@ fn compiles_array_group_and_object_define_property() {
         "{\"odd\":[1,3],\"even\":[2,4]}\n3\n1,4\n9\ntrue\n{\"a\":7}\n"
     );
 }
+
+/// `Object.create` (an empty dictionary), `Object.getPrototypeOf`
+/// (approximated as `null`), and `Object.prototype.propertyIsEnumerable`.
+#[test]
+fn compiles_object_create_prototype_and_property_is_enumerable() {
+    let source = r#"
+        function main(): void {
+            const m = Object.create(null);
+            m["a"] = 1;
+            m["b"] = 2;
+            console.log(JSON.stringify(m));
+            console.log(Object.keys(m).length);
+            console.log(typeof Object.create({ greet: 1 }));
+            console.log(Object.getPrototypeOf({}) === null);
+            const o = { a: 1 };
+            console.log(o.propertyIsEnumerable("a"));
+            console.log(o.propertyIsEnumerable("z"));
+            const j = JSON.parse("{\"a\":1}");
+            console.log(j.propertyIsEnumerable("a"));
+            console.log(j.propertyIsEnumerable("z"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_create_prototype_enumerable"),
+        "{\"a\":1,\"b\":2}\n2\nobject\ntrue\ntrue\nfalse\ntrue\nfalse\n"
+    );
+}
+
+/// `Array.fromAsync` over an array-like input with an optional synchronous
+/// mapper (approximated as `Promise.resolve(items.map(mapFn))`).
+#[test]
+fn compiles_array_from_async() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const a = await Array.fromAsync([1, 2, 3]);
+            console.log(a.join(","));
+            const b = await Array.fromAsync([1, 2, 3], (n: number) => n * 2);
+            console.log(b.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_async"),
+        "1,2,3\n2,4,6\n"
+    );
+}
