@@ -982,6 +982,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
+        self.module.add_function(
+            "thaw_bigint_decimal_cmp",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         // Temporal (`Temporal.Now`/`Instant`/`Plain*`/`Duration`), built on
         // the same epoch-millisecond `f64` as `Date`.
         self.module.add_function(
