@@ -3818,3 +3818,21 @@ fn compiles_proxy_revocable_and_intl_statics() {
         "en-US\nzh-Hant,fr\ntrue\n7\nrevoked\n"
     );
 }
+
+/// `Iterator.concat`/`zip` (ES2025 lazy composition), delegated to the
+/// QuickJS realm.
+#[test]
+fn compiles_iterator_composition() {
+    let source = r#"
+        function main(): void {
+            const concatenated = Iterator.concat([1, 2], [3, 4]);
+            console.log(concatenated.toArray().join(","));
+            const zipped = Iterator.zip([[1, 2], ["a", "b"]]);
+            console.log(JSON.stringify(zipped.toArray()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "iterator_composition"),
+        "1,2,3,4\n[[1,\"a\"],[2,\"b\"]]\n"
+    );
+}
