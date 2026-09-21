@@ -2001,6 +2001,22 @@ macro_rules! jit_expressions {
                     .into(),
                 );
             }
+            Expr::Call(call) if set_combine_method(call, locals).is_some() => {
+                let (token, receiver, other) = set_combine_method(call, locals)?;
+                let mut encoded = Vec::new();
+                encode_expression(receiver, parameters, locals, context, &mut encoded)?;
+                if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                let mut other_encoded = Vec::new();
+                encode_expression(other, parameters, locals, context, &mut other_encoded)?;
+                if jit_expression_kind(&other_encoded)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                output.extend(encoded);
+                output.extend(other_encoded);
+                output.push(token.into());
+            }
             Expr::Call(call) if set_method(call, locals).is_some() => {
                 let (operation, receiver) = set_method(call, locals)?;
                 let mut encoded = Vec::new();

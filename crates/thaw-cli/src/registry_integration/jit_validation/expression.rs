@@ -1317,11 +1317,26 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
-        } else if token == "dassign" {
+        } else if matches!(
+            token.as_str(),
+            "dassign"
+                | "setunion"
+                | "setintersection"
+                | "setdifference"
+                | "setsymmetricdiff"
+        ) {
             if stack.pop()? != JitKind::Dictionary || stack.pop()? != JitKind::Dictionary {
                 return None;
             }
             stack.push(JitKind::Dictionary);
+        } else if matches!(
+            token.as_str(),
+            "setissubset" | "setissuperset" | "setisdisjoint"
+        ) {
+            if stack.pop()? != JitKind::Dictionary || stack.pop()? != JitKind::Dictionary {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if matches!(
             token.as_str(),
             "dkeys"
