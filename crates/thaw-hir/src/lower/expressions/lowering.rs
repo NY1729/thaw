@@ -1973,9 +1973,10 @@ impl<'a> FnLowerer<'a> {
                     }
                     if class.sym == *"SuppressedError" {
                         // `new SuppressedError(error, suppressed, message?)`.
-                        // Like `AggregateError`, only the message survives
-                        // (the exception channel is a single tagged string);
-                        // `.error`/`.suppressed` aren't modeled.
+                        // The exception channel is a single tagged string, so
+                        // both sub-errors are appended after the message
+                        // (`\u{6}<error>\u{7}<suppressed>`) for `.error`/
+                        // `.suppressed` to recover.
                         let args = new_expr.args.clone().unwrap_or_default();
                         if args.iter().any(|argument| argument.spread.is_some()) {
                             return Err(
@@ -1988,6 +1989,10 @@ impl<'a> FnLowerer<'a> {
                                     .into(),
                             );
                         }
+                        let error = self.lower_expr(&args[0].expr)?;
+                        let error = self.coerce_primitive_to_string(error)?;
+                        let suppressed = self.lower_expr(&args[1].expr)?;
+                        let suppressed = self.coerce_primitive_to_string(suppressed)?;
                         let message = match args.get(2) {
                             Some(argument) => {
                                 let message = self.lower_expr(&argument.expr)?;
@@ -1995,11 +2000,24 @@ impl<'a> FnLowerer<'a> {
                             }
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
+                        let concat = |left: HirExpr, right: HirExpr| {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                                vec![left, right],
+                            )
+                        };
                         let tag = HirExpr::Lit(HirLit::Str("\u{1}SuppressedError\u{1}".to_string()));
-                        return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                            vec![tag, message],
-                        ));
+                        let head = concat(tag, message);
+                        let head = concat(
+                            head,
+                            HirExpr::Lit(HirLit::Str("\u{6}".to_string())),
+                        );
+                        let head = concat(head, error);
+                        let head = concat(
+                            head,
+                            HirExpr::Lit(HirLit::Str("\u{7}".to_string())),
+                        );
+                        return Ok(concat(head, suppressed));
                     }
                     if class.sym == *"AggregateError" {
                         // `new AggregateError(errors, message?, options?)`.

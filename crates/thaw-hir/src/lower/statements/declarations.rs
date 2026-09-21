@@ -686,6 +686,11 @@ impl<'a> FnLowerer<'a> {
                 if let Some(method) = native_method_value {
                     self.native_method_values.insert(hir_name.clone(), method);
                 }
+                // `const frozen = Object.freeze(x)` aliases the frozen
+                // object; carry the tracked state onto the new binding.
+                if let Some(state) = decl.init.as_deref().and_then(Self::state_setting_call) {
+                    self.object_states.insert(hir_name.clone(), state);
+                }
                 statements.push(HirStmt::Let(hir_name, storage_type, value));
                 continue;
             }

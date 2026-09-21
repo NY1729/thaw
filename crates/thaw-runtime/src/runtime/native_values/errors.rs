@@ -38,8 +38,26 @@ const ERROR_NAME_OVERRIDE_MARKER: char = '\u{4}';
 /// crossing native code and back (e.g. an `http-errors` error's `status`).
 /// Native `.message`/`.name` reads must ignore it.
 const ERROR_PROPS_MARKER: char = '\u{5}';
+/// A `SuppressedError`'s `.error` sub-error tag, appended after the message
+/// as `\u{1}SuppressedError\u{1}<message>\u{6}<error>\u{7}<suppressed>`.
+/// Nested error tags only use `\u{1}`-`\u{5}`, so `\u{6}`/`\u{7}` can't
+/// collide with one.
+const ERROR_SUPPRESSED_ERROR_MARKER: char = '\u{6}';
+/// A `SuppressedError`'s `.suppressed` sub-error tag.
+const ERROR_SUPPRESSED_MARKER: char = '\u{7}';
+
+/// Drops a `SuppressedError`'s trailing `.error`/`.suppressed` sub-tags
+/// (and anything after them) so `.message`/`.cause`/`.code`/`.name` read
+/// only the real fields. Nested sub-error tags carry `\u{1}`-`\u{5}`, never
+/// `\u{6}`.
+fn strip_suppressed_segments(message: &str) -> &str {
+    message
+        .split_once(ERROR_SUPPRESSED_ERROR_MARKER)
+        .map_or(message, |value| value.0)
+}
 
 fn split_error_tag(message: &str) -> (&str, &str) {
+    let message = strip_suppressed_segments(message);
     let Some(rest) = message.strip_prefix(ERROR_TAG_MARKER) else {
         // No leading tag: a plain message, possibly with a *trailing*
         // `\u{1}name\u{1}message` segment a labeled rejection appends (see
@@ -65,6 +83,7 @@ fn split_error_tag(message: &str) -> (&str, &str) {
 /// The runtime `.name` override embedded after the message, if any --
 /// see `ERROR_NAME_OVERRIDE_MARKER`.
 fn split_error_name_override(message: &str) -> Option<&str> {
+    let message = strip_suppressed_segments(message);
     let (_, after) = message.split_once(ERROR_NAME_OVERRIDE_MARKER)?;
     let after = after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0);
     let after = after.split_once(ERROR_CAUSE_MARKER).map_or(after, |value| value.0);
@@ -83,15 +102,40 @@ fn resolved_error_name(message: &str) -> String {
 }
 
 fn split_error_cause(message: &str) -> Option<&str> {
+    let message = strip_suppressed_segments(message);
     let after = message.split_once(ERROR_CAUSE_MARKER)?.1;
     let after = after.split_once(ERROR_CODE_MARKER).map_or(after, |value| value.0);
     Some(after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0))
 }
 
 fn split_error_code(message: &str) -> Option<&str> {
+    let message = strip_suppressed_segments(message);
     message
         .split_once(ERROR_CODE_MARKER)
         .map(|value| value.1.split_once(ERROR_PROPS_MARKER).map_or(value.1, |props| props.0))
+}
+
+/// A `SuppressedError`'s `.error` sub-error tag, or `None`.
+fn split_suppressed_error(message: &str) -> Option<&str> {
+    let after = message.split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    let segment = after
+        .split_once(ERROR_SUPPRESSED_MARKER)
+        .map_or(after, |value| value.0);
+    Some(
+        segment
+            .split_once(ERROR_PROPS_MARKER)
+            .map_or(segment, |value| value.0),
+    )
+}
+
+/// A `SuppressedError`'s `.suppressed` sub-error tag, or `None`.
+fn split_suppressed(message: &str) -> Option<&str> {
+    let after = message.split_once(ERROR_SUPPRESSED_MARKER)?.1;
+    Some(
+        after
+            .split_once(ERROR_PROPS_MARKER)
+            .map_or(after, |value| value.0),
+    )
 }
 
 /// Reads a caught error's own custom property from the trailing
@@ -185,6 +229,37 @@ pub unsafe extern "C" fn thaw_error_code(message: *const c_char) -> *const c_cha
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     arena_c_string(split_error_code(&text).unwrap_or("undefined"))
+        .map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// `SuppressedError.prototype.error` -- the original sub-error tag (empty
+/// when `message` isn't a `SuppressedError`), matching `.cause`'s
+/// empty-string-for-absent convention.
+///
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_suppressed_error(message: *const c_char) -> *const c_char {
+    if message.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    arena_c_string(split_suppressed_error(&text).unwrap_or_default())
+        .map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// `SuppressedError.prototype.suppressed` -- the suppressed sub-error tag
+/// (empty when `message` isn't a `SuppressedError`).
+///
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_suppressed(message: *const c_char) -> *const c_char {
+    if message.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    arena_c_string(split_suppressed(&text).unwrap_or_default())
         .map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -470,6 +545,36 @@ mod error_native_tests {
         let unoverridden = "\u{1}MyError$Error\u{1}oops";
         assert_eq!(call_name(unoverridden), "MyError");
         assert_eq!(call_stack(unoverridden), "MyError: oops");
+    }
+
+    fn call_suppressed_error(message: &str) -> String {
+        let message = CString::new(message).unwrap();
+        let result = unsafe { thaw_error_suppressed_error(message.as_ptr()) };
+        assert!(!result.is_null());
+        unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn call_suppressed(message: &str) -> String {
+        let message = CString::new(message).unwrap();
+        let result = unsafe { thaw_error_suppressed(message.as_ptr()) };
+        assert!(!result.is_null());
+        unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn a_suppressed_error_keeps_its_sub_errors_separate_from_its_message() {
+        let tagged = "\u{1}SuppressedError\u{1}both\u{6}\u{1}Error\u{1}first\u{7}\u{1}TypeError\u{1}second";
+        assert_eq!(call_name(tagged), "SuppressedError");
+        assert_eq!(call_message(tagged), "both");
+        assert_eq!(call_suppressed_error(tagged), "\u{1}Error\u{1}first");
+        assert_eq!(call_suppressed(tagged), "\u{1}TypeError\u{1}second");
+        // A plain error has neither segment.
+        assert_eq!(call_suppressed_error("boom"), "");
+        assert_eq!(call_suppressed("\u{1}Error\u{1}x"), "");
     }
 
     #[test]

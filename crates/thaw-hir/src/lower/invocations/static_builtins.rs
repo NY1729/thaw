@@ -205,6 +205,85 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// Records freeze/seal/preventExtensions state for the binding a value
+    /// refers to, when it's a simple variable. See `object_states`.
+    fn mark_object_state(
+        &mut self,
+        value: &HirExpr,
+        frozen: bool,
+        sealed: bool,
+        nonextensible: bool,
+    ) {
+        if let HirExpr::Var(name) = value {
+            let state = self.object_states.entry(name.clone()).or_insert(ObjectState {
+                frozen: false,
+                sealed: false,
+                nonextensible: false,
+            });
+            state.frozen |= frozen;
+            state.sealed |= sealed;
+            state.nonextensible |= nonextensible;
+        }
+    }
+
+    /// The state an inline `Object.freeze(...)`/`seal(...)`/
+    /// `preventExtensions(...)` argument implies, for a query applied
+    /// directly to such a call (`Object.isFrozen(Object.freeze(x))`).
+    fn state_setting_call(expr: &Expr) -> Option<ObjectState> {
+        let expr = match expr {
+            Expr::Paren(paren) => paren.expr.as_ref(),
+            other => other,
+        };
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let Expr::Ident(object) = member.obj.as_ref() else {
+            return None;
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        match (object.sym.as_ref(), property.sym.as_ref()) {
+            ("Object", "freeze") => Some(ObjectState {
+                frozen: true,
+                sealed: true,
+                nonextensible: true,
+            }),
+            ("Object", "seal") => Some(ObjectState {
+                frozen: false,
+                sealed: true,
+                nonextensible: true,
+            }),
+            ("Object", "preventExtensions") => Some(ObjectState {
+                frozen: false,
+                sealed: false,
+                nonextensible: true,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The tracked freeze/seal/extensibility state of a value (a fresh,
+    /// extensible one when it isn't a tracked binding).
+    fn object_state(&self, value: &HirExpr) -> ObjectState {
+        if let HirExpr::Var(name) = value {
+            if let Some(state) = self.object_states.get(name) {
+                return *state;
+            }
+        }
+        ObjectState {
+            frozen: false,
+            sealed: false,
+            nonextensible: false,
+        }
+    }
+
     fn lower_static_builtin_call(
         &mut self,
         object: &swc_ecma_ast::Ident,
@@ -248,11 +327,17 @@ impl<'a> FnLowerer<'a> {
                         let [value] = arguments.as_slice() else {
                             return Err(format!("`{label}` expects exactly one argument"));
                         };
-                        // No-op: a thaw value has a fixed native layout with
-                        // no runtime extensibility/mutability tracking, so
-                        // there is nothing to change. The call returns its
-                        // argument, exactly as JS's do.
-                        return self.wrap_call_argument_bindings(value.clone(), &bindings);
+                        let value = value.clone();
+                        // thaw's native objects are fixed-layout values, so
+                        // there is no runtime mutability to change; record
+                        // the observable state instead (see `object_states`).
+                        // The call returns its argument, exactly as JS's do.
+                        match property.sym.as_ref() {
+                            "freeze" => self.mark_object_state(&value, true, true, true),
+                            "seal" => self.mark_object_state(&value, false, true, true),
+                            _ => self.mark_object_state(&value, false, false, true),
+                        }
+                        return self.wrap_call_argument_bindings(value, &bindings);
                     }
                     if object.sym == *"Object"
                         && matches!(
@@ -263,14 +348,27 @@ impl<'a> FnLowerer<'a> {
                         let label = format!("Object.{}", property.sym);
                         let (arguments, bindings) =
                             self.lower_native_spread_values(&call.args, &label)?;
-                        let [_value] = arguments.as_slice() else {
+                        let [value] = arguments.as_slice() else {
                             return Err(format!("`{label}` expects exactly one argument"));
                         };
-                        // Consistent with the no-op freeze/seal above: a thaw
-                        // value is never actually frozen/sealed, and always
-                        // has a fixed layout, so it stays extensible.
-                        let result = HirExpr::Lit(HirLit::Bool(property.sym == *"isExtensible"));
-                        return self.wrap_call_argument_bindings(result, &bindings);
+                        // Reflect the tracked freeze/seal/extensibility state
+                        // a prior `Object.freeze`/`seal`/`preventExtensions`
+                        // (or `Reflect` equivalent) recorded for this binding,
+                        // or that an inline `Object.freeze(...)` argument
+                        // itself implies; an untracked object is a fresh,
+                        // extensible one.
+                        let state = call
+                            .args
+                            .first()
+                            .and_then(|argument| Self::state_setting_call(&argument.expr))
+                            .unwrap_or_else(|| self.object_state(value));
+                        let result = match property.sym.as_ref() {
+                            "isFrozen" => state.frozen,
+                            "isSealed" => state.sealed,
+                            _ => !state.nonextensible,
+                        };
+                        return self
+                            .wrap_call_argument_bindings(HirExpr::Lit(HirLit::Bool(result)), &bindings);
                     }
                     if (object.sym == *"Object" || object.sym == *"Reflect")
                         && property.sym == *"getOwnPropertyDescriptor"
@@ -728,12 +826,32 @@ impl<'a> FnLowerer<'a> {
                         if arguments.len() != expected {
                             return Err(format!("`{label}` expects {expected} argument(s)"));
                         }
-                        // thaw models no prototype chain and no
-                        // extensibility state: setting a prototype or
-                        // preventing extensions is a successful no-op, and
-                        // an object is always extensible.
+                        // thaw models no prototype chain, but it does track
+                        // extensibility: `preventExtensions` records it, and
+                        // `isExtensible`/`setPrototypeOf` report/respect it
+                        // (both return `false` for a non-extensible target,
+                        // matching the spec).
+                        let target = arguments[0].clone();
+                        let result = match property.sym.as_ref() {
+                            "preventExtensions" => {
+                                self.mark_object_state(&target, false, false, true);
+                                true
+                            }
+                            "isExtensible" => !self.object_state(&target).nonextensible,
+                            // `setPrototypeOf`: false only when changing the
+                            // prototype of a non-extensible object. thaw's
+                            // prototype is always reported as `null`, so a
+                            // `null` request is a no-op (and succeeds).
+                            _ => {
+                                let proto_is_null = matches!(
+                                    arguments.get(1),
+                                    Some(HirExpr::Lit(HirLit::Null))
+                                );
+                                !self.object_state(&target).nonextensible || proto_is_null
+                            }
+                        };
                         return self.wrap_call_argument_bindings(
-                            HirExpr::Lit(HirLit::Bool(true)),
+                            HirExpr::Lit(HirLit::Bool(result)),
                             &bindings,
                         );
                     }
@@ -796,6 +914,14 @@ impl<'a> FnLowerer<'a> {
                         let [target, key, value] = arguments.as_slice() else {
                             return Err("`Reflect.set` expects exactly three arguments".into());
                         };
+                        // A frozen object rejects the write (`Reflect.set`
+                        // returns `false` rather than throwing).
+                        if self.object_state(target).frozen {
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Lit(HirLit::Bool(false)),
+                                &bindings,
+                            );
+                        }
                         let HirExpr::Lit(HirLit::Str(key)) = key else {
                             return Err(
                                 "`Reflect.set` currently requires a string-literal key".into()
