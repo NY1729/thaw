@@ -1005,6 +1005,7 @@ impl<'a> FnLowerer<'a> {
             }
             Stmt::Block(block) => self.lower_scoped_stmts(&block.stmts),
             Stmt::Decl(Decl::Var(var_decl)) => self.lower_var_decl(var_decl),
+            Stmt::Decl(Decl::Using(using_decl)) => self.lower_using_decl(using_decl),
 
             Stmt::If(if_stmt) => {
                 let narrowing = self.optional_undefined_narrowing(&if_stmt.test);

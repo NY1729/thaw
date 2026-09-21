@@ -381,6 +381,18 @@ impl<'a> FnLowerer<'a> {
                         let name = match &method.key {
                             PropName::Ident(name) => name.sym.to_string(),
                             PropName::Str(name) => name.value.to_string_lossy().into_owned(),
+                            // A computed well-known symbol (`[Symbol.iterator]`,
+                            // `[Symbol.dispose]`, ...) is stored under its
+                            // sentinel key so the matching member call can find
+                            // it.
+                            PropName::Computed(computed) => {
+                                match well_known_symbol_from_expr(&computed.expr) {
+                                    Some(symbol) => well_known_symbol_key(symbol),
+                                    None => {
+                                        return Err("object method name must be static".into())
+                                    }
+                                }
+                            }
                             _ => return Err("object method name must be static".into()),
                         };
                         let receiver = HirType::Object(
