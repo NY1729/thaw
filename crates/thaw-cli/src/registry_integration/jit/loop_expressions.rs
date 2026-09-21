@@ -1211,7 +1211,19 @@ macro_rules! jit_loop_expressions {
             return None;
         }
         let mut encoded = Vec::new();
-        encode_expression(initializer, parameters, locals, context, &mut encoded)?;
+        // `new Map()` has no value kind of its own; use the kind inferred
+        // from its `.set(k, v)` calls (defaulting to a string-valued
+        // dictionary when the values are never inspected).
+        if matches!(initializer, Expr::New(new_expr) if is_untyped_map_constructor(new_expr)) {
+            let kind = context
+                .map_value_kinds
+                .get(name.sym.as_ref())
+                .copied()
+                .unwrap_or("ds");
+            encoded.push(format!("{kind}empty"));
+        } else {
+            encode_expression(initializer, parameters, locals, context, &mut encoded)?;
+        }
         let value_kind = if boolean_literal(initializer) {
             JitKind::Boolean
         } else {
@@ -1281,6 +1293,15 @@ macro_rules! jit_loop_expressions {
         if let Expr::New(new_expr) = initializer {
             if set_constructor(new_expr, parameters, locals, context.helpers).is_some() {
                 context.set_locals.insert(name.sym.to_string());
+            } else if is_untyped_map_constructor(new_expr) {
+                let kind = context
+                    .map_value_kinds
+                    .get(name.sym.as_ref())
+                    .copied()
+                    .unwrap_or("ds");
+                context
+                    .map_locals
+                    .insert(name.sym.to_string(), kind.to_string());
             }
         }
         locals.insert(name.sym.to_string(), local);

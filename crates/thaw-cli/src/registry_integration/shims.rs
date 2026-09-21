@@ -357,6 +357,8 @@ fn jit_export(
                     loop_depth: 0,
                     loop_labels: Vec::new(),
                     set_locals: std::collections::HashSet::new(),
+                    map_locals: std::collections::HashMap::new(),
+                    map_value_kinds: std::collections::HashMap::new(),
                 };
                 encode_expression(
                     initializer,
@@ -444,6 +446,8 @@ fn jit_export(
                         loop_depth: 0,
                         loop_labels: Vec::new(),
                         set_locals: std::collections::HashSet::new(),
+                        map_locals: std::collections::HashMap::new(),
+                        map_value_kinds: std::collections::HashMap::new(),
                     },
                     &mut right,
                 )?;
@@ -475,6 +479,8 @@ fn jit_export(
                     loop_depth: 0,
                     loop_labels: Vec::new(),
                     set_locals: std::collections::HashSet::new(),
+                    map_locals: std::collections::HashMap::new(),
+                    map_value_kinds: std::collections::HashMap::new(),
                 };
                 encode_expression(
                     assignment.right.as_ref(),
@@ -775,6 +781,8 @@ fn jit_export(
         loop_depth: 0,
         loop_labels: Vec::new(),
         set_locals: std::collections::HashSet::new(),
+        map_locals: std::collections::HashMap::new(),
+        map_value_kinds: std::collections::HashMap::new(),
     };
     let mut parameters = std::collections::HashMap::new();
     let mut slot = 0usize;

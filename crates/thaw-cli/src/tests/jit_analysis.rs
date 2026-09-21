@@ -820,3 +820,28 @@ fn recognizes_set_from_iterable_for_jit() {
         "expected new Set(string) -> setfromarray: {from_string}"
     );
 }
+
+#[test]
+fn recognizes_map_get_set_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "cache".into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let export = jit_numeric_export(
+        "function cache() { const m = new Map(); m.set('a', 1); m.set('b', 2); return m.get('a') + (m.size === 2 ? 10 : 0); } module.exports = { cache };",
+        "cache",
+        false,
+        &function,
+    );
+    let export = export.expect("Map get/set/size should be JIT-specializable");
+    assert!(export.contains("dnempty"), "expected empty Map -> dnempty: {export}");
+    assert!(export.contains("dnget"), "expected Map.get -> dnget: {export}");
+    assert!(export.contains("dnset"), "expected Map.set -> dnset: {export}");
+    assert!(export.contains("dlen"), "expected Map.size -> dlen: {export}");
+}
+
