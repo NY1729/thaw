@@ -110,6 +110,7 @@ impl<'a> FnLowerer<'a> {
                 | "find" | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
                 | "toSpliced" | "at" | "with" | "flat" | "flatMap" | "map" | "filter"
                 | "forEach" | "slice" | "subarray" | "substring" | "substr" | "hasOwnProperty"
+                | "group" | "groupToMap"
                 | "copyWithin" | "fill" | "reverse" | "join"
                 | "push"
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
@@ -157,6 +158,7 @@ impl<'a> FnLowerer<'a> {
             | "lastIndexOf" | "includes" | "startsWith" | "endsWith" | "next" | "return"
             | "throw" => self.lower_native_array_mutation_method(member, property, call),
             "hasOwnProperty" => self.lower_native_has_own_property(member, call),
+            "group" | "groupToMap" => self.lower_native_array_group(member, property, call),
             "getTime" | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate"
             | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
             | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours"

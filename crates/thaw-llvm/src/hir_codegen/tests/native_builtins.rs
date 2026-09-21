@@ -3420,3 +3420,34 @@ fn compiles_globalthis_and_reflect_apply_construct() {
         "object\n42\n7\n30\n30\n"
     );
 }
+
+/// `Array.prototype.group`/`groupToMap` (the older proposal spellings) and
+/// `Object.defineProperty` (existing field / JSON, value-only descriptor).
+#[test]
+fn compiles_array_group_and_object_define_property() {
+    let source = r#"
+        function main(): void {
+            console.log(JSON.stringify([1, 2, 3, 4].group((n: number) => (n % 2 === 0 ? "even" : "odd"))));
+            const mapped = [1, 2, 3, 4].groupToMap((n: number) => String(n % 3));
+            console.log(mapped.get("0")!.join(","));
+            console.log(mapped.get("1")!.join(","));
+
+            const o = { a: 1 };
+            const r = Object.defineProperty(o, "a", {
+                value: 9,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+            });
+            console.log(r.a);
+            console.log(r === o);
+            const j = JSON.parse("{\"a\":1}");
+            Object.defineProperty(j, "a", { value: 7 });
+            console.log(JSON.stringify(j));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_group_define_property"),
+        "{\"odd\":[1,3],\"even\":[2,4]}\n3\n1,4\n9\ntrue\n{\"a\":7}\n"
+    );
+}
