@@ -1,37 +1,209 @@
 thread_local! {
-    static REGEX_CACHE: RefCell<std::collections::HashMap<(String, String), regex::Regex>> =
+    static REGEX_CACHE: RefCell<std::collections::HashMap<(String, String), CompiledRegex>> =
         RefCell::new(std::collections::HashMap::new());
     static REGEX_GROUPS: RefCell<std::collections::HashMap<usize, Box<serde_json::Value>>> =
         RefCell::new(std::collections::HashMap::new());
 }
 
+/// A compiled pattern: the `regex` crate when it can compile the pattern,
+/// otherwise `fancy-regex`, which adds backreferences and lookaround. A
+/// `fancy-regex` pattern that exceeds its backtracking limit reports an
+/// error at match time; those calls degrade to "no match" at the call
+/// sites below.
+enum CompiledRegex {
+    Native(regex::Regex),
+    Fancy(fancy_regex::Regex),
+}
+
+impl CompiledRegex {
+    fn compile(source: &str, flags: &str) -> Option<Self> {
+        if let Ok(native) = regex::RegexBuilder::new(source)
+            .case_insensitive(flags.contains('i'))
+            .multi_line(flags.contains('m'))
+            .dot_matches_new_line(flags.contains('s'))
+            .build()
+        {
+            return Some(Self::Native(native));
+        }
+        fancy_regex::RegexBuilder::new(source)
+            .case_insensitive(flags.contains('i'))
+            .multi_line(flags.contains('m'))
+            .dot_matches_new_line(flags.contains('s'))
+            .build()
+            .ok()
+            .map(Self::Fancy)
+    }
+
+    fn is_match(&self, text: &str) -> bool {
+        match self {
+            Self::Native(regex) => regex.is_match(text),
+            Self::Fancy(regex) => regex.is_match(text).unwrap_or(false),
+        }
+    }
+
+    fn captures(&self, text: &str) -> Option<RegexCaptures> {
+        match self {
+            Self::Native(regex) => regex.captures(text).map(RegexCaptures::from_native),
+            Self::Fancy(regex) => regex
+                .captures(text)
+                .ok()
+                .flatten()
+                .map(RegexCaptures::from_fancy),
+        }
+    }
+
+    fn captures_at(&self, text: &str, start: usize) -> Option<RegexCaptures> {
+        match self {
+            Self::Native(regex) => regex
+                .captures_at(text, start)
+                .map(RegexCaptures::from_native),
+            Self::Fancy(regex) => regex
+                .captures_from_pos(text, start)
+                .ok()
+                .flatten()
+                .map(RegexCaptures::from_fancy),
+        }
+    }
+
+    fn find_at(&self, text: &str, start: usize) -> Option<(usize, usize)> {
+        match self {
+            Self::Native(regex) => regex.find_at(text, start).map(|found| (found.start(), found.end())),
+            Self::Fancy(regex) => regex
+                .find_from_pos(text, start)
+                .ok()
+                .flatten()
+                .map(|found| (found.start(), found.end())),
+        }
+    }
+
+    fn find_iter(&self, text: &str) -> Vec<String> {
+        match self {
+            Self::Native(regex) => regex
+                .find_iter(text)
+                .map(|found| found.as_str().to_string())
+                .collect(),
+            Self::Fancy(regex) => regex
+                .find_iter(text)
+                .filter_map(|found| found.ok())
+                .map(|found| found.as_str().to_string())
+                .collect(),
+        }
+    }
+
+    fn captures_iter(&self, text: &str) -> Vec<RegexCaptures> {
+        match self {
+            Self::Native(regex) => regex
+                .captures_iter(text)
+                .map(RegexCaptures::from_native)
+                .collect(),
+            Self::Fancy(regex) => regex
+                .captures_iter(text)
+                .filter_map(|captures| captures.ok())
+                .map(RegexCaptures::from_fancy)
+                .collect(),
+        }
+    }
+
+    fn capture_names(&self) -> Vec<Option<&str>> {
+        match self {
+            Self::Native(regex) => regex.capture_names().collect(),
+            Self::Fancy(regex) => regex.capture_names().collect(),
+        }
+    }
+
+    fn replace_all(&self, text: &str, replacement: &str) -> String {
+        match self {
+            Self::Native(regex) => regex
+                .replace_all(text, regex::NoExpand(replacement))
+                .into_owned(),
+            Self::Fancy(regex) => regex
+                .replace_all(text, fancy_regex::NoExpand(replacement))
+                .into_owned(),
+        }
+    }
+
+    fn replacen(&self, text: &str, limit: usize, replacement: &str) -> String {
+        match self {
+            Self::Native(regex) => regex
+                .replacen(text, limit, regex::NoExpand(replacement))
+                .into_owned(),
+            Self::Fancy(regex) => regex
+                .replacen(text, limit, fancy_regex::NoExpand(replacement))
+                .into_owned(),
+        }
+    }
+
+    fn split(&self, text: &str) -> Vec<String> {
+        match self {
+            Self::Native(regex) => regex.split(text).map(str::to_string).collect(),
+            Self::Fancy(regex) => regex
+                .split(text)
+                .filter_map(|part| part.ok())
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+}
+
+/// A match's captured groups as owned strings (index 0 is the whole match).
+/// A group that did not participate is an empty string, matching the native
+/// array element type.
+struct RegexCaptures {
+    /// `None` for a group that did not participate in the match.
+    groups: Vec<Option<String>>,
+}
+
+impl RegexCaptures {
+    fn from_native(captures: regex::Captures<'_>) -> Self {
+        Self {
+            groups: (0..captures.len())
+                .map(|index| captures.get(index).map(|group| group.as_str().to_string()))
+                .collect(),
+        }
+    }
+
+    fn from_fancy(captures: fancy_regex::Captures<'_>) -> Self {
+        Self {
+            groups: (0..captures.len())
+                .map(|index| captures.get(index).map(|group| group.as_str().to_string()))
+                .collect(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<&str> {
+        self.groups.get(index).and_then(|group| group.as_deref())
+    }
+
+    /// The whole match followed by each group, a non-participating group as
+    /// an empty string (the native array element type is a plain string).
+    fn into_positional(self) -> Vec<String> {
+        self.groups
+            .into_iter()
+            .map(|group| group.unwrap_or_default())
+            .collect()
+    }
+}
+
 /// Compiles (or reuses a cached compilation of) the regex named by `source`
-/// and `flags`, then calls `f` with it. Returns `None` when the pattern
-/// fails to compile with the `regex` crate's syntax (which lacks
-/// backreferences and lookaround) or an unsupported flag combination.
+/// and `flags`, then calls `f` with it. Returns `None` when neither the
+/// `regex` crate nor `fancy-regex` can compile the pattern.
 ///
 /// Only the `i` (case-insensitive), `m` (multiline) and `s` (dot-all) flags
 /// are honored; the `u`/`v` unicode-mode flags are not tracked. `g`/`y`
-/// `lastIndex` state is tracked by `RegExp.prototype.exec` alone (see
-/// `thaw_regex_exec`/`thaw_regex_exec_advance`) -- `test`, `match`,
-/// `matchAll`, `replace`/`replaceAll` and `split` all still match as if
-/// searching from the start of the string every call.
+/// `lastIndex` state is tracked by `RegExp.prototype.exec`/`test` alone (see
+/// `thaw_regex_exec`/`thaw_regex_exec_advance`) -- `match`, `matchAll`,
+/// `replace`/`replaceAll` and `split` all still match as if searching from
+/// the start of the string every call.
 fn with_compiled_regex<T>(
     source: &str,
     flags: &str,
-    f: impl FnOnce(&regex::Regex) -> T,
+    f: impl FnOnce(&CompiledRegex) -> T,
 ) -> Option<T> {
     REGEX_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let key = (source.to_string(), flags.to_string());
         if !cache.contains_key(&key) {
-            let compiled = regex::RegexBuilder::new(source)
-                .case_insensitive(flags.contains('i'))
-                .multi_line(flags.contains('m'))
-                .dot_matches_new_line(flags.contains('s'))
-                .build()
-                .ok()?;
-            cache.insert(key.clone(), compiled);
+            cache.insert(key.clone(), CompiledRegex::compile(source, flags)?);
         }
         cache.get(&key).map(f)
     })
@@ -128,8 +300,8 @@ pub unsafe extern "C" fn thaw_regex_search(
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
     with_compiled_regex(&source, &flags, |regex| {
         regex
-            .find(&value)
-            .map(|found| value[..found.start()].encode_utf16().count() as f64)
+            .find_at(&value, 0)
+            .map(|(start, _)| value[..start].encode_utf16().count() as f64)
     })
     .flatten()
     .unwrap_or(-1.0)
@@ -155,13 +327,9 @@ unsafe fn thaw_regex_replace_impl(
     let global = all || flags.contains('g');
     let Some(replaced) = with_compiled_regex(&source, &flags, |regex| {
         if global {
-            regex
-                .replace_all(&value, regex::NoExpand(&replacement))
-                .into_owned()
+            regex.replace_all(&value, &replacement)
         } else {
-            regex
-                .replacen(&value, 1, regex::NoExpand(&replacement))
-                .into_owned()
+            regex.replacen(&value, 1, &replacement)
         }
     }) else {
         return std::ptr::null();
@@ -238,9 +406,7 @@ pub unsafe extern "C" fn thaw_regex_split(
     let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    let Some(mut parts) = with_compiled_regex(&source, &flags, |regex| {
-        regex.split(&value).map(str::to_string).collect::<Vec<_>>()
-    }) else {
+    let Some(mut parts) = with_compiled_regex(&source, &flags, |regex| regex.split(&value)) else {
         return std::ptr::null_mut();
     };
     // Truncated after computing the full split, not via the regex crate's
@@ -262,19 +428,10 @@ pub unsafe extern "C" fn thaw_regex_split(
 /// the match (for example one inside an unmatched alternative) is reported
 /// as an empty string rather than `undefined`, since the native array
 /// element type is a plain `string`.
-fn capture_strings(regex: &regex::Regex, value: &str) -> Vec<String> {
+fn capture_strings(regex: &CompiledRegex, value: &str) -> Vec<String> {
     regex
         .captures(value)
-        .map(|captures| {
-            (0..captures.len())
-                .map(|index| {
-                    captures
-                        .get(index)
-                        .map(|group| group.as_str().to_string())
-                        .unwrap_or_default()
-                })
-                .collect::<Vec<_>>()
-        })
+        .map(RegexCaptures::into_positional)
         .unwrap_or_default()
 }
 
@@ -312,17 +469,6 @@ fn utf16_index_to_byte_offset(value: &str, utf16_index: usize) -> Option<usize> 
     (utf16_count == utf16_index).then_some(value.len())
 }
 
-fn capture_strings_from(captures: &regex::Captures) -> Vec<String> {
-    (0..captures.len())
-        .map(|index| {
-            captures
-                .get(index)
-                .map(|group| group.as_str().to_string())
-                .unwrap_or_default()
-        })
-        .collect()
-}
-
 #[no_mangle]
 /// Matches `value` against the regex named by `source`/`flags`, starting the
 /// search at the UTF-16 code-unit index `last_index` -- `RegExp.prototype
@@ -356,17 +502,19 @@ pub unsafe extern "C" fn thaw_regex_exec(
         regex.captures_at(&value, byte_start).map(|captures| {
             let groups = regex
                 .capture_names()
-                .flatten()
-                .filter_map(|name| {
-                    captures.name(name).map(|capture| {
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, name)| {
+                    let name = name?;
+                    captures.get(index).map(|capture| {
                         (
                             name.to_string(),
-                            serde_json::Value::String(capture.as_str().to_string()),
+                            serde_json::Value::String(capture.to_string()),
                         )
                     })
                 })
                 .collect();
-            (capture_strings_from(&captures), serde_json::Value::Object(groups))
+            (captures.into_positional(), serde_json::Value::Object(groups))
         })
     })
     .flatten() else {
@@ -437,17 +585,17 @@ pub unsafe extern "C" fn thaw_regex_exec_advance(
         return -1.0;
     };
     with_compiled_regex(&source, &flags, |regex| {
-        let Some(found) = regex.find_at(&value, byte_start) else {
+        let Some((start, end)) = regex.find_at(&value, byte_start) else {
             return -1.0;
         };
-        if sticky && found.start() != byte_start {
+        if sticky && start != byte_start {
             return -1.0;
         }
-        let mut end = value[..found.end()].encode_utf16().count();
-        if found.start() == found.end() {
-            end += 1;
+        let mut units = value[..end].encode_utf16().count();
+        if start == end {
+            units += 1;
         }
-        end as f64
+        units as f64
     })
     .unwrap_or(-1.0)
 }
@@ -484,10 +632,7 @@ pub unsafe extern "C" fn thaw_regex_match(
     let global = flags.contains('g');
     let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
         if global {
-            regex
-                .find_iter(&value)
-                .map(|found| found.as_str().to_string())
-                .collect::<Vec<_>>()
+            regex.find_iter(&value)
         } else {
             capture_strings(regex, &value)
         }
@@ -557,16 +702,8 @@ pub unsafe extern "C" fn thaw_regex_match_all(
     let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
         regex
             .captures_iter(&value)
-            .map(|captures| {
-                (0..captures.len())
-                    .map(|index| {
-                        captures
-                            .get(index)
-                            .map(|group| group.as_str().to_string())
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .into_iter()
+            .map(RegexCaptures::into_positional)
             .collect::<Vec<_>>()
     }) else {
         return std::ptr::null_mut();
