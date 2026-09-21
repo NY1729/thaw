@@ -17,4 +17,8 @@ thaw-arena = { path = "../thaw-arena" }
 webpki-roots = "1.0"
 icu_normalizer = { version = "2.3.0", features = ["compiled_data"] }
 regex = "1"
+# Backreferences and lookaround, which the `regex` crate deliberately lacks;
+# used as a fallback so such patterns stay native instead of silently
+# reporting "no match".
+fancy-regex = "0.18"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
