@@ -126,6 +126,30 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("bigint comparison returned no value".into());
             }
+            "__thaw_bigint_decimal_add"
+            | "__thaw_bigint_decimal_sub"
+            | "__thaw_bigint_decimal_mul"
+            | "__thaw_bigint_decimal_div"
+            | "__thaw_bigint_decimal_mod" => {
+                let [left, right] = args else {
+                    return Err(format!("{name} expects two operands"));
+                };
+                let left = self.compile_expr(left)?;
+                let right = self.compile_expr(right)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[left.into(), right.into()],
+                        "bigint_decimal_arithmetic",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("bigint arithmetic returned no value".into());
+            }
             "__thaw_temporal_now" => {
                 if !args.is_empty() {
                     return Err("Temporal.Now expects no operands".into());

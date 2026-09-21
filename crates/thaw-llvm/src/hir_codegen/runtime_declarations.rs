@@ -987,6 +987,19 @@ impl<'ctx> HirCompiler<'ctx> {
             f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        for name in [
+            "thaw_bigint_decimal_add",
+            "thaw_bigint_decimal_sub",
+            "thaw_bigint_decimal_mul",
+            "thaw_bigint_decimal_div",
+            "thaw_bigint_decimal_mod",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         // Temporal (`Temporal.Now`/`Instant`/`Plain*`/`Duration`), built on
         // the same epoch-millisecond `f64` as `Date`.
         self.module.add_function(

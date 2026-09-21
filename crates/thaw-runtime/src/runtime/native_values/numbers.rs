@@ -721,6 +721,251 @@ pub unsafe extern "C" fn thaw_bigint_decimal_cmp(
     }
 }
 
+/// A decimal integer string as `(negative, little-endian digits)`, leading
+/// zeros removed and `-0` normalized to non-negative zero.
+fn decimal_digits(text: &str) -> (bool, Vec<u8>) {
+    let text = text.trim();
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let mut out: Vec<u8> = digits
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|byte| byte - b'0')
+        .collect();
+    out.reverse();
+    trim_decimal(&mut out);
+    let zero = out.len() == 1 && out[0] == 0;
+    (negative && !zero, out)
+}
+
+fn trim_decimal(digits: &mut Vec<u8>) {
+    while digits.len() > 1 && *digits.last().unwrap() == 0 {
+        digits.pop();
+    }
+    if digits.is_empty() {
+        digits.push(0);
+    }
+}
+
+fn decimal_is_zero(digits: &[u8]) -> bool {
+    digits.len() == 1 && digits[0] == 0
+}
+
+fn decimal_cmp_magnitude(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+    left.len()
+        .cmp(&right.len())
+        .then_with(|| left.iter().rev().cmp(right.iter().rev()))
+}
+
+fn decimal_add_magnitude(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut carry = 0u8;
+    for index in 0..left.len().max(right.len()) {
+        let sum = left.get(index).copied().unwrap_or(0)
+            + right.get(index).copied().unwrap_or(0)
+            + carry;
+        out.push(sum % 10);
+        carry = sum / 10;
+    }
+    if carry > 0 {
+        out.push(carry);
+    }
+    out
+}
+
+/// `left - right` for `left >= right` (both non-negative magnitudes).
+fn decimal_sub_magnitude(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut borrow = 0i8;
+    for (index, left_digit) in left.iter().enumerate() {
+        let mut difference =
+            *left_digit as i8 - right.get(index).copied().unwrap_or(0) as i8 - borrow;
+        if difference < 0 {
+            difference += 10;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        out.push(difference as u8);
+    }
+    trim_decimal(&mut out);
+    out
+}
+
+fn decimal_mul_magnitude(left: &[u8], right: &[u8]) -> Vec<u8> {
+    if decimal_is_zero(left) || decimal_is_zero(right) {
+        return vec![0];
+    }
+    let mut out = vec![0u8; left.len() + right.len()];
+    for i in 0..left.len() {
+        let mut carry = 0u16;
+        for j in 0..right.len() {
+            let current = out[i + j] as u16 + left[i] as u16 * right[j] as u16 + carry;
+            out[i + j] = (current % 10) as u8;
+            carry = current / 10;
+        }
+        let mut index = i + right.len();
+        while carry > 0 {
+            let current = out[index] as u16 + carry;
+            out[index] = (current % 10) as u8;
+            carry = current / 10;
+            index += 1;
+        }
+    }
+    trim_decimal(&mut out);
+    out
+}
+
+/// `(quotient, remainder)` of two non-negative magnitudes, `right != 0`.
+/// Long division, one decimal digit at a time.
+fn decimal_divmod_magnitude(left: &[u8], right: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut quotient = vec![0u8; left.len()];
+    let mut remainder: Vec<u8> = vec![0];
+    for index in (0..left.len()).rev() {
+        // `remainder = remainder * 10 + left[index]` (little-endian shift).
+        let mut current = vec![0u8];
+        current.extend_from_slice(&remainder);
+        current[0] = left[index];
+        trim_decimal(&mut current);
+        let mut count = 0u8;
+        while decimal_cmp_magnitude(&current, right) != std::cmp::Ordering::Less {
+            current = decimal_sub_magnitude(&current, right);
+            count += 1;
+        }
+        quotient[index] = count;
+        remainder = current;
+    }
+    trim_decimal(&mut quotient);
+    trim_decimal(&mut remainder);
+    (quotient, remainder)
+}
+
+fn decimal_to_string(negative: bool, digits: &[u8]) -> String {
+    let mut text = String::new();
+    if negative && !decimal_is_zero(digits) {
+        text.push('-');
+    }
+    for digit in digits.iter().rev() {
+        text.push((b'0' + digit) as char);
+    }
+    text
+}
+
+/// Applies a signed operation to two decimal strings and returns the
+/// decimal result. `operation` is `0`=add, `1`=subtract, `2`=multiply,
+/// `3`=divide (truncating), `4`=remainder (sign of the dividend).
+///
+/// # Safety
+/// Both pointers must be null or valid NUL-terminated UTF-8 strings.
+unsafe fn bigint_decimal_operation(
+    left: *const c_char,
+    right: *const c_char,
+    operation: u8,
+) -> String {
+    let read = |pointer: *const c_char| -> (bool, Vec<u8>) {
+        if pointer.is_null() {
+            return (false, vec![0]);
+        }
+        decimal_digits(&unsafe { CStr::from_ptr(pointer) }.to_string_lossy())
+    };
+    let (left_negative, left_digits) = read(left);
+    let (right_negative, right_digits) = read(right);
+    match operation {
+        0 | 1 => {
+            let right_negative = if operation == 1 { !right_negative } else { right_negative };
+            if left_negative == right_negative {
+                decimal_to_string(
+                    left_negative,
+                    &decimal_add_magnitude(&left_digits, &right_digits),
+                )
+            } else {
+                match decimal_cmp_magnitude(&left_digits, &right_digits) {
+                    std::cmp::Ordering::Equal => "0".to_string(),
+                    std::cmp::Ordering::Greater => decimal_to_string(
+                        left_negative,
+                        &decimal_sub_magnitude(&left_digits, &right_digits),
+                    ),
+                    std::cmp::Ordering::Less => decimal_to_string(
+                        right_negative,
+                        &decimal_sub_magnitude(&right_digits, &left_digits),
+                    ),
+                }
+            }
+        }
+        2 => decimal_to_string(
+            left_negative != right_negative,
+            &decimal_mul_magnitude(&left_digits, &right_digits),
+        ),
+        _ => {
+            if decimal_is_zero(&right_digits) {
+                return "0".to_string();
+            }
+            let (quotient, remainder) = decimal_divmod_magnitude(&left_digits, &right_digits);
+            if operation == 3 {
+                decimal_to_string(left_negative != right_negative, &quotient)
+            } else {
+                decimal_to_string(left_negative, &remainder)
+            }
+        }
+    }
+}
+
+macro_rules! bigint_decimal_operation_fn {
+    ($name:ident, $operation:expr) => {
+        #[no_mangle]
+        /// A decimal bigint operation (see `bigint_decimal_operation`).
+        ///
+        /// # Safety
+        /// Both pointers must be null or valid NUL-terminated UTF-8 strings.
+        pub unsafe extern "C" fn $name(
+            left: *const c_char,
+            right: *const c_char,
+        ) -> *const c_char {
+            let text = unsafe { bigint_decimal_operation(left, right, $operation) };
+            arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+        }
+    };
+}
+
+bigint_decimal_operation_fn!(thaw_bigint_decimal_add, 0);
+bigint_decimal_operation_fn!(thaw_bigint_decimal_sub, 1);
+bigint_decimal_operation_fn!(thaw_bigint_decimal_mul, 2);
+bigint_decimal_operation_fn!(thaw_bigint_decimal_div, 3);
+bigint_decimal_operation_fn!(thaw_bigint_decimal_mod, 4);
+
+#[cfg(test)]
+mod bigint_decimal_tests {
+    use super::*;
+
+    fn operate(left: &str, right: &str, operation: u8) -> String {
+        let left = std::ffi::CString::new(left).unwrap();
+        let right = std::ffi::CString::new(right).unwrap();
+        unsafe { bigint_decimal_operation(left.as_ptr(), right.as_ptr(), operation) }
+    }
+
+    #[test]
+    fn arithmetic_matches_bigint_semantics() {
+        let a = "123456789012345678901234567890";
+        assert_eq!(operate(a, "1", 0), "123456789012345678901234567891");
+        assert_eq!(operate("1", a, 1), "-123456789012345678901234567889");
+        assert_eq!(
+            operate(a, a, 2),
+            "15241578753238836750495351562536198787501905199875019052100"
+        );
+        assert_eq!(operate(a, "7", 3), "17636684144620811271604938270");
+        assert_eq!(operate(a, "7", 4), "0");
+        // Division truncates toward zero; the remainder keeps the dividend's sign.
+        assert_eq!(operate("-7", "3", 3), "-2");
+        assert_eq!(operate("-7", "3", 4), "-1");
+        assert_eq!(operate("7", "-3", 4), "1");
+        assert_eq!(operate("0", "5", 3), "0");
+        assert_eq!(operate("5", "0", 3), "0");
+        assert_eq!(operate("007", "3", 0), "10");
+    }
+}
+
 /// `BigInt.asIntN(bits, value)`: reinterprets the low `bits` of `value` as a
 /// two's-complement signed integer.
 #[no_mangle]
