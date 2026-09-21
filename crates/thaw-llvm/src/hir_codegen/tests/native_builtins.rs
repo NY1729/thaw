@@ -3496,3 +3496,27 @@ fn compiles_array_from_async() {
         "1,2,3\n2,4,6\n"
     );
 }
+
+/// Locale-sensitive string/date spellings, approximated with the
+/// locale-independent transforms (`toLocaleString` over an array/number
+/// has no grouping; a Date's locale spellings reuse its UTC rendering).
+#[test]
+fn compiles_locale_string_methods() {
+    let source = r#"
+        function main(): void {
+            console.log("abc".toLocaleUpperCase());
+            console.log("ABC".toLocaleLowerCase("tr"));
+            console.log("x".toLocaleString());
+            console.log((1234.5).toLocaleString());
+            console.log([1, 2, 3].toLocaleString());
+            console.log(true.toLocaleString());
+            console.log(new Date(0).toLocaleDateString().length > 0);
+            console.log(new Date(0).toLocaleTimeString().length > 0);
+            console.log(new Date(0).toLocaleString().length > 0);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "locale_string_methods"),
+        "ABC\nabc\nx\n1234.5\n1,2,3\ntrue\ntrue\ntrue\ntrue\n"
+    );
+}

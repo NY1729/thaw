@@ -105,8 +105,9 @@ impl<'a> FnLowerer<'a> {
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "toExponential"
                 | "localeCompare"
                 | "normalize" | "split" | "replace" | "replaceAll" | "test" | "match" | "search"
-                | "matchAll" | "exec" | "toLowerCase" | "toUpperCase" | "isWellFormed"
-                | "toWellFormed" | "toReversed" | "sort" | "toSorted" | "some" | "every"
+                | "matchAll" | "exec" | "toLowerCase" | "toUpperCase" | "toLocaleLowerCase"
+                | "toLocaleUpperCase" | "isWellFormed" | "toWellFormed" | "toReversed"
+                | "sort" | "toSorted" | "some" | "every"
                 | "find" | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
                 | "toSpliced" | "at" | "with" | "flat" | "flatMap" | "map" | "filter"
                 | "forEach" | "slice" | "subarray" | "substring" | "substr" | "hasOwnProperty"
@@ -116,7 +117,8 @@ impl<'a> FnLowerer<'a> {
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
                 | "next" | "return" | "throw"
                 | "includes" | "startsWith" | "endsWith" | "equals" | "copy" | "toString"
-                | "valueOf" | "getTime"
+                | "valueOf" | "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString"
+                | "getTime"
                 | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate" | "getDay"
                 | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds" | "getUTCFullYear"
                 | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours" | "getUTCMinutes"
@@ -145,7 +147,8 @@ impl<'a> FnLowerer<'a> {
             }
             "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd" | "repeat"
             | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "toExponential"
-            | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed" => {
+                            | "toLowerCase" | "toUpperCase" | "toLocaleLowerCase" | "toLocaleUpperCase"
+                | "isWellFormed" | "toWellFormed" => {
                 self.lower_native_scalar_method(member, property, call)
             }
             "toReversed" | "sort" | "toSorted" | "some" | "every" | "find" | "findIndex"
@@ -176,7 +179,10 @@ impl<'a> FnLowerer<'a> {
                 self.lower_native_map_set_method(member, property, call)
             }
             "toJSON" | "toDateString" | "toTimeString" | "toUTCString" | "toString"
-            | "valueOf" | "equals" => self.lower_native_conversion_method(member, property, call),
+            | "valueOf" | "equals" | "toLocaleString" | "toLocaleDateString"
+            | "toLocaleTimeString" => {
+                self.lower_native_conversion_method(member, property, call)
+            }
             "copy" => self.lower_native_bytes_copy(member, call),
             other if Self::bytes_numeric_accessor(other).is_some() => {
                 self.lower_native_bytes_accessor(member, property, call)

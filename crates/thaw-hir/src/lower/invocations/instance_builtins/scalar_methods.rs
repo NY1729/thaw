@@ -553,13 +553,27 @@ impl<'a> FnLowerer<'a> {
                     bindings.push((digits_name, HirType::F64, digits));
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
-                if matches!(property.sym.as_ref(), "toLowerCase" | "toUpperCase") {
-                    if !call.args.is_empty() {
+                if matches!(
+                    property.sym.as_ref(),
+                    "toLowerCase" | "toUpperCase" | "toLocaleLowerCase" | "toLocaleUpperCase"
+                ) {
+                    // The `toLocale*` variants take an optional `locales`
+                    // argument, which is ignored: locale-specific casing
+                    // (e.g. Turkish dotless i) is approximated with the
+                    // locale-independent transform.
+                    let locale = matches!(
+                        property.sym.as_ref(),
+                        "toLocaleLowerCase" | "toLocaleUpperCase"
+                    );
+                    if call.args.len() > usize::from(locale) {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
                     }
                     let receiver = self.lower_expr(&member.obj)?;
                     self.expect_type(&HirType::Str, &receiver, "string case receiver")?;
-                    let suffix = if property.sym == *"toLowerCase" {
+                    let suffix = if matches!(
+                        property.sym.as_ref(),
+                        "toLowerCase" | "toLocaleLowerCase"
+                    ) {
                         "to_lower_case"
                     } else {
                         "to_upper_case"

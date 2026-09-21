@@ -124,6 +124,42 @@ impl<'a> FnLowerer<'a> {
                         vec![receiver, other],
                     ));
                 }
+                if matches!(
+                    property.sym.as_ref(),
+                    "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString"
+                ) {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if receiver_type == date_object_type() {
+                        let timestamp = HirExpr::PropAccess(
+                            Box::new(receiver),
+                            receiver_type,
+                            "timestamp".to_string(),
+                        );
+                        // thaw's calendar math is UTC-only and has no locale
+                        // database, so the locale date/time spellings reuse
+                        // the corresponding UTC rendering.
+                        let intrinsic = match property.sym.as_ref() {
+                            "toLocaleDateString" => "__thaw_date_to_date_string",
+                            "toLocaleTimeString" => "__thaw_date_to_time_string",
+                            _ => "__thaw_date_to_string",
+                        };
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var(intrinsic.to_string())),
+                            vec![timestamp],
+                        ));
+                    }
+                    if property.sym != *"toLocaleString" {
+                        return Err(format!(
+                            "native `.{}()` is only supported on a Date",
+                            property.sym
+                        ));
+                    }
+                    // String/Number/Boolean/Array: approximate locale
+                    // formatting with the locale-independent string form (no
+                    // thousands separators or locale digits).
+                    return self.coerce_primitive_to_string(receiver);
+                }
                 if property.sym == *"toString" {
                     let receiver = self.lower_expr(&member.obj)?;
                     // A byte buffer decodes (`buf.toString("hex")`, default
