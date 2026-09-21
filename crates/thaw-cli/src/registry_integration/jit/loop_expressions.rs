@@ -1278,6 +1278,11 @@ macro_rules! jit_loop_expressions {
                 }
             }
         }
+        if let Expr::New(new_expr) = initializer {
+            if set_constructor(new_expr, parameters, locals, context.helpers).is_some() {
+                context.set_locals.insert(name.sym.to_string());
+            }
+        }
         locals.insert(name.sym.to_string(), local);
         kinds.insert(name.sym.to_string(), kind);
         if is_mutable {

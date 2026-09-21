@@ -45,6 +45,10 @@ macro_rules! jit_callables {
         recursive_result: Option<JitKind>,
         loop_depth: usize,
         loop_labels: Vec<(String, usize)>,
+        /// Locals bound to a native `Set` (a string-keyed dictionary), so a
+        /// `.size` read can lower to the dictionary length instead of a
+        /// field lookup.
+        set_locals: std::collections::HashSet<String>,
     }
 
     fn same_callable(left: NumericCallable<'_>, right: NumericCallable<'_>) -> bool {

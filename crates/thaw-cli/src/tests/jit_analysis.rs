@@ -739,3 +739,27 @@ fn recognizes_set_composition_for_jit() {
         assert!(export.contains(token), "expected {token}: {export}");
     }
 }
+
+#[test]
+fn recognizes_set_size_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "count".into(),
+        generic: None,
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        )],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let export = jit_numeric_export(
+        "function count(value) { const s = new Set([1, 2]); s.add(value); return s.size; } module.exports = { count };",
+        "count",
+        false,
+        &function,
+    );
+    let export = export.expect("Set.size should be JIT-specializable");
+    assert!(export.contains("dlen"), "expected Set.size -> dlen: {export}");
+}

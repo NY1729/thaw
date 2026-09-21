@@ -1076,10 +1076,21 @@ macro_rules! jit_expressions {
                     if encoded_receiver
                         && jit_expression_kind(&receiver)?.0 == JitKind::Dictionary
                     {
-                        let prefix = dictionary_prefix(&receiver)?;
-                        output.extend(receiver);
-                        encode_string(property.sym.as_ref(), output)?;
-                        output.push(format!("{prefix}get"));
+                        // `.size` on a tracked `new Set(...)` local is the
+                        // entry count; an ordinary object's `size` field
+                        // still reads normally.
+                        let set_size = property.sym == *"size"
+                            && matches!(member.obj.as_ref(), Expr::Ident(name)
+                                if context.set_locals.contains(name.sym.as_ref()));
+                        if set_size {
+                            output.extend(receiver);
+                            output.push("dlen".into());
+                        } else {
+                            let prefix = dictionary_prefix(&receiver)?;
+                            output.extend(receiver);
+                            encode_string(property.sym.as_ref(), output)?;
+                            output.push(format!("{prefix}get"));
+                        }
                     } else if property.sym == "length" {
                         let operation = match jit_expression_kind(&receiver)?.0 {
                             JitKind::String => "strlen",
