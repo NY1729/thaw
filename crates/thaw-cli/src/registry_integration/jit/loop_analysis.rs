@@ -338,6 +338,13 @@ macro_rules! jit_loop_analysis {
                     continue;
                 }
             }
+            if let LocalStep::Effect(expression) = &step {
+                let mut effect = Vec::new();
+                encode_expression(expression, parameters, locals, context, &mut effect)?;
+                effect.push("drop".into());
+                output.extend(effect);
+                continue;
+            }
             let forced_kind = match &step {
                 LocalStep::Declare {
                     name,
@@ -367,6 +374,345 @@ macro_rules! jit_loop_analysis {
                 context,
                 output,
             )?;
+        }
+        Some(())
+    }
+
+    fn collection_for_each_call<'a>(expression: &'a Expr) -> Option<(&'a Ident, &'a Expr)> {
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let [callback] = call.args.as_slice() else {
+            return None;
+        };
+        if callback.spread.is_some() {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let (Expr::Ident(receiver), MemberProp::Ident(method)) =
+            (member.obj.as_ref(), &member.prop)
+        else {
+            return None;
+        };
+        (method.sym == *"forEach").then_some((receiver, callback.expr.as_ref()))
+    }
+
+    fn has_collection_for_each(steps: &[LocalStep<'_>]) -> bool {
+        steps.iter().any(|step| {
+            matches!(step, LocalStep::Effect(expression) if collection_for_each_call(expression).is_some())
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_collection_for_each(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        mutable: &std::collections::HashSet<String>,
+        kinds: &mut std::collections::HashMap<String, JitKind>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (receiver, callback) = collection_for_each_call(expression)?;
+        let map_prefix = context.map_locals.get(receiver.sym.as_ref()).cloned();
+        if map_prefix.is_none() && !context.set_locals.contains(receiver.sym.as_ref()) {
+            return None;
+        }
+        let callable = resolve_callable(callback, context.helpers)?;
+        let (callback_parameters, steps, body) = callable_parts(callable)?;
+        if callback_parameters.is_empty() || callback_parameters.len() > 3 {
+            return None;
+        }
+        let callback_parameters = callback_parameters
+            .iter()
+            .map(|parameter| match parameter {
+                Pat::Ident(name) => Some(&name.id),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if callback_parameters.iter().any(|name| {
+            parameters.contains_key(name.sym.as_ref()) || locals.contains_key(name.sym.as_ref())
+        }) {
+            return None;
+        }
+
+        let source_index = kinds.len();
+        output.extend(locals.get(receiver.sym.as_ref())?.iter().cloned());
+        output.extend(["dkeys".into(), "arrayhandle".into()]);
+        kinds.insert(format!("\0foreach-source-{source_index}"), JitKind::Array);
+        let source_local = format!("rsl{source_index}");
+        let index = kinds.len();
+        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+        kinds.insert(format!("\0foreach-index-{index}"), JitKind::Number);
+        let index_local = format!("ln{index}");
+        let key_index = kinds.len();
+        encode_string("", output)?;
+        kinds.insert(format!("\0foreach-key-{key_index}"), JitKind::String);
+        let key_local = format!("ls{key_index}");
+
+        let mut callback_locals = locals.clone();
+        if let Some(collection) = callback_parameters.get(2) {
+            callback_locals.insert(
+                collection.sym.to_string(),
+                locals.get(receiver.sym.as_ref())?.clone(),
+            );
+        }
+        let value_binding = if let Some(prefix) = map_prefix {
+            let value_index = kinds.len();
+            let (kind, local) = match prefix.as_str() {
+                "dn" => {
+                    output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                    (JitKind::Number, format!("ln{value_index}"))
+                }
+                "db" => {
+                    output.extend([
+                        format!("c{:016x}", 0.0f64.to_bits()),
+                        "asbool".into(),
+                    ]);
+                    (JitKind::Boolean, format!("lb{value_index}"))
+                }
+                "ds" => {
+                    encode_string("", output)?;
+                    (JitKind::String, format!("ls{value_index}"))
+                }
+                _ => return None,
+            };
+            kinds.insert(format!("\0foreach-value-{value_index}"), kind);
+            callback_locals.insert(callback_parameters[0].sym.to_string(), vec![local]);
+            if let Some(key) = callback_parameters.get(1) {
+                callback_locals.insert(key.sym.to_string(), vec![key_local.clone()]);
+            }
+            Some((value_index, prefix))
+        } else {
+            callback_locals.insert(
+                callback_parameters[0].sym.to_string(),
+                vec![key_local.clone()],
+            );
+            if let Some(value) = callback_parameters.get(1) {
+                callback_locals.insert(value.sym.to_string(), vec![key_local.clone()]);
+            }
+            None
+        };
+
+        fn pure_local(expression: &Expr) -> bool {
+            match expression {
+                Expr::Lit(_) | Expr::Ident(_) => true,
+                Expr::Paren(expression) => pure_local(expression.expr.as_ref()),
+                Expr::Unary(expression) => pure_local(expression.arg.as_ref()),
+                Expr::Bin(expression) => {
+                    pure_local(expression.left.as_ref()) && pure_local(expression.right.as_ref())
+                }
+                Expr::Cond(expression) => {
+                    pure_local(expression.test.as_ref())
+                        && pure_local(expression.cons.as_ref())
+                        && pure_local(expression.alt.as_ref())
+                }
+                Expr::Member(member) => {
+                    pure_local(member.obj.as_ref())
+                        && match &member.prop {
+                            MemberProp::Ident(_) | MemberProp::PrivateName(_) => true,
+                            MemberProp::Computed(property) => pure_local(property.expr.as_ref()),
+                        }
+                }
+                _ => false,
+            }
+        }
+        let mut callback_effects = Vec::new();
+        let mut callback_initializers = Vec::new();
+        let mut callback_mutable = mutable.clone();
+        let mut declarations_done = false;
+        for step in steps {
+            match step {
+                LocalStep::Declare {
+                    name,
+                    initializer,
+                    mutable: false,
+                } if !declarations_done => {
+                    if callback_locals.contains_key(name.sym.as_ref()) || !pure_local(initializer) {
+                        return None;
+                    }
+                    let mut encoded = Vec::new();
+                    encode_expression(
+                        initializer,
+                        parameters,
+                        &callback_locals,
+                        context,
+                        &mut encoded,
+                    )?;
+                    jit_expression_kind(&encoded)?;
+                    callback_locals.insert(name.sym.to_string(), encoded);
+                }
+                LocalStep::Declare {
+                    name,
+                    initializer,
+                    mutable: true,
+                } if !declarations_done => {
+                    if callback_locals.contains_key(name.sym.as_ref()) || !pure_local(initializer) {
+                        return None;
+                    }
+                    let mut encoded = Vec::new();
+                    encode_expression(
+                        initializer,
+                        parameters,
+                        &callback_locals,
+                        context,
+                        &mut encoded,
+                    )?;
+                    let kind = jit_expression_kind(&encoded)?.0;
+                    let index = kinds.len();
+                    let local = match kind {
+                        JitKind::Number => {
+                            output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                            format!("ln{index}")
+                        }
+                        JitKind::Boolean => {
+                            output.extend([
+                                format!("c{:016x}", 0.0f64.to_bits()),
+                                "asbool".into(),
+                            ]);
+                            format!("lb{index}")
+                        }
+                        JitKind::String => {
+                            encode_string("", output)?;
+                            format!("ls{index}")
+                        }
+                        _ => return None,
+                    };
+                    kinds.insert(name.sym.to_string(), kind);
+                    callback_locals.insert(name.sym.to_string(), vec![local]);
+                    callback_mutable.insert(name.sym.to_string());
+                    callback_initializers.push((index, kind, encoded, name.sym.to_string()));
+                }
+                LocalStep::Declare { .. }
+                | LocalStep::DestructureArray { .. }
+                | LocalStep::DestructureObject { .. } => return None,
+                effect => {
+                    declarations_done = true;
+                    callback_effects.push(effect);
+                }
+            }
+        }
+
+        output.extend([
+            "loop".into(),
+            index_local.clone(),
+            source_local.clone(),
+            "arraylen".into(),
+            "<".into(),
+            "while".into(),
+            source_local,
+            index_local.clone(),
+            "rsget".into(),
+            format!("setl{key_index}"),
+        ]);
+        if let Some((value_index, prefix)) = value_binding {
+            output.extend(locals.get(receiver.sym.as_ref())?.iter().cloned());
+            output.extend([
+                key_local,
+                format!("{prefix}get"),
+                format!("setl{value_index}"),
+            ]);
+        }
+        for (index, kind, initializer, _) in &callback_initializers {
+            output.extend(initializer.iter().cloned());
+            if kind == &JitKind::Boolean {
+                output.push("asbool".into());
+            }
+            output.push(format!("setl{index}"));
+        }
+        for effect in callback_effects {
+            match effect {
+                LocalStep::Assign {
+                    name,
+                    operation,
+                    value,
+                } => encode_local_assignment(
+                    name,
+                    operation,
+                    value,
+                    parameters,
+                    &callback_locals,
+                    &callback_mutable,
+                    kinds,
+                    context,
+                    output,
+                )?,
+                LocalStep::Update { name, operation } => {
+                    encode_local_update(
+                        name,
+                        operation,
+                        &callback_locals,
+                        &callback_mutable,
+                        kinds,
+                        output,
+                    )?
+                }
+                LocalStep::Effect(expression) => encode_loop_expression(
+                    expression,
+                    parameters,
+                    &callback_locals,
+                    &callback_mutable,
+                    kinds,
+                    context,
+                    output,
+                )?,
+                _ => return None,
+            }
+        }
+        match body {
+            NumericBody::Expression(expression) => encode_loop_expression(
+                expression,
+                parameters,
+                &callback_locals,
+                &callback_mutable,
+                kinds,
+                context,
+                output,
+            )?,
+            NumericBody::Statements(statements) => {
+                for statement in statements {
+                    match statement {
+                        Stmt::Expr(_) => encode_loop_effects(
+                            statement,
+                            parameters,
+                            &callback_locals,
+                            &callback_mutable,
+                            (kinds, root_loop_control(), &[]),
+                            context,
+                            output,
+                        )?,
+                        Stmt::Return(statement) => {
+                            encode_loop_expression(
+                                statement.arg.as_deref()?,
+                                parameters,
+                                &callback_locals,
+                                &callback_mutable,
+                                kinds,
+                                context,
+                                output,
+                            )?;
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        output.extend([
+            "looptail".into(),
+            index_local,
+            format!("c{:016x}", 1.0f64.to_bits()),
+            "+".into(),
+            format!("setl{index}"),
+            "loopend".into(),
+        ]);
+        for (index, kind, _, name) in callback_initializers {
+            kinds.remove(&name);
+            kinds.insert(format!("\0foreach-local-{index}"), kind);
         }
         Some(())
     }
@@ -589,6 +935,18 @@ macro_rules! jit_loop_analysis {
             return None;
         }
         let mut source = Vec::new();
+        let map_iteration = match loop_statement.right.as_ref() {
+            Expr::Ident(name) => context
+                .map_locals
+                .get(name.sym.as_ref())
+                .and_then(|prefix| {
+                    locals
+                        .get(name.sym.as_ref())
+                        .cloned()
+                        .map(|source| (prefix.clone(), source))
+                }),
+            _ => None,
+        };
         encode_expression(
             loop_statement.right.as_ref(), parameters, &locals, context, &mut source,
         )?;
@@ -597,7 +955,7 @@ macro_rules! jit_loop_analysis {
         if jit_expression_kind(&source)?.0 == JitKind::Dictionary {
             let is_set = matches!(loop_statement.right.as_ref(), Expr::Ident(name)
                 if context.set_locals.contains(name.sym.as_ref()));
-            if !is_set {
+            if !is_set && map_iteration.is_none() {
                 return None;
             }
             source.push("dkeys".into());
@@ -648,49 +1006,103 @@ macro_rules! jit_loop_analysis {
         kinds.insert(format!("\0forof-index-{index}"), JitKind::Number);
         let index_local = format!("ln{index}");
 
+        let mut map_value_binding = None;
         let element_index = match &loop_statement.left {
             ForHead::VarDecl(declaration) => {
                 let [declarator] = declaration.decls.as_slice() else {
                     return None;
                 };
-                let Pat::Ident(name) = &declarator.name else {
-                    return None;
-                };
-                if declarator.init.is_some()
-                    || parameters.contains_key(name.id.sym.as_ref())
-                    || locals.contains_key(name.id.sym.as_ref())
-                {
-                    return None;
-                }
-                match element_kind {
-                    JitKind::String => encode_string("", output)?,
-                    JitKind::Number | JitKind::Boolean => {
-                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
-                        if element_kind == JitKind::Boolean {
+                if let Some((map_prefix, map_source)) = &map_iteration {
+                    let Pat::Array(pattern) = &declarator.name else {
+                        return None;
+                    };
+                    let [Some(Pat::Ident(key)), Some(Pat::Ident(value))] =
+                        pattern.elems.as_slice()
+                    else {
+                        return None;
+                    };
+                    if declarator.init.is_some()
+                        || parameters.contains_key(key.id.sym.as_ref())
+                        || parameters.contains_key(value.id.sym.as_ref())
+                        || locals.contains_key(key.id.sym.as_ref())
+                        || locals.contains_key(value.id.sym.as_ref())
+                    {
+                        return None;
+                    }
+                    encode_string("", output)?;
+                    let key_index = kinds.len();
+                    let key_local = format!("ls{key_index}");
+                    locals.insert(key.id.sym.to_string(), vec![key_local.clone()]);
+                    kinds.insert(key.id.sym.to_string(), JitKind::String);
+                    match map_prefix.as_str() {
+                        "dn" => output.push(format!("c{:016x}", 0.0f64.to_bits())),
+                        "db" => {
+                            output.push(format!("c{:016x}", 0.0f64.to_bits()));
                             output.push("asbool".into());
                         }
+                        "ds" => encode_string("", output)?,
+                        _ => return None,
                     }
-                    JitKind::Dynamic => {
-                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
-                        output.push("tagnum".into());
+                    let value_index = kinds.len();
+                    let (value_kind, value_local) = match map_prefix.as_str() {
+                        "dn" => (JitKind::Number, format!("ln{value_index}")),
+                        "db" => (JitKind::Boolean, format!("lb{value_index}")),
+                        "ds" => (JitKind::String, format!("ls{value_index}")),
+                        _ => return None,
+                    };
+                    locals.insert(value.id.sym.to_string(), vec![value_local]);
+                    kinds.insert(value.id.sym.to_string(), value_kind);
+                    if declaration.kind != VarDeclKind::Const {
+                        mutable.insert(key.id.sym.to_string());
+                        mutable.insert(value.id.sym.to_string());
                     }
-                    _ => return None,
+                    map_value_binding = Some((
+                        value_index,
+                        map_source.clone(),
+                        key_local,
+                        map_prefix.clone(),
+                    ));
+                    key_index
+                } else {
+                    let Pat::Ident(name) = &declarator.name else {
+                        return None;
+                    };
+                    if declarator.init.is_some()
+                        || parameters.contains_key(name.id.sym.as_ref())
+                        || locals.contains_key(name.id.sym.as_ref())
+                    {
+                        return None;
+                    }
+                    match element_kind {
+                        JitKind::String => encode_string("", output)?,
+                        JitKind::Number | JitKind::Boolean => {
+                            output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                            if element_kind == JitKind::Boolean {
+                                output.push("asbool".into());
+                            }
+                        }
+                        JitKind::Dynamic => {
+                            output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                            output.push("tagnum".into());
+                        }
+                        _ => return None,
+                    }
+                    let element_index = kinds.len();
+                    let prefix = match element_kind {
+                        JitKind::Number => "ln",
+                        JitKind::Boolean => "lb",
+                        JitKind::String => "ls",
+                        JitKind::Dynamic => "ld",
+                        _ => return None,
+                    };
+                    let element_local = format!("{prefix}{element_index}");
+                    locals.insert(name.id.sym.to_string(), vec![element_local.clone()]);
+                    kinds.insert(name.id.sym.to_string(), element_kind);
+                    if declaration.kind != VarDeclKind::Const {
+                        mutable.insert(name.id.sym.to_string());
+                    }
+                    element_index
                 }
-                let element_index = kinds.len();
-                let prefix = match element_kind {
-                    JitKind::Number => "ln",
-                    JitKind::Boolean => "lb",
-                    JitKind::String => "ls",
-                    JitKind::Dynamic => "ld",
-                    _ => return None,
-                };
-                let element_local = format!("{prefix}{element_index}");
-                locals.insert(name.id.sym.to_string(), vec![element_local.clone()]);
-                kinds.insert(name.id.sym.to_string(), element_kind);
-                if declaration.kind != VarDeclKind::Const {
-                    mutable.insert(name.id.sym.to_string());
-                }
-                element_index
             }
             ForHead::Pat(pattern) => {
                 let Pat::Ident(name) = pattern.as_ref() else {
@@ -705,7 +1117,6 @@ macro_rules! jit_loop_analysis {
             }
             ForHead::UsingDecl(_) => return None,
         };
-
         output.push("loop".into());
         output.extend([
             index_local.clone(),
@@ -725,6 +1136,12 @@ macro_rules! jit_loop_analysis {
             format!("{array}get")
         });
         output.push(format!("setl{element_index}"));
+        if let Some((value_index, map_source, key_local, map_prefix)) = map_value_binding {
+            output.extend(map_source);
+            output.push(key_local);
+            output.push(format!("{map_prefix}get"));
+            output.push(format!("setl{value_index}"));
+        }
         encode_loop_effects(
             loop_statement.body.as_ref(),
             parameters,
@@ -748,7 +1165,6 @@ macro_rules! jit_loop_analysis {
         output.extend(std::iter::repeat_n("nip".into(), kinds.len()));
         (output.len() <= 256).then_some(())
     }
-
     fn encode_for_in_body(
         steps: Vec<LocalStep<'_>>,
         statements: &[Stmt],
@@ -791,4 +1207,3 @@ macro_rules! jit_loop_analysis {
 
     };
 }
-

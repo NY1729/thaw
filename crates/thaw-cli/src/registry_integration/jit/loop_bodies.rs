@@ -39,7 +39,7 @@ macro_rules! jit_loop_bodies {
         let mut mutable = std::collections::HashSet::new();
         let mut runtime_locals = 0usize;
         let mut runtime_kinds = std::collections::HashMap::new();
-        let materialize_control_locals = matches!(
+        let materialize_control_locals = has_collection_for_each(&steps) || matches!(
             &body,
             NumericBody::Statements(
                 [Stmt::Block(_)
@@ -644,6 +644,20 @@ macro_rules! jit_loop_bodies {
                     locals.insert(name.sym.to_string(), encoded);
                 }
                 LocalStep::Effect(expression) => {
+                    if encode_collection_for_each(
+                        expression,
+                        parameters,
+                        &locals,
+                        &mutable,
+                        &mut runtime_kinds,
+                        context,
+                        output,
+                    )
+                    .is_some()
+                    {
+                        runtime_locals = runtime_kinds.len();
+                        continue;
+                    }
                     let mut effect = Vec::new();
                     if encode_callable_table_update(
                         expression,
@@ -684,4 +698,3 @@ macro_rules! jit_loop_bodies {
 
     };
 }
-

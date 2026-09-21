@@ -738,6 +738,14 @@ fn recognizes_set_composition_for_jit() {
             .unwrap_or_else(|| panic!("{operation} should be JIT-specializable"));
         assert!(export.contains(token), "expected {token}: {export}");
     }
+    let export = jit_numeric_export(
+        "function combine() { const x = new Set([1, 2]); const y = new Map(); y.set(2, 'two'); y.set(3, 'three'); const z = x.union(y); return z.has(3) ? 1 : 0; } module.exports = { combine };",
+        "combine",
+        false,
+        &function,
+    )
+    .expect("Map should be accepted as a native Set-like value");
+    assert!(export.contains("setunion"), "expected Set-like union: {export}");
 }
 
 #[test]
@@ -881,4 +889,99 @@ fn recognizes_map_keys_values_entries_for_jit() {
     );
     let values = values.expect("Map.values should be JIT-specializable");
     assert!(values.contains("dnvalues"), "expected Map.values -> dnvalues: {values}");
+}
+
+#[test]
+fn recognizes_direct_map_entry_iteration_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "entries".into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let export = jit_numeric_export(
+        "function entries() { const m = new Map(); m.set('a', 1); m.set('b', 2); let total = 0; for (const [key, value] of m) total += value; return total; } module.exports = { entries };",
+        "entries",
+        false,
+        &function,
+    )
+    .expect("direct Map entry iteration should be JIT-specializable");
+    assert!(export.contains("dkeys"), "expected Map keys snapshot: {export}");
+    assert!(export.contains("dnget"), "expected Map value lookup: {export}");
+}
+
+#[test]
+fn recognizes_map_and_set_for_each_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "total".into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let map = jit_numeric_export(
+        "function total() { const m = new Map(); m.set('a', 1); m.set('b', 2); let result = 0; m.forEach((value, key, map) => { const doubled = value * 2; map.has(key); result += doubled; }); return result; } module.exports = { total };",
+        "total",
+        false,
+        &function,
+    )
+    .expect("Map.forEach should be JIT-specializable");
+    assert!(map.contains("dnget"), "expected Map value lookup: {map}");
+    let set = jit_numeric_export(
+        "function total() { const s = new Set(['a', 'b']); let result = 0; s.forEach((value, key, set) => { let length = 0; length = value.length; set.has(key); result += length; }); return result; } module.exports = { total };",
+        "total",
+        false,
+        &function,
+    )
+    .expect("Set.forEach should be JIT-specializable");
+    assert!(set.contains("dkeys"), "expected Set keys snapshot: {set}");
+}
+
+#[test]
+fn reorders_pure_commutative_arithmetic_to_fit_jit_registers() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "deep".into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    assert!(jit_numeric_export(
+        "function deep() { return 1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + 10)))))))); } module.exports = { deep };",
+        "deep",
+        false,
+        &function,
+    )
+    .is_some());
+}
+
+#[test]
+fn reorders_pure_subtraction_without_changing_operand_order() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "deep".into(),
+        generic: None,
+        params: vec![(
+            "flag".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        )],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let program = jit_numeric_export(
+        "function deep(flag) { return 1000 - (900 - (800 - (700 - (600 - (500 - (400 - (300 - (flag ? 200 : 100)))))))); } module.exports = { deep };",
+        "deep",
+        false,
+        &function,
+    )
+    .expect("pure right-nested subtraction should fit JIT registers");
+    assert!(program.contains("rsub"), "expected reverse subtraction: {program}");
 }

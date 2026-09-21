@@ -7,6 +7,36 @@ macro_rules! jit_expressions {
         context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
+        fn register_depth(expression: &Expr) -> usize {
+            match expression {
+                Expr::Paren(expression) => register_depth(expression.expr.as_ref()),
+                Expr::Bin(binary) => register_depth(binary.left.as_ref())
+                    .max(1 + register_depth(binary.right.as_ref())),
+                Expr::Cond(conditional) => register_depth(conditional.test.as_ref())
+                    .max(register_depth(conditional.cons.as_ref()))
+                    .max(register_depth(conditional.alt.as_ref())),
+                _ => 1,
+            }
+        }
+
+        fn is_pure_operand(expression: &Expr) -> bool {
+            match expression {
+                Expr::Lit(_) | Expr::Ident(_) => true,
+                Expr::Paren(expression) => is_pure_operand(expression.expr.as_ref()),
+                Expr::Unary(unary) => is_pure_operand(unary.arg.as_ref()),
+                Expr::Bin(binary) => {
+                    is_pure_operand(binary.left.as_ref())
+                        && is_pure_operand(binary.right.as_ref())
+                }
+                Expr::Cond(conditional) => {
+                    is_pure_operand(conditional.test.as_ref())
+                        && is_pure_operand(conditional.cons.as_ref())
+                        && is_pure_operand(conditional.alt.as_ref())
+                }
+                _ => false,
+            }
+        }
+
         struct OptionalChainOperation {
             receiver_presence: Option<Vec<String>>,
             receiver: Vec<String>,
@@ -1453,22 +1483,81 @@ macro_rules! jit_expressions {
                 let mut right = Vec::new();
                 encode_expression(binary.left.as_ref(), parameters, locals, context, &mut left)?;
                 encode_expression(binary.right.as_ref(), parameters, locals, context, &mut right)?;
-                append_add(left, right, output)?;
+                if jit_expression_kind(&left)?.0 == JitKind::Number
+                    && jit_expression_kind(&right)?.0 == JitKind::Number
+                    && is_pure_operand(binary.left.as_ref())
+                    && is_pure_operand(binary.right.as_ref())
+                    && register_depth(binary.right.as_ref())
+                        > register_depth(binary.left.as_ref())
+                {
+                    append_add(right, left, output)?;
+                } else {
+                    append_add(left, right, output)?;
+                }
+            }
+            Expr::Bin(binary) if binary.op == BinaryOp::Mul => {
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                encode_number(binary.left.as_ref(), parameters, locals, context, &mut left)?;
+                encode_number(binary.right.as_ref(), parameters, locals, context, &mut right)?;
+                if is_pure_operand(binary.left.as_ref())
+                    && is_pure_operand(binary.right.as_ref())
+                    && register_depth(binary.right.as_ref())
+                        > register_depth(binary.left.as_ref())
+                {
+                    output.extend(right);
+                    output.extend(left);
+                } else {
+                    output.extend(left);
+                    output.extend(right);
+                }
+                output.push("*".into());
             }
             Expr::Bin(binary)
                 if matches!(
                     binary.op,
-                    BinaryOp::Sub
-                        | BinaryOp::Mul
-                        | BinaryOp::Div
-                        | BinaryOp::Mod
-                        | BinaryOp::BitAnd
+                    BinaryOp::Sub | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Exp
+                ) =>
+            {
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                encode_number(binary.left.as_ref(), parameters, locals, context, &mut left)?;
+                encode_number(binary.right.as_ref(), parameters, locals, context, &mut right)?;
+                let reverse = is_pure_operand(binary.left.as_ref())
+                    && is_pure_operand(binary.right.as_ref())
+                    && register_depth(binary.right.as_ref())
+                        > register_depth(binary.left.as_ref());
+                if reverse {
+                    output.extend(right);
+                    output.extend(left);
+                } else {
+                    output.extend(left);
+                    output.extend(right);
+                }
+                output.push(
+                    match (binary.op, reverse) {
+                        (BinaryOp::Sub, false) => "-",
+                        (BinaryOp::Sub, true) => "rsub",
+                        (BinaryOp::Div, false) => "/",
+                        (BinaryOp::Div, true) => "rdiv",
+                        (BinaryOp::Mod, false) => "%",
+                        (BinaryOp::Mod, true) => "rrem",
+                        (BinaryOp::Exp, false) => "pow",
+                        (BinaryOp::Exp, true) => "rpow",
+                        _ => unreachable!(),
+                    }
+                    .into(),
+                );
+            }
+            Expr::Bin(binary)
+                if matches!(
+                    binary.op,
+                    BinaryOp::BitAnd
                         | BinaryOp::BitOr
                         | BinaryOp::BitXor
                         | BinaryOp::LShift
                         | BinaryOp::RShift
                         | BinaryOp::ZeroFillRShift
-                        | BinaryOp::Exp
                 ) =>
             {
                 for operand in [&binary.left, &binary.right] {
@@ -1476,17 +1565,12 @@ macro_rules! jit_expressions {
                 }
                 output.push(
                     match binary.op {
-                        BinaryOp::Sub => "-",
-                        BinaryOp::Mul => "*",
-                        BinaryOp::Div => "/",
-                        BinaryOp::Mod => "%",
                         BinaryOp::BitAnd => "band",
                         BinaryOp::BitOr => "bor",
                         BinaryOp::BitXor => "bxor",
                         BinaryOp::LShift => "shl",
                         BinaryOp::RShift => "shr",
                         BinaryOp::ZeroFillRShift => "ushr",
-                        BinaryOp::Exp => "pow",
                         _ => unreachable!(),
                     }
                     .into(),

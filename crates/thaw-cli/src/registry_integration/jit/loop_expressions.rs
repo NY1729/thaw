@@ -1111,9 +1111,6 @@ macro_rules! jit_loop_expressions {
             );
         }
         let index = loop_local_index(&local)?;
-        if operation != AssignOp::Assign {
-            output.push(local.clone());
-        }
         let mut value = Vec::new();
         encode_expression(value_expression, parameters, locals, context, &mut value)?;
         match kinds.get(name.sym.as_ref())? {
@@ -1126,7 +1123,21 @@ macro_rules! jit_loop_expressions {
             JitKind::Dictionary if dictionary_prefix(&value)? != local.get(..2)? => return None,
             _ => {}
         }
+        let value_first = matches!(
+            (kinds.get(name.sym.as_ref())?, operation, value_expression),
+            (
+                JitKind::Number,
+                AssignOp::AddAssign | AssignOp::MulAssign,
+                Expr::Ident(_) | Expr::Lit(_)
+            )
+        );
+        if operation != AssignOp::Assign && !value_first {
+            output.push(local.clone());
+        }
         output.extend(value);
+        if value_first {
+            output.push(local.clone());
+        }
         if kinds.get(name.sym.as_ref())? == &JitKind::Array && operation == AssignOp::Assign {
             output.push("arrayhandle".into());
         }
@@ -1314,4 +1325,3 @@ macro_rules! jit_loop_expressions {
 
     };
 }
-

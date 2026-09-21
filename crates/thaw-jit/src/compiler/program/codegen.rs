@@ -58,12 +58,21 @@ impl NumericProgram {
                     }
                     let right = depth - 1;
                     let left = depth - 2;
+                    let reverse = matches!(
+                        operation,
+                        NumericOp::ReverseSubtract | NumericOp::ReverseDivide
+                    );
+                    let destination = if reverse { right } else { left };
+                    let source = if reverse { left } else { right };
                     code.extend_from_slice(&[
                         0xf2,
                         0x0f,
                         operation.opcode(),
-                        0xc0 | (left << 3) | right,
+                        0xc0 | (destination << 3) | source,
                     ]);
+                    if reverse {
+                        emit_move(&mut code, left, right);
+                    }
                     depth -= 1;
                 }
                 NumericValue::Compare(operation) => {
@@ -106,11 +115,19 @@ impl NumericProgram {
                     let value = depth - 1;
                     emit_bit_operation(&mut code, value, 0xf8);
                 }
-                NumericValue::Remainder => {
+                NumericValue::Remainder | NumericValue::ReverseRemainder => {
                     if depth < 2 {
                         return None;
                     }
-                    emit_binary_call(&mut code, fmod as *const () as u64, depth - 2);
+                    if matches!(value, NumericValue::ReverseRemainder) {
+                        emit_binary_call_reversed(
+                            &mut code,
+                            fmod as *const () as u64,
+                            depth - 2,
+                        );
+                    } else {
+                        emit_binary_call(&mut code, fmod as *const () as u64, depth - 2);
+                    }
                     depth -= 1;
                 }
                 NumericValue::Minimum | NumericValue::Maximum => {
@@ -125,11 +142,19 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::Power => {
+                NumericValue::Power | NumericValue::ReversePower => {
                     if depth < 2 {
                         return None;
                     }
-                    emit_binary_call(&mut code, power as *const () as u64, depth - 2);
+                    if matches!(value, NumericValue::ReversePower) {
+                        emit_binary_call_reversed(
+                            &mut code,
+                            power as *const () as u64,
+                            depth - 2,
+                        );
+                    } else {
+                        emit_binary_call(&mut code, power as *const () as u64, depth - 2);
+                    }
                     depth -= 1;
                 }
                 NumericValue::Atan2 | NumericValue::Hypot | NumericValue::Imul => {
