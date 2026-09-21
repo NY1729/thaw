@@ -45,7 +45,7 @@ type NapiFunctionArgument = (usize, Vec<HirType>, HirType, bool, Option<usize>);
 
 fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
-        HirType::F64 | HirType::Bool | HirType::Str => Some(1),
+        HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => Some(1),
         HirType::Union(elements) if jit_argument_tagged_union(elements) => Some(2),
         HirType::Array(element)
             if jit_array_result_element_supported(element) =>
@@ -136,4 +136,3 @@ fn jit_union_member_tag(ty: &HirType) -> Option<u64> {
         _ => None,
     }
 }
-

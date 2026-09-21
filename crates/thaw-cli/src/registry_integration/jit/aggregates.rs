@@ -2,7 +2,10 @@ macro_rules! jit_aggregates {
     () => {
     fn jit_parameter_slots(ty: &thaw_hir::HirType) -> Option<usize> {
         match ty {
-            thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => Some(1),
+            thaw_hir::HirType::F64
+            | thaw_hir::HirType::Bool
+            | thaw_hir::HirType::Str
+            | thaw_hir::HirType::JsValue => Some(1),
             thaw_hir::HirType::Union(elements) if jit_argument_tagged_union(elements) => Some(2),
             thaw_hir::HirType::Array(element)
                 if jit_array_result_element_supported(element) =>
@@ -90,6 +93,7 @@ macro_rules! jit_aggregates {
         }
         let prefix = match ty {
             thaw_hir::HirType::Str => Some("s"),
+            thaw_hir::HirType::JsValue => Some("h"),
             thaw_hir::HirType::Bool => Some("b"),
             thaw_hir::HirType::F64 => Some("a"),
             thaw_hir::HirType::Array(element) => match element.as_ref() {

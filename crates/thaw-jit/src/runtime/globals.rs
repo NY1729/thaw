@@ -85,6 +85,8 @@ pub type NumberSource = unsafe extern "C" fn() -> f64;
 pub type DictionaryGet = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char) -> f64;
 pub type DictionaryMutate = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char, f64) -> f64;
 pub type DictionaryQuery = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char) -> f64;
+pub type DynamicObjectQuery =
+    unsafe extern "C" fn(u8, u64, *mut *const c_char) -> f64;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -123,6 +125,7 @@ thread_local! {
     static DICTIONARY_GET: Cell<Option<DictionaryGet>> = const { Cell::new(None) };
     static DICTIONARY_MUTATE: Cell<Option<DictionaryMutate>> = const { Cell::new(None) };
     static DICTIONARY_QUERY: Cell<Option<DictionaryQuery>> = const { Cell::new(None) };
+    static DYNAMIC_OBJECT_QUERY: Cell<Option<DynamicObjectQuery>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
     static CALL_ABSENCE: Cell<u8> = const { Cell::new(1) };
@@ -406,6 +409,21 @@ extern "C" fn set_is_disjoint_from(object: f64, other: f64) -> f64 {
 /// handle (every element stringified as its key).
 extern "C" fn set_from_array(array: f64) -> f64 {
     dictionary_query(array, 0.0, 22)
+}
+
+extern "C" fn set_like_dictionary(handle: f64) -> f64 {
+    DYNAMIC_OBJECT_QUERY.with(|query| {
+        let Some(query) = query.get() else {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return 0.0;
+        };
+        let mut error = ptr::null();
+        let value = unsafe { query(0, handle.to_bits(), &mut error) };
+        if !error.is_null() {
+            CALL_ERROR.with(|slot| slot.set(error));
+        }
+        value
+    })
 }
 
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();

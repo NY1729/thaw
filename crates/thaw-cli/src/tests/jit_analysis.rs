@@ -741,11 +741,35 @@ fn recognizes_set_composition_for_jit() {
     let export = jit_numeric_export(
         "function combine() { const x = new Set([1, 2]); const y = new Map(); y.set(2, 'two'); y.set(3, 'three'); const z = x.union(y); return z.has(3) ? 1 : 0; } module.exports = { combine };",
         "combine",
-        false,
+        true,
         &function,
     )
     .expect("Map should be accepted as a native Set-like value");
     assert!(export.contains("setunion"), "expected Set-like union: {export}");
+}
+
+#[test]
+fn recognizes_opaque_set_like_arguments_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "combine".into(),
+        generic: None,
+        params: vec![(
+            "other".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
+        )],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let export = jit_numeric_export(
+        "module.exports.combine = function(other) { const x = new Set(['a', 'b']); const union = x.union(other); return union.has('c') ? 1 : 0; };",
+        "combine",
+        false,
+        &function,
+    )
+    .unwrap_or_else(|| panic!("{}", jit_rejection_reason("module.exports.combine = function(other) { const x = new Set(['a', 'b']); const union = x.union(other); return union.has('c') ? 1 : 0; };", &function)));
+    assert!(export.contains("h0,setlike,setunion"), "{export}");
 }
 
 #[test]
@@ -933,7 +957,7 @@ fn recognizes_map_and_set_for_each_for_jit() {
     .expect("Map.forEach should be JIT-specializable");
     assert!(map.contains("dnget"), "expected Map value lookup: {map}");
     let set = jit_numeric_export(
-        "function total() { const s = new Set(['a', 'b']); let result = 0; s.forEach((value, key, set) => { let length = 0; length = value.length; set.has(key); result += length; }); return result; } module.exports = { total };",
+        "function total() { const s = new Set(['a', 'b']); let result = 0; s.forEach((value, key, set) => { let length = 0; let extra = 1; length = value.length; set.has(key); result += length + extra; return value; }); return result; } module.exports = { total };",
         "total",
         false,
         &function,

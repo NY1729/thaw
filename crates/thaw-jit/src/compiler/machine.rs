@@ -475,6 +475,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     dictionary_get: Option<DictionaryGet>,
     dictionary_mutate: Option<DictionaryMutate>,
     dictionary_query: Option<DictionaryQuery>,
+    dynamic_object_query: Option<DynamicObjectQuery>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -543,6 +544,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_dictionary_mutate =
         DICTIONARY_MUTATE.with(|mutate| mutate.replace(dictionary_mutate));
     let previous_dictionary_query = DICTIONARY_QUERY.with(|query| query.replace(dictionary_query));
+    let previous_dynamic_object_query =
+        DYNAMIC_OBJECT_QUERY.with(|query| query.replace(dynamic_object_query));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let previous_absence = CALL_ABSENCE.with(|absence| absence.replace(1));
@@ -594,6 +597,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     DICTIONARY_GET.with(|get| get.set(previous_dictionary_get));
     DICTIONARY_MUTATE.with(|mutate| mutate.set(previous_dictionary_mutate));
     DICTIONARY_QUERY.with(|query| query.set(previous_dictionary_query));
+    DYNAMIC_OBJECT_QUERY.with(|query| query.set(previous_dynamic_object_query));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }

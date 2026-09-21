@@ -730,6 +730,57 @@ pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
     CString::new(text).unwrap_or_default().into_raw()
 }
 
+/// The residual JIT's `dynamic_object_query` host ABI: operation `0`
+/// snapshots a Set-like opaque handle's keys into a JSON object (validating
+/// the `size`/`has`/`keys` protocol in the JS realm).
+///
+/// # Safety
+/// `handle` must be a live retained handle (or `0`); `error` must be null or
+/// point to a writable pointer slot.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_js_dynamic_object_query(
+    operation: u8,
+    handle: u64,
+    error: *mut *const c_char,
+) -> f64 {
+    if operation != 0 {
+        if let Some(error) = error.as_mut() {
+            *error = CString::new("unsupported dynamic object query")
+                .unwrap_or_default()
+                .into_raw();
+        }
+        return 0.0;
+    }
+    let result = with_active_or_context(|ctx| -> Result<String, String> {
+        let value = value_for_handle(&ctx, handle)?;
+        let snapshot: Function = ctx
+            .eval(
+                "(value) => { const size = Number(value.size); const has = value.has; const keys = value.keys; if (Number.isNaN(size) || size < 0 || typeof has !== 'function' || typeof keys !== 'function') throw new TypeError('Set-like object requires non-negative size, has(), and keys()'); const iterator = keys.call(value); if ((typeof iterator !== 'object' && typeof iterator !== 'function') || iterator === null || typeof iterator.next !== 'function') throw new TypeError('Set-like keys() must return an iterator'); const out = Object.create(null); for (;;) { const step = iterator.next(); if ((typeof step !== 'object' && typeof step !== 'function') || step === null) throw new TypeError('Set-like iterator result must be an object'); if (step.done) break; out[String(step.value)] = true; } return JSON.stringify(out); }",
+            )
+            .map_err(|error| error.to_string())?;
+        snapshot.call((value,)).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => error.to_string(),
+        })
+    });
+    match result {
+        Ok(json) => {
+            // Build the JIT dictionary (`*mut serde_json::Value`) directly:
+            // the same layout thaw-std's dictionary host reads. `preserve_order`
+            // keeps key insertion order.
+            let value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+            let leaked = Box::into_raw(Box::new(value));
+            f64::from_bits(leaked as usize as u64)
+        }
+        Err(message) => {
+            if let Some(error) = error.as_mut() {
+                *error = CString::new(message).unwrap_or_default().into_raw();
+            }
+            0.0
+        }
+    }
+}
+
 fn handle_array<'js>(ctx: &Ctx<'js>) -> Result<Array<'js>, String> {
     ctx.globals()
         .get("__thaw_value_handles")
