@@ -128,6 +128,7 @@ impl<'a> FnLowerer<'a> {
         receiver: HirExpr,
         other: HirExpr,
         element_type: HirType,
+        other_type: HirType,
         op: &str,
         extra_bindings: Vec<LoweredBinding>,
     ) -> Result<HirExpr, String> {
@@ -154,7 +155,7 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
 
         self.scope.insert(receiver_name.clone(), set_type.clone());
-        self.scope.insert(other_name.clone(), set_type.clone());
+        self.scope.insert(other_name.clone(), other_type.clone());
         self.scope
             .insert(elements_name.clone(), elements_type.clone());
         self.scope.insert(length_name.clone(), HirType::F64);
@@ -299,7 +300,7 @@ impl<'a> FnLowerer<'a> {
 
         let mut bindings = vec![(receiver_name, set_type.clone(), receiver)];
         bindings.extend(extra_bindings);
-        bindings.push((other_name, set_type, other));
+        bindings.push((other_name, other_type, other));
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
@@ -320,6 +321,7 @@ impl<'a> FnLowerer<'a> {
         receiver: HirExpr,
         other: HirExpr,
         element_type: HirType,
+        other_type: HirType,
         scan_side: &str,
         target_side: &str,
         expect_present: bool,
@@ -344,7 +346,7 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
 
         self.scope.insert(receiver_name.clone(), set_type.clone());
-        self.scope.insert(other_name.clone(), set_type.clone());
+        self.scope.insert(other_name.clone(), other_type.clone());
         self.scope
             .insert(elements_name.clone(), elements_type.clone());
         self.scope.insert(length_name.clone(), HirType::F64);
@@ -436,7 +438,7 @@ impl<'a> FnLowerer<'a> {
 
         let mut bindings = vec![(receiver_name, set_type.clone(), receiver)];
         bindings.extend(extra_bindings);
-        bindings.push((other_name, set_type, other));
+        bindings.push((other_name, other_type, other));
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
@@ -676,4 +678,16 @@ impl<'a> FnLowerer<'a> {
         self.lower_group_by(items, item_type, key_fn, object_result)
     }
 
+}
+
+/// Whether a `Set` composition/predicate argument is usable: either the
+/// same `Set<T>` element type as the receiver, or a `Map<T, _>` whose keys
+/// act as the set-like membership set (both share the same native hash
+/// table, so `has`/`set`/key-snapshot intrinsics apply unchanged).
+fn set_argument_is_compatible(other: &HirType, element_type: &HirType) -> bool {
+    match other {
+        HirType::Set(element) => element.as_ref() == element_type,
+        HirType::Map(key, _) => key.as_ref() == element_type,
+        _ => false,
+    }
 }
