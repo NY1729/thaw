@@ -3744,9 +3744,10 @@ fn compiles_bigint_operations() {
 /// A `bigint` literal (or a literal `BigInt("...")` argument) beyond
 /// Thaw's fixed-width `i64` is kept as the real QuickJS BigInt, so
 /// `.toString()`/radix conversion stay exact. Comparing (`>`, `==`,
-/// `===`, ...) and doing arithmetic (`+`, `-`, `*`, `/`, `%`) with another
-/// `bigint` goes through arbitrary-precision decimal-digit helpers, so the
-/// result is exact for any magnitude.
+/// `===`, ...), arithmetic (`+`, `-`, `*`, `/`, `%`), bitwise
+/// (`&`, `|`, `^`, `<<`, `>>`), and unary `-` with another `bigint` go
+/// through arbitrary-precision decimal-digit helpers, so the result is
+/// exact for any magnitude.
 #[test]
 fn compiles_large_bigint_literals() {
     let source = r#"
@@ -3774,6 +3775,13 @@ fn compiles_large_bigint_literals() {
             console.log((a / a).toString());
             console.log((-a).toString());
             console.log((-(a + 1n)).toString());
+            console.log((a & 0xffffffffffffffffn).toString());
+            console.log((a | 1n).toString());
+            console.log((a ^ a).toString());
+            console.log((a << 8n).toString());
+            console.log((a >> 8n).toString());
+            console.log(((-a) & 255n).toString());
+            console.log(((-a) >> 8n).toString());
         }
     "#;
     assert_eq!(
@@ -3785,7 +3793,10 @@ fn compiles_large_bigint_literals() {
          246913578024691357802469135780\n17636684144620811271604938270\n0\n\
          -123456789012345678901234567889\n\
          15241578753238836750495351562536198787501905199875019052100\n1\n\
-         -123456789012345678901234567890\n-123456789012345678901234567891\n"
+         -123456789012345678901234567890\n-123456789012345678901234567891\n\
+         14083847773837265618\n123456789012345678901234567891\n0\n\
+         31604937987160493798716049379840\n482253082079475308207947530\n46\n\
+         -482253082079475308207947531\n"
     );
 }
 

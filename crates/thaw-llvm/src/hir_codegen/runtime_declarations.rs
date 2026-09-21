@@ -993,6 +993,11 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_bigint_decimal_mul",
             "thaw_bigint_decimal_div",
             "thaw_bigint_decimal_mod",
+            "thaw_bigint_decimal_and",
+            "thaw_bigint_decimal_or",
+            "thaw_bigint_decimal_xor",
+            "thaw_bigint_decimal_shl",
+            "thaw_bigint_decimal_shr",
         ] {
             self.module.add_function(
                 name,
