@@ -878,6 +878,24 @@ impl<'a> FnLowerer<'a> {
         if lhs_type == rhs_type {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
         }
+        // A native `bigint` against a beyond-`i64` one (a live handle):
+        // equal exactly when their decimal digits agree.
+        if matches!(
+            (&lhs_type, &rhs_type),
+            (HirType::JsValue, HirType::I64) | (HirType::I64, HirType::JsValue)
+        ) {
+            let left = self.bigint_decimal_string(lhs, &lhs_type)?;
+            let right = self.bigint_decimal_string(rhs, &rhs_type)?;
+            let comparison = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bigint_decimal_cmp".into())),
+                vec![left, right],
+            );
+            return Ok(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(comparison),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            ));
+        }
         let nullish_check =
             match (&lhs_type, &rhs_type) {
                 (HirType::Optional(payload), HirType::Null)
@@ -1020,16 +1038,97 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// The decimal digits of a `bigint`-like operand: a native `i64` via
+    /// `thaw_i64_to_string`, or a live `JsValue` (a `bigint` beyond `i64`,
+    /// kept as a handle) via its own `toString()`. Used to compare a
+    /// fixed-width native `bigint` against one outside its range.
+    fn bigint_decimal_string(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
+        match ty {
+            HirType::I64 => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_i64_to_string".into())),
+                vec![value],
+            )),
+            HirType::JsValue => {
+                let no_args =
+                    self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(Vec::new()))?;
+                let call = HirExpr::Call(
+                    Box::new(HirExpr::Var("callDynamicMethod".into())),
+                    vec![
+                        value,
+                        HirExpr::Lit(HirLit::Str("toString".into())),
+                        no_args,
+                    ],
+                );
+                Ok(HirExpr::JsonAsString(Box::new(call)))
+            }
+            other => Err(format!(
+                "a bigint comparison needs a native `bigint` or a dynamic bigint, got {other:?}"
+            )),
+        }
+    }
+
+    /// Strict equality between a native `bigint` and a beyond-`i64` one
+    /// (a live handle), which `coerce_strict_equality_operands` would
+    /// reject as incompatible: equal exactly when their decimal digits
+    /// agree.
+    fn lower_mixed_bigint_equality(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        if !matches!(
+            (&lhs_type, &rhs_type),
+            (HirType::JsValue, HirType::I64) | (HirType::I64, HirType::JsValue)
+        ) {
+            return Ok(None);
+        }
+        let left = self.bigint_decimal_string(lhs, &lhs_type)?;
+        let right = self.bigint_decimal_string(rhs, &rhs_type)?;
+        let comparison = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bigint_decimal_cmp".into())),
+            vec![left, right],
+        );
+        Ok(Some(HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(comparison),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        )))
+    }
+
     fn lower_relational(
         &mut self,
         lhs: HirExpr,
         rhs: HirExpr,
         op: BinOp,
     ) -> Result<HirExpr, String> {
-        if self.infer_expr_type(&lhs)? == HirType::I64
-            && self.infer_expr_type(&rhs)? == HirType::I64
-        {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        if lhs_type == HirType::I64 && rhs_type == HirType::I64 {
             return Ok(HirExpr::BinOp(op, Box::new(lhs), Box::new(rhs)));
+        }
+        // A native `bigint` against a beyond-`i64` one (a live handle):
+        // compare their decimal digits, which orders integers exactly.
+        if matches!(
+            (&lhs_type, &rhs_type),
+            (HirType::JsValue, HirType::I64) | (HirType::I64, HirType::JsValue)
+        ) {
+            let left = self.bigint_decimal_string(lhs, &lhs_type)?;
+            let right = self.bigint_decimal_string(rhs, &rhs_type)?;
+            let comparison = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bigint_decimal_cmp".into())),
+                vec![left, right],
+            );
+            return Ok(HirExpr::BinOp(
+                op,
+                Box::new(comparison),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            ));
         }
         if self.infer_expr_type(&lhs)? == HirType::Str
             && self.infer_expr_type(&rhs)? == HirType::Str

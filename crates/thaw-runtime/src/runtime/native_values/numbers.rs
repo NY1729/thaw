@@ -673,6 +673,54 @@ pub unsafe extern "C" fn thaw_i64_from_string(value: *const c_char) -> i64 {
     }
 }
 
+/// A decimal integer string as `(negative, significant_digits)` -- sign
+/// split out and leading zeros removed, so `"-007"` and `"-7"` compare
+/// equal and magnitudes order by length then lexicographically.
+fn decimal_magnitude(text: &str) -> (bool, String) {
+    let text = text.trim();
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let digits = digits.trim_start_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    (negative && digits != "0", digits.to_string())
+}
+
+#[no_mangle]
+/// Compares two decimal integer strings (`BigInt.prototype.toString()`
+/// output) as `-1`/`0`/`1`. Lets a fixed-width native `bigint` be compared
+/// against a value beyond its range that only exists as a live JS handle.
+///
+/// # Safety
+/// Both pointers must be null or valid NUL-terminated UTF-8 strings.
+pub unsafe extern "C" fn thaw_bigint_decimal_cmp(
+    left: *const c_char,
+    right: *const c_char,
+) -> f64 {
+    let read = |pointer: *const c_char| -> (bool, String) {
+        if pointer.is_null() {
+            return (false, "0".to_string());
+        }
+        decimal_magnitude(&unsafe { CStr::from_ptr(pointer) }.to_string_lossy())
+    };
+    let (left_negative, left_digits) = read(left);
+    let (right_negative, right_digits) = read(right);
+    if left_negative != right_negative {
+        return if left_negative { -1.0 } else { 1.0 };
+    }
+    let ordering = left_digits
+        .len()
+        .cmp(&right_digits.len())
+        .then_with(|| left_digits.cmp(&right_digits));
+    let sign = if left_negative { -1.0 } else { 1.0 };
+    sign * match ordering {
+        std::cmp::Ordering::Less => -1.0,
+        std::cmp::Ordering::Equal => 0.0,
+        std::cmp::Ordering::Greater => 1.0,
+    }
+}
+
 /// `BigInt.asIntN(bits, value)`: reinterprets the low `bits` of `value` as a
 /// two's-complement signed integer.
 #[no_mangle]

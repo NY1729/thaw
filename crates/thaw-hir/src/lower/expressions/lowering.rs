@@ -845,23 +845,34 @@ impl<'a> FnLowerer<'a> {
                     BinaryOp::LtEq => self.lower_relational(lhs, rhs, BinOp::LtEq)?,
                     BinaryOp::GtEq => self.lower_relational(lhs, rhs, BinOp::GtEq)?,
                     BinaryOp::EqEqEq => {
-                        let (lhs, rhs) = self.coerce_strict_equality_operands(lhs, rhs)?;
-                        self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
-                            .unwrap_or(HirExpr::BinOp(
-                                BinOp::EqEqEq,
-                                Box::new(lhs),
-                                Box::new(rhs),
-                            ))
+                        if let Some(result) =
+                            self.lower_mixed_bigint_equality(lhs.clone(), rhs.clone())?
+                        {
+                            result
+                        } else {
+                            let (lhs, rhs) = self.coerce_strict_equality_operands(lhs, rhs)?;
+                            self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
+                                .unwrap_or(HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(lhs),
+                                    Box::new(rhs),
+                                ))
+                        }
                     }
                     BinaryOp::NotEqEq => {
-                        let (lhs, rhs) = self.coerce_strict_equality_operands(lhs, rhs)?;
-                        let equality = self
-                            .lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
-                            .unwrap_or(HirExpr::BinOp(
-                                BinOp::EqEqEq,
-                                Box::new(lhs),
-                                Box::new(rhs),
-                            ));
+                        let equality = if let Some(result) =
+                            self.lower_mixed_bigint_equality(lhs.clone(), rhs.clone())?
+                        {
+                            result
+                        } else {
+                            let (lhs, rhs) = self.coerce_strict_equality_operands(lhs, rhs)?;
+                            self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
+                                .unwrap_or(HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(lhs),
+                                    Box::new(rhs),
+                                ))
+                        };
                         HirExpr::BinOp(
                             BinOp::EqEqEq,
                             Box::new(equality),
