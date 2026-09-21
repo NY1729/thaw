@@ -111,7 +111,7 @@ impl<'a> FnLowerer<'a> {
                 | "find" | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
                 | "toSpliced" | "at" | "with" | "flat" | "flatMap" | "map" | "filter"
                 | "forEach" | "slice" | "subarray" | "substring" | "substr" | "hasOwnProperty"
-                | "propertyIsEnumerable" | "deref" | "group" | "groupToMap"
+                | "propertyIsEnumerable" | "isPrototypeOf" | "deref" | "group" | "groupToMap"
                 | "copyWithin" | "fill" | "reverse" | "join"
                 | "push"
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
@@ -163,6 +163,14 @@ impl<'a> FnLowerer<'a> {
             | "throw" => self.lower_native_array_mutation_method(member, property, call),
             "hasOwnProperty" | "propertyIsEnumerable" => {
                 self.lower_native_has_own_property(member, call)
+            }
+            "isPrototypeOf" => {
+                // Approx: thaw models no prototype chain, so nothing is a
+                // prototype of anything.
+                if call.args.len() != 1 {
+                    return Err("native `.isPrototypeOf()` expects exactly one argument".into());
+                }
+                Ok(HirExpr::Lit(HirLit::Bool(false)))
             }
             "deref" => self.lower_native_weakref_deref(member, call),
             "group" | "groupToMap" => self.lower_native_array_group(member, property, call),
