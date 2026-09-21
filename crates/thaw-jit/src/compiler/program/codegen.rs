@@ -2219,6 +2219,29 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
+                NumericValue::SetUnion
+                | NumericValue::SetIntersection
+                | NumericValue::SetDifference
+                | NumericValue::SetSymmetricDifference
+                | NumericValue::SetIsSubsetOf
+                | NumericValue::SetIsSupersetOf
+                | NumericValue::SetIsDisjointFrom => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::SetUnion => set_union,
+                        NumericValue::SetIntersection => set_intersection,
+                        NumericValue::SetDifference => set_difference,
+                        NumericValue::SetSymmetricDifference => set_symmetric_difference,
+                        NumericValue::SetIsSubsetOf => set_is_subset_of,
+                        NumericValue::SetIsSupersetOf => set_is_superset_of,
+                        NumericValue::SetIsDisjointFrom => set_is_disjoint_from,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
                 NumericValue::DictionaryKeys
                 | NumericValue::NumberDictionaryValues
                 | NumericValue::BoolDictionaryValues

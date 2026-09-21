@@ -1937,3 +1937,39 @@ fn set_operations_use_jit_without_quickjs() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "2\n3\ntrue\ntrue\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn set_composition_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-set-compose-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-set-compose");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function unionHas(first: number, second: number): number;\nexport declare function intersectionHas(): number;\nexport declare function differenceHas(): number;\nexport declare function symmetricHas(): number;\nexport declare function relate(): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.unionHas = function(first, second) { const x = new Set([1, 2]); const y = new Set([2, 3]); const u = x.union(y); return u.has(first) ? (u.has(second) ? 1 : 2) : 3; }; module.exports.intersectionHas = function() { const x = new Set([1, 2, 3]); const y = new Set([2, 3, 4]); const i = x.intersection(y); return i.has(1) ? 1 : (i.has(2) ? 2 : 3); }; module.exports.differenceHas = function() { const x = new Set([1, 2]); const y = new Set([2, 3]); const d = y.difference(x); return d.has(3) ? 1 : 0; }; module.exports.symmetricHas = function() { const x = new Set([1, 2]); const y = new Set([2, 3]); const s = x.symmetricDifference(y); return s.has(1) ? 1 : 0; }; module.exports.relate = function() { const x = new Set([1, 2]); const y = new Set([1, 2, 3]); return x.isSubsetOf(y) ? (y.isSupersetOf(x) ? (x.isDisjointFrom(y) ? 1 : 2) : 3) : 4; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { unionHas, intersectionHas, differenceHas, symmetricHas, relate } from 'jit-set-compose';\nfunction main(): void { console.log(unionHas(1, 3)); console.log(unionHas(1, 4)); console.log(intersectionHas()); console.log(differenceHas()); console.log(symmetricHas()); console.log(relate()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n2\n2\n1\n1\n2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

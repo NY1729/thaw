@@ -576,6 +576,47 @@ macro_rules! jit_returns {
         Some((operation, member.obj.as_ref()))
     }
 
+    /// Recognizes `set.union(x)` / `intersection` / `difference` /
+    /// `symmetricDifference` / `isSubsetOf` / `isSupersetOf` /
+    /// `isDisjointFrom` where `set` is a native JIT `Set`. Returns the
+    /// runtime token, the receiver, and the argument.
+    fn set_combine_method<'a>(
+        call: &'a CallExpr,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<(&'static str, &'a Expr, &'a Expr)> {
+        if call.args.len() != 1 || call.args[0].spread.is_some() {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        let token = match property.sym.as_ref() {
+            "union" => "setunion",
+            "intersection" => "setintersection",
+            "difference" => "setdifference",
+            "symmetricDifference" => "setsymmetricdiff",
+            "isSubsetOf" => "setissubset",
+            "isSupersetOf" => "setissuperset",
+            "isDisjointFrom" => "setisdisjoint",
+            _ => return None,
+        };
+        let receiver_is_dictionary = member_path(member.obj.as_ref())
+            .and_then(|path| locals.get(&path))
+            .is_some_and(|tokens| {
+                jit_expression_kind(tokens).is_some_and(|(kind, _)| kind == JitKind::Dictionary)
+            });
+        if !receiver_is_dictionary {
+            return None;
+        }
+        Some((token, member.obj.as_ref(), call.args[0].expr.as_ref()))
+    }
+
     fn string_static_constructor<'a>(
         call: &'a CallExpr,
         parameters: &std::collections::HashMap<String, String>,

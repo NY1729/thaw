@@ -371,6 +371,37 @@ extern "C" fn dictionary_key_at(object: f64, index: f64) -> f64 {
     dictionary_query(object, index, 14)
 }
 
+/// Set composition/predicate helpers: the second operand (`other`) is
+/// passed through `dictionary_query`'s `key` slot as an object pointer, and
+/// the host dispatches on the operation byte.
+extern "C" fn set_union(object: f64, other: f64) -> f64 {
+    dictionary_query(object, other, 15)
+}
+
+extern "C" fn set_intersection(object: f64, other: f64) -> f64 {
+    dictionary_query(object, other, 16)
+}
+
+extern "C" fn set_difference(object: f64, other: f64) -> f64 {
+    dictionary_query(object, other, 17)
+}
+
+extern "C" fn set_symmetric_difference(object: f64, other: f64) -> f64 {
+    dictionary_query(object, other, 18)
+}
+
+extern "C" fn set_is_subset_of(object: f64, other: f64) -> f64 {
+    dictionary_query(object, other, 19)
+}
+
+extern "C" fn set_is_superset_of(object: f64, other: f64) -> f64 {
+    dictionary_query(object, other, 20)
+}
+
+extern "C" fn set_is_disjoint_from(object: f64, other: f64) -> f64 {
+    dictionary_query(object, other, 21)
+}
+
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]

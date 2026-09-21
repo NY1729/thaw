@@ -768,6 +768,69 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
                 CString::new(key.as_str()).unwrap_or_default().into_raw() as usize as u64,
             )
         }
+        // Set composition/predicates (15-21): `object` is the receiver and
+        // `key` carries the *other* object pointer. Only the key sets
+        // matter (a JIT `Set` is a string-keyed dictionary).
+        15..=18 => {
+            let receiver = unsafe { object.as_ref() };
+            let other = unsafe { key.cast::<Value>().as_ref() };
+            let (Some(Value::Object(receiver)), Some(Value::Object(other))) = (receiver, other)
+            else {
+                return 0.0;
+            };
+            let mut fields = serde_json::Map::new();
+            match operation {
+                15 => {
+                    for (key, value) in receiver {
+                        fields.insert(key.clone(), value.clone());
+                    }
+                    for (key, value) in other {
+                        fields.insert(key.clone(), value.clone());
+                    }
+                }
+                16 => {
+                    for (key, value) in receiver {
+                        if other.contains_key(key) {
+                            fields.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                17 => {
+                    for (key, value) in receiver {
+                        if !other.contains_key(key) {
+                            fields.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                _ => {
+                    for (key, value) in receiver {
+                        if !other.contains_key(key) {
+                            fields.insert(key.clone(), value.clone());
+                        }
+                    }
+                    for (key, value) in other {
+                        if !receiver.contains_key(key) {
+                            fields.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+            f64::from_bits(leak(Value::Object(fields)) as usize as u64)
+        }
+        19..=21 => {
+            let receiver = unsafe { object.as_ref() };
+            let other = unsafe { key.cast::<Value>().as_ref() };
+            let (Some(Value::Object(receiver)), Some(Value::Object(other))) = (receiver, other)
+            else {
+                return 0.0;
+            };
+            let result = match operation {
+                19 => receiver.keys().all(|key| other.contains_key(key)),
+                20 => other.keys().all(|key| receiver.contains_key(key)),
+                _ => receiver.keys().all(|key| !other.contains_key(key)),
+            };
+            f64::from(result)
+        }
         _ => 0.0,
     }
 }
