@@ -191,7 +191,7 @@ impl<'a> FnLowerer<'a> {
                 | ("JSON", "stringify")
                 | ("Iterator", "from")
                 | ("RegExp", "escape")
-                | ("Reflect", "ownKeys" | "has" | "get" | "set" | "deleteProperty")
+                | ("Reflect", "ownKeys" | "has" | "get" | "set" | "deleteProperty" | "apply" | "construct")
                 | ("Symbol", "for" | "keyFor")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("String", "fromCharCode" | "fromCodePoint")
@@ -311,6 +311,59 @@ impl<'a> FnLowerer<'a> {
                             ("configurable".to_string(), HirExpr::Lit(HirLit::Bool(true))),
                         ]);
                         return self.wrap_call_argument_bindings(descriptor, &bindings);
+                    }
+                    if object.sym == *"Reflect" && property.sym == *"apply" {
+                        // `Reflect.apply(target, thisArg, argsList)` is
+                        // exactly `target.apply(thisArg, argsList)`, so
+                        // reuse the existing function-value `.apply`
+                        // lowering instead of duplicating it. (Its own
+                        // static-args-length requirement applies, e.g. a
+                        // literal array or tuple.)
+                        let [target, this_argument, arguments] = call.args.as_slice() else {
+                            return Err("`Reflect.apply` expects exactly three arguments".into());
+                        };
+                        let forwarded = CallExpr {
+                            span: call.span,
+                            ctxt: call.ctxt,
+                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                span: call.span,
+                                obj: target.expr.clone(),
+                                prop: MemberProp::Ident(IdentName::new("apply".into(), call.span)),
+                            }))),
+                            args: vec![this_argument.clone(), arguments.clone()],
+                            type_args: None,
+                        };
+                        return self.lower_call(&forwarded);
+                    }
+                    if object.sym == *"Reflect" && property.sym == *"construct" {
+                        // `Reflect.construct(Ctor, argsList)` == `new
+                        // Ctor(...argsList)`. Thaw's `new` needs a statically
+                        // spliced argument list, so only an array *literal*
+                        // is accepted here (a spread element would also need
+                        // a statically known length).
+                        let [target, arguments] = call.args.as_slice() else {
+                            return Err(
+                                "`Reflect.construct` expects exactly two arguments".into()
+                            );
+                        };
+                        let Expr::Array(array) = arguments.expr.as_ref() else {
+                            return Err(
+                                "`Reflect.construct` currently requires an array literal".into()
+                            );
+                        };
+                        let arguments = array
+                            .elems
+                            .iter()
+                            .cloned()
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or("`Reflect.construct` array literal cannot contain holes")?;
+                        return self.lower_expr(&Expr::New(swc_ecma_ast::NewExpr {
+                            span: call.span,
+                            ctxt: call.ctxt,
+                            callee: target.expr.clone(),
+                            args: Some(arguments),
+                            type_args: None,
+                        }));
                     }
                     if object.sym == *"Reflect" && property.sym == *"set" {
                         let (arguments, bindings) =

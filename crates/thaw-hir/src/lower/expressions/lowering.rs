@@ -203,7 +203,7 @@ impl<'a> FnLowerer<'a> {
                         // name directly, which never routes through this
                         // bare-identifier expression lowering at all.
                         global @ ("Atomics" | "crypto" | "process" | "AbortSignal" | "String"
-                        | "Number" | "Boolean") => {
+                        | "Number" | "Boolean" | "globalThis") => {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
                                 vec![HirExpr::Lit(HirLit::Str(global.to_string()))],

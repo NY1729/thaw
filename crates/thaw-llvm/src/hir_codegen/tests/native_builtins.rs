@@ -3385,3 +3385,38 @@ fn compiles_regexp_has_indices_and_base64_globals() {
         "true\nfalse\naGVsbG8=\nhello\nhi there\nYWJj\nYWI=\nYQ==\n"
     );
 }
+
+/// `globalThis` as a value (a live quickjs global handle),
+/// `Reflect.apply`, and `Reflect.construct`.
+#[test]
+fn compiles_globalthis_and_reflect_apply_construct() {
+    let source = r#"
+        class Point {
+            x: number;
+            y: number;
+            constructor(x: number, y: number) {
+                this.x = x;
+                this.y = y;
+            }
+            sum(): number {
+                return this.x + this.y;
+            }
+        }
+        function add(a: number, b: number): number {
+            return a + b;
+        }
+        function main(): void {
+            console.log(typeof globalThis);
+            (globalThis as any).thawGlobal = 42;
+            console.log((globalThis as any).thawGlobal);
+            console.log(Reflect.apply(add, null, [3, 4]));
+            const p = Reflect.construct(Point, [10, 20]) as Point;
+            console.log(p.sum());
+            console.log(Reflect.apply(p.sum, p, []) as number);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "globalthis_reflect_apply_construct"),
+        "object\n42\n7\n30\n30\n"
+    );
+}
