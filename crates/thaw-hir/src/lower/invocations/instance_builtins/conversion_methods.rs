@@ -171,6 +171,20 @@ impl<'a> FnLowerer<'a> {
                             vec![close, flags],
                         ));
                     }
+                    // `Symbol.prototype.toString()` is `Symbol(description)`.
+                    // `coerce_primitive_to_string`'s `Symbol` arm is
+                    // deliberately identity (a symbol used as an object key
+                    // needs its raw representation), so a *method call* needs
+                    // the dedicated rendering instead.
+                    if receiver_type == HirType::Symbol {
+                        if !call.args.is_empty() {
+                            return Err("native `.toString()` expects no arguments".into());
+                        }
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_symbol_to_string".to_string())),
+                            vec![receiver],
+                        ));
+                    }
                     if receiver_type == HirType::Array(Box::new(HirType::F64))
                         && call.args.len() == 1
                     {

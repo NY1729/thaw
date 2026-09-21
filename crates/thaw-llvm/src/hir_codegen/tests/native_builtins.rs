@@ -3286,10 +3286,11 @@ fn compiles_symbol_registry_and_description() {
             console.log(Symbol.for("reg").description);
             console.log(typeof Symbol("x"));
             console.log(Symbol("x") === Symbol("x"));
+            console.log(Symbol("x").toString());
         }
     "#;
     assert_eq!(
         compile_and_run(source, "symbol_registry"),
-        "true\nfalse\nk\nhello\nreg\nsymbol\nfalse\n"
+        "true\nfalse\nk\nhello\nreg\nsymbol\nfalse\nSymbol(x)\n"
     );
 }
