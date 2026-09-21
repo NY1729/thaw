@@ -3329,3 +3329,37 @@ fn compiles_reflect_object_static_and_substr() {
         "3\n3\n4\nbcd\nef\ncdef\ntrue\nfalse\n7\ntrue\n5\ntrue\n{\"b\":6}\n"
     );
 }
+
+/// `Reflect.set`, `Object.isExtensible`/`isFrozen`/`isSealed`, and
+/// `Object.getOwnPropertyDescriptor`.
+///
+/// `isFrozen`/`isSealed` are always `false` and `isExtensible` always
+/// `true`: `Object.freeze`/`seal`/`preventExtensions` are no-ops in thaw
+/// (a value's native layout is fixed), so a value is never observably
+/// frozen. The one deliberate divergence from JS is
+/// `Object.isFrozen(Object.freeze(x))`, which JS reports as `true`.
+#[test]
+fn compiles_reflect_set_and_object_descriptor_queries() {
+    let source = r#"
+        function main(): void {
+            const o = { a: 1 };
+            const ok = Reflect.set(o, "a", 9);
+            console.log(ok);
+            console.log(o.a);
+            const j = JSON.parse("{\"a\":1}");
+            console.log(Reflect.set(j, "a", 9));
+            console.log(JSON.stringify(j));
+            console.log(Object.isExtensible({}));
+            console.log(Object.isFrozen({}));
+            console.log(Object.isSealed({}));
+            const d = Object.getOwnPropertyDescriptor(o, "a");
+            console.log(d === undefined ? "none" : d.value);
+            console.log(d.enumerable);
+            console.log(Object.getOwnPropertyDescriptor(o, "z") === undefined);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "reflect_set_descriptor_queries"),
+        "true\n9\ntrue\n{\"a\":9}\ntrue\nfalse\nfalse\n9\ntrue\ntrue\n"
+    );
+}

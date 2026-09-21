@@ -187,7 +187,7 @@ impl<'a> FnLowerer<'a> {
             ("Array", "of" | "from" | "isArray")
                 | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
                 | ("Map", "groupBy")
-                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions")
+                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions" | "isFrozen" | "isSealed" | "isExtensible" | "getOwnPropertyDescriptor")
                 | ("JSON", "stringify")
                 | ("Iterator", "from")
                 | ("RegExp", "escape")
@@ -249,6 +249,139 @@ impl<'a> FnLowerer<'a> {
                         // there is nothing to change. The call returns its
                         // argument, exactly as JS's do.
                         return self.wrap_call_argument_bindings(value.clone(), &bindings);
+                    }
+                    if object.sym == *"Object"
+                        && matches!(
+                            property.sym.as_ref(),
+                            "isFrozen" | "isSealed" | "isExtensible"
+                        )
+                    {
+                        let label = format!("Object.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [_value] = arguments.as_slice() else {
+                            return Err(format!("`{label}` expects exactly one argument"));
+                        };
+                        // Consistent with the no-op freeze/seal above: a thaw
+                        // value is never actually frozen/sealed, and always
+                        // has a fixed layout, so it stays extensible.
+                        let result = HirExpr::Lit(HirLit::Bool(property.sym == *"isExtensible"));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Object" && property.sym == *"getOwnPropertyDescriptor" {
+                        let (arguments, bindings) = self.lower_native_spread_values(
+                            &call.args,
+                            "Object.getOwnPropertyDescriptor",
+                        )?;
+                        let [target, key] = arguments.as_slice() else {
+                            return Err(
+                                "`Object.getOwnPropertyDescriptor` expects exactly two arguments"
+                                    .into(),
+                            );
+                        };
+                        let HirExpr::Lit(HirLit::Str(key)) = key else {
+                            return Err(
+                                "`Object.getOwnPropertyDescriptor` currently requires a string-literal key"
+                                    .into(),
+                            );
+                        };
+                        let key = key.clone();
+                        let target_type = self.infer_expr_type(target)?;
+                        let HirType::Object(fields) = &target_type else {
+                            return Err(format!(
+                                "`Object.getOwnPropertyDescriptor` currently requires a fixed \
+                                 object, got {target_type:?}"
+                            ));
+                        };
+                        if !fields.iter().any(|(name, _)| name == &key) {
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Lit(HirLit::Undefined),
+                                &bindings,
+                            );
+                        }
+                        // All fields thaw models are own, writable,
+                        // enumerable, and configurable.
+                        let descriptor = HirExpr::ObjectLit(vec![
+                            (
+                                "value".to_string(),
+                                HirExpr::PropAccess(Box::new(target.clone()), target_type, key),
+                            ),
+                            ("writable".to_string(), HirExpr::Lit(HirLit::Bool(true))),
+                            ("enumerable".to_string(), HirExpr::Lit(HirLit::Bool(true))),
+                            ("configurable".to_string(), HirExpr::Lit(HirLit::Bool(true))),
+                        ]);
+                        return self.wrap_call_argument_bindings(descriptor, &bindings);
+                    }
+                    if object.sym == *"Reflect" && property.sym == *"set" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Reflect.set")?;
+                        let [target, key, value] = arguments.as_slice() else {
+                            return Err("`Reflect.set` expects exactly three arguments".into());
+                        };
+                        let HirExpr::Lit(HirLit::Str(key)) = key else {
+                            return Err(
+                                "`Reflect.set` currently requires a string-literal key".into()
+                            );
+                        };
+                        let key = key.clone();
+                        let target_type = self.infer_expr_type(target)?;
+                        let value_type = self.infer_expr_type(value)?;
+                        let assign = match &target_type {
+                            HirType::Object(fields) => {
+                                if !fields.iter().any(|(name, _)| name == &key) {
+                                    return Err(format!(
+                                        "`Reflect.set` cannot add the new field `{key}` to a fixed object"
+                                    ));
+                                }
+                                HirExpr::PropAssign(
+                                    Box::new(target.clone()),
+                                    target_type.clone(),
+                                    key,
+                                    Box::new(value.clone()),
+                                )
+                            }
+                            HirType::Json => HirExpr::JsonSet(
+                                Box::new(target.clone()),
+                                Box::new(HirExpr::Lit(HirLit::Str(key))),
+                                Box::new(value.clone()),
+                                value_type,
+                                true,
+                            ),
+                            other => {
+                                return Err(format!(
+                                    "`Reflect.set` currently requires a fixed object or JSON \
+                                     receiver, got {other:?}"
+                                ))
+                            }
+                        };
+                        // `Reflect.set` returns a boolean (true on success),
+                        // so run the assignment for its side effect and
+                        // return `true` from a zero-argument closure.
+                        let body = HirExpr::Block(vec![
+                            HirStmt::Expr(assign),
+                            HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
+                        ]);
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_bindings(&body, &mut referenced);
+                        let captures = referenced
+                            .into_iter()
+                            .filter_map(|captured| {
+                                self.scope
+                                    .get(&captured)
+                                    .cloned()
+                                    .map(|ty| HirParam { name: captured, ty })
+                            })
+                            .collect();
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Lambda(
+                                captures,
+                                Vec::new(),
+                                HirType::Bool,
+                                Box::new(body),
+                            )),
+                            Vec::new(),
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Reflect"
                         && matches!(property.sym.as_ref(), "has" | "get" | "deleteProperty")
