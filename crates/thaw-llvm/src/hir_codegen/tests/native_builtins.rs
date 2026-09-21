@@ -3917,3 +3917,37 @@ fn compiles_well_known_symbols() {
         "10\n20\n86400000\nstring\nundefined\nMap\n"
     );
 }
+
+/// `Promise.allKeyed`/`Promise.allSettledKeyed` (strictly typed, including
+/// heterogeneous values).
+#[test]
+fn compiles_promise_keyed_combinators() {
+    let source = r#"
+        async function one(): Promise<number> {
+            return 1;
+        }
+        async function two(): Promise<string> {
+            return "two";
+        }
+        async function fail(): Promise<number> {
+            throw new Error("boom");
+        }
+        async function main(): Promise<void> {
+            const results = await Promise.allKeyed({ a: one(), b: two() });
+            console.log(results.a, results.b);
+            try {
+                await Promise.allKeyed({ a: one(), b: fail() });
+            } catch (e) {
+                console.log(e.message);
+            }
+            const settled = await Promise.allSettledKeyed({ a: one(), b: fail() });
+            console.log(settled.a.status, settled.b.status);
+            console.log(settled.a.value);
+            console.log(settled.b.reason);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_keyed_combinators"),
+        "1 two\nboom\nfulfilled rejected\n1\nboom\n"
+    );
+}
