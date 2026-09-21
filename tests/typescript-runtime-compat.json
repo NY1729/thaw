@@ -706,6 +706,11 @@
       "source": "function main(): void { const values: number[] = [3, 1, 2]; values.sort((left, right) => left - right); const expanded: number[] = values.flatMap((value) => [value, value * 10]); console.log(values.join(','), expanded.join(','), expanded.findLast((value) => value < 10), values.toReversed().join(',')); }"
     },
     {
+      "name": "iterator helpers",
+      "expect": "matched",
+      "source": "function main(): void { const selected = Iterator.from([1, 2, 3, 4]).map(value => value * 2).filter(value => value > 2).drop(1).take(2).toArray(); const total = Iterator.from([1, 2, 3]).reduce((sum: number, value: number) => sum + value, 0); console.log(selected.join(','), total, Iterator.from(new Set<number>([3, 4])).toArray().join(',')); }"
+    },
+    {
       "name": "modern string operations",
       "expect": "matched",
       "source": "function main(): void { const matches: string[] = Array.from('a1b22'.matchAll(/\\d+/g)).map((match) => match[0]); console.log('7'.padStart(3, '0'), 'a-a'.replaceAll('a', 'x'), matches.join(','), '😀'.codePointAt(0)); }"

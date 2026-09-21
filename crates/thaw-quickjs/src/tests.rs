@@ -2111,6 +2111,53 @@ fn retains_and_calls_a_callable_javascript_value() {
 }
 
 #[test]
+fn iterator_from_works_through_dynamic_handles() {
+    let iterator_name = CString::new("Iterator").unwrap();
+    let iterator = thaw_js_get_global(iterator_name.as_ptr());
+    assert_ne!(iterator, 0);
+
+    let from = CString::new("from").unwrap();
+    let source = CString::new("[[1,2,3,4]]").unwrap();
+    let values = thaw_js_call_method_handle_result(iterator, from.as_ptr(), source.as_ptr(), true);
+    assert!(values.error.is_null());
+
+    let next = CString::new("next").unwrap();
+    let empty = CString::new("[]").unwrap();
+    let result = thaw_js_call_method_result(values.value, next.as_ptr(), empty.as_ptr());
+    assert!(
+        result.error.is_null(),
+        "{}",
+        unsafe { CStr::from_ptr(result.error) }.to_str().unwrap()
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result.value) }.to_str().unwrap(),
+        "{\"value\":1,\"done\":false}"
+    );
+
+    let helper_name = CString::new("__thaw_iterator_from").unwrap();
+    let helper = thaw_js_get_global(helper_name.as_ptr());
+    let source = CString::new("[[1,2,3,4]]").unwrap();
+    let values = thaw_js_call_handle_handle_result(helper, source.as_ptr(), true);
+    assert!(values.error.is_null());
+    let drop_name = CString::new("drop").unwrap();
+    let one = CString::new("[1]").unwrap();
+    let dropped =
+        thaw_js_call_method_handle_result(values.value, drop_name.as_ptr(), one.as_ptr(), true);
+    assert!(
+        dropped.error.is_null(),
+        "{}",
+        unsafe { CStr::from_ptr(dropped.error) }.to_str().unwrap()
+    );
+    let to_array = CString::new("toArray").unwrap();
+    let result = thaw_js_call_method_result(dropped.value, to_array.as_ptr(), empty.as_ptr());
+    assert!(result.error.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result.value) }.to_str().unwrap(),
+        "[2,3,4]"
+    );
+}
+
+#[test]
 fn reuses_a_handle_for_the_same_javascript_object() {
     assert_eq!(
         load("globalThis.sharedIdentity = {}; globalThis.returnSharedIdentity = () => sharedIdentity;"),
