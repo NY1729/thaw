@@ -1078,6 +1078,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_error_cause",
             "thaw_error_code",
             "thaw_error_stack",
+            "thaw_error_suppressed_error",
+            "thaw_error_suppressed",
             "thaw_error_to_string",
         ] {
             self.module.add_function(

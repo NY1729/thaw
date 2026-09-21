@@ -290,6 +290,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_error_cause"
             | "__thaw_error_code"
             | "__thaw_error_stack"
+            | "__thaw_error_suppressed_error"
+            | "__thaw_error_suppressed"
             | "__thaw_error_is_error"
             | "__thaw_error_to_string" => {
                 let [value] = args else {

@@ -71,6 +71,21 @@ struct FnLowerer<'a> {
     expected_arrow_return_hint: Option<HirType>,
     generator_yields: Option<(Symbol, HirType, Symbol, HirType, Symbol, HirType)>,
     generator_finalizers: HashMap<Symbol, Vec<HirStmt>>,
+    /// Compile-time freeze/seal/extensibility state, keyed by the binding a
+    /// `Object.freeze`/`seal`/`preventExtensions` (or the `Reflect`
+    /// equivalent) was applied to. thaw's native objects are fixed-layout
+    /// values with no runtime state, so this tracks the observable
+    /// `isFrozen`/`isSealed`/`isExtensible` results (and `Reflect.set`'s
+    /// success) for the direct binding patterns; an object that escapes
+    /// through an alias or a return falls back to the fresh-object default.
+    object_states: HashMap<Symbol, ObjectState>,
+}
+
+#[derive(Clone, Copy)]
+struct ObjectState {
+    frozen: bool,
+    sealed: bool,
+    nonextensible: bool,
 }
 
 #[derive(Clone)]

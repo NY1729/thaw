@@ -3334,13 +3334,9 @@ fn compiles_reflect_object_static_and_substr() {
 }
 
 /// `Reflect.set`, `Object.isExtensible`/`isFrozen`/`isSealed`, and
-/// `Object.getOwnPropertyDescriptor`.
-///
-/// `isFrozen`/`isSealed` are always `false` and `isExtensible` always
-/// `true`: `Object.freeze`/`seal`/`preventExtensions` are no-ops in thaw
-/// (a value's native layout is fixed), so a value is never observably
-/// frozen. The one deliberate divergence from JS is
-/// `Object.isFrozen(Object.freeze(x))`, which JS reports as `true`.
+/// `Object.getOwnPropertyDescriptor`. A fresh object is extensible, not
+/// frozen, and not sealed (see `compiles_object_freeze_state` for the
+/// tracked freeze/seal transitions).
 #[test]
 fn compiles_reflect_set_and_object_descriptor_queries() {
     let source = r#"
@@ -3364,6 +3360,38 @@ fn compiles_reflect_set_and_object_descriptor_queries() {
     assert_eq!(
         compile_and_run(source, "reflect_set_descriptor_queries"),
         "true\n9\ntrue\n{\"a\":9}\ntrue\nfalse\nfalse\n9\ntrue\ntrue\n"
+    );
+}
+
+/// `Object.freeze`/`seal`/`preventExtensions` record observable state, so
+/// `isFrozen`/`isSealed`/`isExtensible` (and the `Reflect` equivalents)
+/// report the real transitions, including through a `const` alias and an
+/// inline `Object.freeze(...)` argument.
+#[test]
+fn compiles_object_freeze_state() {
+    let source = r#"
+        function main(): void {
+            const o: { a: number } = { a: 1 };
+            console.log(Object.isFrozen(o), Object.isSealed(o), Object.isExtensible(o));
+            Object.freeze(o);
+            console.log(Object.isFrozen(o), Object.isSealed(o), Object.isExtensible(o));
+            const s: { b: number } = { b: 2 };
+            Object.seal(s);
+            console.log(Object.isSealed(s), Object.isFrozen(s), Object.isExtensible(s));
+            const p: { c: number } = { c: 3 };
+            Object.preventExtensions(p);
+            console.log(Object.isExtensible(p), Object.isSealed(p));
+            console.log(Object.isFrozen(Object.freeze({ d: 4 })));
+            const f = Object.freeze({ e: 5 });
+            console.log(Object.isFrozen(f));
+            console.log(Reflect.isExtensible(o), Reflect.preventExtensions(o));
+            console.log(Reflect.setPrototypeOf(o, null));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_freeze_state"),
+        "false false true\ntrue true false\ntrue false false\nfalse false\ntrue\n\
+         true\nfalse true\ntrue\n"
     );
 }
 
@@ -3571,12 +3599,16 @@ fn using_disposal_failures_continue_and_suppress_the_pending_error() {
                 throw new Error("body");
             } catch (error) {
                 console.log(error.name);
+                console.log(error.message);
+                console.log(error.error.message);
+                console.log(error.suppressed.message);
+                console.log(error.suppressed.suppressed.message);
             }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "using_suppressed_error"),
-        "dispose b\ndispose a\nSuppressedError\n"
+        "dispose b\ndispose a\nSuppressedError\na\na\nb\nbody\n"
     );
 }
 
