@@ -3592,25 +3592,33 @@ fn compiles_await_using_declarations() {
 }
 
 /// `DisposableStack`/`AsyncDisposableStack` are real QuickJS handles, so
-/// `defer`/`dispose` (and `disposeAsync`) delegate exactly. `use` with a
-/// compiled resource isn't transferred (the sentinel key isn't a real
-/// symbol on the JS side).
+/// `defer`/`dispose` (and `disposeAsync`) delegate exactly, and `use` of a
+/// compiled resource works because its `[Symbol.dispose]`/
+/// `[Symbol.asyncDispose]` sentinel key is re-keyed onto the real symbol by
+/// the JSON reviver.
 #[test]
 fn compiles_disposable_stack() {
     let source = r#"
+        function makeResource(name: string) {
+            return { [Symbol.dispose]() { console.log("dispose " + name); } };
+        }
+        function makeAsync(name: string) {
+            return { async [Symbol.asyncDispose](): Promise<void> { console.log("async dispose " + name); } };
+        }
         async function main(): Promise<void> {
             const stack = new DisposableStack();
+            stack.use(makeResource("r1"));
             stack.defer(() => console.log("deferred"));
             console.log("body");
             stack.dispose();
             const asyncStack = new AsyncDisposableStack();
-            asyncStack.defer(async () => console.log("async deferred"));
+            asyncStack.use(makeAsync("a1"));
             await asyncStack.disposeAsync();
         }
     "#;
     assert_eq!(
         compile_and_run(source, "disposable_stack"),
-        "body\ndeferred\nasync deferred\n"
+        "body\ndeferred\ndispose r1\nasync dispose a1\n"
     );
 }
 
