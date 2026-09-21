@@ -30,6 +30,7 @@ impl<'a> FnLowerer<'a> {
                     | "ReferenceError"
                     | "EvalError"
                     | "URIError"
+                    | "AggregateError"
             ) {
                 if call.type_args.is_some() {
                     return Err("native `super(...)` does not support type arguments".into());

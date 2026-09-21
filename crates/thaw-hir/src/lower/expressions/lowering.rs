@@ -1890,6 +1890,37 @@ impl<'a> FnLowerer<'a> {
                             timestamp,
                         )]));
                     }
+                    if class.sym == *"AggregateError" {
+                        // `new AggregateError(errors, message?, options?)`.
+                        // The exception channel is a single tagged string
+                        // (see the branch below), so only the message
+                        // survives: the `errors` iterable and the resulting
+                        // `.errors` array are not modeled, and a caller can
+                        // recover only `.name`/`.message`.
+                        let args = new_expr.args.clone().unwrap_or_default();
+                        if args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err(
+                                "`new AggregateError()` does not support spread arguments".into()
+                            );
+                        }
+                        if args.is_empty() || args.len() > 3 {
+                            return Err(
+                                "`new AggregateError()` expects an errors argument and at most a message and options".into()
+                            );
+                        }
+                        let message = match args.get(1) {
+                            Some(argument) => {
+                                let message = self.lower_expr(&argument.expr)?;
+                                self.coerce_primitive_to_string(message)?
+                            }
+                            None => HirExpr::Lit(HirLit::Str(String::new())),
+                        };
+                        let tag = HirExpr::Lit(HirLit::Str("\u{1}AggregateError\u{1}".to_string()));
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![tag, message],
+                        ));
+                    }
                     if matches!(
                         class.sym.as_ref(),
                         "Error"
