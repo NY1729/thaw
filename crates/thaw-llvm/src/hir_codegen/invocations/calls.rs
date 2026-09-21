@@ -193,7 +193,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_temporal_instant_nanos_from_string"
             | "__thaw_temporal_plain_time_from_string"
             | "__thaw_temporal_plain_time_nanos_from_string"
-            | "__thaw_temporal_duration_from_string" => {
+            | "__thaw_temporal_duration_from_string"
+            | "__thaw_temporal_duration_nanos_from_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
                 };

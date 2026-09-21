@@ -1022,6 +1022,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_temporal_instant_nanos_from_string",
             "thaw_temporal_plain_time_from_string",
             "thaw_temporal_plain_time_nanos_from_string",
+            "thaw_temporal_duration_nanos_from_string",
         ] {
             self.module.add_function(
                 name,
