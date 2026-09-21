@@ -638,4 +638,42 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// `Array.prototype.group(keyFn)` / `groupToMap(keyFn)` -- the
+    /// instance-method spellings the older proposal shipped under (the
+    /// standardized names are the static `Object.groupBy`/`Map.groupBy`).
+    /// `group` returns a plain object (string keys only), `groupToMap` a
+    /// `Map` (any key), exactly like their static counterparts, so both
+    /// reuse `lower_group_by`.
+    fn lower_native_array_group(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let object_result = property.sym == *"group";
+        let items = self.lower_expr(&member.obj)?;
+        let items_type = self.infer_expr_type(&items)?;
+        let HirType::Array(item_type) = &items_type else {
+            return Err(format!(
+                "`.{}()` requires a homogeneous array, got {items_type:?}",
+                property.sym
+            ));
+        };
+        let item_type = item_type.as_ref().clone();
+        let [callback] = call.args.as_slice() else {
+            return Err(format!(
+                "`.{}()` expects exactly one callback argument",
+                property.sym
+            ));
+        };
+        if callback.spread.is_some() {
+            return Err(format!(
+                "`.{}()` does not support a spread callback",
+                property.sym
+            ));
+        }
+        let key_fn = self.lower_array_from_callback(&callback.expr, &item_type)?;
+        self.lower_group_by(items, item_type, key_fn, object_result)
+    }
+
 }
