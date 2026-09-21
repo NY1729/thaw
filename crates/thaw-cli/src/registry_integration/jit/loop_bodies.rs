@@ -130,6 +130,34 @@ macro_rules! jit_loop_bodies {
                         }
                         continue;
                     }
+                    // A `new Set(...)` local lives in a runtime slot rather
+                    // than being re-materialized on every use -- otherwise
+                    // each `set.add(x)` would mutate a fresh object and
+                    // `set.has(y)` would inspect another.
+                    let is_set = match initializer {
+                        Expr::New(new_expr) => {
+                            set_constructor(new_expr, parameters, &locals, context.helpers).is_some()
+                        }
+                        _ => false,
+                    };
+                    if is_set {
+                        encode_loop_declaration(
+                            LocalStep::Declare {
+                                name,
+                                initializer,
+                                mutable: true,
+                            },
+                            None,
+                            parameters,
+                            &mut locals,
+                            &mut mutable,
+                            &mut runtime_kinds,
+                            context,
+                            output,
+                        )?;
+                        runtime_locals = runtime_kinds.len();
+                        continue;
+                    }
                     if materialize_control_locals {
                         if let Some(mut helpers) = finite_callable_names(initializer).filter(
                             |helpers| {

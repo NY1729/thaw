@@ -507,6 +507,75 @@ macro_rules! jit_returns {
         matches!(property.sym.as_ref(), "of" | "from").then_some(property.sym.as_ref())
     }
 
+    /// Recognizes `new Set()` (no initializer) or `new Set([...])` (array
+    /// literal initializer). Returns `Some(None)` for the empty form and
+    /// `Some(Some(array))` for the initializer form; a non-literal
+    /// iterable isn't specialized.
+    fn set_constructor<'a>(
+        new_expr: &'a NewExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<Option<&'a Expr>> {
+        if parameters.contains_key("Set")
+            || locals.contains_key("Set")
+            || helpers.contains_key("Set")
+        {
+            return None;
+        }
+        let Expr::Ident(callee) = new_expr.callee.as_ref() else {
+            return None;
+        };
+        if callee.sym != "Set" {
+            return None;
+        }
+        match new_expr.args.as_deref() {
+            None | Some([]) => Some(None),
+            Some([argument]) if argument.spread.is_none() => {
+                matches!(argument.expr.as_ref(), Expr::Array(_))
+                    .then(|| Some(argument.expr.as_ref()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Recognizes `set.has(x)` / `set.add(x)` / `set.delete(x)` where
+    /// `set` is a native JIT `Set` (modeled as a string-keyed dictionary;
+    /// the receiver's local must have been materialized to a runtime slot,
+    /// see `encode_steps_and_body`'s mutation scan).
+    fn set_method<'a>(
+        call: &'a CallExpr,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<(&'static str, &'a Expr)> {
+        if call.args.len() != 1 || call.args[0].spread.is_some() {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        let operation = match property.sym.as_ref() {
+            "has" => "has",
+            "add" => "add",
+            "delete" => "delete",
+            _ => return None,
+        };
+        let receiver_is_dictionary = member_path(member.obj.as_ref())
+            .and_then(|path| locals.get(&path))
+            .is_some_and(|tokens| {
+                jit_expression_kind(tokens).is_some_and(|(kind, _)| kind == JitKind::Dictionary)
+            });
+        if !receiver_is_dictionary {
+            return None;
+        }
+        Some((operation, member.obj.as_ref()))
+    }
+
     fn string_static_constructor<'a>(
         call: &'a CallExpr,
         parameters: &std::collections::HashMap<String, String>,
