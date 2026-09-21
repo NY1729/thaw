@@ -3866,3 +3866,29 @@ fn compiles_set_composition_with_map_argument() {
         "1,2,3,4\n2,3\n1\n1,4\nfalse\nfalse\n"
     );
 }
+
+/// `Intl.DisplayNames`/`Intl.DurationFormat`, provided by the bundled JS
+/// `Intl` polyfill with per-language tables (English + Japanese).
+#[test]
+fn compiles_intl_display_names_and_duration_format() {
+    let source = r#"
+        function main(): void {
+            const dn = new Intl.DisplayNames(["en"], { type: "language" });
+            console.log(dn.of("fr"));
+            const dnJa = new Intl.DisplayNames(["ja"], { type: "language" });
+            console.log(dnJa.of("fr"));
+            const region = new Intl.DisplayNames("en", { type: "region" });
+            console.log(region.of("JP"));
+            const currency = new Intl.DisplayNames("ja", { type: "currency" });
+            console.log(currency.of("USD"));
+            const df = new Intl.DurationFormat("en", { style: "long" });
+            console.log(df.format({ hours: 1, minutes: 30 }));
+            const dfJa = new Intl.DurationFormat("ja", { style: "short" });
+            console.log(dfJa.format({ hours: 2, minutes: 5 }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "intl_display_names_duration"),
+        "French\nフランス語\nJapan\n米ドル\n1 hour, 30 minutes\n2 時間 5 分\n"
+    );
+}
