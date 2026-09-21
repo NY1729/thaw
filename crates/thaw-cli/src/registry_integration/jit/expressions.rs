@@ -2046,48 +2046,61 @@ macro_rules! jit_expressions {
                 if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary {
                     return None;
                 }
-                let mut key = Vec::new();
-                encode_expression(
-                    call.args[0].expr.as_ref(),
-                    parameters,
-                    locals,
-                    context,
-                    &mut key,
-                )?;
-                match jit_expression_kind(&key)?.0 {
-                    JitKind::String => {}
-                    JitKind::Number => key.push("numstr".into()),
-                    JitKind::Boolean => key.push("boolstr".into()),
-                    _ => return None,
-                }
-                output.extend(encoded);
                 match operation {
-                    "get" => {
-                        output.extend(key);
-                        output.push(format!("{prefix}get"));
+                    "keys" => {
+                        output.extend(encoded);
+                        output.push("dkeys".into());
                     }
-                    "set" => {
-                        let expected = match prefix.as_str() {
-                            "dn" => JitKind::Number,
-                            "db" => JitKind::Boolean,
-                            _ => JitKind::String,
-                        };
-                        let mut value = Vec::new();
+                    "values" => {
+                        output.extend(encoded);
+                        output.push(format!("{prefix}values"));
+                    }
+                    "entries" => {
+                        output.extend(encoded);
+                        output.push(format!("{prefix}entries"));
+                    }
+                    "get" | "set" => {
+                        let mut key = Vec::new();
                         encode_expression(
-                            call.args[1].expr.as_ref(),
+                            call.args[0].expr.as_ref(),
                             parameters,
                             locals,
                             context,
-                            &mut value,
+                            &mut key,
                         )?;
-                        if jit_expression_kind(&value)?.0 != expected {
-                            return None;
+                        match jit_expression_kind(&key)?.0 {
+                            JitKind::String => {}
+                            JitKind::Number => key.push("numstr".into()),
+                            JitKind::Boolean => key.push("boolstr".into()),
+                            _ => return None,
                         }
-                        output.push("dup".into());
-                        output.extend(key);
-                        output.extend(value);
-                        output.push(format!("{prefix}set"));
-                        output.push("drop".into());
+                        output.extend(encoded);
+                        if operation == "get" {
+                            output.extend(key);
+                            output.push(format!("{prefix}get"));
+                        } else {
+                            let expected = match prefix.as_str() {
+                                "dn" => JitKind::Number,
+                                "db" => JitKind::Boolean,
+                                _ => JitKind::String,
+                            };
+                            let mut value = Vec::new();
+                            encode_expression(
+                                call.args[1].expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut value,
+                            )?;
+                            if jit_expression_kind(&value)?.0 != expected {
+                                return None;
+                            }
+                            output.push("dup".into());
+                            output.extend(key);
+                            output.extend(value);
+                            output.push(format!("{prefix}set"));
+                            output.push("drop".into());
+                        }
                     }
                     _ => return None,
                 }
