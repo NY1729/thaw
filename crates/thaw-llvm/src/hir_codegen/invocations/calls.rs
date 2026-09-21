@@ -185,7 +185,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("Temporal.Now.timeZoneId returned no value".into());
             }
             "__thaw_temporal_instant_from_string"
+            | "__thaw_temporal_instant_nanos_from_string"
             | "__thaw_temporal_plain_time_from_string"
+            | "__thaw_temporal_plain_time_nanos_from_string"
             | "__thaw_temporal_duration_from_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
@@ -211,18 +213,20 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_temporal_plain_time_to_string"
             | "__thaw_temporal_plain_year_month_to_string"
             | "__thaw_temporal_plain_month_day_to_string"
-            | "__thaw_temporal_duration_to_string" => {
-                let [timestamp] = args else {
-                    return Err(format!("{name} expects one operand"));
+            | "__thaw_temporal_duration_to_string"
+            | "__thaw_temporal_epoch_nanoseconds" => {
+                let [timestamp, nanoseconds] = args else {
+                    return Err(format!("{name} expects two operands"));
                 };
                 let timestamp = self.compile_expr(timestamp)?;
+                let nanoseconds = self.compile_expr(nanoseconds)?;
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 let runtime = format!("thaw_{runtime}");
                 return self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
-                        &[timestamp.into()],
+                        &[timestamp.into(), nanoseconds.into()],
                         "temporal_to_string",
                     )
                     .map_err(|error| error.to_string())?
@@ -230,9 +234,32 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal string conversion returned no value".into());
             }
-            "__thaw_temporal_shift"
-            | "__thaw_temporal_compare"
-            | "__thaw_temporal_duration_component" => {
+            "__thaw_temporal_compare" => {
+                let [left_ms, left_ns, right_ms, right_ns] = args else {
+                    return Err(format!("{name} expects four operands"));
+                };
+                let left_ms = self.compile_expr(left_ms)?;
+                let left_ns = self.compile_expr(left_ns)?;
+                let right_ms = self.compile_expr(right_ms)?;
+                let right_ns = self.compile_expr(right_ns)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_temporal_compare").unwrap(),
+                        &[
+                            left_ms.into(),
+                            left_ns.into(),
+                            right_ms.into(),
+                            right_ns.into(),
+                        ],
+                        "temporal_compare",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal comparison returned no value".into());
+            }
+            "__thaw_temporal_shift" | "__thaw_temporal_duration_component" => {
                 let [left, right] = args else {
                     return Err(format!("{name} expects two operands"));
                 };

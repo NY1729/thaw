@@ -1,8 +1,9 @@
 impl<'a> FnLowerer<'a> {
     /// The Temporal value kinds thaw models. Each is an ordinary object
-    /// `{ timestamp, __temporal_<kind> }`: the epoch-millisecond `f64`
-    /// `Date` already uses, plus a marker field whose *name* encodes the
-    /// kind so the type system (and method dispatch) can tell them apart.
+    /// `{ timestamp, nanoseconds, __temporal_<kind> }`: the epoch-millisecond
+    /// `f64` `Date` already uses, the sub-millisecond nanoseconds
+    /// (0..999999), and a marker field whose *name* encodes the kind so the
+    /// type system (and method dispatch) can tell them apart.
     const TEMPORAL_KINDS: &'static [&'static str] = &[
         "instant",
         "plainDate",
@@ -29,9 +30,10 @@ impl<'a> FnLowerer<'a> {
         None
     }
 
-    fn temporal_object(kind: &str, timestamp: HirExpr) -> HirExpr {
+    fn temporal_object(kind: &str, timestamp: HirExpr, nanoseconds: HirExpr) -> HirExpr {
         HirExpr::ObjectLit(vec![
             ("timestamp".to_string(), timestamp),
+            ("nanoseconds".to_string(), nanoseconds),
             (format!("__temporal_{kind}"), HirExpr::Lit(HirLit::F64(1.0))),
         ])
     }
@@ -52,6 +54,7 @@ impl<'a> FnLowerer<'a> {
         Self::temporal_object(
             kind,
             HirExpr::Call(Box::new(HirExpr::Var("__thaw_temporal_now".into())), Vec::new()),
+            HirExpr::Lit(HirLit::F64(0.0)),
         )
     }
 
@@ -59,20 +62,31 @@ impl<'a> FnLowerer<'a> {
         HirExpr::PropAccess(Box::new(value), ty.clone(), "timestamp".to_string())
     }
 
-    /// The epoch-millisecond timestamp an operand represents: a Temporal
-    /// value's own `timestamp`, or an ISO 8601 string parsed with the same
-    /// parser `Temporal.Instant.from` uses.
-    fn temporal_timestamp_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+    fn temporal_nanoseconds(value: HirExpr, ty: &HirType) -> HirExpr {
+        HirExpr::PropAccess(Box::new(value), ty.clone(), "nanoseconds".to_string())
+    }
+
+    /// The `(epoch milliseconds, sub-millisecond nanoseconds)` an operand
+    /// represents: a Temporal value's own fields, or an ISO 8601 string
+    /// parsed the same way `Temporal.Instant.from` is.
+    fn temporal_operand(&mut self, value: HirExpr) -> Result<(HirExpr, HirExpr), String> {
         let ty = self.infer_expr_type(&value)?;
         if Self::temporal_kind(&ty).is_some() {
-            return Ok(Self::temporal_timestamp(value, &ty));
+            let milliseconds = Self::temporal_timestamp(value.clone(), &ty);
+            let nanoseconds = Self::temporal_nanoseconds(value, &ty);
+            return Ok((milliseconds, nanoseconds));
         }
         if ty == HirType::Str {
             let text = self.coerce_primitive_to_string(value)?;
-            return Ok(HirExpr::Call(
+            let milliseconds = HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_temporal_instant_from_string".into())),
+                vec![text.clone()],
+            );
+            let nanoseconds = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_temporal_instant_nanos_from_string".into())),
                 vec![text],
-            ));
+            );
+            return Ok((milliseconds, nanoseconds));
         }
         Err(format!(
             "expected a Temporal value or an ISO 8601 string, got {ty:?}"
@@ -186,7 +200,7 @@ impl<'a> FnLowerer<'a> {
                         return Err(format!("`{label}` expects exactly one argument"));
                     };
                     let milliseconds = self.temporal_duration_milliseconds(value.clone())?;
-                    Self::temporal_object("duration", milliseconds)
+                    Self::temporal_object("duration", milliseconds, HirExpr::Lit(HirLit::F64(0.0)))
                 }
                 other => return Err(format!("`Temporal.Duration.{other}` is not supported")),
             };
@@ -200,18 +214,22 @@ impl<'a> FnLowerer<'a> {
                         return Err(format!("`{label}` expects exactly one argument"));
                     };
                     let text = self.coerce_primitive_to_string(value.clone())?;
-                    let timestamp = HirExpr::Call(
+                    let milliseconds = HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_temporal_instant_from_string".into())),
+                        vec![text.clone()],
+                    );
+                    let nanoseconds = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_temporal_instant_nanos_from_string".into())),
                         vec![text],
                     );
-                    Self::temporal_object("instant", timestamp)
+                    Self::temporal_object("instant", milliseconds, nanoseconds)
                 }
                 "fromEpochMilliseconds" => {
                     let [value] = arguments.as_slice() else {
                         return Err(format!("`{label}` expects exactly one argument"));
                     };
                     let value = self.coerce_primitive_to_number(value.clone())?;
-                    Self::temporal_object("instant", value)
+                    Self::temporal_object("instant", value, HirExpr::Lit(HirLit::F64(0.0)))
                 }
                 "fromEpochSeconds" => {
                     let [value] = arguments.as_slice() else {
@@ -225,15 +243,16 @@ impl<'a> FnLowerer<'a> {
                             Box::new(value),
                             Box::new(HirExpr::Lit(HirLit::F64(1000.0))),
                         ),
+                        HirExpr::Lit(HirLit::F64(0.0)),
                     )
                 }
                 "fromEpochNanoseconds" => {
                     let [value] = arguments.as_slice() else {
                         return Err(format!("`{label}` expects exactly one argument"));
                     };
-                    // Nanoseconds are approximated by a plain number of
-                    // nanoseconds divided down to milliseconds (a fixed-width
-                    // `bigint` argument isn't converted here).
+                    // A plain number of nanoseconds split into milliseconds
+                    // and a sub-millisecond remainder (a fixed-width `bigint`
+                    // argument isn't converted here).
                     let value = match self.infer_expr_type(value)? {
                         HirType::F64 => value.clone(),
                         other => {
@@ -242,24 +261,34 @@ impl<'a> FnLowerer<'a> {
                             ))
                         }
                     };
-                    Self::temporal_object(
-                        "instant",
-                        HirExpr::BinOp(
+                    let milliseconds = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                        vec![HirExpr::BinOp(
                             BinOp::Div,
-                            Box::new(value),
+                            Box::new(value.clone()),
                             Box::new(HirExpr::Lit(HirLit::F64(1_000_000.0))),
-                        ),
-                    )
+                        )],
+                    );
+                    let nanoseconds = HirExpr::BinOp(
+                        BinOp::Sub,
+                        Box::new(value),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Mul,
+                            Box::new(milliseconds.clone()),
+                            Box::new(HirExpr::Lit(HirLit::F64(1_000_000.0))),
+                        )),
+                    );
+                    Self::temporal_object("instant", milliseconds, nanoseconds)
                 }
                 "compare" => {
                     let [left, right] = arguments.as_slice() else {
                         return Err(format!("`{label}` expects exactly two arguments"));
                     };
-                    let left = self.temporal_timestamp_operand(left.clone())?;
-                    let right = self.temporal_timestamp_operand(right.clone())?;
+                    let (left_ms, left_ns) = self.temporal_operand(left.clone())?;
+                    let (right_ms, right_ns) = self.temporal_operand(right.clone())?;
                     HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_temporal_compare".into())),
-                        vec![left, right],
+                        vec![left_ms, left_ns, right_ms, right_ns],
                     )
                 }
                 other => return Err(format!("`Temporal.Instant.{other}` is not supported")),
@@ -284,24 +313,36 @@ impl<'a> FnLowerer<'a> {
                 let text = self.coerce_primitive_to_string(value.clone())?;
                 // `PlainTime` has no date component, so it parses a
                 // time-of-day (or the time part of a full date-time).
-                let parser = if kind == "plainTime" {
-                    "__thaw_temporal_plain_time_from_string"
+                let (milliseconds_parser, nanoseconds_parser) = if kind == "plainTime" {
+                    (
+                        "__thaw_temporal_plain_time_from_string",
+                        "__thaw_temporal_plain_time_nanos_from_string",
+                    )
                 } else {
-                    "__thaw_temporal_instant_from_string"
+                    (
+                        "__thaw_temporal_instant_from_string",
+                        "__thaw_temporal_instant_nanos_from_string",
+                    )
                 };
-                let timestamp =
-                    HirExpr::Call(Box::new(HirExpr::Var(parser.into())), vec![text]);
-                Self::temporal_object(kind, timestamp)
+                let milliseconds = HirExpr::Call(
+                    Box::new(HirExpr::Var(milliseconds_parser.into())),
+                    vec![text.clone()],
+                );
+                let nanoseconds = HirExpr::Call(
+                    Box::new(HirExpr::Var(nanoseconds_parser.into())),
+                    vec![text],
+                );
+                Self::temporal_object(kind, milliseconds, nanoseconds)
             }
             "compare" => {
                 let [left, right] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly two arguments"));
                 };
-                let left = self.temporal_timestamp_operand(left.clone())?;
-                let right = self.temporal_timestamp_operand(right.clone())?;
+                let (left_ms, left_ns) = self.temporal_operand(left.clone())?;
+                let (right_ms, right_ns) = self.temporal_operand(right.clone())?;
                 HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_temporal_compare".into())),
-                    vec![left, right],
+                    vec![left_ms, left_ns, right_ms, right_ns],
                 )
             }
             other => return Err(format!("`Temporal.{namespace}.{other}` is not supported")),
@@ -323,7 +364,8 @@ impl<'a> FnLowerer<'a> {
         let Some(kind) = Self::temporal_kind(&receiver_type) else {
             return Ok(None);
         };
-        let timestamp = Self::temporal_timestamp(receiver, &receiver_type);
+        let timestamp = Self::temporal_timestamp(receiver.clone(), &receiver_type);
+        let nanoseconds = Self::temporal_nanoseconds(receiver, &receiver_type);
         let label = format!("Temporal {kind}.{}", property.sym);
         let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
         let result = match property.sym.as_ref() {
@@ -333,19 +375,19 @@ impl<'a> FnLowerer<'a> {
                 }
                 HirExpr::Call(
                     Box::new(HirExpr::Var(Self::temporal_formatter(kind).into())),
-                    vec![timestamp],
+                    vec![timestamp, nanoseconds],
                 )
             }
             "equals" => {
                 let [other] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
                 };
-                let other = self.temporal_timestamp_operand(other.clone())?;
+                let (other_ms, other_ns) = self.temporal_operand(other.clone())?;
                 HirExpr::BinOp(
                     BinOp::EqEqEq,
                     Box::new(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_temporal_compare".into())),
-                        vec![timestamp, other],
+                        vec![timestamp, nanoseconds, other_ms, other_ns],
                     )),
                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                 )
@@ -364,34 +406,44 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
                     )
                 };
+                // The shift is millisecond-granular, so the sub-millisecond
+                // nanoseconds carry through unchanged.
                 Self::temporal_object(
                     kind,
                     HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_temporal_shift".into())),
                         vec![timestamp, delta],
                     ),
+                    nanoseconds,
                 )
             }
             "since" | "until" => {
                 let [other] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
                 };
-                let other = self.temporal_timestamp_operand(other.clone())?;
+                let (other_ms, _) = self.temporal_operand(other.clone())?;
                 // `until` is `other - this`, `since` is `this - other`.
                 let (left, right) = if property.sym == *"until" {
-                    (other, timestamp)
+                    (other_ms, timestamp)
                 } else {
-                    (timestamp, other)
+                    (timestamp, other_ms)
                 };
                 Self::temporal_object(
                     "duration",
                     HirExpr::BinOp(BinOp::Sub, Box::new(left), Box::new(right)),
+                    HirExpr::Lit(HirLit::F64(0.0)),
                 )
             }
-            "toPlainDate" => Self::temporal_object("plainDate", timestamp),
-            "toPlainDateTime" => Self::temporal_object("plainDateTime", timestamp),
-            "toPlainTime" => Self::temporal_object("plainTime", timestamp),
-            "toZonedDateTimeISO" => Self::temporal_object("zonedDateTime", timestamp),
+            "toPlainDate" => {
+                Self::temporal_object("plainDate", timestamp, nanoseconds)
+            }
+            "toPlainDateTime" => {
+                Self::temporal_object("plainDateTime", timestamp, nanoseconds)
+            }
+            "toPlainTime" => Self::temporal_object("plainTime", timestamp, nanoseconds),
+            "toZonedDateTimeISO" => {
+                Self::temporal_object("zonedDateTime", timestamp, nanoseconds)
+            }
             "total" if kind == "duration" => {
                 let [unit] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one unit argument"));
@@ -470,6 +522,29 @@ impl<'a> FnLowerer<'a> {
                 vec![timestamp, HirExpr::Lit(HirLit::F64(unit))],
             )));
         }
+        // `epochNanoseconds` is a BigInt of the full nanosecond count,
+        // built from the runtime's decimal string (an `i64` couldn't hold
+        // the full range, and `f64` would lose precision).
+        if property.sym == *"epochNanoseconds" {
+            let receiver = self.lower_expr(&member.obj)?;
+            let receiver_type = self.infer_expr_type(&receiver)?;
+            let milliseconds = Self::temporal_timestamp(receiver.clone(), &receiver_type);
+            let nanoseconds = Self::temporal_nanoseconds(receiver, &receiver_type);
+            let digits = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_temporal_epoch_nanoseconds".into())),
+                vec![milliseconds, nanoseconds],
+            );
+            let constructor = HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+            );
+            let arguments =
+                self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![digits]))?;
+            return Ok(Some(HirExpr::Call(
+                Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+                vec![constructor, arguments],
+            )));
+        }
         let getter = match property.sym.as_ref() {
             "epochMilliseconds" => None,
             "epochSeconds" => Some(("__thaw_temporal_epoch_seconds", false)),
@@ -489,13 +564,22 @@ impl<'a> FnLowerer<'a> {
         };
         let receiver = self.lower_expr(&member.obj)?;
         let receiver_type = self.infer_expr_type(&receiver)?;
-        let timestamp = Self::temporal_timestamp(receiver, &receiver_type);
+        let timestamp = Self::temporal_timestamp(receiver.clone(), &receiver_type);
+        let nanoseconds = Self::temporal_nanoseconds(receiver, &receiver_type);
         let _ = kind;
         Ok(Some(match getter {
             None => timestamp,
             Some(("__thaw_temporal_epoch_seconds", _)) => HirExpr::BinOp(
                 BinOp::Div,
-                Box::new(timestamp),
+                Box::new(HirExpr::BinOp(
+                    BinOp::Add,
+                    Box::new(timestamp),
+                    Box::new(HirExpr::BinOp(
+                        BinOp::Div,
+                        Box::new(nanoseconds),
+                        Box::new(HirExpr::Lit(HirLit::F64(1_000_000.0))),
+                    )),
+                )),
                 Box::new(HirExpr::Lit(HirLit::F64(1000.0))),
             ),
             Some((name, weekday)) => {
