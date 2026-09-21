@@ -3994,3 +3994,20 @@ fn compiles_object_prototype_statics() {
         "1\n0\nfalse\n"
     );
 }
+
+/// `String.raw` as a tagged template and as a direct
+/// `String.raw({ raw: [...] }, ...)` call.
+#[test]
+fn compiles_string_raw() {
+    let source = r#"
+        function main(): void {
+            const x = 1;
+            console.log(String.raw`a\nb${x}c`);
+            console.log(String.raw({ raw: ["a", "b"] }, 1, 2));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_raw"),
+        "a\\nb1c\na1b\n"
+    );
+}
