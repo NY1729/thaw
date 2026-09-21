@@ -998,6 +998,29 @@ impl<'a> FnLowerer<'a> {
                             Box::new(value),
                         )
                     }
+                    UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::JsValue => {
+                        // A beyond-`i64` bigint handle: `0 - x` on decimal
+                        // digits, wrapped back into a real BigInt.
+                        let digits = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_bigint_decimal_sub".into())),
+                            vec![
+                                HirExpr::Lit(HirLit::Str("0".to_string())),
+                                self.bigint_decimal_string(value, &HirType::JsValue)?,
+                            ],
+                        );
+                        let constructor = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                        );
+                        let arguments = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![digits]),
+                        )?;
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+                            vec![constructor, arguments],
+                        )
+                    }
                     UnaryOp::Minus => {
                         self.expect_type(&HirType::F64, &value, "unary minus")?;
                         HirExpr::Call(
