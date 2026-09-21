@@ -3479,8 +3479,10 @@ fn compiles_object_create_prototype_and_property_is_enumerable() {
     );
 }
 
-/// `Array.fromAsync` over an array-like input with an optional synchronous
-/// mapper (approximated as `Promise.resolve(items.map(mapFn))`).
+/// `Array.fromAsync` over an array-like input with an optional sync or
+/// async mapper, delegated to the JS realm (`Array.fromAsync`) so an async
+/// mapper's per-element `await` is honored. An async iterable or an array of
+/// native Promises can't cross the bridge yet.
 #[test]
 fn compiles_array_from_async() {
     let source = r#"
@@ -3489,11 +3491,13 @@ fn compiles_array_from_async() {
             console.log(a.join(","));
             const b = await Array.fromAsync([1, 2, 3], (n: number) => n * 2);
             console.log(b.join(","));
+            const c = await Array.fromAsync([1, 2], async (n: number) => n + 10);
+            console.log(c.join(","));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_from_async"),
-        "1,2,3\n2,4,6\n"
+        "1,2,3\n2,4,6\n11,12\n"
     );
 }
 

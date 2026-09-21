@@ -1945,52 +1945,47 @@ impl<'a> FnLowerer<'a> {
                         return self.wrap_call_argument_bindings(result, &spread_bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"fromAsync" {
-                        // Approx: `Array.fromAsync(items, mapFn?)` desugars
-                        // to `Promise.resolve(items.map(mapFn))` -- correct
-                        // for an array-like input and a synchronous mapper.
-                        // Promise *elements* aren't awaited individually,
-                        // and a non-array iterable (a Set, a generator) isn't
-                        // accepted.
-                        if call.args.is_empty() || call.args.len() > 3 {
+                        // Delegate to the JS realm's `Array.fromAsync`, which
+                        // handles async iterables, per-element `await`,
+                        // iterator closing, and `thisArg` exactly; the
+                        // previous native approximation only covered an
+                        // array-like input with a synchronous mapper.
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Array.fromAsync")?;
+                        if arguments.is_empty() || arguments.len() > 3 {
                             return Err("`Array.fromAsync` expects one to three arguments".into());
                         }
-                        let mut items = call.args[0].expr.clone();
-                        if call.args.len() >= 2 {
-                            if call.args[1].spread.is_some() {
-                                return Err(
-                                    "`Array.fromAsync` does not support a spread mapper".into()
-                                );
-                            }
-                            items = Box::new(Expr::Call(CallExpr {
-                                span: call.span,
-                                ctxt: call.ctxt,
-                                callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
-                                    span: call.span,
-                                    obj: items,
-                                    prop: MemberProp::Ident(IdentName::new("map".into(), call.span)),
-                                }))),
-                                args: vec![call.args[1].clone()],
-                                type_args: None,
-                            }));
+                        let array = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                            vec![HirExpr::Lit(HirLit::Str("Array".to_string()))],
+                        );
+                        let mut json_arguments = Vec::with_capacity(arguments.len());
+                        for argument in &arguments {
+                            // A mapper callback must cross as a live
+                            // callback, not a JSON value.
+                            let value = if matches!(
+                                self.infer_expr_type(argument)?,
+                                HirType::Function(_, _) | HirType::CallableFunction(..)
+                            ) {
+                                self.coerce_to_declared(&HirType::JsValue, argument.clone())?
+                            } else {
+                                self.coerce_to_declared(&HirType::Json, argument.clone())?
+                            };
+                            json_arguments.push(value);
                         }
-                        let promise = CallExpr {
-                            span: call.span,
-                            ctxt: call.ctxt,
-                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
-                                span: call.span,
-                                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
-                                    "Promise".into(),
-                                    call.span,
-                                ))),
-                                prop: MemberProp::Ident(IdentName::new("resolve".into(), call.span)),
-                            }))),
-                            args: vec![swc_ecma_ast::ExprOrSpread {
-                                spread: None,
-                                expr: items,
-                            }],
-                            type_args: None,
-                        };
-                        return self.lower_call(&promise);
+                        let json_arguments = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(json_arguments),
+                        )?;
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
+                            vec![
+                                array,
+                                HirExpr::Lit(HirLit::Str("fromAsync".to_string())),
+                                json_arguments,
+                            ],
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"isArray" {
                         let (arguments, mut bindings) =
