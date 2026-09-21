@@ -3363,6 +3363,41 @@ fn compiles_reflect_set_and_object_descriptor_queries() {
     );
 }
 
+/// The resizable/transferable `ArrayBuffer` and growable
+/// `SharedArrayBuffer` API (`transfer`, `transferToFixedLength`, `resize`,
+/// `grow`, `detached`/`resizable`/`growable`/`maxByteLength`), plus the
+/// `Atomics.waitAsync` bootstrap. `SharedArrayBuffer.grow` needs the SAB
+/// allocator hooks thaw now installs; `waitAsync` resolves a would-block
+/// wait as `"timed-out"` (no cross-thread notification here).
+#[test]
+fn compiles_arraybuffer_and_atomics() {
+    let source = r#"
+        function main(): void {
+            const ab = new ArrayBuffer(8);
+            console.log(ab.byteLength, ab.detached);
+            const moved = ab.transfer(16);
+            console.log(moved.byteLength, ab.detached);
+            const fixed = moved.transferToFixedLength(4);
+            console.log(fixed.byteLength);
+            const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+            console.log(resizable.resizable, resizable.maxByteLength);
+            resizable.resize(12);
+            console.log(resizable.byteLength);
+            const shared = new SharedArrayBuffer(8, { maxByteLength: 16 });
+            console.log(shared.growable);
+            shared.grow(12);
+            console.log(shared.byteLength);
+            const i32 = new Int32Array(shared);
+            const result = Atomics.waitAsync(i32, 0, 1);
+            console.log(result.async, result.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "arraybuffer_atomics"),
+        "8 false\n16 true\n4\ntrue 16\n12\ntrue\n12\nfalse not-equal\n"
+    );
+}
+
 /// The ECMAScript 2026 `Uint8Array` base64/hex API: `fromHex`/`fromBase64`
 /// statics, `toHex`/`toBase64` instance methods, and `setFromHex`/
 /// `setFromBase64` (returning `{ read, written }`).
