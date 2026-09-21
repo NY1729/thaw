@@ -2045,3 +2045,39 @@ fn set_for_of_uses_jit_without_quickjs() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n0\nabc\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn set_from_iterable_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-set-from-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-set-from");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function fromArray(): number;\nexport declare function fromString(): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.fromArray = function() { const values = ['a', 'b', 'c']; const s = new Set(values); return s.has('b') ? (s.size === 3 ? 1 : 2) : 3; }; module.exports.fromString = function() { const text = 'abc'; const s = new Set(text); return s.has('c') ? 1 : 0; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { fromArray, fromString } from 'jit-set-from';\nfunction main(): void { console.log(fromArray()); console.log(fromString()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "status={:?} stderr={}", result.status, String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

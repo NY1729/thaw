@@ -873,38 +873,56 @@ macro_rules! jit_expressions {
             Expr::New(new_expr)
                 if set_constructor(new_expr, parameters, locals, context.helpers).is_some() =>
             {
-                // `new Set()` / `new Set([...])` -- modeled as a
-                // string-keyed dictionary (each element stringified as its
-                // key, the value a harmless duplicate of that key), since
-                // the JIT's dictionary is always string-keyed.
-                output.push("dsempty".into());
-                if let Some(Expr::Array(array)) =
-                    set_constructor(new_expr, parameters, locals, context.helpers)?
-                {
-                    for element in &array.elems {
-                        let element = element.as_ref()?;
-                        if element.spread.is_some() {
-                            return None;
+                // `new Set()` / `new Set([...])` / `new Set(stringIterable)`
+                // -- modeled as a string-keyed dictionary (each element
+                // stringified as its key, the value a harmless duplicate of
+                // that key), since the JIT's dictionary is always
+                // string-keyed.
+                match set_constructor(new_expr, parameters, locals, context.helpers)? {
+                    None => output.push("dsempty".into()),
+                    Some(Expr::Array(array)) => {
+                        output.push("dsempty".into());
+                        for element in &array.elems {
+                            let element = element.as_ref()?;
+                            if element.spread.is_some() {
+                                return None;
+                            }
+                            let mut key = Vec::new();
+                            encode_expression(
+                                element.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut key,
+                            )?;
+                            match jit_expression_kind(&key)?.0 {
+                                JitKind::String => {}
+                                JitKind::Number => key.push("numstr".into()),
+                                JitKind::Boolean => key.push("boolstr".into()),
+                                _ => return None,
+                            }
+                            output.push("dup".into());
+                            output.extend(key);
+                            output.push("dup".into());
+                            output.push("dsset".into());
+                            output.push("drop".into());
                         }
-                        let mut key = Vec::new();
-                        encode_expression(
-                            element.expr.as_ref(),
-                            parameters,
-                            locals,
-                            context,
-                            &mut key,
-                        )?;
-                        match jit_expression_kind(&key)?.0 {
-                            JitKind::String => {}
-                            JitKind::Number => key.push("numstr".into()),
-                            JitKind::Boolean => key.push("boolstr".into()),
+                    }
+                    Some(other) => {
+                        // `new Set(<string iterable>)`: build the Set from
+                        // the iterable's string-array form at runtime.
+                        let mut source = Vec::new();
+                        encode_expression(other, parameters, locals, context, &mut source)?;
+                        match jit_expression_kind(&source)?.0 {
+                            JitKind::String => source.push("strarray".into()),
+                            JitKind::Array => {}
                             _ => return None,
                         }
-                        output.push("dup".into());
-                        output.extend(key);
-                        output.push("dup".into());
-                        output.push("dsset".into());
-                        output.push("drop".into());
+                        if array_prefix(&source)? != "rs" {
+                            return None;
+                        }
+                        output.extend(source);
+                        output.push("setfromarray".into());
                     }
                 }
             }

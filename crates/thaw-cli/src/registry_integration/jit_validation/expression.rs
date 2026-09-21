@@ -1329,6 +1329,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Dictionary);
+        } else if token == "setfromarray" {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Dictionary);
         } else if matches!(
             token.as_str(),
             "setissubset" | "setissuperset" | "setisdisjoint"

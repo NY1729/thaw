@@ -531,10 +531,7 @@ macro_rules! jit_returns {
         }
         match new_expr.args.as_deref() {
             None | Some([]) => Some(None),
-            Some([argument]) if argument.spread.is_none() => {
-                matches!(argument.expr.as_ref(), Expr::Array(_))
-                    .then(|| Some(argument.expr.as_ref()))
-            }
+            Some([argument]) if argument.spread.is_none() => Some(Some(argument.expr.as_ref())),
             _ => None,
         }
     }
