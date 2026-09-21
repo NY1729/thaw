@@ -876,3 +876,51 @@ pub unsafe extern "C" fn thaw_symbol_description(symbol: *const c_char) -> *cons
     let description = symbol.split_once(':').map_or("", |value| value.1);
     arena_c_string(description).map_or(std::ptr::null(), |value| value.cast())
 }
+
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+///
+/// `btoa(value)`: base64-encode a "binary string" (each UTF-16 code unit is
+/// one byte; JS throws for a code unit above 255, thaw takes the low byte).
+pub unsafe extern "C" fn thaw_btoa(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let bytes = value
+        .encode_utf16()
+        .map(|unit| unit as u8)
+        .collect::<Vec<_>>();
+    arena_c_string(&encode_bytes(&bytes, "base64")).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+///
+/// `atob(value)`: base64-decode into a "binary string" (each byte becomes
+/// one Latin-1 character). Non-alphabet bytes -- whitespace, padding, or an
+/// invalid character -- are skipped rather than throwing.
+pub unsafe extern "C" fn thaw_atob(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let mut bytes = Vec::new();
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for byte in value.bytes() {
+        let Some(sextet) = base64_decode_value(byte) else {
+            continue;
+        };
+        buffer = (buffer << 6) | u32::from(sextet);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buffer >> bits) as u8);
+        }
+    }
+    let text: String = bytes.iter().map(|&byte| byte as char).collect();
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}

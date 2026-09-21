@@ -1246,6 +1246,7 @@ impl<'a> FnLowerer<'a> {
                                     | "sticky"
                                     | "unicode"
                                     | "unicodeSets"
+                                    | "hasIndices"
                             ) =>
                     {
                         // These aren't stored fields -- `regex_object_type`
@@ -1261,6 +1262,7 @@ impl<'a> FnLowerer<'a> {
                             "sticky" => "y",
                             "unicode" => "u",
                             "unicodeSets" => "v",
+                            "hasIndices" => "d",
                             _ => unreachable!(),
                         };
                         let flags = HirExpr::PropAccess(

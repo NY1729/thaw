@@ -679,6 +679,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_string_trim_end",
             "thaw_string_to_lower_case",
             "thaw_string_to_upper_case",
+            "thaw_atob",
+            "thaw_btoa",
         ] {
             self.module
                 .add_function(name, string_transform_type, Some(Linkage::External));
