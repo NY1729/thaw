@@ -1070,7 +1070,12 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bigint_decimal_sub"
                     | "__thaw_bigint_decimal_mul"
                     | "__thaw_bigint_decimal_div"
-                    | "__thaw_bigint_decimal_mod" => {
+                    | "__thaw_bigint_decimal_mod"
+                    | "__thaw_bigint_decimal_and"
+                    | "__thaw_bigint_decimal_or"
+                    | "__thaw_bigint_decimal_xor"
+                    | "__thaw_bigint_decimal_shl"
+                    | "__thaw_bigint_decimal_shr" => {
                         let [left, right] = args.as_slice() else {
                             return Err("bigint arithmetic expects two operands".into());
                         };

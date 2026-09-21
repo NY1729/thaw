@@ -1088,6 +1088,11 @@ impl<'a> FnLowerer<'a> {
             BinaryOp::Mul => "__thaw_bigint_decimal_mul",
             BinaryOp::Div => "__thaw_bigint_decimal_div",
             BinaryOp::Mod => "__thaw_bigint_decimal_mod",
+            BinaryOp::BitAnd => "__thaw_bigint_decimal_and",
+            BinaryOp::BitOr => "__thaw_bigint_decimal_or",
+            BinaryOp::BitXor => "__thaw_bigint_decimal_xor",
+            BinaryOp::LShift => "__thaw_bigint_decimal_shl",
+            BinaryOp::RShift => "__thaw_bigint_decimal_shr",
             _ => return Ok(None),
         };
         let lhs_type = self.infer_expr_type(lhs)?;
