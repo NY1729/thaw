@@ -1261,7 +1261,14 @@ impl<'a> FnLowerer<'a> {
                     if self.catch_bindings.contains(name)
                         && !matches!(
                             prop.sym.as_ref(),
-                            "length" | "name" | "message" | "cause" | "code" | "stack"
+                            "length"
+                                | "name"
+                                | "message"
+                                | "cause"
+                                | "code"
+                                | "stack"
+                                | "error"
+                                | "suppressed"
                         )
                     {
                         return Ok(HirExpr::Call(
@@ -1307,6 +1314,17 @@ impl<'a> FnLowerer<'a> {
                     )),
                     HirType::Str if prop.sym == *"cause" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_error_cause".to_string())),
+                        vec![obj],
+                    )),
+                    // `SuppressedError`'s two sub-errors, recovered from the
+                    // exception tag's own trailing segments (empty on any
+                    // other error, matching `.cause`'s convention).
+                    HirType::Str if prop.sym == *"error" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_suppressed_error".to_string())),
+                        vec![obj],
+                    )),
+                    HirType::Str if prop.sym == *"suppressed" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_suppressed".to_string())),
                         vec![obj],
                     )),
                     HirType::Str if prop.sym == *"code" => Ok(HirExpr::Call(
