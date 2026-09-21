@@ -60,6 +60,42 @@ impl<'a> FnLowerer<'a> {
         HirExpr::PropAccess(Box::new(value), ty.clone(), "time_zone".to_string())
     }
 
+    /// A `Duration`'s total as nanoseconds (`ms * 1e6 + ns`).
+    fn duration_total_nanoseconds(milliseconds: &HirExpr, nanoseconds: &HirExpr) -> HirExpr {
+        HirExpr::BinOp(
+            BinOp::Add,
+            Box::new(HirExpr::BinOp(
+                BinOp::Mul,
+                Box::new(milliseconds.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(1_000_000.0))),
+            )),
+            Box::new(nanoseconds.clone()),
+        )
+    }
+
+    /// `(milliseconds, sub-millisecond nanoseconds)` that represent a total
+    /// nanosecond count (floor division, so the remainder is non-negative).
+    fn duration_from_total_nanoseconds(total: HirExpr) -> (HirExpr, HirExpr) {
+        let milliseconds = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_math_floor".into())),
+            vec![HirExpr::BinOp(
+                BinOp::Div,
+                Box::new(total.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(1_000_000.0))),
+            )],
+        );
+        let nanoseconds = HirExpr::BinOp(
+            BinOp::Sub,
+            Box::new(total),
+            Box::new(HirExpr::BinOp(
+                BinOp::Mul,
+                Box::new(milliseconds.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(1_000_000.0))),
+            )),
+        );
+        (milliseconds, nanoseconds)
+    }
+
     fn temporal_formatter(kind: &str) -> &'static str {
         match kind {
             "plainDate" => "__thaw_temporal_plain_date_to_string",
@@ -635,6 +671,24 @@ impl<'a> FnLowerer<'a> {
                 };
                 Self::temporal_zoned_object(timestamp, nanoseconds, zone)
             }
+            "abs" | "negated" if kind == "duration" => {
+                let total = Self::duration_total_nanoseconds(&timestamp, &nanoseconds);
+                let total = if property.sym == *"abs" {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_math_abs".into())),
+                        vec![total],
+                    )
+                } else {
+                    HirExpr::BinOp(
+                        BinOp::Mul,
+                        Box::new(total),
+                        Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+                    )
+                };
+                let (milliseconds, nanoseconds) =
+                    Self::duration_from_total_nanoseconds(total);
+                Self::temporal_object("duration", milliseconds, nanoseconds)
+            }
             "total" if kind == "duration" => {
                 let [unit] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one unit argument"));
@@ -702,6 +756,40 @@ impl<'a> FnLowerer<'a> {
         // milliseconds (a duration isn't stored component-wise, so an
         // unnormalized `{ minutes: 90 }` reports `hours` 1 rather than 0).
         if kind == "duration" {
+            if matches!(property.sym.as_ref(), "sign" | "blank") {
+                let receiver = self.lower_expr(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                let milliseconds =
+                    Self::temporal_timestamp(receiver.clone(), &receiver_type);
+                let nanoseconds = Self::temporal_nanoseconds(receiver, &receiver_type);
+                let total = Self::duration_total_nanoseconds(&milliseconds, &nanoseconds);
+                if property.sym == *"blank" {
+                    return Ok(Some(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(total),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    )));
+                }
+                return Ok(Some(HirExpr::Conditional(
+                    Box::new(HirExpr::BinOp(
+                        BinOp::Gt,
+                        Box::new(total.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    Box::new(HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Lt,
+                            Box::new(total),
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        HirType::F64,
+                    )),
+                    HirType::F64,
+                )));
+            }
             let unit = match property.sym.as_ref() {
                 "days" => 0.0,
                 "hours" => 1.0,

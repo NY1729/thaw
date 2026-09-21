@@ -3363,6 +3363,29 @@ fn compiles_reflect_set_and_object_descriptor_queries() {
     );
 }
 
+/// `Temporal.Duration`'s sign/blank introspection and the `abs`/`negated`
+/// normalization (each keeps the total nanoseconds exact, including a
+/// sub-millisecond duration).
+#[test]
+fn compiles_temporal_duration_sign_and_normalization() {
+    let source = r#"
+        function main(): void {
+            const d = Temporal.Duration.from({ hours: 2, minutes: 30 });
+            console.log(d.sign, d.blank);
+            const neg = Temporal.Duration.from({ hours: -2, minutes: -30 });
+            console.log(neg.sign, neg.blank);
+            console.log(d.negated().toString());
+            console.log(neg.negated().toString(), neg.abs().toString());
+            console.log(Temporal.Duration.from({ seconds: 0 }).blank);
+            console.log(Temporal.Duration.from("PT0.000000001S").negated().toString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_duration_normalization"),
+        "1 false\n-1 false\n-PT2H30M\nPT2H30M PT2H30M\ntrue\n-PT0.000000001S\n"
+    );
+}
+
 /// The ISO-calendar surface of the native Temporal slice: `calendarId`
 /// (always `"iso8601"`), `withCalendar("iso8601")`, the date helpers
 /// (`monthCode`/`daysInMonth`/`daysInYear`/`monthsInYear`/`inLeapYear`),

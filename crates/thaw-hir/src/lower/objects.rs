@@ -918,6 +918,8 @@ impl<'a> FnLowerer<'a> {
                     | "daysInYear"
                     | "monthsInYear"
                     | "inLeapYear"
+                    | "sign"
+                    | "blank"
                     | "year"
                     | "month"
                     | "day"
