@@ -1265,6 +1265,34 @@ fn compiles_set_symmetric_difference_and_relational_predicates() {
 #[test]
 fn compiles_iterator_from() {
     let source = r#"
+        function* numbers(): Generator<number, void, undefined> {
+            yield 7;
+            yield 8;
+        }
+
+        function* tracked(): Generator<number, void, undefined> {
+            try {
+                yield 1;
+                yield 2;
+            } finally {
+                console.log("closed");
+            }
+        }
+
+        function* controlled(): Generator<number, number, number> {
+            try {
+                const resumed = yield 1;
+                try {
+                    yield resumed;
+                } catch (error) {
+                    yield String(error).length;
+                }
+                return 7;
+            } finally {
+                console.log("controlled closed");
+            }
+        }
+
         function main(): void {
             const iterator = Iterator.from([1, 2, 3]);
             const first = iterator.next();
@@ -1289,10 +1317,24 @@ fn compiles_iterator_from() {
             console.log(Iterator.from(new Set<number>([3, 4])).toArray().join(","));
             const entries = Iterator.from(new Map<string, number>([["a", 1]])).toArray();
             console.log(entries[0][0], entries[0][1]);
+            console.log(Iterator.from(numbers()).map(value => value * 2).toArray().join(","));
+            for (const value of Iterator.from([5, 6]).map(value => value + 1)) {
+                console.log(value);
+            }
+            for (const value of Iterator.from(tracked()).map(value => value * 2)) {
+                console.log(value);
+                break;
+            }
+            const controlledIterator = Iterator.from(controlled());
+            console.log(controlledIterator.next().value);
+            console.log(controlledIterator.next(4).value);
+            console.log(controlledIterator.throw("boom").value);
+            const stopped = controlledIterator.return(9);
+            console.log(stopped.value, stopped.done);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "iterator_from"),
-        "1 false\n2 false\n2,3\n4,6\n6\n2\ntrue\ntrue\n3,4\na 1\n"
+        "1 false\n2 false\n2,3\n4,6\n6\n2\ntrue\ntrue\n3,4\na 1\n14,16\n6\n7\n2\nclosed\n1\n4\n4\ncontrolled closed\n9 true\n"
     );
 }

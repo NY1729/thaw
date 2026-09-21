@@ -36,6 +36,13 @@
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
     JSON.stringify(value, replacer, space);
   globalThis.__thaw_iterator_from = source => {
+    if (source?.__thawNativeIterator) {
+      return Object.assign(Object.create(Iterator.prototype), source, {
+        next: (...args) => args.length ? source.__thawNext(args[0]) : source.next(),
+        return: (...args) => args.length ? source.__thawReturn(args[0]) : source.return(),
+        throw: value => source.__thawThrow(String(value))
+      });
+    }
     let iterator = source[Symbol.iterator]?.() ?? source;
     if (typeof iterator.return !== 'function') {
       const sourceIterator = iterator;
