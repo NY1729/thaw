@@ -288,4 +288,80 @@ impl<'a> FnLowerer<'a> {
         };
         self.wrap_call_argument_bindings(result, &spread_bindings)
     }
+
+    /// `Uint8Array.prototype.toHex()` / `.toBase64()` and
+    /// `.setFromHex(text)` / `.setFromBase64(text)` (ECMAScript 2026). The
+    /// `set*` variants write into the buffer from offset 0 and return
+    /// `{ read, written }` (`read` is approximated as the source length, so
+    /// a fully valid input matches the spec).
+    fn lower_native_bytes_encoding_method(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver = self.lower_expr(&member.obj)?;
+        if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
+            return Err(format!(
+                "`.{}()` is only supported on a Buffer / Uint8Array",
+                property.sym
+            ));
+        }
+        let encoding = if matches!(property.sym.as_ref(), "toHex" | "setFromHex") {
+            "hex"
+        } else {
+            "base64"
+        };
+        let encoding_lit = HirExpr::Lit(HirLit::Str(encoding.to_string()));
+        let (arguments, bindings) = self
+            .lower_native_spread_values(&call.args, &format!("Uint8Array.{}", property.sym))?;
+        if matches!(property.sym.as_ref(), "toHex" | "toBase64") {
+            if !arguments.is_empty() {
+                return Err(format!("`{}` expects no arguments", property.sym));
+            }
+            return self.wrap_call_argument_bindings(
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bytes_to_string".to_string())),
+                    vec![receiver, encoding_lit],
+                ),
+                &bindings,
+            );
+        }
+        let [source] = arguments.as_slice() else {
+            return Err(format!("`{}` expects exactly one argument", property.sym));
+        };
+        let source = self.coerce_primitive_to_string(source.clone())?;
+        let written = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_set_from_string".to_string())),
+            vec![receiver, source, encoding_lit],
+        );
+        // `read` is the number of source characters consumed to produce
+        // `written` bytes: 2 per byte for hex, 4 per 3-byte group for
+        // base64 (so a truncating write stops at a group boundary).
+        let read = if encoding == "hex" {
+            HirExpr::BinOp(
+                BinOp::Mul,
+                Box::new(written.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(2.0))),
+            )
+        } else {
+            HirExpr::BinOp(
+                BinOp::Mul,
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_math_ceil".to_string())),
+                    vec![HirExpr::BinOp(
+                        BinOp::Div,
+                        Box::new(written.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(3.0))),
+                    )],
+                )),
+                Box::new(HirExpr::Lit(HirLit::F64(4.0))),
+            )
+        };
+        let result = HirExpr::ObjectLit(vec![
+            ("read".to_string(), read),
+            ("written".to_string(), written),
+        ]);
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
 }

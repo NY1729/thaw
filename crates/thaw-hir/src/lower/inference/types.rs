@@ -529,6 +529,7 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bytes_write"
                     | "__thaw_bytes_write_i64"
                     | "__thaw_bytes_copy"
+                    | "__thaw_bytes_set_from_string"
                     | "__thaw_bytes_index_of" => return Ok(HirType::F64),
                     "__thaw_bytes_read_i64" => return Ok(HirType::I64),
                     "__thaw_bytes_equals" => return Ok(HirType::Bool),

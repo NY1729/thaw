@@ -764,6 +764,13 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[f64_type.into()], false),
             Some(Linkage::External),
         );
+        // `Uint8Array.prototype.setFromHex`/`setFromBase64`: writes into the
+        // buffer and returns the byte count.
+        self.module.add_function(
+            "thaw_bytes_set_from_string",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         // `Buffer.from(number[])` clamps each element to a byte; takes a
         // raw `[len][elem...]` buffer and returns a fresh one.
         self.module.add_function(
