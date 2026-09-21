@@ -24,6 +24,7 @@ fn is_error_family_name(name: &str) -> bool {
             | "ReferenceError"
             | "EvalError"
             | "URIError"
+            | "AggregateError"
     )
 }
 
