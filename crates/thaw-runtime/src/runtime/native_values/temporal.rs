@@ -39,6 +39,72 @@ pub extern "C" fn thaw_temporal_instant_to_string(timestamp: f64) -> *const c_ch
     thaw_date_to_iso_string(timestamp)
 }
 
+/// Parses `HH:MM`, `HH:MM:SS`, or `HH:MM:SS.sss` (optionally preceded by a
+/// date/`T`) into milliseconds since midnight, or `None` on a bad shape or
+/// out-of-range field.
+fn parse_time_of_day(text: &str) -> Option<f64> {
+    let text = text.trim();
+    // A full date-time string: keep only the time part.
+    let time = match text.rsplit_once('T') {
+        Some((_, time)) => time.trim_end_matches('Z'),
+        None => text,
+    };
+    let time = match time.split_once(['+']) {
+        Some((time, _)) => time,
+        None => time,
+    };
+    let mut parts = time.split(':');
+    let hours: i64 = parts.next()?.trim().parse().ok()?;
+    let minutes: i64 = parts.next()?.trim().parse().ok()?;
+    let (seconds, millis) = match parts.next() {
+        Some(second) => {
+            let (whole, fraction) = match second.split_once('.') {
+                Some((whole, fraction)) => (whole, fraction),
+                None => (second, ""),
+            };
+            let seconds: i64 = whole.trim().parse().ok()?;
+            let mut fraction = fraction.trim().to_string();
+            if fraction.len() > 3 {
+                fraction.truncate(3);
+            }
+            while fraction.len() < 3 {
+                fraction.push('0');
+            }
+            let millis: i64 = if fraction.is_empty() {
+                0
+            } else {
+                fraction.parse().ok()?
+            };
+            (seconds, millis)
+        }
+        None => (0, 0),
+    };
+    if parts.next().is_some()
+        || !(0..=23).contains(&hours)
+        || !(0..=59).contains(&minutes)
+        || !(0..=59).contains(&seconds)
+    {
+        return None;
+    }
+    Some((hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + millis) as f64)
+}
+
+#[no_mangle]
+/// `Temporal.PlainTime.from(text)`: the time-of-day as milliseconds since
+/// midnight (stored as a 1970-01-01 timestamp, so the shared civil
+/// formatter renders it correctly). A time-only string or the time part of
+/// a full ISO date-time both work.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_temporal_plain_time_from_string(text: *const c_char) -> f64 {
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    parse_time_of_day(&text).unwrap_or(f64::NAN)
+}
+
 #[no_mangle]
 /// `Temporal.PlainDate.prototype.toString()`: `YYYY-MM-DD` (no time or
 /// offset), or a null pointer for an unrepresentable date.
@@ -82,11 +148,39 @@ pub extern "C" fn thaw_temporal_plain_time_to_string(timestamp: f64) -> *const c
     let Some(fields) = civil_from_timestamp(timestamp) else {
         return std::ptr::null();
     };
-    let text = format!(
-        "{:02}:{:02}:{:02}.{:03}",
-        fields.hours, fields.minutes, fields.seconds, fields.milliseconds
-    );
+    let text = if fields.milliseconds == 0 {
+        format!(
+            "{:02}:{:02}:{:02}",
+            fields.hours, fields.minutes, fields.seconds
+        )
+    } else {
+        format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            fields.hours, fields.minutes, fields.seconds, fields.milliseconds
+        )
+    };
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// One component of a `Duration` held as milliseconds: `unit` is
+/// `0`=days, `1`=hours, `2`=minutes, `3`=seconds, `4`=milliseconds. Each
+/// component is the remainder after the larger ones, so
+/// `{ hours: 2, minutes: 30 }` reports `minutes` 30, not 150.
+pub extern "C" fn thaw_temporal_duration_component(milliseconds: f64, unit: f64) -> f64 {
+    if !milliseconds.is_finite() {
+        return f64::NAN;
+    }
+    let sign = if milliseconds < 0.0 { -1.0 } else { 1.0 };
+    let total = milliseconds.abs().trunc() as i64;
+    let component = match unit as i64 {
+        0 => total / 86_400_000,
+        1 => (total % 86_400_000) / 3_600_000,
+        2 => (total % 3_600_000) / 60_000,
+        3 => (total % 60_000) / 1_000,
+        _ => total % 1_000,
+    };
+    sign * component as f64
 }
 
 #[no_mangle]

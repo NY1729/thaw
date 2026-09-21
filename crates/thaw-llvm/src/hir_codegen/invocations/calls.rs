@@ -142,7 +142,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal.Now.timeZoneId returned no value".into());
             }
-            "__thaw_temporal_instant_from_string" | "__thaw_temporal_duration_from_string" => {
+            "__thaw_temporal_instant_from_string"
+            | "__thaw_temporal_plain_time_from_string"
+            | "__thaw_temporal_duration_from_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
                 };
@@ -186,7 +188,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal string conversion returned no value".into());
             }
-            "__thaw_temporal_shift" | "__thaw_temporal_compare" => {
+            "__thaw_temporal_shift"
+            | "__thaw_temporal_compare"
+            | "__thaw_temporal_duration_component" => {
                 let [left, right] = args else {
                     return Err(format!("{name} expects two operands"));
                 };

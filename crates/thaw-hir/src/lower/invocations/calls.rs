@@ -634,6 +634,7 @@ impl<'a> FnLowerer<'a> {
                         | "subtract"
                         | "since"
                         | "until"
+                        | "total"
                         | "toPlainDate"
                         | "toPlainDateTime"
                         | "toPlainTime"
