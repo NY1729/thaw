@@ -1014,11 +1014,13 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         // Temporal (`Temporal.Now`/`Instant`/`Plain*`/`Duration`), built on
         // the same epoch-millisecond `f64` as `Date`.
-        self.module.add_function(
-            "thaw_temporal_now",
-            f64_type.fn_type(&[], false),
-            Some(Linkage::External),
-        );
+        for name in ["thaw_temporal_now", "thaw_temporal_now_nanos"] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(&[], false),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_temporal_time_zone_id",
             i8_ptr.fn_type(&[], false),
@@ -1117,6 +1119,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
+        self.module.add_function(
+            "thaw_temporal_plain_date_field",
+            f64_type.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_month_code",
+            i8_ptr.fn_type(&[f64_type.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_temporal_duration_from_string",
             f64_type.fn_type(&[i8_ptr.into()], false),

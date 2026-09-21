@@ -3363,6 +3363,31 @@ fn compiles_reflect_set_and_object_descriptor_queries() {
     );
 }
 
+/// The ISO-calendar surface of the native Temporal slice: `calendarId`
+/// (always `"iso8601"`), `withCalendar("iso8601")`, the date helpers
+/// (`monthCode`/`daysInMonth`/`daysInYear`/`monthsInYear`/`inLeapYear`),
+/// and a nanosecond-precision `Temporal.Now.instant()`.
+#[test]
+fn compiles_temporal_calendar_and_helpers() {
+    let source = r#"
+        function main(): void {
+            const d = Temporal.PlainDate.from("2020-02-15");
+            console.log(d.calendarId);
+            console.log(d.monthCode, d.daysInMonth, d.daysInYear, d.monthsInYear, d.inLeapYear);
+            const d2 = Temporal.PlainDate.from("2021-02-15");
+            console.log(d2.monthCode, d2.daysInMonth, d2.daysInYear, d2.inLeapYear);
+            console.log(Temporal.PlainYearMonth.from("2020-02").daysInMonth);
+            console.log(d.withCalendar("iso8601").toString());
+            const now = Temporal.Now.instant();
+            console.log(now.epochNanoseconds.toString().length > 10, now.toString().endsWith("Z"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_calendar_helpers"),
+        "iso8601\nM02 29 366 12 true\nM02 28 365 false\n29\n2020-02-15\ntrue true\n"
+    );
+}
+
 /// `Temporal.ZonedDateTime` with real time zones (jiff's tzdb): parsing
 /// with a `[Zone]` annotation, DST-correct offsets, `toString`, field
 /// reads in the zone, and the `toInstant`/`withTimeZone`/`toPlain*`
