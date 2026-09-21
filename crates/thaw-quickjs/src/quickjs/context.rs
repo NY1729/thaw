@@ -20,6 +20,68 @@ fn cli_script(arguments: &[String]) -> Option<(usize, &str)> {
         .filter(|(_, script)| std::path::Path::new(script).is_file())
 }
 
+/// Configures QuickJS's growable-`SharedArrayBuffer` allocator hooks,
+/// which quickjs-ng leaves unset by default (so `sab.grow(...)` throws
+/// "growable SharedArrayBuffer requires SAB allocator hooks"). thaw's
+/// runtime is single-threaded, so a refcounted allocation is enough.
+fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct Header {
+        refcount: usize,
+        size: usize,
+    }
+
+    unsafe extern "C" fn allocate(_opaque: *mut c_void, size: u64) -> *mut c_void {
+        let size = size as usize;
+        let header = std::mem::size_of::<Header>();
+        let Ok(layout) = std::alloc::Layout::from_size_align(header + size, 16) else {
+            return std::ptr::null_mut();
+        };
+        let base = unsafe { std::alloc::alloc(layout) };
+        if base.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe { (base as *mut Header).write(Header { refcount: 1, size }) };
+        unsafe { base.add(header).cast() }
+    }
+
+    unsafe extern "C" fn release(_opaque: *mut c_void, pointer: *mut c_void) {
+        if pointer.is_null() {
+            return;
+        }
+        let header = std::mem::size_of::<Header>();
+        let base = unsafe { (pointer as *mut u8).sub(header) };
+        let entry = base as *mut Header;
+        unsafe { (*entry).refcount -= 1 };
+        if unsafe { (*entry).refcount } == 0 {
+            let size = unsafe { (*entry).size };
+            if let Ok(layout) = std::alloc::Layout::from_size_align(header + size, 16) {
+                unsafe { std::alloc::dealloc(base, layout) };
+            }
+        }
+    }
+
+    unsafe extern "C" fn duplicate(_opaque: *mut c_void, pointer: *mut c_void) {
+        if pointer.is_null() {
+            return;
+        }
+        let base = unsafe { (pointer as *mut u8).sub(std::mem::size_of::<Header>()) };
+        unsafe { (*(base as *mut Header)).refcount += 1 };
+    }
+
+    let functions = rquickjs::qjs::JSSharedArrayBufferFunctions {
+        sab_alloc: Some(allocate),
+        sab_free: Some(release),
+        sab_dup: Some(duplicate),
+        sab_opaque: std::ptr::null_mut(),
+    };
+    let raw = ctx.as_raw().as_ptr();
+    let runtime = unsafe { rquickjs::qjs::JS_GetRuntime(raw) };
+    unsafe { rquickjs::qjs::JS_SetSharedArrayBufferFunctions(runtime, &functions) };
+}
+
 fn ensure_context() {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -27,6 +89,7 @@ fn ensure_context() {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
+                install_shared_array_buffer_functions(&ctx);
                 ctx.globals()
                     .set(
                         "__thaw_os_thread_token",
