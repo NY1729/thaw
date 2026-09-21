@@ -3732,3 +3732,89 @@ fn compiles_json_reviver_and_suppressed_error() {
         "{\"a\":1,\"b\":[2,3]}\n{\"a\":1,\"b\":99}\nSuppressedError\ntrue\ntrue\nboth\n"
     );
 }
+
+/// `Map.prototype.getOrInsert` / `getOrInsertComputed`.
+#[test]
+fn compiles_map_get_or_insert() {
+    let source = r#"
+        function main(): void {
+            const m = new Map<string, number>();
+            console.log(m.getOrInsert("a", 1));
+            console.log(m.getOrInsert("a", 2));
+            console.log(m.get("a"));
+            console.log(m.getOrInsertComputed("b", (k: string) => k.length));
+            console.log(m.getOrInsertComputed("b", (k: string) => 99));
+            console.log(m.get("b"));
+            console.log(m.size);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_get_or_insert"),
+        "1\n1\n1\n1\n1\n1\n2\n"
+    );
+}
+
+/// `Math.sumPrecise` and the deprecated `Date.getYear`/`setYear`.
+#[test]
+fn compiles_math_sum_precise_and_date_year() {
+    let source = r#"
+        function main(): void {
+            console.log(Math.sumPrecise([0.1, 0.2, 0.3]));
+            console.log(Math.sumPrecise([1, 2, 3, 4]));
+            const d = new Date(0);
+            console.log(d.getYear());
+            d.setYear(95);
+            console.log(d.getFullYear(), d.getMonth(), d.getDate());
+            d.setYear(2005);
+            console.log(d.getFullYear());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "math_sum_precise_date_year"),
+        "0.6\n10\n70\n1995 0 1\n2005\n"
+    );
+}
+
+/// `Promise.prototype.then(onFulfilled, onRejected)` (desugared to
+/// `then(...).catch(...)`).
+#[test]
+fn compiles_promise_then_two_arg() {
+    let source = r#"
+        async function ok(): Promise<number> {
+            return 1;
+        }
+        async function bad(): Promise<number> {
+            throw new Error("nope");
+        }
+        async function main(): Promise<void> {
+            console.log(await ok().then((v: number) => v + 10, (e: string) => 0));
+            console.log(await bad().then((v: number) => v + 10, (e: string) => 42));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_then_two_arg"),
+        "11\n42\n"
+    );
+}
+
+/// `Proxy.revocable` (a live handle) and the approximated
+/// `Intl.getCanonicalLocales`/`Intl.supportedValuesOf` statics.
+#[test]
+fn compiles_proxy_revocable_and_intl_statics() {
+    let source = r#"
+        function main(): void {
+            console.log(Intl.getCanonicalLocales("EN-us").join(","));
+            console.log(Intl.getCanonicalLocales(["zh-hant", "FR"]).join(","));
+            console.log(Intl.supportedValuesOf("calendar").length > 0);
+            const target = { n: 7 };
+            const r = Proxy.revocable(target, {});
+            console.log(r.proxy.n);
+            r.revoke();
+            console.log("revoked");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "proxy_revocable_intl_statics"),
+        "en-US\nzh-Hant,fr\ntrue\n7\nrevoked\n"
+    );
+}

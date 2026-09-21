@@ -119,7 +119,8 @@ impl<'a> FnLowerer<'a> {
                 | "includes" | "startsWith" | "endsWith" | "equals" | "copy" | "toString"
                 | "valueOf" | "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString"
                 | "getTime"
-                | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate" | "getDay"
+                | "setTime" | "toISOString" | "getFullYear" | "getYear" | "setYear"
+                | "getMonth" | "getDate" | "getDay"
                 | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds" | "getUTCFullYear"
                 | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours" | "getUTCMinutes"
                 | "getUTCSeconds" | "getUTCMilliseconds" | "setFullYear" | "setMonth" | "setDate"
@@ -165,7 +166,8 @@ impl<'a> FnLowerer<'a> {
             }
             "deref" => self.lower_native_weakref_deref(member, call),
             "group" | "groupToMap" => self.lower_native_array_group(member, property, call),
-            "getTime" | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate"
+            "getTime" | "setTime" | "toISOString" | "getFullYear" | "getYear" | "setYear"
+            | "getMonth" | "getDate"
             | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
             | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours"
             | "getUTCMinutes" | "getUTCSeconds" | "getUTCMilliseconds" | "setFullYear"
@@ -174,7 +176,8 @@ impl<'a> FnLowerer<'a> {
             | "setUTCHours" | "setUTCMinutes" | "setUTCSeconds" | "setUTCMilliseconds" => {
                 self.lower_native_date_method(member, property, call)
             }
-            "get" | "set" | "add" | "has" | "delete" | "clear" | "union" | "intersection"
+            "get" | "set" | "add" | "has" | "delete" | "clear" | "getOrInsert"
+            | "getOrInsertComputed" | "union" | "intersection"
             | "difference" | "symmetricDifference" | "isSubsetOf" | "isSupersetOf"
             | "isDisjointFrom" | "keys" | "values" | "entries" => {
                 self.lower_native_map_set_method(member, property, call)

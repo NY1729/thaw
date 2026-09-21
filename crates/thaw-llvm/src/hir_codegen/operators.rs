@@ -310,6 +310,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             | "__thaw_math_fround"
                             | "__thaw_math_clz32"
                             | "__thaw_math_random"
+                            | "__thaw_math_sum_precise"
                             | "__thaw_math_pow"
                             | "__thaw_math_min"
                             | "__thaw_math_max"
