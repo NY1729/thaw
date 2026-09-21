@@ -3520,3 +3520,31 @@ fn compiles_locale_string_methods() {
         "ABC\nabc\nx\n1234.5\n1,2,3\ntrue\ntrue\ntrue\ntrue\n"
     );
 }
+
+/// `AggregateError` joins the built-in error family: usable as a type
+/// annotation and constructible as `new AggregateError(errors, message?)`.
+/// The `errors` iterable isn't modeled (the exception channel is a single
+/// tagged string), so only `.name`/`.message` survive a `throw`.
+#[test]
+fn compiles_aggregate_error() {
+    let source = r#"
+        function make(): AggregateError {
+            return new AggregateError([1, 2, 3]);
+        }
+        function main(): void {
+            console.log(make());
+            try {
+                throw new AggregateError([new Error("a")], "all failed");
+            } catch (error) {
+                console.log(error);
+                console.log(error instanceof AggregateError);
+                console.log(error.name);
+                console.log(error.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "aggregate_error"),
+        "\nall failed\ntrue\nAggregateError\nall failed\n"
+    );
+}
