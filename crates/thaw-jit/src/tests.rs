@@ -2014,6 +2014,21 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_reversed_noncommutative_operations() {
+        for (operation, args, expected) in [
+            ("rsub", [2.0, 10.0], 8.0),
+            ("rdiv", [2.0, 10.0], 5.0),
+            ("rrem", [3.0, 10.0], 1.0),
+            ("rpow", [3.0, 2.0], 8.0),
+        ] {
+            let symbol = CString::new(format!("expr:a0,a1,{operation}:{operation}")).unwrap();
+            let result = call(&symbol, &args);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
+    }
+
+    #[test]
     fn propagates_uncaught_typed_throws() {
         for token in [
             "missingcalln",

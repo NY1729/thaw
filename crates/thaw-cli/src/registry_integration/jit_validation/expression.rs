@@ -398,10 +398,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "-"
                 | "*"
                 | "/"
+                | "rsub"
+                | "rdiv"
                 | "%"
+                | "rrem"
                 | "min"
                 | "max"
                 | "pow"
+                | "rpow"
                 | "atan2"
                 | "hypot"
                 | "imul"
@@ -1876,4 +1880,3 @@ fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> O
     }
     Some(format!("expr:{}", expression.join(",")))
 }
-

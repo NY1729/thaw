@@ -3052,8 +3052,7 @@ macro_rules! jit_control_flow {
             }
             offset += 1;
         }
-        (!statements[offset..].is_empty())
-            .then_some((steps, NumericBody::Statements(&statements[offset..])))
+        Some((steps, NumericBody::Statements(&statements[offset..])))
     }
     };
 }

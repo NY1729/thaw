@@ -8,8 +8,10 @@ pub struct ThawJitResult {
 enum NumericOp {
     Add,
     Subtract,
+    ReverseSubtract,
     Multiply,
     Divide,
+    ReverseDivide,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,8 +168,10 @@ impl NumericOp {
         match operation {
             "add" => Some(Self::Add),
             "sub" => Some(Self::Subtract),
+            "rsub" => Some(Self::ReverseSubtract),
             "mul" => Some(Self::Multiply),
             "div" => Some(Self::Divide),
+            "rdiv" => Some(Self::ReverseDivide),
             _ => None,
         }
     }
@@ -177,8 +181,10 @@ impl NumericOp {
         match self {
             Self::Add => 0x58,
             Self::Subtract => 0x5c,
+            Self::ReverseSubtract => 0x5c,
             Self::Multiply => 0x59,
             Self::Divide => 0x5e,
+            Self::ReverseDivide => 0x5e,
         }
     }
 }
@@ -489,8 +495,10 @@ enum NumericValue {
     StringTrimEnd,
     StringTrimStart,
     Power,
+    ReversePower,
     UnaryMath(UnaryMath),
     Remainder,
+    ReverseRemainder,
     Select,
     ShortCircuit(bool),
     ConditionalStart,
@@ -552,4 +560,3 @@ enum NumericValue {
 }
 
 struct NumericProgram(Vec<NumericValue>);
-

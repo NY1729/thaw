@@ -1949,18 +1949,18 @@ fn set_composition_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function unionHas(first: number, second: number): number;\nexport declare function intersectionHas(): number;\nexport declare function differenceHas(): number;\nexport declare function symmetricHas(): number;\nexport declare function relate(): number;\n",
+        "export declare function unionHas(first: number, second: number): number;\nexport declare function intersectionHas(): number;\nexport declare function differenceHas(): number;\nexport declare function symmetricHas(): number;\nexport declare function relate(): number;\nexport declare function mapLike(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.unionHas = function(first, second) { const x = new Set([1, 2]); const y = new Set([2, 3]); const u = x.union(y); return u.has(first) ? (u.has(second) ? 1 : 2) : 3; }; module.exports.intersectionHas = function() { const x = new Set([1, 2, 3]); const y = new Set([2, 3, 4]); const i = x.intersection(y); return i.has(1) ? 1 : (i.has(2) ? 2 : 3); }; module.exports.differenceHas = function() { const x = new Set([1, 2]); const y = new Set([2, 3]); const d = y.difference(x); return d.has(3) ? 1 : 0; }; module.exports.symmetricHas = function() { const x = new Set([1, 2]); const y = new Set([2, 3]); const s = x.symmetricDifference(y); return s.has(1) ? 1 : 0; }; module.exports.relate = function() { const x = new Set([1, 2]); const y = new Set([1, 2, 3]); return x.isSubsetOf(y) ? (y.isSupersetOf(x) ? (x.isDisjointFrom(y) ? 1 : 2) : 3) : 4; };\n",
+        "module.exports.unionHas = function(first, second) { const x = new Set([1, 2]); const y = new Set([2, 3]); const u = x.union(y); return u.has(first) ? (u.has(second) ? 1 : 2) : 3; }; module.exports.intersectionHas = function() { const x = new Set([1, 2, 3]); const y = new Set([2, 3, 4]); const i = x.intersection(y); return i.has(1) ? 1 : (i.has(2) ? 2 : 3); }; module.exports.differenceHas = function() { const x = new Set([1, 2]); const y = new Set([2, 3]); const d = y.difference(x); return d.has(3) ? 1 : 0; }; module.exports.symmetricHas = function() { const x = new Set([1, 2]); const y = new Set([2, 3]); const s = x.symmetricDifference(y); return s.has(1) ? 1 : 0; }; module.exports.relate = function() { const x = new Set([1, 2]); const y = new Set([1, 2, 3]); return x.isSubsetOf(y) ? (y.isSupersetOf(x) ? (x.isDisjointFrom(y) ? 1 : 2) : 3) : 4; }; module.exports.mapLike = function() { const x = new Set([1, 2]); const y = new Map(); y.set(2, 'two'); y.set(3, 'three'); const z = x.union(y); return z.has(3) ? 1 : 0; };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { unionHas, intersectionHas, differenceHas, symmetricHas, relate } from 'jit-set-compose';\nfunction main(): void { console.log(unionHas(1, 3)); console.log(unionHas(1, 4)); console.log(intersectionHas()); console.log(differenceHas()); console.log(symmetricHas()); console.log(relate()); }\n",
+        "import { unionHas, intersectionHas, differenceHas, symmetricHas, relate, mapLike } from 'jit-set-compose';\nfunction main(): void { console.log(unionHas(1, 3)); console.log(unionHas(1, 4)); console.log(intersectionHas()); console.log(differenceHas()); console.log(symmetricHas()); console.log(relate()); console.log(mapLike()); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1970,7 +1970,10 @@ fn set_composition_uses_jit_without_quickjs() {
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n2\n2\n1\n1\n2\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1\n2\n2\n1\n1\n2\n1\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -2151,5 +2154,113 @@ fn map_keys_values_use_jit_without_quickjs() {
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(String::from_utf8_lossy(&result.stdout), "a,b\n1,2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn direct_map_entry_iteration_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-map-entries-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-map-entries");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function entries(): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.entries = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); let total = 0; for (const [key, value] of m) total += value; return total; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { entries } from 'jit-map-entries';\nfunction main(): void { console.log(entries()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn map_and_set_for_each_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-collection-foreach-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-collection-foreach");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function mapTotal(): number;\nexport declare function setTotal(): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.mapTotal = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); let result = 0; m.forEach((value, key, map) => { const doubled = value * 2; map.has(key); result += doubled; }); return result; }; module.exports.setTotal = function() { const s = new Set(['x', 'yz']); let result = 0; s.forEach((value, key, set) => { let length = 0; length = value.length; set.has(key); result += length; }); return result; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { mapTotal, setTotal } from 'jit-collection-foreach';\nfunction main(): void { console.log(mapTotal() + setTotal()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "9\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn deeply_nested_pure_arithmetic_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-deep-arithmetic-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-deep-arithmetic");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function deep(flag: boolean): number;\nexport declare function deepSubtract(flag: boolean): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.deep = function(flag) { return 1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (flag ? 9 : 10)))))))); };\nmodule.exports.deepSubtract = function(flag) { return 1000 - (900 - (800 - (700 - (600 - (500 - (400 - (300 - (flag ? 200 : 100)))))))); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { deep, deepSubtract } from 'jit-deep-arithmetic';\nfunction main(): void { console.log(deep(true)); console.log(deep(false)); console.log(deepSubtract(true)); console.log(deepSubtract(false)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "45\n46\n600\n500\n");
     let _ = std::fs::remove_dir_all(dir);
 }
