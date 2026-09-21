@@ -102,13 +102,15 @@ impl<'a> FnLowerer<'a> {
             || matches!(
             property,
             "charAt" | "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
-                | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
+                | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "toExponential"
+                | "localeCompare"
                 | "normalize" | "split" | "replace" | "replaceAll" | "test" | "match" | "search"
                 | "matchAll" | "exec" | "toLowerCase" | "toUpperCase" | "isWellFormed"
                 | "toWellFormed" | "toReversed" | "sort" | "toSorted" | "some" | "every"
                 | "find" | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
                 | "toSpliced" | "at" | "with" | "flat" | "flatMap" | "map" | "filter"
-                | "forEach" | "slice" | "subarray" | "copyWithin" | "fill" | "reverse" | "join"
+                | "forEach" | "slice" | "subarray" | "substring" | "hasOwnProperty"
+                | "copyWithin" | "fill" | "reverse" | "join"
                 | "push"
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
                 | "next" | "return" | "throw"
@@ -141,8 +143,8 @@ impl<'a> FnLowerer<'a> {
                 self.lower_native_regex_method(member, property, call)
             }
             "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd" | "repeat"
-            | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "toLowerCase"
-            | "toUpperCase" | "isWellFormed" | "toWellFormed" => {
+            | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "toExponential"
+            | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed" => {
                 self.lower_native_scalar_method(member, property, call)
             }
             "toReversed" | "sort" | "toSorted" | "some" | "every" | "find" | "findIndex"
@@ -150,11 +152,11 @@ impl<'a> FnLowerer<'a> {
             | "with" | "flat" | "flatMap" | "map" | "filter" => {
                 self.lower_native_array_transform_method(member, property, call)
             }
-            "forEach" | "slice" | "subarray" | "copyWithin" | "fill" | "reverse" | "join" | "push"
-            | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
-            | "includes" | "startsWith" | "endsWith" | "next" | "return" | "throw" => {
-                self.lower_native_array_mutation_method(member, property, call)
-            }
+            "forEach" | "slice" | "subarray" | "substring" | "copyWithin" | "fill" | "reverse"
+            | "join" | "push" | "pop" | "shift" | "unshift" | "splice" | "indexOf"
+            | "lastIndexOf" | "includes" | "startsWith" | "endsWith" | "next" | "return"
+            | "throw" => self.lower_native_array_mutation_method(member, property, call),
+            "hasOwnProperty" => self.lower_native_has_own_property(member, call),
             "getTime" | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate"
             | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
             | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours"

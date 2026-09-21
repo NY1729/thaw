@@ -316,6 +316,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_number_to_exponential",
+            i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_number_to_radix_string",
             i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
             Some(Linkage::External),
@@ -647,6 +652,11 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_string_slice",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_substring",
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
             Some(Linkage::External),
         );

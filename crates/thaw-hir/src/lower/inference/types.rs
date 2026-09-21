@@ -724,7 +724,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
                         return Ok(HirType::Str);
                     }
-                    "__thaw_string_slice" => {
+                    "__thaw_string_slice" | "__thaw_string_substring" => {
                         if args.len() != 3 {
                             return Err("string slice expects three operands".into());
                         }
@@ -817,12 +817,12 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, digits, "toFixed digits")?;
                         return Ok(HirType::Str);
                     }
-                    "__thaw_number_to_precision" => {
+                    "__thaw_number_to_precision" | "__thaw_number_to_exponential" => {
                         let [value, digits] = args.as_slice() else {
-                            return Err("number toPrecision expects two operands".into());
+                            return Err("number precision format expects two operands".into());
                         };
-                        self.expect_type(&HirType::F64, value, "toPrecision receiver")?;
-                        self.expect_type(&HirType::F64, digits, "toPrecision digits")?;
+                        self.expect_type(&HirType::F64, value, "precision format receiver")?;
+                        self.expect_type(&HirType::F64, digits, "precision format digits")?;
                         return Ok(HirType::Str);
                     }
                     "__thaw_number_to_radix_string" => {

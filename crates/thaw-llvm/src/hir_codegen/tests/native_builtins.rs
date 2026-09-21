@@ -3234,3 +3234,39 @@ fn byte_buffer_bigint_accessors() {
         "0000000000000000\n0\n0\nffffffffffffff7f\n9223372036854775807\n9223372036854775807\n8\n8000000000000000\n-9223372036854775808\n-9223372036854775808\nffffffffffffffff\n-1\n-1\n0\n"
     );
 }
+
+/// Native lowering for a set of standard built-ins that were previously
+/// unrecognized: `RegExp.prototype.toString` (used to silently coerce to
+/// `[object Object]`), `Number.prototype.toExponential`,
+/// `String.prototype.substring`, and `Object.prototype.hasOwnProperty`.
+#[test]
+fn compiles_additional_standard_builtins() {
+    let source = r#"
+        function main(): void {
+            console.log((/ab/gi).toString());
+            console.log((/x/).toString());
+
+            console.log((1234.5).toExponential(2));
+            console.log((0.000123).toExponential(3));
+            console.log((123.456).toExponential());
+
+            console.log("abcdef".substring(1, 3));
+            console.log("abcdef".substring(3, 1));
+            console.log("abcdef".substring(-2, 3));
+            console.log("abcdef".substring(2));
+
+            const obj = { a: 1, b: "y" };
+            const key = "b";
+            console.log(obj.hasOwnProperty("a"));
+            console.log(obj.hasOwnProperty("z"));
+            console.log(obj.hasOwnProperty(key));
+            const parsed = JSON.parse("{\"a\":1}");
+            console.log(parsed.hasOwnProperty("a"));
+            console.log(parsed.hasOwnProperty("z"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "additional_standard_builtins"),
+        "/ab/gi\n/x/\n1.23e+3\n1.230e-4\n1.23456e+2\nbc\nbc\nabc\ncdef\ntrue\nfalse\ntrue\ntrue\nfalse\n"
+    );
+}
