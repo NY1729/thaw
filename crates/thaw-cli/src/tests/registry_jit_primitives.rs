@@ -1973,3 +1973,39 @@ fn set_composition_uses_jit_without_quickjs() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n2\n2\n1\n1\n2\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn set_size_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-set-size-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-set-size");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function sizeAfterAdd(value: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.sizeAfterAdd = function(value) { const s = new Set([1, 2]); s.add(value); return s.size; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { sizeAfterAdd } from 'jit-set-size';\nfunction main(): void { console.log(sizeAfterAdd(3)); console.log(sizeAfterAdd(2)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

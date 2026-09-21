@@ -356,6 +356,7 @@ fn jit_export(
                     recursive_result: None,
                     loop_depth: 0,
                     loop_labels: Vec::new(),
+                    set_locals: std::collections::HashSet::new(),
                 };
                 encode_expression(
                     initializer,
@@ -442,6 +443,7 @@ fn jit_export(
                         recursive_result: None,
                         loop_depth: 0,
                         loop_labels: Vec::new(),
+                        set_locals: std::collections::HashSet::new(),
                     },
                     &mut right,
                 )?;
@@ -472,6 +474,7 @@ fn jit_export(
                     recursive_result: None,
                     loop_depth: 0,
                     loop_labels: Vec::new(),
+                    set_locals: std::collections::HashSet::new(),
                 };
                 encode_expression(
                     assignment.right.as_ref(),
@@ -771,6 +774,7 @@ fn jit_export(
         recursive_result,
         loop_depth: 0,
         loop_labels: Vec::new(),
+        set_locals: std::collections::HashSet::new(),
     };
     let mut parameters = std::collections::HashMap::new();
     let mut slot = 0usize;
