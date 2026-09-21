@@ -701,3 +701,41 @@ fn recognizes_set_constructor_and_methods_for_jit() {
     assert!(export.contains("ddelete"), "expected Set.delete -> ddelete: {export}");
     assert!(export.contains("dsl"), "expected a materialized Set local: {export}");
 }
+
+#[test]
+fn recognizes_set_composition_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "combine".into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    for (operation, token) in [
+        ("union", "setunion"),
+        ("intersection", "setintersection"),
+        ("difference", "setdifference"),
+        ("symmetricDifference", "setsymmetricdiff"),
+    ] {
+        let source = format!(
+            "function combine() {{ const x = new Set([1, 2]); const y = new Set([2, 3]); const z = x.{operation}(y); return z.has(2) ? 1 : 0; }} module.exports = {{ combine }};"
+        );
+        let export = jit_numeric_export(&source, "combine", false, &function)
+            .unwrap_or_else(|| panic!("{operation} should be JIT-specializable"));
+        assert!(export.contains(token), "expected {token}: {export}");
+    }
+    for (operation, token) in [
+        ("isSubsetOf", "setissubset"),
+        ("isSupersetOf", "setissuperset"),
+        ("isDisjointFrom", "setisdisjoint"),
+    ] {
+        let source = format!(
+            "function combine() {{ const x = new Set([1, 2]); const y = new Set([2, 3]); return x.{operation}(y) ? 1 : 0; }} module.exports = {{ combine }};"
+        );
+        let export = jit_numeric_export(&source, "combine", false, &function)
+            .unwrap_or_else(|| panic!("{operation} should be JIT-specializable"));
+        assert!(export.contains(token), "expected {token}: {export}");
+    }
+}
