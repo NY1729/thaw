@@ -3363,3 +3363,25 @@ fn compiles_reflect_set_and_object_descriptor_queries() {
         "true\n9\ntrue\n{\"a\":9}\ntrue\nfalse\nfalse\n9\ntrue\ntrue\n"
     );
 }
+
+/// `RegExp.prototype.hasIndices` (the `d` flag) and the `atob`/`btoa`
+/// base64 globals.
+#[test]
+fn compiles_regexp_has_indices_and_base64_globals() {
+    let source = r#"
+        function main(): void {
+            console.log((/ab/d).hasIndices);
+            console.log((/ab/g).hasIndices);
+            console.log(btoa("hello"));
+            console.log(atob("aGVsbG8="));
+            console.log(atob(btoa("hi there")));
+            console.log(btoa("abc"));
+            console.log(btoa("ab"));
+            console.log(btoa("a"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regexp_has_indices_base64"),
+        "true\nfalse\naGVsbG8=\nhello\nhi there\nYWJj\nYWI=\nYQ==\n"
+    );
+}
