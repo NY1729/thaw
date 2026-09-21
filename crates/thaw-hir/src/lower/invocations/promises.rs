@@ -475,6 +475,148 @@ impl<'a> FnLowerer<'a> {
         callee_name: &str,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+        if callee_name == "Promise.allKeyed" || callee_name == "Promise.allSettledKeyed" {
+            let all_keyed = callee_name == "Promise.allKeyed";
+            let [arg] = call.args.as_slice() else {
+                return Err(format!("`{callee_name}` expects exactly one object argument"));
+            };
+            if arg.spread.is_some() {
+                return Err(format!("`{callee_name}` does not support a spread argument"));
+            }
+            let Expr::Object(object) = arg.expr.as_ref() else {
+                return Err(format!("`{callee_name}` requires an object-literal argument"));
+            };
+            let mut keys = Vec::new();
+            let mut promises = Vec::new();
+            let mut resolved_types = Vec::new();
+            for property in &object.props {
+                let swc_ecma_ast::PropOrSpread::Prop(property) = property else {
+                    return Err(format!("`{callee_name}` properties must not spread"));
+                };
+                let swc_ecma_ast::Prop::KeyValue(property) = property.as_ref() else {
+                    return Err(format!("`{callee_name}` requires `key: value` entries"));
+                };
+                let key = match &property.key {
+                    swc_ecma_ast::PropName::Ident(ident) => ident.sym.to_string(),
+                    swc_ecma_ast::PropName::Str(value) => {
+                        value.value.to_string_lossy().into_owned()
+                    }
+                    _ => return Err(format!("`{callee_name}` requires literal keys")),
+                };
+                let value = self.lower_expr(&property.value)?;
+                let resolved = match self.infer_expr_type(&value)? {
+                    HirType::Promise(inner) => *inner,
+                    other => other,
+                };
+                if resolved == HirType::Void {
+                    return Err(format!("`{callee_name}` value `{key}` resolves to void"));
+                }
+                keys.push(key);
+                promises.push(value);
+                resolved_types.push(resolved);
+            }
+            let mut field_types = Vec::new();
+            let mut settled_slots: Option<Vec<HirType>> = None;
+            let (joined, joined_type) = if all_keyed {
+                field_types = resolved_types.clone();
+                let homogeneous = !resolved_types.is_empty()
+                    && resolved_types.iter().all(|element| element == &resolved_types[0]);
+                if homogeneous {
+                    (
+                        HirExpr::PromiseAll(promises, resolved_types[0].clone()),
+                        HirType::Array(Box::new(resolved_types[0].clone())),
+                    )
+                } else {
+                    (
+                        HirExpr::PromiseAllTuple(promises, resolved_types.clone()),
+                        HirType::Tuple(resolved_types.clone()),
+                    )
+                }
+            } else {
+                // Each value settles on its own (`Promise.allSettled([v])`),
+                // so heterogeneous element types stay strictly modeled;
+                // the heterogeneous settled arrays are then joined as a
+                // tuple.
+                let mut slots = Vec::with_capacity(promises.len());
+                let mut settled_promises = Vec::with_capacity(promises.len());
+                for (value, resolved) in promises.into_iter().zip(resolved_types.iter()) {
+                    let settled = promise_settled_result_type(resolved.clone());
+                    field_types.push(settled.clone());
+                    slots.push(HirType::Array(Box::new(settled)));
+                    settled_promises.push(HirExpr::PromiseAllSettled(
+                        vec![value],
+                        resolved.clone(),
+                    ));
+                }
+                settled_slots = Some(slots.clone());
+                (
+                    HirExpr::PromiseAllTuple(settled_promises, slots.clone()),
+                    HirType::Tuple(slots),
+                )
+            };
+            let results_name = format!("__thaw_keyed_results_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(results_name.clone(), joined_type.clone());
+            let slot_type = |index: usize| match &joined_type {
+                HirType::Array(element) => element.as_ref().clone(),
+                HirType::Tuple(elements) => elements[index].clone(),
+                other => unreachable!("keyed combinator joined type {other:?}"),
+            };
+            let fields = keys
+                .iter()
+                .enumerate()
+                .map(|(index, key)| {
+                    let slot = slot_type(index);
+                    let mut value = HirExpr::TypedIndex(
+                        Box::new(HirExpr::Var(results_name.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        slot,
+                    );
+                    if settled_slots.is_some() {
+                        // Unwrap the per-key `[settled]` array to the entry.
+                        value = HirExpr::TypedIndex(
+                            Box::new(value),
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            field_types[index].clone(),
+                        );
+                    }
+                    (key.clone(), value)
+                })
+                .collect::<Vec<_>>();
+            let result_object = HirExpr::ObjectLit(fields);
+            let output_type = self.infer_expr_type(&result_object)?;
+            let body = HirExpr::Block(vec![HirStmt::Return(Some(result_object))]);
+            let mut referenced = BTreeSet::new();
+            collect_referenced_bindings(&body, &mut referenced);
+            let captures = referenced
+                .into_iter()
+                .filter(|captured| captured != &results_name)
+                .filter_map(|captured| {
+                    self.scope
+                        .get(&captured)
+                        .cloned()
+                        .map(|ty| HirParam { name: captured, ty })
+                })
+                .collect();
+            let callback = HirExpr::Lambda(
+                captures,
+                vec![HirParam {
+                    name: results_name,
+                    ty: joined_type.clone(),
+                }],
+                output_type.clone(),
+                Box::new(body),
+            );
+            return Ok(HirExpr::PromiseThen(
+                Box::new(joined),
+                Box::new(callback),
+                joined_type,
+                output_type,
+                false,
+                false,
+            ));
+        }
+
         if callee_name == "Promise.all" {
             let [arg] = call.args.as_slice() else {
                 return Err("`Promise.all` expects exactly one array argument".into());

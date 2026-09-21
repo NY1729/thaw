@@ -1070,7 +1070,15 @@ impl<'a> FnLowerer<'a> {
             return self.lower_promise_try(call);
         }
 
-        if matches!(callee_name.as_str(), "Promise.all" | "Promise.allSettled" | "Promise.race" | "Promise.any") {
+        if matches!(
+            callee_name.as_str(),
+            "Promise.all"
+                | "Promise.allSettled"
+                | "Promise.race"
+                | "Promise.any"
+                | "Promise.allKeyed"
+                | "Promise.allSettledKeyed"
+        ) {
             return self.lower_promise_static_call(&callee_name, call);
         }
 
