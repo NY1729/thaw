@@ -708,6 +708,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_string_to_upper_case",
             "thaw_atob",
             "thaw_btoa",
+            "thaw_escape",
+            "thaw_unescape",
         ] {
             self.module
                 .add_function(name, string_transform_type, Some(Linkage::External));
@@ -1005,6 +1007,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context
                 .bool_type()
                 .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_is_error",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

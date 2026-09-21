@@ -31,6 +31,7 @@ impl<'a> FnLowerer<'a> {
                     | "EvalError"
                     | "URIError"
                     | "AggregateError"
+                    | "SuppressedError"
             ) {
                 if call.type_args.is_some() {
                     return Err("native `super(...)` does not support type arguments".into());
@@ -921,7 +922,10 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
-        if matches!(callee_name.as_str(), "encodeURIComponent" | "encodeURI" | "atob" | "btoa") {
+        if matches!(
+            callee_name.as_str(),
+            "encodeURIComponent" | "encodeURI" | "atob" | "btoa" | "escape" | "unescape"
+        ) {
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, &callee_name)?;
             let [value] = arguments.as_slice() else {
@@ -932,7 +936,9 @@ impl<'a> FnLowerer<'a> {
                 "encodeURIComponent" => "__thaw_encode_uri_component",
                 "encodeURI" => "__thaw_encode_uri",
                 "atob" => "__thaw_atob",
-                _ => "__thaw_btoa",
+                "btoa" => "__thaw_btoa",
+                "escape" => "__thaw_escape",
+                _ => "__thaw_unescape",
             };
             let result = HirExpr::Call(Box::new(HirExpr::Var(intrinsic.to_string())), vec![value]);
             return self.wrap_call_argument_bindings(result, &bindings);
@@ -1328,6 +1334,72 @@ impl<'a> FnLowerer<'a> {
                 "String" => HirExpr::JsonAsString(Box::new(value)),
                 _ => HirExpr::JsonAsBool(Box::new(value)),
             });
+        }
+
+        // `Error("x")` (no `new`) behaves exactly like `new Error("x")`: a
+        // tagged exception string. `new` is handled in `lower_new_expr`.
+        if matches!(
+            callee_name.as_str(),
+            "Error"
+                | "TypeError"
+                | "RangeError"
+                | "SyntaxError"
+                | "ReferenceError"
+                | "EvalError"
+                | "URIError"
+        ) {
+            if call.args.iter().any(|argument| argument.spread.is_some()) {
+                return Err(format!("`{callee_name}()` does not support spread arguments"));
+            }
+            if call.args.len() > 2 {
+                return Err(format!(
+                    "`{callee_name}()` expects at most a message and options argument"
+                ));
+            }
+            let message = match call.args.first() {
+                Some(argument) => {
+                    let message = self.lower_expr(&argument.expr)?;
+                    self.coerce_primitive_to_string(message)?
+                }
+                None => HirExpr::Lit(HirLit::Str(String::new())),
+            };
+            let tag = HirExpr::Lit(HirLit::Str(format!("\u{1}{}\u{1}", callee_name)));
+            let tagged = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                vec![tag, message],
+            );
+            let Some(options) = call.args.get(1) else {
+                return Ok(tagged);
+            };
+            let options = self.lower_expr(&options.expr)?;
+            let options_type = self.infer_expr_type(&options)?;
+            let HirType::Object(fields) = &options_type else {
+                return Err(format!(
+                    "`{callee_name}()` options must be an object with a `cause` field"
+                ));
+            };
+            let cause_type = fields
+                .iter()
+                .find(|(name, _)| name == "cause")
+                .map(|(_, ty)| ty)
+                .ok_or_else(|| format!("`{callee_name}()` options must have a `cause` field"))?;
+            let cause = HirExpr::PropAccess(
+                Box::new(options),
+                options_type.clone(),
+                "cause".to_string(),
+            );
+            let cause = match cause_type {
+                HirType::Str => cause,
+                _ => self.coerce_primitive_to_string(cause)?,
+            };
+            let with_marker = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                vec![tagged, HirExpr::Lit(HirLit::Str("\u{2}".to_string()))],
+            );
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                vec![with_marker, cause],
+            ));
         }
 
         let mut signature = self.signatures.get(&callee_name).cloned();
