@@ -129,6 +129,29 @@
     ) {
       return undefined;
     }
+    // A compiled object method keyed by a well-known symbol (`[Symbol.dispose]`,
+    // `[Symbol.asyncDispose]`, ...) crosses as a `"\u001f@@<name>"` string key
+    // (thaw-hir's `well_known_symbol_key`, which can't collide with a real
+    // property name). Re-key it onto the real symbol here so a JS API that
+    // looks it up (`DisposableStack.prototype.use`) finds it. The reviver runs
+    // bottom-up, so nested objects are already revived by the time their
+    // parent is processed.
+    if (value && typeof value === 'object') {
+      for (const key of Object.keys(value)) {
+        if (key.charCodeAt(0) === 0x1f && key.startsWith('\u001f@@')) {
+          const symbol = Symbol[key.slice(3)];
+          if (symbol) {
+            Object.defineProperty(value, symbol, {
+              value: value[key],
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+            delete value[key];
+          }
+        }
+      }
+    }
     return value;
   };
   globalThis.__thaw_json_binary_replacer = function (key, value) {
