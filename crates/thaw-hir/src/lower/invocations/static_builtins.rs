@@ -189,6 +189,7 @@ impl<'a> FnLowerer<'a> {
                 | ("Map", "groupBy")
                 | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
                 | ("JSON", "stringify")
+                | ("Iterator", "from")
                 | ("RegExp", "escape")
                 | ("Reflect", "ownKeys")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
@@ -525,6 +526,27 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("callDynamicMethod".into())),
                             vec![regexp, HirExpr::Lit(HirLit::Str("escape".into())), args],
                         )));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Iterator" && property.sym == *"from" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Iterator.from")?;
+                        let [source] = arguments.as_slice() else {
+                            return Err("`Iterator.from` expects exactly one argument".into());
+                        };
+                        let source = self.coerce_to_declared(&HirType::Json, source.clone())?;
+                        let args = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![source]),
+                        )?;
+                        let iterator_from = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("__thaw_iterator_from".into()))],
+                        );
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+                            vec![iterator_from, args],
+                        );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"of" {
