@@ -3701,6 +3701,29 @@ fn compiles_bigint_operations() {
     );
 }
 
+/// A `bigint` literal (or a literal `BigInt("...")` argument) beyond
+/// Thaw's fixed-width `i64` is kept as the real QuickJS BigInt, so
+/// `.toString()`/radix conversion stay exact. Arithmetic and relational
+/// comparison on such a value still need the native `i64` range.
+#[test]
+fn compiles_large_bigint_literals() {
+    let source = r#"
+        function main(): void {
+            const a = 123456789012345678901234567890n;
+            console.log(a.toString());
+            console.log(a.toString(16));
+            console.log(String(a));
+            console.log(BigInt("123456789012345678901234567890").toString());
+            console.log(BigInt("5").toString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "large_bigint"),
+        "123456789012345678901234567890\n18ee90ff6c373e0ee4e3f0ad2\n\
+         123456789012345678901234567890\n123456789012345678901234567890\n5\n"
+    );
+}
+
 /// `String.prototype.replace`/`replaceAll` with a *function* replacer,
 /// delegated to QuickJS (`callDynamicMethod`) so the compiled closure is
 /// invoked per match with the real `(match, captures..., offset, string)`
