@@ -108,6 +108,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date string conversion returned no value".into());
             }
+            "__thaw_bigint_decimal_cmp" => {
+                let [left, right] = args else {
+                    return Err("bigint comparison expects two operands".into());
+                };
+                let left = self.compile_expr(left)?;
+                let right = self.compile_expr(right)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bigint_decimal_cmp").unwrap(),
+                        &[left.into(), right.into()],
+                        "bigint_decimal_cmp",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("bigint comparison returned no value".into());
+            }
             "__thaw_temporal_now" => {
                 if !args.is_empty() {
                     return Err("Temporal.Now expects no operands".into());

@@ -1058,6 +1058,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, timestamp, "Date timestamp")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_bigint_decimal_cmp" => {
+                        let [left, right] = args.as_slice() else {
+                            return Err("bigint comparison expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, left, "bigint comparison left")?;
+                        self.expect_type(&HirType::Str, right, "bigint comparison right")?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_temporal_now"
                     | "__thaw_temporal_instant_from_string"
                     | "__thaw_temporal_plain_time_from_string"
