@@ -3548,3 +3548,34 @@ fn compiles_aggregate_error() {
         "\nall failed\ntrue\nAggregateError\nall failed\n"
     );
 }
+
+/// `WeakRef`/`FinalizationRegistry`/`Proxy`. `WeakRef` is a strong-holding
+/// one-element array (`.deref()` always yields the target); `Proxy` is a
+/// genuine QuickJS proxy over a by-value copy of the target. A
+/// `FinalizationRegistry` is the real QuickJS global (its callback fires
+/// non-deterministically on collection, so this test's callback is silent).
+#[test]
+fn compiles_weak_ref_finalization_registry_and_proxy() {
+    let source = r#"
+        type T = { a: number, b: number };
+        function main(): void {
+            const target: T = { a: 1, b: 2 };
+            const r = new WeakRef(target);
+            console.log(r.deref().a);
+            console.log(r.deref().b);
+            const inline = new WeakRef({ x: 9 });
+            console.log(inline.deref().x);
+            const registry = new FinalizationRegistry((_held: string) => {});
+            registry.register(target, "held");
+            registry.unregister(target);
+            console.log("done");
+            const p = new Proxy({ n: 7 }, {});
+            console.log(p.n);
+            console.log(JSON.stringify(p));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "weak_ref_proxy"),
+        "1\n2\n9\ndone\n7\n{\"n\":7}\n"
+    );
+}
