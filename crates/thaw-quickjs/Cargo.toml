@@ -74,7 +74,10 @@ rquickjs = "0.12.2"
 rsa = { version = "0.9", features = ["sha2", "pem", "getrandom"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 sec1 = { version = "0.7", features = ["pem"] }
-serde_json = "1"
+# `preserve_order` must match thaw-std: the `dynamic_object_query` adapter
+# builds a `serde_json::Value` dictionary that thaw-std's dictionary host
+# reads directly, so both must agree on `Value`'s layout.
+serde_json = { version = "1", features = ["preserve_order"] }
 signature = "2"
 sha1 = { version = "0.10", features = ["oid"] }
 sha2 = { version = "0.10", features = ["oid"] }

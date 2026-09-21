@@ -2198,8 +2198,10 @@ macro_rules! jit_expressions {
                 }
                 let mut other_encoded = Vec::new();
                 encode_expression(other, parameters, locals, context, &mut other_encoded)?;
-                if jit_expression_kind(&other_encoded)?.0 != JitKind::Dictionary {
-                    return None;
+                match jit_expression_kind(&other_encoded)?.0 {
+                    JitKind::Dictionary => {}
+                    JitKind::Dynamic => other_encoded.push("setlike".into()),
+                    _ => return None,
                 }
                 output.extend(encoded);
                 output.extend(other_encoded);

@@ -323,6 +323,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
         }
     }
@@ -1097,6 +1098,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,

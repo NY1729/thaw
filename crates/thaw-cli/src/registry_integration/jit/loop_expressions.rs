@@ -1124,12 +1124,8 @@ macro_rules! jit_loop_expressions {
             _ => {}
         }
         let value_first = matches!(
-            (kinds.get(name.sym.as_ref())?, operation, value_expression),
-            (
-                JitKind::Number,
-                AssignOp::AddAssign | AssignOp::MulAssign,
-                Expr::Ident(_) | Expr::Lit(_)
-            )
+            (kinds.get(name.sym.as_ref())?, operation),
+            (JitKind::Number, AssignOp::AddAssign | AssignOp::MulAssign)
         );
         if operation != AssignOp::Assign && !value_first {
             output.push(local.clone());

@@ -80,6 +80,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             .or_else(|| token.strip_prefix("lb").map(|index| (JitKind::Boolean, index)))
             .or_else(|| token.strip_prefix("ls").map(|index| (JitKind::String, index)))
             .or_else(|| token.strip_prefix("ld").map(|index| (JitKind::Dynamic, index)))
+            .or_else(|| token.strip_prefix("lh").map(|index| (JitKind::Dynamic, index)))
             .and_then(|(kind, index)| index.parse::<usize>().ok().map(|index| (kind, index)))
         {
             if let Some(stored) = stack.get(index) {
@@ -1338,6 +1339,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Dictionary);
+        } else if token == "setlike" {
+            if stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Dictionary);
         } else if matches!(
             token.as_str(),
             "setissubset" | "setissuperset" | "setisdisjoint"
@@ -1792,7 +1798,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             });
             maximum_depth = maximum_depth.max(stack.len());
         } else {
-            stack.push(if token.starts_with('s') || token.starts_with('t') {
+            stack.push(if token.starts_with('h') {
+                JitKind::Dynamic
+            } else if token.starts_with('s') || token.starts_with('t') {
                 JitKind::String
             } else if token.starts_with('b') {
                 JitKind::Boolean

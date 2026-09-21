@@ -943,6 +943,7 @@ fn jit_export(
         let prefix = match ty {
             thaw_hir::HirType::Str => "s",
             thaw_hir::HirType::Bool => "b",
+            thaw_hir::HirType::JsValue => "h",
             thaw_hir::HirType::Array(element) => match element.as_ref() {
                 thaw_hir::HirType::F64 => "rn",
                 thaw_hir::HirType::Bool => "rb",

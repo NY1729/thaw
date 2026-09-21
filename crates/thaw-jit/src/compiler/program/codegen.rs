@@ -2277,12 +2277,14 @@ impl NumericProgram {
                 | NumericValue::DictionaryFromNumberEntries
                 | NumericValue::DictionaryFromBoolEntries
                 | NumericValue::DictionaryFromStringEntries
-                | NumericValue::SetFromArray => {
+                | NumericValue::SetFromArray
+                | NumericValue::SetLikeDictionary => {
                     if depth == 0 {
                         return None;
                     }
                     let function = match value {
                         NumericValue::SetFromArray => set_from_array,
+                        NumericValue::SetLikeDictionary => set_like_dictionary,
                         NumericValue::DictionaryKeys => dictionary_keys,
                         NumericValue::NumberDictionaryValues => number_dictionary_values,
                         NumericValue::BoolDictionaryValues => bool_dictionary_values,
