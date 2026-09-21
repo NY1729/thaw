@@ -715,6 +715,13 @@ macro_rules! jit_returns {
         let operation = match property.sym.as_ref() {
             "get" if call.args.len() == 1 => "get",
             "set" if call.args.len() == 2 => "set",
+            "keys" | "values" | "entries" if call.args.is_empty() => {
+                match property.sym.as_ref() {
+                    "keys" => "keys",
+                    "values" => "values",
+                    _ => "entries",
+                }
+            }
             _ => return None,
         };
         let receiver_is_map = member_path(member.obj.as_ref())

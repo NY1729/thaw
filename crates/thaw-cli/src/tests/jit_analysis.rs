@@ -845,3 +845,40 @@ fn recognizes_map_get_set_for_jit() {
     assert!(export.contains("dlen"), "expected Map.size -> dlen: {export}");
 }
 
+
+#[test]
+fn recognizes_map_keys_values_entries_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: "spread".into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+    };
+    let export = jit_numeric_export(
+        "function spread() { const m = new Map(); m.set('a', 1); m.set('b', 2); const k = m.keys(); return k.join(','); } module.exports = { spread };",
+        "spread",
+        false,
+        &function,
+    );
+    let export = export.expect("Map.keys should be JIT-specializable");
+    assert!(export.contains("dkeys"), "expected Map.keys -> dkeys: {export}");
+    let values = jit_numeric_export(
+        "function spread() { const m = new Map(); m.set('a', 1); const v = m.values(); return v.join(','); } module.exports = { spread };",
+        "spread",
+        false,
+        &thaw_bridge::DtsFunction {
+            param_field_constraints: Vec::new(),
+            name: "spread".into(),
+            generic: None,
+            params: vec![],
+            required_params: 0,
+            rest_param: None,
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        },
+    );
+    let values = values.expect("Map.values should be JIT-specializable");
+    assert!(values.contains("dnvalues"), "expected Map.values -> dnvalues: {values}");
+}
