@@ -86,12 +86,31 @@ impl<'a> FnLowerer<'a> {
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
-            Expr::Lit(Lit::BigInt(n)) => Ok(HirExpr::Lit(HirLit::I64(
-                n.value
-                    .to_string()
-                    .parse()
-                    .map_err(|_| "bigint literal exceeds Thaw's signed 64-bit range")?,
-            ))),
+            Expr::Lit(Lit::BigInt(n)) => {
+                let text = n.value.to_string();
+                match text.parse::<i64>() {
+                    Ok(value) => Ok(HirExpr::Lit(HirLit::I64(value))),
+                    // A `bigint` beyond Thaw's fixed-width `i64` is kept as
+                    // the real QuickJS BigInt, so `.toString()`, radix
+                    // conversion, and comparisons stay exact. Arithmetic on
+                    // it stays dynamic (Thaw's native `bigint` operators
+                    // only cover the `i64` range).
+                    Err(_) => {
+                        let constructor = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                        );
+                        let arguments = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![HirExpr::Lit(HirLit::Str(text))]),
+                        )?;
+                        Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+                            vec![constructor, arguments],
+                        ))
+                    }
+                }
+            }
             Expr::Lit(Lit::Str(s)) => Ok(HirExpr::Lit(HirLit::Str(
                 s.value.to_string_lossy().into_owned(),
             ))),
