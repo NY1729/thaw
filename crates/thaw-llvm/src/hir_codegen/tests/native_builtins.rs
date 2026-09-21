@@ -3541,6 +3541,38 @@ fn compiles_using_declarations() {
     );
 }
 
+/// A `using` resource is disposed when `break`/`continue` leaves its block,
+/// but *not* when a `break` only leaves a loop nested inside that block.
+#[test]
+fn compiles_using_disposal_in_loops() {
+    let source = r#"
+        function make(name: string) {
+            return { [Symbol.dispose]() { console.log("dispose " + name); } };
+        }
+        function main(): void {
+            for (let i = 0; i < 3; i++) {
+                using r = make("loop" + i);
+                if (i === 1) { continue; }
+                if (i === 2) { break; }
+                console.log("body " + i);
+            }
+            console.log("after");
+            for (let i = 0; i < 2; i++) {
+                using outer = make("outer" + i);
+                for (let j = 0; j < 3; j++) {
+                    if (j === 1) { break; }
+                    console.log("inner " + i + "," + j);
+                }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_loop_disposal"),
+        "body 0\ndispose loop0\ndispose loop1\ndispose loop2\nafter\n\
+         inner 0,0\ndispose outer0\ninner 1,0\ndispose outer1\n"
+    );
+}
+
 /// `await using` disposes through `Symbol.asyncDispose` and awaits it.
 #[test]
 fn compiles_await_using_declarations() {

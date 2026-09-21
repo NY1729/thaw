@@ -493,10 +493,25 @@ fn collect_stmt_bindings_with_bound(
 /// A throw in a try body is handled by that try's catch first, so recursive
 /// descent into `HirStmt::Try` only instruments its catch body for throws.
 /// Returns are always instrumented because they leave every enclosing try.
+///
+/// A `break`/`continue` is instrumented only when it actually leaves the
+/// instrumented scope: `loop_depth` counts the loops entered *inside*
+/// `stmts`, so the innermost loop is outside the scope exactly when no loop
+/// has been entered yet, and a `BreakDepth(n)`/`ContinueDepth(n)` reaches
+/// outside when `n >= loop_depth`.
 fn inject_finally_before_exits(
     stmts: Vec<HirStmt>,
     finalizer: &[HirStmt],
     inject_throws: bool,
+) -> Vec<HirStmt> {
+    inject_finally_before_exits_at(stmts, finalizer, inject_throws, 0)
+}
+
+fn inject_finally_before_exits_at(
+    stmts: Vec<HirStmt>,
+    finalizer: &[HirStmt],
+    inject_throws: bool,
+    loop_depth: usize,
 ) -> Vec<HirStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
@@ -509,23 +524,31 @@ fn inject_finally_before_exits(
                 out.extend(finalizer.iter().cloned());
                 out.push(stmt);
             }
+            HirStmt::Break | HirStmt::Continue if loop_depth == 0 => {
+                out.extend(finalizer.iter().cloned());
+                out.push(stmt);
+            }
+            HirStmt::BreakDepth(depth) | HirStmt::ContinueDepth(depth) if depth >= loop_depth => {
+                out.extend(finalizer.iter().cloned());
+                out.push(stmt);
+            }
             HirStmt::If(cond, then_body, else_body) => out.push(HirStmt::If(
                 cond,
-                inject_finally_before_exits(then_body, finalizer, inject_throws),
-                inject_finally_before_exits(else_body, finalizer, inject_throws),
+                inject_finally_before_exits_at(then_body, finalizer, inject_throws, loop_depth),
+                inject_finally_before_exits_at(else_body, finalizer, inject_throws, loop_depth),
             )),
             HirStmt::While(cond, body) => out.push(HirStmt::While(
                 cond,
-                inject_finally_before_exits(body, finalizer, inject_throws),
+                inject_finally_before_exits_at(body, finalizer, inject_throws, loop_depth + 1),
             )),
             HirStmt::Break
             | HirStmt::Continue
             | HirStmt::BreakDepth(_)
             | HirStmt::ContinueDepth(_) => out.push(stmt),
             HirStmt::Try(body, catch_name, catch_body, hidden) => out.push(HirStmt::Try(
-                inject_finally_before_exits(body, finalizer, false),
+                inject_finally_before_exits_at(body, finalizer, false, loop_depth),
                 catch_name,
-                inject_finally_before_exits(catch_body, finalizer, inject_throws),
+                inject_finally_before_exits_at(catch_body, finalizer, inject_throws, loop_depth),
                 hidden,
             )),
             other => out.push(other),
