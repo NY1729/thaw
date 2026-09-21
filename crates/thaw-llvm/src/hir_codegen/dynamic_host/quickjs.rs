@@ -795,6 +795,62 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| "thaw_json_parse returned no value".into())
     }
 
+    fn compile_call_dynamic_value_mixed_handle(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let [callable, json_args, handles] = args else {
+            return Err(
+                "callDynamicValueMixedHandle expects callable, JSON arguments, and handle array"
+                    .into(),
+            );
+        };
+        let callable = self.compile_expr(callable)?;
+        let json_args = self.compile_expr(json_args)?;
+        let handles = self.compile_expr(handles)?.into_pointer_value();
+        let handles = self.compile_array_data(handles)?;
+        let text = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[json_args.into()],
+                "mixed_handle_args_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_call_handle_mixed_handle_result")
+                    .unwrap(),
+                &[callable.into(), text.into(), handles.into()],
+                "mixed_handle_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "mixed_handle_value")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "mixed_handle_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+
     fn compile_construct_dynamic_value(
         &mut self,
         args: &[HirExpr],

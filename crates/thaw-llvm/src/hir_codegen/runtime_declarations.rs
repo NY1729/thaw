@@ -1672,6 +1672,14 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_call_handle_mixed_handle_result",
+            handle_result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_construct_handle_result",
             handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
             Some(Linkage::External),

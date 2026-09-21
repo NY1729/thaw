@@ -1053,6 +1053,37 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_result(
 }
 
 #[no_mangle]
+/// Like `thaw_js_call_handle_mixed_result`, but returns the call's result
+/// as a live handle instead of a JSON encoding -- needed when the result
+/// may not be JSON-representable (a `BigInt` from a dynamic `+`).
+///
+/// # Safety
+/// `args_json` must be null or a valid NUL-terminated UTF-8 string;
+/// `handles` must point to `handles_len` handle ids.
+pub unsafe extern "C" fn thaw_js_call_handle_mixed_handle_result(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+) -> ThawHandleResult {
+    let args_json = to_str(args_json);
+    match with_active_or_context(|ctx| {
+        let target = Function::from_value(value_for_handle(&ctx, handle)?)
+            .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
+        let value = unsafe { invoke_mixed(ctx.clone(), target, &args_json, handles)? };
+        retain_value(&ctx, value)
+    }) {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_js_construct_handle_result(
     handle: u64,
     args_json: *const c_char,
