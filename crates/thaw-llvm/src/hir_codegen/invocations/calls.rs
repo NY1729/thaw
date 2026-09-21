@@ -155,17 +155,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("bigint arithmetic returned no value".into());
             }
-            "__thaw_temporal_now" => {
+            "__thaw_temporal_now" | "__thaw_temporal_now_nanos" => {
                 if !args.is_empty() {
                     return Err("Temporal.Now expects no operands".into());
                 }
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
                 return self
                     .builder
-                    .build_call(
-                        self.module.get_function("thaw_temporal_now").unwrap(),
-                        &[],
-                        "temporal_now",
-                    )
+                    .build_call(self.module.get_function(&runtime).unwrap(), &[], "temporal_now")
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
@@ -368,6 +366,43 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("Temporal zoned field returned no value".into());
+            }
+            "__thaw_temporal_plain_date_field" => {
+                let [milliseconds, field] = args else {
+                    return Err(format!("{name} expects two operands"));
+                };
+                let milliseconds = self.compile_expr(milliseconds)?;
+                let field = self.compile_expr(field)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_plain_date_field")
+                            .unwrap(),
+                        &[milliseconds.into(), field.into()],
+                        "temporal_plain_date_field",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal plain-date field returned no value".into());
+            }
+            "__thaw_temporal_month_code" => {
+                let [milliseconds] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let milliseconds = self.compile_expr(milliseconds)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_temporal_month_code").unwrap(),
+                        &[milliseconds.into()],
+                        "temporal_month_code",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal month code returned no value".into());
             }
             "__thaw_temporal_shift" | "__thaw_temporal_duration_component" => {
                 let [left, right] = args else {

@@ -640,6 +640,7 @@ impl<'a> FnLowerer<'a> {
                         | "toPlainTime"
                         | "toInstant"
                         | "withTimeZone"
+                        | "withCalendar"
                         | "toZonedDateTimeISO"
                 );
                 let generic_method = matches!(property.sym.as_ref(), "toString" | "toJSON");

@@ -76,7 +76,10 @@ impl<'a> FnLowerer<'a> {
         Self::temporal_object(
             kind,
             HirExpr::Call(Box::new(HirExpr::Var("__thaw_temporal_now".into())), Vec::new()),
-            HirExpr::Lit(HirLit::F64(0.0)),
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_temporal_now_nanos".into())),
+                Vec::new(),
+            ),
         )
     }
 
@@ -225,7 +228,10 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_temporal_now".into())),
                         Vec::new(),
                     ),
-                    HirExpr::Lit(HirLit::F64(0.0)),
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_temporal_now_nanos".into())),
+                        Vec::new(),
+                    ),
                     time_zone,
                 );
                 return self.wrap_call_argument_bindings(result, &bindings).map(Some);
@@ -445,7 +451,7 @@ impl<'a> FnLowerer<'a> {
         let timestamp = Self::temporal_timestamp(receiver.clone(), &receiver_type);
         let nanoseconds = Self::temporal_nanoseconds(receiver.clone(), &receiver_type);
         let time_zone = (kind == "zonedDateTime")
-            .then(|| Self::temporal_zone(receiver, &receiver_type));
+            .then(|| Self::temporal_zone(receiver.clone(), &receiver_type));
         let label = format!("Temporal {kind}.{}", property.sym);
         let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
         let result = match property.sym.as_ref() {
@@ -591,6 +597,25 @@ impl<'a> FnLowerer<'a> {
             "toInstant" => {
                 Self::temporal_object("instant", timestamp, nanoseconds)
             }
+            "withCalendar" => {
+                // Only the ISO 8601 calendar exists here, so
+                // `withCalendar("iso8601")` is an identity.
+                let [calendar] = arguments.as_slice() else {
+                    return Err(format!("`{label}` expects exactly one calendar"));
+                };
+                let calendar_name = match calendar {
+                    HirExpr::Lit(HirLit::Str(calendar)) => calendar.to_ascii_lowercase(),
+                    _ => {
+                        return Err(format!("`{label}` requires a string-literal calendar"));
+                    }
+                };
+                if calendar_name != "iso8601" {
+                    return Err(format!(
+                        "only the `iso8601` calendar is supported, got `{calendar_name}`"
+                    ));
+                }
+                receiver
+            }
             "withTimeZone" => {
                 let [zone] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one time zone"));
@@ -668,6 +693,11 @@ impl<'a> FnLowerer<'a> {
         property: &IdentName,
         kind: &'static str,
     ) -> Result<Option<HirExpr>, String> {
+        // Every Temporal value thaw models uses the ISO 8601 calendar
+        // (jiff is ISO-only), so `calendarId` is constant.
+        if property.sym == *"calendarId" {
+            return Ok(Some(HirExpr::Lit(HirLit::Str("iso8601".to_string()))));
+        }
         // A `Duration`'s components are approximated from its total
         // milliseconds (a duration isn't stored component-wise, so an
         // unnormalized `{ minutes: 90 }` reports `hours` 1 rather than 0).
@@ -710,6 +740,63 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("callDynamicValueHandle".into())),
                 vec![constructor, arguments],
             )));
+        }
+        // ISO-calendar date helpers shared by `PlainDate`/`PlainDateTime`/
+        // `PlainYearMonth` (and, for a `ZonedDateTime`, its local date).
+        let calendar_field = match property.sym.as_ref() {
+            "daysInMonth" => Some(0.0),
+            "daysInYear" => Some(1.0),
+            "monthsInYear" => Some(2.0),
+            "inLeapYear" => Some(3.0),
+            _ => None,
+        };
+        if property.sym == *"monthCode" || calendar_field.is_some() {
+            let receiver = self.lower_expr(&member.obj)?;
+            let receiver_type = self.infer_expr_type(&receiver)?;
+            let date_timestamp = if kind == "zonedDateTime" {
+                let milliseconds = Self::temporal_timestamp(receiver.clone(), &receiver_type);
+                let nanoseconds = Self::temporal_nanoseconds(receiver.clone(), &receiver_type);
+                let time_zone = Self::temporal_zone(receiver, &receiver_type);
+                HirExpr::Call(
+                    Box::new(HirExpr::Var(
+                        "__thaw_temporal_zoned_plain_timestamp".into(),
+                    )),
+                    vec![
+                        milliseconds,
+                        nanoseconds,
+                        time_zone,
+                        HirExpr::Lit(HirLit::F64(0.0)),
+                    ],
+                )
+            } else {
+                Self::temporal_timestamp(receiver, &receiver_type)
+            };
+            if property.sym == *"monthCode" {
+                return Ok(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_month_code".into())),
+                    vec![date_timestamp],
+                )));
+            }
+            let value = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_temporal_plain_date_field".into())),
+                vec![
+                    date_timestamp,
+                    HirExpr::Lit(HirLit::F64(calendar_field.unwrap())),
+                ],
+            );
+            if property.sym == *"inLeapYear" {
+                // `inLeapYear` is a boolean, not the raw 1/0.
+                return Ok(Some(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(value),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                )));
+            }
+            return Ok(Some(value));
         }
         // A `ZonedDateTime`'s zone-dependent reads: `timeZoneId`, `offset`,
         // and the calendar/time fields in its own zone.
