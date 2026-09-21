@@ -861,6 +861,20 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Symbol, symbol, "computed symbol key")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_symbol_for" => {
+                        let [description] = args.as_slice() else {
+                            return Err("Symbol.for expects one description operand".into());
+                        };
+                        self.expect_type(&HirType::Str, description, "Symbol.for description")?;
+                        return Ok(HirType::Symbol);
+                    }
+                    "__thaw_symbol_key_for" | "__thaw_symbol_description" => {
+                        let [symbol] = args.as_slice() else {
+                            return Err("symbol key expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Symbol, symbol, "symbol argument")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_length" => {
                         let [argument] = args.as_slice() else {
                             return Err("string length expects one operand".into());

@@ -167,7 +167,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("bigint string conversion returned no value".into());
             }
-            "__thaw_symbol_new" | "__thaw_symbol_to_string" | "__thaw_symbol_key" => {
+            "__thaw_symbol_new"
+            | "__thaw_symbol_to_string"
+            | "__thaw_symbol_key"
+            | "__thaw_symbol_for"
+            | "__thaw_symbol_key_for"
+            | "__thaw_symbol_description" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
                 };

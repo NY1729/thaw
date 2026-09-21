@@ -1189,6 +1189,12 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_string_length".to_string())),
                         vec![obj],
                     )),
+                    // `Symbol("x").description` -- the description part of
+                    // the symbol's own runtime representation.
+                    HirType::Symbol if prop.sym == *"description" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_symbol_description".to_string())),
+                        vec![obj],
+                    )),
                     // Every string is a potential caught exception (there is
                     // no separate `Error` type -- see
                     // `lower/expressions/lowering.rs`'s `new Error(...)`

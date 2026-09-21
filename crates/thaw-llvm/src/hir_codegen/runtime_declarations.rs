@@ -42,7 +42,14 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i64_type.into()], false),
             Some(Linkage::External),
         );
-        for name in ["thaw_symbol_new", "thaw_symbol_to_string", "thaw_symbol_key"] {
+        for name in [
+            "thaw_symbol_new",
+            "thaw_symbol_to_string",
+            "thaw_symbol_key",
+            "thaw_symbol_for",
+            "thaw_symbol_key_for",
+            "thaw_symbol_description",
+        ] {
             self.module.add_function(
                 name,
                 i8_ptr.fn_type(&[i8_ptr.into()], false),
