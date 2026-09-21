@@ -26,6 +26,65 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// `using x = expr;` / `await using x = expr;` bind `x` like a `const`;
+    /// the enclosing block's disposal (see `lower_stmts`) is what runs
+    /// `x[Symbol.dispose]()` / `await x[Symbol.asyncDispose]()`.
+    fn lower_using_decl(&mut self, using_decl: &UsingDecl) -> Result<Vec<HirStmt>, String> {
+        let synthetic = VarDecl {
+            span: using_decl.span,
+            ctxt: swc_common::SyntaxContext::empty(),
+            kind: VarDeclKind::Const,
+            declare: false,
+            decls: using_decl.decls.clone(),
+        };
+        self.lower_var_decl(&synthetic)
+    }
+
+    /// The statement that disposes a `using` binding: `x[Symbol.dispose]()`
+    /// for `using`, `await x[Symbol.asyncDispose]()` for `await using`.
+    fn lower_using_disposal(
+        &mut self,
+        source_name: &str,
+        is_await: bool,
+    ) -> Result<HirStmt, String> {
+        let span = swc_common::DUMMY_SP;
+        let symbol_name = if is_await { "asyncDispose" } else { "dispose" };
+        let member = MemberExpr {
+            span,
+            obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                source_name.into(),
+                span,
+            ))),
+            prop: MemberProp::Computed(ComputedPropName {
+                span,
+                expr: Box::new(Expr::Member(MemberExpr {
+                    span,
+                    obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        "Symbol".into(),
+                        span,
+                    ))),
+                    prop: MemberProp::Ident(IdentName::new(symbol_name.into(), span)),
+                })),
+            }),
+        };
+        let call = Expr::Call(CallExpr {
+            span,
+            ctxt: swc_common::SyntaxContext::empty(),
+            callee: Callee::Expr(Box::new(Expr::Member(member))),
+            args: Vec::new(),
+            type_args: None,
+        });
+        let value = if is_await {
+            self.lower_expr(&Expr::Await(AwaitExpr {
+                span,
+                arg: Box::new(call),
+            }))?
+        } else {
+            self.lower_expr(&call)?
+        };
+        Ok(HirStmt::Expr(value))
+    }
+
     fn lower_var_decl(&mut self, var_decl: &VarDecl) -> Result<Vec<HirStmt>, String> {
         let mut statements = Vec::new();
         for decl in &var_decl.decls {

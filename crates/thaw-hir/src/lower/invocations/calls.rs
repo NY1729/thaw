@@ -2204,6 +2204,34 @@ impl<'a> FnLowerer<'a> {
                 };
                 self.lower_expr(&Expr::Call(from))
             }
+            "dispose" | "asyncDispose" => {
+                // `obj[Symbol.dispose]()` / `obj[Symbol.asyncDispose]()`
+                // invoke the method stored under the symbol's sentinel key.
+                // Re-enter the ordinary field-call path with a computed
+                // string key so the receiver-aware method call is reused.
+                if !call.args.is_empty() {
+                    return Err(format!("`[Symbol.{symbol}]()` expects no arguments"));
+                }
+                let synthetic = CallExpr {
+                    span: call.span,
+                    ctxt: call.ctxt,
+                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                        span: call.span,
+                        obj: member.obj.clone(),
+                        prop: MemberProp::Computed(ComputedPropName {
+                            span: call.span,
+                            expr: Box::new(Expr::Lit(swc_ecma_ast::Lit::Str(swc_ecma_ast::Str {
+                                span: call.span,
+                                value: well_known_symbol_key(symbol).into(),
+                                raw: None,
+                            }))),
+                        }),
+                    }))),
+                    args: Vec::new(),
+                    type_args: None,
+                };
+                self.lower_call(&synthetic)
+            }
             "toPrimitive" => {
                 let receiver = self.lower_expr(&member.obj)?;
                 let receiver_type = self.infer_expr_type(&receiver)?;

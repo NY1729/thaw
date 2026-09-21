@@ -80,8 +80,20 @@ impl<'a> FnLowerer<'a> {
         self.awaited_bindings.extend(consumers.awaited);
 
         let mut out = Vec::new();
+        let mut using_disposals: Vec<HirStmt> = Vec::new();
         for stmt in stmts {
             out.extend(self.lower_stmt_seq(stmt)?);
+            if let Stmt::Decl(Decl::Using(using_decl)) = stmt {
+                for declarator in &using_decl.decls {
+                    if let Pat::Ident(binding) = &declarator.name {
+                        let disposal = self.lower_using_disposal(
+                            binding.id.sym.as_ref(),
+                            using_decl.is_await,
+                        )?;
+                        using_disposals.push(disposal);
+                    }
+                }
+            }
             if let Stmt::Expr(expression) = stmt {
                 if let Some(targets) = self.assertion_union_narrowing(&expression.expr) {
                     for target in targets {
@@ -136,7 +148,35 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
-        Ok(out)
+        if using_disposals.is_empty() {
+            return Ok(out);
+        }
+        // `using` resources are disposed in reverse declaration order when
+        // the block exits. `finally` is expanded around the abrupt exits
+        // lowering already models (`return`/`throw`); a `break`/`continue`
+        // out of the block does not dispose yet.
+        using_disposals.reverse();
+        let mut name = "__thaw_using_finally".to_string();
+        while self.scope.contains_key(&name) {
+            name.push('_');
+        }
+        let catch_name = self.bind_local(&name, HirType::Str);
+        self.generator_finalizers
+            .insert(catch_name.clone(), using_disposals.clone());
+        let body = inject_finally_before_exits(out, &using_disposals, false);
+        let catch_body = inject_finally_before_exits(
+            vec![HirStmt::Throw(HirExpr::Var(catch_name.clone()))],
+            &using_disposals,
+            true,
+        );
+        let mut lowered = vec![HirStmt::Try(
+            body,
+            catch_name.clone(),
+            catch_body,
+            Some(catch_name),
+        )];
+        lowered.extend(using_disposals);
+        Ok(lowered)
     }
 
     fn stmt_definitely_exits(stmt: &Stmt) -> bool {
