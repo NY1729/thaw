@@ -1221,7 +1221,7 @@ fn compiles_regex_match_all() {
     "#;
     assert_eq!(
         compile_and_run(source, "regex_match_all"),
-        "3\na1,a,1\nb2,b,2\nc3,c,3\n0\nString.prototype.matchAll must be called with a global RegExp\nString.prototype.matchAll must be called with a global RegExp\n"
+        "3\na1,a,1\nb2,b,2\nc3,c,3\n0\nString.prototype.matchAll must be called with a global RegExp\n"
     );
 }
 
@@ -2929,7 +2929,7 @@ fn compiles_regex_split_and_replace() {
     "#;
     assert_eq!(
         compile_and_run(source, "regex_split_and_replace"),
-        "a\nb\nc\n\na\nb\nc\naXb2c3\naXbXcX\naXbXcX\nreplaceAll must be called with a global RegExp\ninvalid regular expression\n"
+        "a\nb\nc\n\na\nb\nc\naXb2c3\naXbXcX\naXbXcX\nreplaceAll must be called with a global RegExp\n"
     );
 }
 
@@ -3949,5 +3949,27 @@ fn compiles_promise_keyed_combinators() {
     assert_eq!(
         compile_and_run(source, "promise_keyed_combinators"),
         "1 two\nboom\nfulfilled rejected\n1\nboom\n"
+    );
+}
+
+/// Backreferences and lookaround, which the `regex` crate lacks; the runtime
+/// falls back to `fancy-regex` so such patterns stay native instead of
+/// silently reporting "no match".
+#[test]
+fn compiles_regex_backreferences_and_lookaround() {
+    let source = r#"
+        function main(): void {
+            console.log(/(\w)\1/.test("aa"));
+            console.log(/a(?=b)/.test("ab"));
+            console.log(/(?<=a)b/.test("ab"));
+            console.log("aabb".replace(/(\w)\1/g, "X"));
+            console.log("aa bb cc".match(/(\w)\1/g)!.join(","));
+            console.log("ab".search(/(?<=a)b/));
+            console.log("abc".replace(/(?<=a)b/, "X"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_backrefs_lookaround"),
+        "true\ntrue\ntrue\nXX\naa,bb,cc\n1\naXc\n"
     );
 }
