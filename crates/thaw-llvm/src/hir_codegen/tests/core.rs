@@ -2047,6 +2047,28 @@ fn passes_callbacks_to_typed_quickjs_calls() {
 }
 
 #[test]
+fn returned_closure_keeps_mutable_state_across_quickjs_callbacks() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b655477696365(
+            callback: () => number,
+        ): number[];
+
+        function* numbers(): Generator<number, void, undefined> {
+            yield 7;
+            yield 8;
+        }
+
+        function main(): void {
+            loadScript("globalThis.invokeTwice = callback => [callback(), callback()];");
+            const inner = numbers();
+            const outer = (): number => inner.next().value ?? -1;
+            console.log(__thaw_typed_js_696e766f6b655477696365(outer).join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "returned_stateful_callback"), "7,8\n");
+}
+
+#[test]
 fn decodes_nullable_typed_quickjs_callback_arguments() {
     let source = r#"
         declare function __thaw_typed_js_72756e4e756c6c43616c6c6261636b(

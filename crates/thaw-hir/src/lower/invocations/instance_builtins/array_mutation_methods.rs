@@ -92,7 +92,7 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::ArrayLit(Vec::new())),
                         )
                     });
-                    let resume = if property.sym == *"throw" {
+                    let (resume, resume_binding) = if property.sym == *"throw" {
                         let [argument] = call.args.as_slice() else {
                             return Err("generator `.throw()` expects exactly one value".into());
                         };
@@ -100,9 +100,12 @@ impl<'a> FnLowerer<'a> {
                             return Err("generator `.throw()` does not accept a spread value".into());
                         }
                         let value = self.lower_expr(&argument.expr)?;
-                        vec![
+                        let value = self.coerce_primitive_to_string(value)?;
+                        let name = format!("__thaw_generator_throw_{}", self.next_binding);
+                        self.next_binding += 1;
+                        (vec![
                             HirExpr::Lit(HirLit::I64(2)),
-                            self.coerce_primitive_to_string(value)?,
+                            HirExpr::Var(name.clone()),
                             generator_placeholder(input_type).ok_or_else(|| {
                                 format!(
                                     "generator input type {input_type:?} has no default value"
@@ -111,9 +114,9 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(completion_name.clone()),
                             HirExpr::Var(request_name.clone()),
                             HirExpr::Var(forced_name.clone()),
-                        ]
+                        ], Some((name, HirType::Str, value)))
                     } else if property.sym == *"return" {
-                        vec![
+                        (vec![
                             HirExpr::Lit(HirLit::I64(1)),
                             HirExpr::Lit(HirLit::Str(String::new())),
                             generator_placeholder(input_type).ok_or_else(|| {
@@ -124,7 +127,7 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(completion_name.clone()),
                             HirExpr::Var(request_name.clone()),
                             HirExpr::Var(forced_name.clone()),
-                        ]
+                        ], None)
                     } else {
                         if call.args.len() > 1
                             || call.args.iter().any(|argument| argument.spread.is_some())
@@ -142,14 +145,16 @@ impl<'a> FnLowerer<'a> {
                                 )
                             })?,
                         };
-                        vec![
+                        let name = format!("__thaw_generator_input_{}", self.next_binding);
+                        self.next_binding += 1;
+                        (vec![
                             HirExpr::Lit(HirLit::I64(0)),
                             HirExpr::Lit(HirLit::Str(String::new())),
-                            input,
+                            HirExpr::Var(name.clone()),
                             HirExpr::Var(completion_name.clone()),
                             HirExpr::Var(request_name.clone()),
                             HirExpr::Var(forced_name.clone()),
-                        ]
+                        ], Some((name, input_type.clone(), input)))
                     };
                     let value_type = if return_element == HirType::Undefined {
                         HirType::Optional(Box::new(element.clone()))
@@ -311,7 +316,7 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Call(Box::new(mapper), vec![producer_call]),
                         )
                     };
-                    let wrapper_params = vec![
+                    let mut wrapper_params = vec![
                         HirParam {
                             name: producer_name.clone(),
                             ty: receiver_type.clone(),
@@ -329,7 +334,7 @@ impl<'a> FnLowerer<'a> {
                             ty: forced_channel.clone(),
                         },
                     ];
-                    let wrapper_args = vec![
+                    let mut wrapper_args = vec![
                         receiver,
                         HirExpr::TypedClosure(
                             return_channel.clone(),
@@ -341,6 +346,10 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::ArrayLit(Vec::new())),
                         ),
                     ];
+                    if let Some((name, ty, value)) = resume_binding {
+                        wrapper_params.push(HirParam { name, ty });
+                        wrapper_args.push(value);
+                    }
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Lambda(
                             Vec::new(),
