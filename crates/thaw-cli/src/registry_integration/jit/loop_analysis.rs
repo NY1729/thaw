@@ -592,6 +592,16 @@ macro_rules! jit_loop_analysis {
         encode_expression(
             loop_statement.right.as_ref(), parameters, &locals, context, &mut source,
         )?;
+        // `for (const x of set)` iterates the Set's elements -- the keys
+        // of the string-keyed dictionary it's modeled as.
+        if jit_expression_kind(&source)?.0 == JitKind::Dictionary {
+            let is_set = matches!(loop_statement.right.as_ref(), Expr::Ident(name)
+                if context.set_locals.contains(name.sym.as_ref()));
+            if !is_set {
+                return None;
+            }
+            source.push("dkeys".into());
+        }
         if source.len() == 1 {
             if let Some(untag) = jit_typed_array_union_untag(&source[0]) {
                 source.push(untag.into());
