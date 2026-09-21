@@ -2093,6 +2093,66 @@ impl<'a> FnLowerer<'a> {
                 // targets always advertises an *identical* plain-call
                 // signature for the exact same instance type, so dropping
                 // `new` here doesn't change the JS semantics for this case.
+                if let Expr::Ident(class) = new_expr.callee.as_ref() {
+                    if class.sym == *"WeakRef" {
+                        // A *strong* approximation: the target is kept
+                        // alive for the enclosing arena's lifetime, so
+                        // `.deref()` always yields it (a real weak
+                        // reference would be collected immediately --
+                        // the only holder is the `WeakRef` itself --
+                        // making `deref()` return `undefined`). Modeled as
+                        // a one-element array, so `.deref()` is a plain
+                        // index-0 read.
+                        let args = new_expr.args.as_deref().unwrap_or_default();
+                        if args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err("`new WeakRef()` does not support spread arguments".into());
+                        }
+                        let [target] = args else {
+                            return Err("`new WeakRef()` expects exactly one target argument".into());
+                        };
+                        let target = self.lower_expr(&target.expr)?;
+                        return Ok(HirExpr::ArrayLit(vec![target]));
+                    }
+                    if matches!(class.sym.as_ref(), "FinalizationRegistry" | "Proxy") {
+                        // No compiled object model exists for these, so
+                        // construct the real QuickJS global and keep it as
+                        // a dynamic handle instead of approximating it:
+                        // `FinalizationRegistry` retains its callback (it
+                        // only fires on collection, which never happens
+                        // observably within an arena), and `Proxy`
+                        // delegates to a genuine JS proxy -- the
+                        // target/handler must be JSON-representable (a
+                        // compiled object is passed by value), matching
+                        // every other dynamic-constructor argument.
+                        let args = new_expr.args.as_deref().unwrap_or_default();
+                        if args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err(format!(
+                                "`new {}()` does not support spread arguments",
+                                class.sym
+                            ));
+                        }
+                        let values = args
+                            .iter()
+                            .map(|argument| {
+                                let value = self.lower_expr_with_expected_type(
+                                    &argument.expr,
+                                    Some(&HirType::JsValue),
+                                )?;
+                                self.coerce_to_declared(&HirType::Json, value)
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        let values =
+                            self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+                        let constructor = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+                        );
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("constructDynamicValue".into())),
+                            vec![constructor, values],
+                        ));
+                    }
+                }
                 if let Expr::Ident(callee) = new_expr.callee.as_ref() {
                     let name = self.resolve_binding(callee.sym.as_ref());
                     if self.signatures.contains_key(&name) {
