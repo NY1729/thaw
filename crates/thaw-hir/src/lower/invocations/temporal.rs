@@ -282,10 +282,15 @@ impl<'a> FnLowerer<'a> {
                     return Err(format!("`{label}` expects exactly one argument"));
                 };
                 let text = self.coerce_primitive_to_string(value.clone())?;
-                let timestamp = HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_temporal_instant_from_string".into())),
-                    vec![text],
-                );
+                // `PlainTime` has no date component, so it parses a
+                // time-of-day (or the time part of a full date-time).
+                let parser = if kind == "plainTime" {
+                    "__thaw_temporal_plain_time_from_string"
+                } else {
+                    "__thaw_temporal_instant_from_string"
+                };
+                let timestamp =
+                    HirExpr::Call(Box::new(HirExpr::Var(parser.into())), vec![text]);
                 Self::temporal_object(kind, timestamp)
             }
             "compare" => {
@@ -387,9 +392,55 @@ impl<'a> FnLowerer<'a> {
             "toPlainDateTime" => Self::temporal_object("plainDateTime", timestamp),
             "toPlainTime" => Self::temporal_object("plainTime", timestamp),
             "toZonedDateTimeISO" => Self::temporal_object("zonedDateTime", timestamp),
+            "total" if kind == "duration" => {
+                let [unit] = arguments.as_slice() else {
+                    return Err(format!("`{label}` expects exactly one unit argument"));
+                };
+                let factor = Self::duration_unit_factor(&Self::duration_unit(unit)?)?;
+                HirExpr::BinOp(
+                    BinOp::Div,
+                    Box::new(timestamp),
+                    Box::new(HirExpr::Lit(HirLit::F64(factor))),
+                )
+            }
             _ => return Ok(None),
         };
         self.wrap_call_argument_bindings(result, &bindings).map(Some)
+    }
+
+    /// The unit name a `Duration.total`/`Duration.round` argument names: a
+    /// bare string, or an object literal's `unit` field.
+    fn duration_unit(argument: &HirExpr) -> Result<String, String> {
+        if let HirExpr::Lit(HirLit::Str(unit)) = argument {
+            return Ok(unit.clone());
+        }
+        if let HirExpr::ObjectLit(fields) = argument {
+            for (name, value) in fields {
+                if name == "unit" {
+                    if let HirExpr::Lit(HirLit::Str(unit)) = value {
+                        return Ok(unit.clone());
+                    }
+                }
+            }
+        }
+        Err("a Duration unit must be a string literal or `{ unit: \"...\" }`".into())
+    }
+
+    fn duration_unit_factor(unit: &str) -> Result<f64, String> {
+        // Temporal accepts both the singular and plural unit spellings.
+        Ok(match unit {
+            "year" | "years" => 365.0 * 86_400_000.0,
+            "month" | "months" => 30.0 * 86_400_000.0,
+            "week" | "weeks" => 7.0 * 86_400_000.0,
+            "day" | "days" => 86_400_000.0,
+            "hour" | "hours" => 3_600_000.0,
+            "minute" | "minutes" => 60_000.0,
+            "second" | "seconds" => 1_000.0,
+            "millisecond" | "milliseconds" => 1.0,
+            "microsecond" | "microseconds" => 0.001,
+            "nanosecond" | "nanoseconds" => 0.000001,
+            other => return Err(format!("unknown Duration unit `{other}`")),
+        })
     }
 
     /// Property reads (`instant.epochMilliseconds`, `date.year`, ...).
@@ -399,6 +450,26 @@ impl<'a> FnLowerer<'a> {
         property: &IdentName,
         kind: &'static str,
     ) -> Result<Option<HirExpr>, String> {
+        // A `Duration`'s components are approximated from its total
+        // milliseconds (a duration isn't stored component-wise, so an
+        // unnormalized `{ minutes: 90 }` reports `hours` 1 rather than 0).
+        if kind == "duration" {
+            let unit = match property.sym.as_ref() {
+                "days" => 0.0,
+                "hours" => 1.0,
+                "minutes" => 2.0,
+                "seconds" => 3.0,
+                "milliseconds" => 4.0,
+                _ => return Ok(None),
+            };
+            let receiver = self.lower_expr(&member.obj)?;
+            let receiver_type = self.infer_expr_type(&receiver)?;
+            let timestamp = Self::temporal_timestamp(receiver, &receiver_type);
+            return Ok(Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_temporal_duration_component".into())),
+                vec![timestamp, HirExpr::Lit(HirLit::F64(unit))],
+            )));
+        }
         let getter = match property.sym.as_ref() {
             "epochMilliseconds" => None,
             "epochSeconds" => Some(("__thaw_temporal_epoch_seconds", false)),
