@@ -149,6 +149,7 @@ impl CompiledRegex {
 /// A group that did not participate is an empty string, matching the native
 /// array element type.
 struct RegexCaptures {
+    start: usize,
     /// `None` for a group that did not participate in the match.
     groups: Vec<Option<String>>,
 }
@@ -156,6 +157,7 @@ struct RegexCaptures {
 impl RegexCaptures {
     fn from_native(captures: regex::Captures<'_>) -> Self {
         Self {
+            start: captures.get(0).map_or(0, |matched| matched.start()),
             groups: (0..captures.len())
                 .map(|index| captures.get(index).map(|group| group.as_str().to_string()))
                 .collect(),
@@ -164,6 +166,7 @@ impl RegexCaptures {
 
     fn from_fancy(captures: fancy_regex::Captures<'_>) -> Self {
         Self {
+            start: captures.get(0).map_or(0, |matched| matched.start()),
             groups: (0..captures.len())
                 .map(|index| captures.get(index).map(|group| group.as_str().to_string()))
                 .collect(),
@@ -499,7 +502,10 @@ pub unsafe extern "C" fn thaw_regex_exec(
         return std::ptr::null_mut();
     };
     let Some((matches, groups)) = with_compiled_regex(&source, &flags, |regex| {
-        regex.captures_at(&value, byte_start).map(|captures| {
+        regex.captures_at(&value, byte_start).and_then(|captures| {
+            if flags.contains('y') && captures.start != byte_start {
+                return None;
+            }
             let groups = regex
                 .capture_names()
                 .into_iter()
@@ -514,7 +520,7 @@ pub unsafe extern "C" fn thaw_regex_exec(
                     })
                 })
                 .collect();
-            (captures.into_positional(), serde_json::Value::Object(groups))
+            Some((captures.into_positional(), serde_json::Value::Object(groups)))
         })
     })
     .flatten() else {
