@@ -799,6 +799,16 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
+        // `obj[Symbol.x](...)` -- dispatch the well-known symbols thaw
+        // models natively.
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let MemberProp::Computed(computed) = &member.prop {
+                if let Some(symbol) = well_known_symbol_from_expr(&computed.expr) {
+                    return self.lower_well_known_symbol_call(member, symbol, call);
+                }
+            }
+        }
+
         let mut callee_name = match callee_expr.as_ref() {
             Expr::Ident(ident) => self.resolve_binding(ident.sym.as_ref()),
             // Console methods have no dedicated HIR node; they are encoded as
@@ -2146,5 +2156,85 @@ impl<'a> FnLowerer<'a> {
         };
         let result = HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), args);
         self.wrap_call_argument_bindings(result, &argument_bindings)
+    }
+
+    /// Lowers `obj[Symbol.x](...)` for the well-known symbols thaw models
+    /// natively (`Symbol.iterator` and `Symbol.toPrimitive`).
+    fn lower_well_known_symbol_call(
+        &mut self,
+        member: &MemberExpr,
+        symbol: &str,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        match symbol {
+            "iterator" => {
+                if !call.args.is_empty() {
+                    return Err("`[Symbol.iterator]()` expects no arguments".into());
+                }
+                // `obj[Symbol.iterator]()` reuses `Iterator.from(obj)`,
+                // which already produces a native iterator for every
+                // receiver thaw models.
+                let from = CallExpr {
+                    span: call.span,
+                    ctxt: call.ctxt,
+                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                        span: call.span,
+                        obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            "Iterator".into(),
+                            call.span,
+                        ))),
+                        prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                            "from".into(),
+                            call.span,
+                        )),
+                    }))),
+                    args: vec![swc_ecma_ast::ExprOrSpread {
+                        spread: None,
+                        expr: member.obj.clone(),
+                    }],
+                    type_args: None,
+                };
+                self.lower_expr(&Expr::Call(from))
+            }
+            "toPrimitive" => {
+                let receiver = self.lower_expr(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                if receiver_type != date_object_type() {
+                    return Err(format!(
+                        "`[Symbol.toPrimitive]` is only supported on a Date, got {receiver_type:?}"
+                    ));
+                }
+                let hint = match call.args.as_slice() {
+                    [] => None,
+                    [argument] if argument.spread.is_none() => match argument.expr.as_ref() {
+                        Expr::Lit(swc_ecma_ast::Lit::Str(value)) => {
+                            Some(value.value.to_string_lossy().into_owned())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let timestamp = HirExpr::PropAccess(
+                    Box::new(receiver),
+                    receiver_type,
+                    "timestamp".to_string(),
+                );
+                match hint.as_deref() {
+                    Some("number") => Ok(timestamp),
+                    Some("string") | Some("default") => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_date_to_string".to_string())),
+                        vec![timestamp],
+                    )),
+                    None => Err(
+                        "`[Symbol.toPrimitive]` requires a literal \"number\"/\"string\"/\"default\" hint"
+                            .into(),
+                    ),
+                    Some(other) => Err(format!("invalid `Symbol.toPrimitive` hint `{other}`")),
+                }
+            }
+            other => Err(format!(
+                "`[Symbol.{other}]()` is not supported (thaw models `Symbol.iterator` and `Symbol.toPrimitive`)"
+            )),
+        }
     }
 }
