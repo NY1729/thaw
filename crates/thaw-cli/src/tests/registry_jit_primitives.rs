@@ -1901,3 +1901,39 @@ fn optional_string_results_use_jit_without_quickjs() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+#[test]
+fn set_operations_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-set-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-set");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function member(value: number, removed: number): number;\nexport declare function addThenHas(value: string): boolean;\nexport declare function emptyThenAdd(value: string): boolean;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.member = function(value, removed) { const s = new Set([1, 2, 3]); s.add(value); s.delete(removed); return s.has(value) ? (s.has(removed) ? 1 : 2) : 3; }; module.exports.addThenHas = function(value) { const s = new Set(['a', 'b']); s.add(value); return s.has(value); }; module.exports.emptyThenAdd = function(value) { const s = new Set(); s.add(value); return s.has(value); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { member, addThenHas, emptyThenAdd } from 'jit-set';\nfunction main(): void { console.log(member(5, 1)); console.log(member(5, 5)); console.log(addThenHas('c')); console.log(emptyThenAdd('z')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "2\n3\ntrue\ntrue\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

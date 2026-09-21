@@ -870,6 +870,44 @@ macro_rules! jit_expressions {
                     output.push("t".into());
                 }
             }
+            Expr::New(new_expr)
+                if set_constructor(new_expr, parameters, locals, context.helpers).is_some() =>
+            {
+                // `new Set()` / `new Set([...])` -- modeled as a
+                // string-keyed dictionary (each element stringified as its
+                // key, the value a harmless duplicate of that key), since
+                // the JIT's dictionary is always string-keyed.
+                output.push("dsempty".into());
+                if let Some(Expr::Array(array)) =
+                    set_constructor(new_expr, parameters, locals, context.helpers)?
+                {
+                    for element in &array.elems {
+                        let element = element.as_ref()?;
+                        if element.spread.is_some() {
+                            return None;
+                        }
+                        let mut key = Vec::new();
+                        encode_expression(
+                            element.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut key,
+                        )?;
+                        match jit_expression_kind(&key)?.0 {
+                            JitKind::String => {}
+                            JitKind::Number => key.push("numstr".into()),
+                            JitKind::Boolean => key.push("boolstr".into()),
+                            _ => return None,
+                        }
+                        output.push("dup".into());
+                        output.extend(key);
+                        output.push("dup".into());
+                        output.push("dsset".into());
+                        output.push("drop".into());
+                    }
+                }
+            }
             Expr::Array(array) => {
                 output.push("arrayempty".into());
                 let mut prefix = None;
@@ -1962,6 +2000,47 @@ macro_rules! jit_expressions {
                     }
                     .into(),
                 );
+            }
+            Expr::Call(call) if set_method(call, locals).is_some() => {
+                let (operation, receiver) = set_method(call, locals)?;
+                let mut encoded = Vec::new();
+                encode_expression(receiver, parameters, locals, context, &mut encoded)?;
+                if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                let mut key = Vec::new();
+                encode_expression(
+                    call.args[0].expr.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut key,
+                )?;
+                match jit_expression_kind(&key)?.0 {
+                    JitKind::String => {}
+                    JitKind::Number => key.push("numstr".into()),
+                    JitKind::Boolean => key.push("boolstr".into()),
+                    _ => return None,
+                }
+                output.extend(encoded);
+                match operation {
+                    "has" => {
+                        output.extend(key);
+                        output.push("dhasown".into());
+                    }
+                    "delete" => {
+                        output.extend(key);
+                        output.push("ddelete".into());
+                    }
+                    "add" => {
+                        output.push("dup".into());
+                        output.extend(key);
+                        output.push("dup".into());
+                        output.push("dsset".into());
+                        output.push("drop".into());
+                    }
+                    _ => return None,
+                }
             }
             Expr::Call(call)
                 if array_method(call, parameters, locals, context.helpers).is_some() =>
