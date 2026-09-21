@@ -982,6 +982,50 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
+        // Temporal (`Temporal.Now`/`Instant`/`Plain*`/`Duration`), built on
+        // the same epoch-millisecond `f64` as `Date`.
+        self.module.add_function(
+            "thaw_temporal_now",
+            f64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_time_zone_id",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_instant_from_string",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_instant_to_string",
+            "thaw_temporal_plain_date_to_string",
+            "thaw_temporal_plain_date_time_to_string",
+            "thaw_temporal_plain_time_to_string",
+            "thaw_temporal_plain_year_month_to_string",
+            "thaw_temporal_plain_month_day_to_string",
+            "thaw_temporal_duration_to_string",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[f64_type.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in ["thaw_temporal_shift", "thaw_temporal_compare"] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(&[f64_type.into(), f64_type.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_temporal_duration_from_string",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         // `new Error(message)`/`new TypeError(...)`/etc. tag the thrown
         // string with a class name ahead of the message (see
         // `thaw_hir::lower::expressions::lowering` and

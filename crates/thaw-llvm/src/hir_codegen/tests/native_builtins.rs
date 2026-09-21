@@ -3724,6 +3724,44 @@ fn compiles_large_bigint_literals() {
     );
 }
 
+/// The native `Temporal` slice: `Now`, `Instant`, `PlainDate`/`PlainDateTime`/
+/// `PlainTime`/`PlainYearMonth`/`PlainMonthDay`, and `Duration`, all on the
+/// epoch-millisecond `f64` `Date` uses (so nanoseconds and a timezone
+/// database are approximated, and the zone is always UTC).
+#[test]
+fn compiles_temporal_values() {
+    let source = r#"
+        function main(): void {
+            console.log(Temporal.Now.timeZoneId());
+            const i = Temporal.Instant.from("2020-01-02T03:04:05.678Z");
+            console.log(i.toString());
+            console.log(i.epochMilliseconds);
+            console.log(i.epochSeconds);
+            console.log(Temporal.Instant.fromEpochMilliseconds(0).toString());
+            console.log(Temporal.Instant.compare(i, Temporal.Instant.from("2020-01-02T03:04:05.678Z")));
+            console.log(i.equals(Temporal.Instant.from("2020-01-02T03:04:05.678Z")));
+            console.log(i.add(Temporal.Duration.from("PT1H")).toString());
+            console.log(i.subtract(Temporal.Duration.from("PT1H")).toString());
+            const d = Temporal.PlainDate.from("2021-03-15");
+            console.log(d.toString());
+            console.log(d.year);
+            console.log(d.month);
+            console.log(d.day);
+            console.log(d.dayOfWeek);
+            console.log(Temporal.PlainDate.compare(d, Temporal.PlainDate.from("2021-03-16")));
+            console.log(d.add(Temporal.Duration.from("P1D")).toString());
+            console.log(Temporal.Duration.from({ hours: 2, minutes: 30 }).toString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_values"),
+        "UTC\n2020-01-02T03:04:05.678Z\n1577934245678\n1577934245.678\n\
+         1970-01-01T00:00:00.000Z\n0\ntrue\n2020-01-02T04:04:05.678Z\n\
+         2020-01-02T02:04:05.678Z\n2021-03-15\n2021\n3\n15\n1\n-1\n\
+         2021-03-16\nPT2H30M\n"
+    );
+}
+
 /// `String.prototype.replace`/`replaceAll` with a *function* replacer,
 /// delegated to QuickJS (`callDynamicMethod`) so the compiled closure is
 /// invoked per match with the real `(match, captures..., offset, string)`
