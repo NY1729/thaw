@@ -1239,7 +1239,11 @@ impl<'a> FnLowerer<'a> {
                 let lowered = (|| -> Result<Vec<HirStmt>, String> {
                     let item_discriminants =
                         self.expression_array_element_discriminants(&for_of.right);
-                    let mut values = self.lower_expr(&for_of.right)?;
+                    let expected = (self.infer_member_receiver_type(&for_of.right)
+                        == Some(HirType::JsValue))
+                    .then_some(HirType::JsValue);
+                    let mut values = self
+                        .lower_expr_with_expected_type(&for_of.right, expected.as_ref())?;
                     let mut values_type = self.infer_expr_type(&values)?;
                     let mut generator_producer = None;
                     if values_type == HirType::Str {
