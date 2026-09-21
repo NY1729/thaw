@@ -14,7 +14,12 @@ fn record_acceptance_metrics(name: &str, build_time: Duration, output: &Path) {
         )
         .unwrap();
     }
-    assert!(build_time < Duration::from_secs(300), "{metrics}");
+    // A generous ceiling, not a tight target: the heaviest examples (sharp,
+    // and hono+react+prisma+postgres, whose bundled Prisma client dominates)
+    // legitimately take minutes on a slow, shared CI runner and can drift by
+    // a few seconds run to run. Still catches a gross regression (a build
+    // that suddenly takes many minutes).
+    assert!(build_time < Duration::from_secs(420), "{metrics}");
     assert!(executable_bytes < 100 * 1024 * 1024, "{metrics}");
 }
 
