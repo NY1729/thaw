@@ -361,9 +361,10 @@ impl<'a> FnLowerer<'a> {
                     };
                     let other = other.clone();
                     let other_type = self.infer_expr_type(&other)?;
-                    if other_type != receiver_type {
+                    if !set_argument_is_compatible(&other_type, &element_type) {
                         return Err(format!(
-                            "native `.{}()` requires a {receiver_type:?} argument, got {other_type:?}",
+                            "native `.{}()` requires a Set or Map argument with element/key type \
+                             {element_type:?}, got {other_type:?}",
                             property.sym
                         ));
                     }
@@ -371,6 +372,7 @@ impl<'a> FnLowerer<'a> {
                         receiver,
                         other,
                         element_type,
+                        other_type,
                         property.sym.as_ref(),
                         spread_bindings,
                     );
@@ -400,9 +402,10 @@ impl<'a> FnLowerer<'a> {
                     };
                     let other = other.clone();
                     let other_type = self.infer_expr_type(&other)?;
-                    if other_type != receiver_type {
+                    if !set_argument_is_compatible(&other_type, &element_type) {
                         return Err(format!(
-                            "native `.{}()` requires a {receiver_type:?} argument, got {other_type:?}",
+                            "native `.{}()` requires a Set or Map argument with element/key type \
+                             {element_type:?}, got {other_type:?}",
                             property.sym
                         ));
                     }
@@ -420,6 +423,7 @@ impl<'a> FnLowerer<'a> {
                         receiver,
                         other,
                         element_type,
+                        other_type,
                         scan_name,
                         test_target,
                         expect_present,

@@ -3836,3 +3836,33 @@ fn compiles_iterator_composition() {
         "1,2,3,4\n[[1,\"a\"],[2,\"b\"]]\n"
     );
 }
+
+/// A `Map<T, _>` is accepted as a set-like argument to the `Set`
+/// composition/predicate methods (its keys are the membership set).
+#[test]
+fn compiles_set_composition_with_map_argument() {
+    let source = r#"
+        function sorted(s: Set<number>): string {
+            const a = Array.from(s);
+            a.sort((x: number, y: number) => x - y);
+            return a.join(",");
+        }
+        function main(): void {
+            const s = new Set<number>([1, 2, 3]);
+            const m = new Map<number, string>();
+            m.set(2, "b");
+            m.set(3, "c");
+            m.set(4, "d");
+            console.log(sorted(s.union(m)));
+            console.log(sorted(s.intersection(m)));
+            console.log(sorted(s.difference(m)));
+            console.log(sorted(s.symmetricDifference(m)));
+            console.log(s.isSubsetOf(m));
+            console.log(s.isDisjointFrom(s));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_composition_map_argument"),
+        "1,2,3,4\n2,3\n1\n1,4\nfalse\nfalse\n"
+    );
+}
