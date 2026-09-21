@@ -902,6 +902,32 @@ impl<'a> FnLowerer<'a> {
                 });
             }
         }
+        // Temporal property reads (`instant.epochMilliseconds`,
+        // `date.year`, ...) computed from the value's timestamp.
+        if let MemberProp::Ident(property) = &member.prop {
+            if matches!(
+                property.sym.as_ref(),
+                "epochMilliseconds"
+                    | "epochSeconds"
+                    | "year"
+                    | "month"
+                    | "day"
+                    | "hour"
+                    | "minute"
+                    | "second"
+                    | "millisecond"
+                    | "dayOfWeek"
+            ) {
+                if let Some(kind) = self
+                    .peek_type_without_lowering(&member.obj)
+                    .and_then(|ty| Self::temporal_kind(&ty))
+                {
+                    if let Some(result) = self.lower_temporal_property(member, property, kind)? {
+                        return Ok(result);
+                    }
+                }
+            }
+        }
         if let Expr::Ident(enum_name) = member.obj.as_ref() {
             let member_name = match &member.prop {
                 MemberProp::Ident(member) => Some(member.sym.to_string()),

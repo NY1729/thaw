@@ -1058,6 +1058,19 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, timestamp, "Date timestamp")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_temporal_now"
+                    | "__thaw_temporal_instant_from_string"
+                    | "__thaw_temporal_shift"
+                    | "__thaw_temporal_compare"
+                    | "__thaw_temporal_duration_from_string" => return Ok(HirType::F64),
+                    "__thaw_temporal_instant_to_string"
+                    | "__thaw_temporal_plain_date_to_string"
+                    | "__thaw_temporal_plain_date_time_to_string"
+                    | "__thaw_temporal_plain_time_to_string"
+                    | "__thaw_temporal_plain_year_month_to_string"
+                    | "__thaw_temporal_plain_month_day_to_string"
+                    | "__thaw_temporal_duration_to_string"
+                    | "__thaw_temporal_time_zone_id" => return Ok(HirType::Str),
                     "__thaw_date_set_full_year"
                     | "__thaw_date_set_month"
                     | "__thaw_date_set_date"

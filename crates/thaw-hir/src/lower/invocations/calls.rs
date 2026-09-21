@@ -204,6 +204,16 @@ impl<'a> FnLowerer<'a> {
             return Ok(invoked);
         }
 
+        // `Temporal.<Namespace>.<method>(...)` / `Temporal.Now.<method>()`.
+        // Checked before the class/static-method resolution below, which
+        // would otherwise try to resolve the `Temporal` namespace as a
+        // variable.
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let Some(result) = self.lower_temporal_namespace_call(member, call)? {
+                return Ok(result);
+            }
+        }
+
         // Expressions that produce typed functions are callable through the
         // same closure ABI as locals. In particular, support `make(x)(y)`.
         if !matches!(callee_expr.as_ref(), Expr::Ident(_) | Expr::Member(_)) {
@@ -611,6 +621,34 @@ impl<'a> FnLowerer<'a> {
                     self.peek_type_without_lowering(&member.obj),
                     Some(HirType::JsValue)
                 );
+                // Temporal instance methods. A receiver that's itself a
+                // Temporal-returning call (a chained `instant.add(...).toString()`)
+                // can't be typed by `peek_type_without_lowering`, so those
+                // method names are attempted directly; `lower_temporal_method`
+                // returns `None` (having only built a pure expression) when
+                // the receiver turns out not to be Temporal.
+                let temporal_method = matches!(
+                    property.sym.as_ref(),
+                    "equals"
+                        | "add"
+                        | "subtract"
+                        | "since"
+                        | "until"
+                        | "toPlainDate"
+                        | "toPlainDateTime"
+                        | "toPlainTime"
+                        | "toZonedDateTimeISO"
+                );
+                let generic_method = matches!(property.sym.as_ref(), "toString" | "toJSON");
+                let receiver_maybe_temporal = self
+                    .peek_type_without_lowering(&member.obj)
+                    .map(|ty| Self::temporal_kind(&ty).is_some())
+                    .unwrap_or(matches!(member.obj.as_ref(), Expr::Call(_) | Expr::New(_)));
+                if temporal_method || (generic_method && receiver_maybe_temporal) {
+                    if let Some(result) = self.lower_temporal_method(member, property, call)? {
+                        return Ok(result);
+                    }
+                }
                 if Self::is_native_instance_builtin(property.sym.as_ref()) && !receiver_is_dynamic {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
