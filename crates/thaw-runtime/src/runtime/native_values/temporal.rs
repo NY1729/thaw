@@ -1,10 +1,11 @@
-// Native approximations for the `Temporal` namespace, built on the same
-// epoch-millisecond `f64` representation as `Date` (there is no
-// nanosecond clock or timezone database). Every `Temporal` value is
-// lowered as an ordinary object `{ timestamp, __temporal_<kind> }`, so the
-// existing object codegen and `.timestamp` field access carry it; these
-// functions only do the parsing, formatting, and arithmetic the methods
-// need.
+// Native approximations for the `Temporal` namespace. Every `Temporal`
+// value is lowered as an ordinary object
+// `{ timestamp, nanoseconds, __temporal_<kind> }`: `timestamp` is the same
+// epoch-millisecond `f64` `Date` uses, and `nanoseconds` is the
+// sub-millisecond remainder (0..999999), so `.timestamp` field access and
+// the object codegen carry it while fractional seconds keep nanosecond
+// precision. There is no nanosecond clock or timezone database, so `Now`
+// and the zone are millisecond/UTC.
 
 #[no_mangle]
 /// `Temporal.Now.instant()` and friends: the current time in epoch
@@ -20,64 +21,192 @@ pub extern "C" fn thaw_temporal_time_zone_id() -> *const c_char {
     arena_c_string("UTC").map_or(std::ptr::null(), |value| value.cast())
 }
 
+/// A fractional-seconds string (1-9 digits) as `(milliseconds,
+/// sub-millisecond nanoseconds)`.
+fn temporal_fraction_nanos(fraction: &str) -> Option<(f64, f64)> {
+    if fraction.is_empty()
+        || fraction.len() > 9
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = fraction.to_string();
+    while digits.len() < 9 {
+        digits.push('0');
+    }
+    let nanos: i64 = digits.parse().ok()?;
+    Some(((nanos / 1_000_000) as f64, (nanos % 1_000_000) as f64))
+}
+
+/// Parses a full ISO 8601 date(-time) into `(milliseconds,
+/// sub-millisecond nanoseconds)`, or `None`. Handles a `Z`/`+HH:mm`
+/// offset and up to 9 fractional-second digits (which `Date.parse`
+/// truncates to milliseconds).
+fn parse_temporal_date_time(text: &str) -> Option<(f64, f64)> {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?)?$",
+        )
+        .unwrap()
+    });
+    let captures = pattern.captures(text.trim())?;
+    let field = |index: usize| -> Option<i64> { captures.get(index)?.as_str().parse().ok() };
+    let year = field(1)?;
+    let month = field(2).unwrap_or(1) as u32;
+    let day = field(3).unwrap_or(1) as u32;
+    let hours = field(4).unwrap_or(0);
+    let minutes = field(5).unwrap_or(0);
+    let seconds = field(6).unwrap_or(0);
+    let (fraction_ms, fraction_ns) = match captures.get(7) {
+        Some(fraction) => temporal_fraction_nanos(fraction.as_str())?,
+        None => (0.0, 0.0),
+    };
+    if !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month) as i64).contains(&(day as i64))
+        || !(0..=23).contains(&hours)
+        || !(0..=59).contains(&minutes)
+        || !(0..=59).contains(&seconds)
+    {
+        return None;
+    }
+    let mut timestamp = days_from_civil(year, month, day) as f64 * 86_400_000.0
+        + hours as f64 * 3_600_000.0
+        + minutes as f64 * 60_000.0
+        + seconds as f64 * 1_000.0
+        + fraction_ms;
+    if let Some(offset) = captures.get(8) {
+        let offset = offset.as_str();
+        if offset != "Z" {
+            let sign = if offset.starts_with('-') { -1.0 } else { 1.0 };
+            let offset_hours: f64 = offset[1..3].parse().ok()?;
+            let offset_minutes: f64 = offset[4..6].parse().ok()?;
+            timestamp -= sign * (offset_hours * 3_600_000.0 + offset_minutes * 60_000.0);
+        }
+    }
+    Some((timestamp, fraction_ns))
+}
+
+/// The `.NNNNNNNNN` suffix for a total of sub-second nanoseconds, with
+/// trailing zeros removed, or empty for a whole second.
+fn temporal_fraction_suffix(nanoseconds: i64) -> String {
+    if nanoseconds == 0 {
+        return String::new();
+    }
+    let mut text = format!(
+        ".{:03}{:06}",
+        nanoseconds / 1_000_000,
+        nanoseconds % 1_000_000
+    );
+    while text.ends_with('0') {
+        text.pop();
+    }
+    text
+}
+
 #[no_mangle]
-/// `Temporal.Instant.from(text)`: reuses `Date.parse`'s ISO 8601 parser,
-/// which already handles a `Z`/`+HH:mm` offset and returns `NaN` on
-/// anything it doesn't recognize.
+/// `Temporal.Instant.from(text)` / `PlainDateTime.from`: the epoch
+/// milliseconds.
 ///
 /// # Safety
 /// `text` must be null or a valid NUL-terminated UTF-8 string.
 pub unsafe extern "C" fn thaw_temporal_instant_from_string(text: *const c_char) -> f64 {
-    unsafe { thaw_date_parse(text) }
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    parse_temporal_date_time(&text)
+        .map(|(milliseconds, _)| milliseconds)
+        .unwrap_or(f64::NAN)
+}
+
+#[no_mangle]
+/// The sub-millisecond nanoseconds of `Temporal.Instant.from(text)` /
+/// `PlainDateTime.from` (0..999999).
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_temporal_instant_nanos_from_string(text: *const c_char) -> f64 {
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    parse_temporal_date_time(&text)
+        .map(|(_, nanoseconds)| nanoseconds)
+        .unwrap_or(f64::NAN)
 }
 
 #[no_mangle]
 /// `Temporal.Instant.prototype.toString()` / `.toJSON()`: ISO 8601 with a
-/// `Z` offset. Temporal's nanosecond precision is approximated by the
-/// `Date` representation's milliseconds.
-pub extern "C" fn thaw_temporal_instant_to_string(timestamp: f64) -> *const c_char {
-    thaw_date_to_iso_string(timestamp)
+/// `Z` offset and up to 9 fractional-second digits.
+pub extern "C" fn thaw_temporal_instant_to_string(
+    timestamp: f64,
+    nanoseconds: f64,
+) -> *const c_char {
+    let Some(fields) = civil_from_timestamp(timestamp) else {
+        return std::ptr::null();
+    };
+    if !(0..=9999).contains(&fields.year) {
+        return std::ptr::null();
+    }
+    let suffix = temporal_fraction_suffix(
+        fields.milliseconds as i64 * 1_000_000 + nanoseconds.round() as i64,
+    );
+    let text = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{suffix}Z",
+        fields.year, fields.month, fields.day, fields.hours, fields.minutes, fields.seconds
+    );
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
-/// Parses `HH:MM`, `HH:MM:SS`, or `HH:MM:SS.sss` (optionally preceded by a
-/// date/`T`) into milliseconds since midnight, or `None` on a bad shape or
+#[no_mangle]
+/// `Temporal.Instant.prototype.epochNanoseconds` as a decimal string (for
+/// the HIR to wrap in a BigInt), computed in `i128` so any date is exact.
+pub extern "C" fn thaw_temporal_epoch_nanoseconds(
+    timestamp: f64,
+    nanoseconds: f64,
+) -> *const c_char {
+    if !timestamp.is_finite() {
+        return std::ptr::null();
+    }
+    let total =
+        (timestamp.round() as i128) * 1_000_000 + (nanoseconds.round() as i128);
+    arena_c_string(&total.to_string()).map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// Parses `HH:MM`, `HH:MM:SS`, or `HH:MM:SS.sssssssss` (optionally
+/// preceded by a date/`T`) into `(milliseconds since midnight,
+/// sub-millisecond nanoseconds)`, or `None` on a bad shape or
 /// out-of-range field.
-fn parse_time_of_day(text: &str) -> Option<f64> {
+fn parse_time_of_day(text: &str) -> Option<(f64, f64)> {
     let text = text.trim();
     // A full date-time string: keep only the time part.
     let time = match text.rsplit_once('T') {
         Some((_, time)) => time.trim_end_matches('Z'),
         None => text,
     };
-    let time = match time.split_once(['+']) {
+    let time = match time.split_once('+') {
         Some((time, _)) => time,
         None => time,
     };
     let mut parts = time.split(':');
     let hours: i64 = parts.next()?.trim().parse().ok()?;
     let minutes: i64 = parts.next()?.trim().parse().ok()?;
-    let (seconds, millis) = match parts.next() {
+    let (seconds, fraction_ms, fraction_ns) = match parts.next() {
         Some(second) => {
             let (whole, fraction) = match second.split_once('.') {
                 Some((whole, fraction)) => (whole, fraction),
                 None => (second, ""),
             };
             let seconds: i64 = whole.trim().parse().ok()?;
-            let mut fraction = fraction.trim().to_string();
-            if fraction.len() > 3 {
-                fraction.truncate(3);
-            }
-            while fraction.len() < 3 {
-                fraction.push('0');
-            }
-            let millis: i64 = if fraction.is_empty() {
-                0
+            let (fraction_ms, fraction_ns) = if fraction.is_empty() {
+                (0.0, 0.0)
             } else {
-                fraction.parse().ok()?
+                temporal_fraction_nanos(fraction.trim())?
             };
-            (seconds, millis)
+            (seconds, fraction_ms, fraction_ns)
         }
-        None => (0, 0),
+        None => (0, 0.0, 0.0),
     };
     if parts.next().is_some()
         || !(0..=23).contains(&hours)
@@ -86,7 +215,10 @@ fn parse_time_of_day(text: &str) -> Option<f64> {
     {
         return None;
     }
-    Some((hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + millis) as f64)
+    Some((
+        (hours * 3_600_000 + minutes * 60_000 + seconds * 1_000) as f64 + fraction_ms,
+        fraction_ns,
+    ))
 }
 
 #[no_mangle]
@@ -102,13 +234,35 @@ pub unsafe extern "C" fn thaw_temporal_plain_time_from_string(text: *const c_cha
         return f64::NAN;
     }
     let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
-    parse_time_of_day(&text).unwrap_or(f64::NAN)
+    parse_time_of_day(&text)
+        .map(|(milliseconds, _)| milliseconds)
+        .unwrap_or(f64::NAN)
+}
+
+#[no_mangle]
+/// The sub-millisecond nanoseconds of `Temporal.PlainTime.from(text)`.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_temporal_plain_time_nanos_from_string(
+    text: *const c_char,
+) -> f64 {
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    parse_time_of_day(&text)
+        .map(|(_, nanoseconds)| nanoseconds)
+        .unwrap_or(f64::NAN)
 }
 
 #[no_mangle]
 /// `Temporal.PlainDate.prototype.toString()`: `YYYY-MM-DD` (no time or
 /// offset), or a null pointer for an unrepresentable date.
-pub extern "C" fn thaw_temporal_plain_date_to_string(timestamp: f64) -> *const c_char {
+pub extern "C" fn thaw_temporal_plain_date_to_string(
+    timestamp: f64,
+    _nanoseconds: f64,
+) -> *const c_char {
     let Some(fields) = civil_from_timestamp(timestamp) else {
         return std::ptr::null();
     };
@@ -120,45 +274,44 @@ pub extern "C" fn thaw_temporal_plain_date_to_string(timestamp: f64) -> *const c
 }
 
 #[no_mangle]
-/// `Temporal.PlainDateTime.prototype.toString()`: `YYYY-MM-DDTHH:MM:SS.sss`
-/// (no offset).
-pub extern "C" fn thaw_temporal_plain_date_time_to_string(timestamp: f64) -> *const c_char {
+/// `Temporal.PlainDateTime.prototype.toString()`:
+/// `YYYY-MM-DDTHH:MM:SS[.fffffffff]` (no offset).
+pub extern "C" fn thaw_temporal_plain_date_time_to_string(
+    timestamp: f64,
+    nanoseconds: f64,
+) -> *const c_char {
     let Some(fields) = civil_from_timestamp(timestamp) else {
         return std::ptr::null();
     };
     if !(0..=9999).contains(&fields.year) {
         return std::ptr::null();
     }
+    let suffix = temporal_fraction_suffix(
+        fields.milliseconds as i64 * 1_000_000 + nanoseconds.round() as i64,
+    );
     let text = format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}",
-        fields.year,
-        fields.month,
-        fields.day,
-        fields.hours,
-        fields.minutes,
-        fields.seconds,
-        fields.milliseconds
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{suffix}",
+        fields.year, fields.month, fields.day, fields.hours, fields.minutes, fields.seconds
     );
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
-/// `Temporal.PlainTime.prototype.toString()`: `HH:MM:SS.sss`.
-pub extern "C" fn thaw_temporal_plain_time_to_string(timestamp: f64) -> *const c_char {
+/// `Temporal.PlainTime.prototype.toString()`: `HH:MM:SS[.fffffffff]`.
+pub extern "C" fn thaw_temporal_plain_time_to_string(
+    timestamp: f64,
+    nanoseconds: f64,
+) -> *const c_char {
     let Some(fields) = civil_from_timestamp(timestamp) else {
         return std::ptr::null();
     };
-    let text = if fields.milliseconds == 0 {
-        format!(
-            "{:02}:{:02}:{:02}",
-            fields.hours, fields.minutes, fields.seconds
-        )
-    } else {
-        format!(
-            "{:02}:{:02}:{:02}.{:03}",
-            fields.hours, fields.minutes, fields.seconds, fields.milliseconds
-        )
-    };
+    let suffix = temporal_fraction_suffix(
+        fields.milliseconds as i64 * 1_000_000 + nanoseconds.round() as i64,
+    );
+    let text = format!(
+        "{:02}:{:02}:{:02}{suffix}",
+        fields.hours, fields.minutes, fields.seconds
+    );
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -185,7 +338,10 @@ pub extern "C" fn thaw_temporal_duration_component(milliseconds: f64, unit: f64)
 
 #[no_mangle]
 /// `Temporal.PlainYearMonth.prototype.toString()`: `YYYY-MM`.
-pub extern "C" fn thaw_temporal_plain_year_month_to_string(timestamp: f64) -> *const c_char {
+pub extern "C" fn thaw_temporal_plain_year_month_to_string(
+    timestamp: f64,
+    _nanoseconds: f64,
+) -> *const c_char {
     let Some(fields) = civil_from_timestamp(timestamp) else {
         return std::ptr::null();
     };
@@ -198,7 +354,10 @@ pub extern "C" fn thaw_temporal_plain_year_month_to_string(timestamp: f64) -> *c
 
 #[no_mangle]
 /// `Temporal.PlainMonthDay.prototype.toString()`: `MM-DD`.
-pub extern "C" fn thaw_temporal_plain_month_day_to_string(timestamp: f64) -> *const c_char {
+pub extern "C" fn thaw_temporal_plain_month_day_to_string(
+    timestamp: f64,
+    _nanoseconds: f64,
+) -> *const c_char {
     let Some(fields) = civil_from_timestamp(timestamp) else {
         return std::ptr::null();
     };
@@ -217,13 +376,25 @@ pub extern "C" fn thaw_temporal_shift(timestamp: f64, delta_milliseconds: f64) -
 /// `Temporal.*.compare(a, b)` and `.equals(other)`: `-1`/`0`/`1` (or `NaN`
 /// when either side is an invalid timestamp), matching the spec's
 /// comparator. `equals` is this call compared against `0` at the HIR level.
-pub extern "C" fn thaw_temporal_compare(left: f64, right: f64) -> f64 {
-    if left.is_nan() || right.is_nan() {
+pub extern "C" fn thaw_temporal_compare(
+    left_milliseconds: f64,
+    left_nanoseconds: f64,
+    right_milliseconds: f64,
+    right_nanoseconds: f64,
+) -> f64 {
+    if left_milliseconds.is_nan() || right_milliseconds.is_nan() {
         return f64::NAN;
     }
-    if left < right {
+    if left_milliseconds != right_milliseconds {
+        return if left_milliseconds < right_milliseconds {
+            -1.0
+        } else {
+            1.0
+        };
+    }
+    if left_nanoseconds < right_nanoseconds {
         -1.0
-    } else if left > right {
+    } else if left_nanoseconds > right_nanoseconds {
         1.0
     } else {
         0.0
@@ -308,7 +479,10 @@ pub unsafe extern "C" fn thaw_temporal_duration_from_string(text: *const c_char)
 /// `Temporal.Duration.prototype.total()`/`.toString()` support: a duration
 /// held as milliseconds renders back as an ISO 8601 string with the
 /// largest exact components (hours/minutes/seconds/milliseconds).
-pub extern "C" fn thaw_temporal_duration_to_string(milliseconds: f64) -> *const c_char {
+pub extern "C" fn thaw_temporal_duration_to_string(
+    milliseconds: f64,
+    _nanoseconds: f64,
+) -> *const c_char {
     if !milliseconds.is_finite() {
         return std::ptr::null();
     }

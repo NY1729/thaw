@@ -3790,9 +3790,10 @@ fn compiles_large_bigint_literals() {
 }
 
 /// The native `Temporal` slice: `Now`, `Instant`, `PlainDate`/`PlainDateTime`/
-/// `PlainTime`/`PlainYearMonth`/`PlainMonthDay`, and `Duration`, all on the
-/// epoch-millisecond `f64` `Date` uses (so nanoseconds and a timezone
-/// database are approximated, and the zone is always UTC).
+/// `PlainTime`/`PlainYearMonth`/`PlainMonthDay`, and `Duration`, on the
+/// epoch-millisecond `f64` `Date` uses plus a sub-millisecond nanoseconds
+/// field (so fractional seconds keep nanosecond precision; there is no
+/// timezone database, and the zone is always UTC).
 #[test]
 fn compiles_temporal_values() {
     let source = r#"
@@ -3825,14 +3826,26 @@ fn compiles_temporal_values() {
             console.log(t.toString());
             console.log(t.hour);
             console.log(Temporal.PlainTime.from("2022-06-07T08:09:10").toString());
+            const precise = Temporal.Instant.from("2020-01-02T03:04:05.678123456Z");
+            console.log(precise.toString());
+            console.log(precise.epochNanoseconds.toString());
+            console.log(Temporal.Instant.compare(
+                precise,
+                Temporal.Instant.from("2020-01-02T03:04:05.678123457Z"),
+            ));
+            console.log(precise.equals(Temporal.Instant.from("2020-01-02T03:04:05.678123456Z")));
+            console.log(Temporal.PlainTime.from("12:30:45.123456789").toString());
+            console.log(Temporal.PlainDateTime.from("2022-06-07T08:09:10.111222333").toString());
         }
     "#;
     assert_eq!(
         compile_and_run(source, "temporal_values"),
         "UTC\n2020-01-02T03:04:05.678Z\n1577934245678\n1577934245.678\n\
-         1970-01-01T00:00:00.000Z\n0\ntrue\n2020-01-02T04:04:05.678Z\n\
+         1970-01-01T00:00:00Z\n0\ntrue\n2020-01-02T04:04:05.678Z\n\
          2020-01-02T02:04:05.678Z\n2021-03-15\n2021\n3\n15\n1\n-1\n\
-         2021-03-16\nPT2H30M\n2\n30\n150\n1.5\n12:30:45.678\n12\n08:09:10\n"
+         2021-03-16\nPT2H30M\n2\n30\n150\n1.5\n12:30:45.678\n12\n08:09:10\n\
+         2020-01-02T03:04:05.678123456Z\n1577934245678123456\n-1\ntrue\n\
+         12:30:45.123456789\n2022-06-07T08:09:10.111222333\n"
     );
 }
 
