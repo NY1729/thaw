@@ -187,11 +187,11 @@ impl<'a> FnLowerer<'a> {
             ("Array", "of" | "from" | "isArray")
                 | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
                 | ("Map", "groupBy")
-                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
+                | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions")
                 | ("JSON", "stringify")
                 | ("Iterator", "from")
                 | ("RegExp", "escape")
-                | ("Reflect", "ownKeys")
+                | ("Reflect", "ownKeys" | "has" | "get" | "set" | "deleteProperty")
                 | ("Symbol", "for" | "keyFor")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("String", "fromCharCode" | "fromCodePoint")
@@ -231,6 +231,73 @@ impl<'a> FnLowerer<'a> {
                             vec![value],
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Object"
+                        && matches!(
+                            property.sym.as_ref(),
+                            "freeze" | "seal" | "preventExtensions"
+                        )
+                    {
+                        let label = format!("Object.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [value] = arguments.as_slice() else {
+                            return Err(format!("`{label}` expects exactly one argument"));
+                        };
+                        // No-op: a thaw value has a fixed native layout with
+                        // no runtime extensibility/mutability tracking, so
+                        // there is nothing to change. The call returns its
+                        // argument, exactly as JS's do.
+                        return self.wrap_call_argument_bindings(value.clone(), &bindings);
+                    }
+                    if object.sym == *"Reflect"
+                        && matches!(property.sym.as_ref(), "has" | "get" | "deleteProperty")
+                    {
+                        let label = format!("Reflect.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [target, key] = arguments.as_slice() else {
+                            return Err(format!("`{label}` expects exactly two arguments"));
+                        };
+                        if property.sym == *"has" {
+                            let result = self.lower_has_own_value(target.clone(), key.clone())?;
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        // A literal key resolves against a fixed object's
+                        // own fields at lowering time; a `Json` receiver
+                        // defers to the runtime.
+                        let key_literal = match key {
+                            HirExpr::Lit(HirLit::Str(value)) => Some(value.clone()),
+                            _ => None,
+                        };
+                        let target_type = self.infer_expr_type(target)?;
+                        match (property.sym.as_ref(), &target_type, key_literal) {
+                            ("get", HirType::Object(fields), Some(key)) => {
+                                let result = if fields.iter().any(|(name, _)| name == &key) {
+                                    HirExpr::PropAccess(Box::new(target.clone()), target_type, key)
+                                } else {
+                                    HirExpr::Lit(HirLit::Undefined)
+                                };
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
+                            ("get", HirType::Json, Some(key)) => {
+                                let result = HirExpr::JsonGet(Box::new(target.clone()), key);
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
+                            ("deleteProperty", HirType::Json, Some(key)) => {
+                                let result = HirExpr::JsonDelete(
+                                    Box::new(target.clone()),
+                                    Box::new(HirExpr::Lit(HirLit::Str(key))),
+                                );
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "`{label}` currently requires a fixed object or JSON \
+                                     receiver and a string-literal key, got {target_type:?}"
+                                ))
+                            }
+                        }
                     }
                     if object.sym == *"Buffer" {
                         if property.sym == *"isBuffer" {

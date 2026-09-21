@@ -131,11 +131,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return Ok(result);
             }
-            "__thaw_string_slice" | "__thaw_string_substring" => {
-                let runtime = if name == "__thaw_string_slice" {
-                    "thaw_string_slice"
-                } else {
-                    "thaw_string_substring"
+            "__thaw_string_slice" | "__thaw_string_substring" | "__thaw_string_substr" => {
+                let runtime = match name {
+                    "__thaw_string_slice" => "thaw_string_slice",
+                    "__thaw_string_substring" => "thaw_string_substring",
+                    _ => "thaw_string_substr",
                 };
                 let arguments = args
                     .iter()

@@ -3294,3 +3294,38 @@ fn compiles_symbol_registry_and_description() {
         "true\nfalse\nk\nhello\nreg\nsymbol\nfalse\nSymbol(x)\n"
     );
 }
+
+/// `Object.freeze`/`seal`/`preventExtensions` (identity in thaw's fixed
+/// layout), `String.prototype.substr` (Annex B), and `Reflect.has`/`get`/
+/// `deleteProperty`.
+#[test]
+fn compiles_reflect_object_static_and_substr() {
+    let source = r#"
+        function main(): void {
+            const frozen = Object.freeze({ a: 1, b: 2 });
+            console.log(frozen.a + frozen.b);
+            const sealed = Object.seal({ c: 3 });
+            console.log(sealed.c);
+            const prevented = Object.preventExtensions({ d: 4 });
+            console.log(prevented.d);
+
+            console.log("abcdef".substr(1, 3));
+            console.log("abcdef".substr(-2));
+            console.log("abcdef".substr(2));
+
+            const o = { a: 7 };
+            console.log(Reflect.has(o, "a"));
+            console.log(Reflect.has(o, "z"));
+            console.log(Reflect.get(o, "a"));
+            console.log(Reflect.get(o, "z") === undefined);
+            const j = JSON.parse("{\"a\":5,\"b\":6}");
+            console.log(Reflect.get(j, "a"));
+            console.log(Reflect.deleteProperty(j, "a"));
+            console.log(JSON.stringify(j));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "reflect_object_static_substr"),
+        "3\n3\n4\nbcd\nef\ncdef\ntrue\nfalse\n7\ntrue\n5\ntrue\n{\"b\":6}\n"
+    );
+}
