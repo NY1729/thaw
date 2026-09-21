@@ -771,3 +771,72 @@ pub unsafe extern "C" fn thaw_symbol_to_string(symbol: *const c_char) -> *const 
 pub extern "C" fn thaw_symbol_key(symbol: *const c_char) -> *const c_char {
     symbol
 }
+
+/// The process-wide `Symbol.for` registry: description -> registered symbol
+/// text, so `Symbol.for("x")` returns the *same* symbol every time.
+fn symbol_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[no_mangle]
+/// # Safety
+/// `description` must point to a valid NUL-terminated UTF-8 string.
+///
+/// `Symbol.for(description)` -- the global symbol registry, keyed by
+/// description, so repeated calls with the same description share one
+/// symbol.
+pub unsafe extern "C" fn thaw_symbol_for(description: *const c_char) -> *const c_char {
+    if description.is_null() {
+        return std::ptr::null();
+    }
+    let description = unsafe { CStr::from_ptr(description) }
+        .to_string_lossy()
+        .into_owned();
+    let mut registry = symbol_registry().lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(symbol) = registry.get(&description) {
+        return arena_c_string(symbol).map_or(std::ptr::null(), |value| value.cast());
+    }
+    let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let symbol = format!("\u{3}{id}:{description}");
+    registry.insert(description, symbol.clone());
+    arena_c_string(&symbol).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+/// `symbol` must point to a valid NUL-terminated UTF-8 string.
+///
+/// `Symbol.keyFor(symbol)`: the registered key, or the empty string for a
+/// symbol that was not created by `Symbol.for`.
+pub unsafe extern "C" fn thaw_symbol_key_for(symbol: *const c_char) -> *const c_char {
+    if symbol.is_null() {
+        return std::ptr::null();
+    }
+    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
+    let registry = symbol_registry().lock().unwrap_or_else(|error| error.into_inner());
+    let key = registry
+        .iter()
+        .find(|(_, value)| value.as_str() == symbol.as_ref())
+        .map(|(key, _)| key.clone())
+        .unwrap_or_default();
+    arena_c_string(&key).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+/// `symbol` must point to a value returned by `thaw_symbol_new`/
+/// `thaw_symbol_for`.
+///
+/// The description part of any symbol (`Symbol("x").description`), or the
+/// empty string for a symbol with no description.
+pub unsafe extern "C" fn thaw_symbol_description(symbol: *const c_char) -> *const c_char {
+    if symbol.is_null() {
+        return std::ptr::null();
+    }
+    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
+    let description = symbol.split_once(':').map_or("", |value| value.1);
+    arena_c_string(description).map_or(std::ptr::null(), |value| value.cast())
+}

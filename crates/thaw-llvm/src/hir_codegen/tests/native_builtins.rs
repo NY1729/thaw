@@ -3270,3 +3270,26 @@ fn compiles_additional_standard_builtins() {
         "/ab/gi\n/x/\n1.23e+3\n1.230e-4\n1.23456e+2\nbc\nbc\nabc\ncdef\ntrue\nfalse\ntrue\ntrue\nfalse\n"
     );
 }
+
+/// `Symbol` static registry and description accessors:
+/// `Symbol.for(x) === Symbol.for(x)` (one global symbol per description),
+/// `Symbol.keyFor`, `Symbol.prototype.description`, and confirming two
+/// `Symbol(x)` calls stay distinct.
+#[test]
+fn compiles_symbol_registry_and_description() {
+    let source = r#"
+        function main(): void {
+            console.log(Symbol.for("x") === Symbol.for("x"));
+            console.log(Symbol.for("x") === Symbol.for("y"));
+            console.log(Symbol.keyFor(Symbol.for("k")));
+            console.log(Symbol("hello").description);
+            console.log(Symbol.for("reg").description);
+            console.log(typeof Symbol("x"));
+            console.log(Symbol("x") === Symbol("x"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "symbol_registry"),
+        "true\nfalse\nk\nhello\nreg\nsymbol\nfalse\n"
+    );
+}

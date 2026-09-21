@@ -216,7 +216,12 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_string_concat" => return Some(HirType::Str),
                         "__thaw_i64_to_string" => return Some(HirType::Str),
                         "__thaw_bytes_read_i64" => return Some(HirType::I64),
-                        "__thaw_symbol_new" => return Some(HirType::Symbol),
+                        "__thaw_symbol_new" | "__thaw_symbol_for" => {
+                            return Some(HirType::Symbol)
+                        }
+                        "__thaw_symbol_key_for" | "__thaw_symbol_description" => {
+                            return Some(HirType::Str)
+                        }
                         "__thaw_symbol_to_string" => return Some(HirType::Str),
                         "__thaw_symbol_key" => return Some(HirType::Str),
                         "__thaw_string_length"
@@ -368,7 +373,15 @@ impl<'ctx> HirCompiler<'ctx> {
         let rhs_value = self.compile_expr(rhs)?;
 
         if op == BinOp::EqEqEq {
-            let string_operands = self.expr_is_string(lhs) && self.expr_is_string(rhs);
+            // A symbol is represented as the same tagged string a `Str` is,
+            // so it compares by content (identity): `Symbol.for("x")` is
+            // one symbol, while two `Symbol("x")` calls differ by their
+            // own id. Without this, symbol operands fell to a raw pointer
+            // compare against two separate arena allocations.
+            let string_like = |expr: &HirExpr| {
+                self.expr_is_string(expr) || self.expr_hir_type(expr) == Some(HirType::Symbol)
+            };
+            let string_operands = string_like(lhs) && string_like(rhs);
             return match (lhs_value, rhs_value) {
                 (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => self
                     .builder

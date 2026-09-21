@@ -192,6 +192,7 @@ impl<'a> FnLowerer<'a> {
                 | ("Iterator", "from")
                 | ("RegExp", "escape")
                 | ("Reflect", "ownKeys")
+                | ("Symbol", "for" | "keyFor")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("String", "fromCharCode" | "fromCodePoint")
                 | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "f16round" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
@@ -206,6 +207,31 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+                    if object.sym == *"Symbol" {
+                        let label = format!("Symbol.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [value] = arguments.as_slice() else {
+                            return Err(format!("`{label}` expects exactly one argument"));
+                        };
+                        // `Symbol.for` takes a string description;
+                        // `Symbol.keyFor` takes the symbol itself.
+                        let value = if property.sym == *"for" {
+                            self.coerce_primitive_to_string(value.clone())?
+                        } else {
+                            value.clone()
+                        };
+                        let intrinsic = if property.sym == *"for" {
+                            "__thaw_symbol_for"
+                        } else {
+                            "__thaw_symbol_key_for"
+                        };
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var(intrinsic.to_string())),
+                            vec![value],
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     if object.sym == *"Buffer" {
                         if property.sym == *"isBuffer" {
                             let (arguments, mut bindings) =
