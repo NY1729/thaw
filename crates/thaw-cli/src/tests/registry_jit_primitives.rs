@@ -1978,6 +1978,58 @@ fn set_composition_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn set_composition_accepts_an_opaque_set_like_object() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-set-like-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-set-like");
+    let factory = registry.join("set-like-factory");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(&factory).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function combine(other: JsValue): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.combine = function(other) { const x = new Set(['a', 'b']); const union = x.union(other); return union.has('c') ? 1 : 0; };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        factory.join("package.d.ts"),
+        "export declare function makeSetLike(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        factory.join("bundle.js"),
+        "module.exports.makeSetLike = function() { return { size: 2, has(value) { return value === 'b' || value === 'c'; }, keys() { return ['b', 'c'][Symbol.iterator](); } }; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { combine } from 'jit-set-like';\nimport { makeSetLike } from 'set-like-factory';\nfunction main(): void { console.log(combine(makeSetLike())); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert!(!manifest["quickjs_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["function"] == "combine"));
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn set_size_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-set-size-{}",
@@ -2209,7 +2261,7 @@ fn map_and_set_for_each_use_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.mapTotal = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); let result = 0; m.forEach((value, key, map) => { const doubled = value * 2; map.has(key); result += doubled; }); return result; }; module.exports.setTotal = function() { const s = new Set(['x', 'yz']); let result = 0; s.forEach((value, key, set) => { let length = 0; length = value.length; set.has(key); result += length; }); return result; };\n",
+        "module.exports.mapTotal = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); let result = 0; m.forEach((value, key, map) => { const doubled = value * 2; map.has(key); result += doubled; }); return result; }; module.exports.setTotal = function() { const s = new Set(['x', 'yz']); let result = 0; s.forEach((value, key, set) => { let length = 0; let extra = 1; length = value.length; set.has(key); result += length + extra; return value; }); return result; };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -2225,7 +2277,7 @@ fn map_and_set_for_each_use_jit_without_quickjs() {
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "9\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "11\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

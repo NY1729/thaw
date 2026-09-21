@@ -378,7 +378,7 @@ macro_rules! jit_loop_analysis {
         Some(())
     }
 
-    fn collection_for_each_call<'a>(expression: &'a Expr) -> Option<(&'a Ident, &'a Expr)> {
+    fn collection_for_each_call(expression: &Expr) -> Option<(&Ident, &Expr)> {
         let Expr::Call(call) = expression else {
             return None;
         };
@@ -525,14 +525,25 @@ macro_rules! jit_loop_analysis {
         let mut callback_effects = Vec::new();
         let mut callback_initializers = Vec::new();
         let mut callback_mutable = mutable.clone();
+        let callback_mutations = steps
+            .iter()
+            .filter_map(|step| match step {
+                LocalStep::Assign { name, .. } | LocalStep::Update { name, .. } => {
+                    Some(name.sym.as_ref())
+                }
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
         let mut declarations_done = false;
         for step in steps {
             match step {
                 LocalStep::Declare {
                     name,
                     initializer,
-                    mutable: false,
-                } if !declarations_done => {
+                    mutable,
+                } if !declarations_done
+                    && (!mutable || !callback_mutations.contains(name.sym.as_ref())) =>
+                {
                     if callback_locals.contains_key(name.sym.as_ref()) || !pure_local(initializer) {
                         return None;
                     }
@@ -551,7 +562,7 @@ macro_rules! jit_loop_analysis {
                     name,
                     initializer,
                     mutable: true,
-                } if !declarations_done => {
+                } if !declarations_done && callback_mutations.contains(name.sym.as_ref()) => {
                     if callback_locals.contains_key(name.sym.as_ref()) || !pure_local(initializer) {
                         return None;
                     }
@@ -687,15 +698,17 @@ macro_rules! jit_loop_analysis {
                             output,
                         )?,
                         Stmt::Return(statement) => {
-                            encode_loop_expression(
-                                statement.arg.as_deref()?,
-                                parameters,
-                                &callback_locals,
-                                &callback_mutable,
-                                kinds,
+                            if let Some(value) = statement.arg.as_deref() {
+                                encode_loop_expression(
+                                    value,
+                                    parameters,
+                                    &callback_locals,
+                                    &callback_mutable,
+                                    kinds,
                                 context,
                                 output,
                             )?;
+                        }
                         }
                         _ => return None,
                     }

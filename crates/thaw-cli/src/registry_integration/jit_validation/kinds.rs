@@ -70,7 +70,10 @@ fn jit_rejection_reason(
 
 fn jit_diagnostic_type_supported(ty: &thaw_hir::HirType) -> bool {
     match ty {
-        thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => true,
+        thaw_hir::HirType::F64
+        | thaw_hir::HirType::Bool
+        | thaw_hir::HirType::Str
+        | thaw_hir::HirType::JsValue => true,
         thaw_hir::HirType::Array(element) | thaw_hir::HirType::Dictionary(element) => {
             matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str)
         }
@@ -540,4 +543,3 @@ fn dynamic_array_comparison_result(token: &str) -> Option<JitKind> {
         _ => unreachable!(),
     })
 }
-

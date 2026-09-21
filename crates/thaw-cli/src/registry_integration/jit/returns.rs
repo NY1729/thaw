@@ -1366,14 +1366,27 @@ macro_rules! jit_returns {
         Some(())
     }
 
+    /// An opaque host handle (a `JsValue` parameter) can only cross the
+    /// dedicated host ABI (`setlike`), never a native dynamic primitive
+    /// conversion -- such a conversion must fall back to the host runtime.
+    fn is_opaque_handle_token(token: &str) -> bool {
+        token.starts_with('h') || token.starts_with("lh")
+    }
+
     fn append_string(mut expression: Vec<String>, output: &mut Vec<String>) -> Option<()> {
         let kind = jit_expression_kind(&expression)?.0;
+        let opaque = expression.iter().any(|token| is_opaque_handle_token(token));
         output.append(&mut expression);
         match kind {
             JitKind::Number => output.push("numstr".into()),
             JitKind::Boolean => output.push("boolstr".into()),
             JitKind::String => {}
-            JitKind::Dynamic => output.push("dynstr".into()),
+            JitKind::Dynamic => {
+                if opaque {
+                    return None;
+                }
+                output.push("dynstr".into());
+            }
             JitKind::Array | JitKind::Dictionary => return None,
         }
         Some(())
@@ -1381,10 +1394,16 @@ macro_rules! jit_returns {
 
     fn append_number(mut expression: Vec<String>, output: &mut Vec<String>) -> Option<()> {
         let kind = jit_expression_kind(&expression)?.0;
+        let opaque = expression.iter().any(|token| is_opaque_handle_token(token));
         output.append(&mut expression);
         match kind {
             JitKind::String => output.push("strnum".into()),
-            JitKind::Dynamic => output.push("dynnum".into()),
+            JitKind::Dynamic => {
+                if opaque {
+                    return None;
+                }
+                output.push("dynnum".into());
+            }
             JitKind::Array | JitKind::Dictionary => return None,
             JitKind::Number | JitKind::Boolean => {}
         }

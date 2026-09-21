@@ -206,6 +206,7 @@ impl NumericProgram {
                     "setissuperset" => Some(NumericValue::SetIsSupersetOf),
                     "setisdisjoint" => Some(NumericValue::SetIsDisjointFrom),
                     "setfromarray" => Some(NumericValue::SetFromArray),
+                    "setlike" => Some(NumericValue::SetLikeDictionary),
                     "dnappend" => Some(NumericValue::DictionaryAppend(0)),
                     "dbappend" => Some(NumericValue::DictionaryAppend(1)),
                     "dsappend" => Some(NumericValue::DictionaryAppend(2)),
@@ -1147,6 +1148,7 @@ impl NumericProgram {
                                 .strip_prefix('a')
                                 .or_else(|| value.strip_prefix('b'))
                                 .or_else(|| value.strip_prefix('s'))
+                                .or_else(|| value.strip_prefix('h'))
                                 .or_else(|| value.strip_prefix("rn"))
                                 .or_else(|| value.strip_prefix("rb"))
                                 .or_else(|| value.strip_prefix("rs"))

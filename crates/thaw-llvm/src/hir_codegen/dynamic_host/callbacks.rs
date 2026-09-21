@@ -213,6 +213,18 @@ impl<'ctx> HirCompiler<'ctx> {
         path: &str,
         output: &mut Vec<BasicValueEnum<'ctx>>,
     ) -> Result<(), String> {
+        if *ty == HirType::JsValue {
+            output.push(
+                self.builder
+                    .build_bit_cast(
+                        value.into_int_value(),
+                        self.context.f64_type(),
+                        &format!("{path}_handle_slot"),
+                    )
+                    .map_err(|error| error.to_string())?,
+            );
+            return Ok(());
+        }
         if let HirType::Union(elements) = ty {
             if !jit_argument_tagged_union(elements) {
                 return Err(format!("unsupported JIT union argument {ty:?}"));

@@ -224,6 +224,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(slot, value)
                     .map_err(|error| error.to_string())?;
             }
+            let dynamic_object_query = if signature.params.contains(&HirType::JsValue) {
+                self.module
+                    .get_function("thaw_js_dynamic_object_query")
+                    .unwrap()
+                    .as_global_value()
+                    .as_pointer_value()
+            } else {
+                self.context.ptr_type(Default::default()).const_null()
+            };
             let result = self
                 .builder
                 .build_call(
@@ -451,6 +460,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             .as_global_value()
                             .as_pointer_value()
                             .into(),
+                        dynamic_object_query.into(),
                     ],
                     "jit_numeric_result",
                 )
