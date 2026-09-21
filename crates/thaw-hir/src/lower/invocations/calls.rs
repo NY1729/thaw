@@ -1189,7 +1189,10 @@ impl<'a> FnLowerer<'a> {
         // `Object`/`Json` all share the same pointer representation, so
         // this has to be resolved here at lowering time using the
         // argument's inferred type, not deferred to codegen.
-        if matches!(callee_name.as_str(), "Number" | "String" | "Boolean") {
+        if matches!(
+            callee_name.as_str(),
+            "Number" | "String" | "Boolean" | "BigInt"
+        ) {
             let [arg] = call.args.as_slice() else {
                 return Err(format!("`{callee_name}` expects exactly one argument"));
             };
@@ -1294,6 +1297,26 @@ impl<'a> FnLowerer<'a> {
                 )
             {
                 return self.coerce_primitive_to_number(value);
+            }
+            if callee_name == "BigInt" {
+                return match ty {
+                    HirType::I64 => Ok(value),
+                    HirType::F64 => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_i64_from_number".to_string())),
+                        vec![value],
+                    )),
+                    HirType::Str => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_i64_from_string".to_string())),
+                        vec![value],
+                    )),
+                    HirType::Bool => Ok(HirExpr::Conditional(
+                        Box::new(value),
+                        Box::new(HirExpr::Lit(HirLit::I64(1))),
+                        Box::new(HirExpr::Lit(HirLit::I64(0))),
+                        HirType::I64,
+                    )),
+                    other => Err(format!("`BigInt` cannot convert a value of type {other:?}")),
+                };
             }
             if ty != HirType::Json {
                 return Err(format!(

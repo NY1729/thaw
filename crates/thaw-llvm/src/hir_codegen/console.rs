@@ -150,7 +150,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let rendered = self
                 .builder
                 .build_call(
-                    self.module.get_function("thaw_i64_to_string").unwrap(),
+                    self.module.get_function("thaw_i64_to_bigint_string").unwrap(),
                     &[value.into()],
                     "console_i64",
                 )

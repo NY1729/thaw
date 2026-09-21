@@ -186,6 +186,7 @@ impl<'a> FnLowerer<'a> {
             (object, property),
             ("Array", "of" | "from" | "isArray" | "fromAsync")
                 | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
+                | ("BigInt", "asIntN" | "asUintN")
                 | ("Map", "groupBy")
                 | ("Object", "groupBy" | "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is" | "freeze" | "seal" | "preventExtensions" | "isFrozen" | "isSealed" | "isExtensible" | "getOwnPropertyDescriptor" | "defineProperty" | "create" | "getPrototypeOf")
                 | ("JSON", "stringify")
@@ -2088,6 +2089,36 @@ impl<'a> FnLowerer<'a> {
                         bindings.push((left_name, left_type, left_value));
                         bindings.push((right_name, right_type, right_value));
                         return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"BigInt"
+                        && matches!(property.sym.as_ref(), "asIntN" | "asUintN")
+                    {
+                        // `BigInt.asIntN(bits, value)` / `asUintN(bits, value)`:
+                        // thaw's BigInt is a fixed-width `i64`, so these are
+                        // native bit-mask operations (see the runtime's
+                        // `thaw_i64_as_int_n`/`thaw_i64_as_uint_n`), not the
+                        // unbounded-precision wraparound real JS performs.
+                        let label = format!("BigInt.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [bits, value] = arguments.as_slice() else {
+                            return Err(format!("`{label}` expects two arguments"));
+                        };
+                        let bits = self.coerce_primitive_to_number(bits.clone())?;
+                        let value = value.clone();
+                        self.expect_type(&HirType::I64, &value, &format!("{label} value"))?;
+                        let intrinsic = if property.sym == *"asIntN" {
+                            "__thaw_i64_as_int_n"
+                        } else {
+                            "__thaw_i64_as_uint_n"
+                        };
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var(intrinsic.to_string())),
+                                vec![value, bits],
+                            ),
+                            &bindings,
+                        );
                     }
                     if object.sym == *"Number"
                         && matches!(property.sym.as_ref(), "parseFloat" | "parseInt")

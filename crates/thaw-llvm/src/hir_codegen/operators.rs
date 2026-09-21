@@ -214,8 +214,14 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_stringify_keys_string_space"
                         | "fetch"
                         | "__thaw_string_concat" => return Some(HirType::Str),
-                        "__thaw_i64_to_string" => return Some(HirType::Str),
-                        "__thaw_bytes_read_i64" => return Some(HirType::I64),
+                        "__thaw_i64_to_string"
+                        | "__thaw_i64_to_bigint_string"
+                        | "__thaw_i64_to_radix_string" => return Some(HirType::Str),
+                        "__thaw_i64_from_number"
+                        | "__thaw_i64_from_string"
+                        | "__thaw_i64_as_int_n"
+                        | "__thaw_i64_as_uint_n"
+                        | "__thaw_bytes_read_i64" => return Some(HirType::I64),
                         "__thaw_symbol_new" | "__thaw_symbol_for" => {
                             return Some(HirType::Symbol)
                         }

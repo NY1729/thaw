@@ -167,6 +167,45 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("bigint string conversion returned no value".into());
             }
+            "__thaw_i64_from_number" | "__thaw_i64_from_string" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let value = self.compile_expr(value)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
+                        &[value.into()],
+                        "bigint_conversion",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("bigint conversion returned no value".into());
+            }
+            "__thaw_i64_as_int_n"
+            | "__thaw_i64_as_uint_n"
+            | "__thaw_i64_to_radix_string" => {
+                let [value, bits] = args else {
+                    return Err(format!("{name} expects two operands"));
+                };
+                let value = self.compile_expr(value)?;
+                let bits = self.compile_expr(bits)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
+                        &[value.into(), bits.into()],
+                        "bigint_radix",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("bigint radix conversion returned no value".into());
+            }
             "__thaw_symbol_new"
             | "__thaw_symbol_to_string"
             | "__thaw_symbol_key"
