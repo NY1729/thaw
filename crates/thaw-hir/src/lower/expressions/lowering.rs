@@ -1890,6 +1890,36 @@ impl<'a> FnLowerer<'a> {
                             timestamp,
                         )]));
                     }
+                    if class.sym == *"SuppressedError" {
+                        // `new SuppressedError(error, suppressed, message?)`.
+                        // Like `AggregateError`, only the message survives
+                        // (the exception channel is a single tagged string);
+                        // `.error`/`.suppressed` aren't modeled.
+                        let args = new_expr.args.clone().unwrap_or_default();
+                        if args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err(
+                                "`new SuppressedError()` does not support spread arguments".into()
+                            );
+                        }
+                        if args.len() < 2 || args.len() > 3 {
+                            return Err(
+                                "`new SuppressedError()` expects an error, a suppressed error, and an optional message"
+                                    .into(),
+                            );
+                        }
+                        let message = match args.get(2) {
+                            Some(argument) => {
+                                let message = self.lower_expr(&argument.expr)?;
+                                self.coerce_primitive_to_string(message)?
+                            }
+                            None => HirExpr::Lit(HirLit::Str(String::new())),
+                        };
+                        let tag = HirExpr::Lit(HirLit::Str("\u{1}SuppressedError\u{1}".to_string()));
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![tag, message],
+                        ));
+                    }
                     if class.sym == *"AggregateError" {
                         // `new AggregateError(errors, message?, options?)`.
                         // The exception channel is a single tagged string

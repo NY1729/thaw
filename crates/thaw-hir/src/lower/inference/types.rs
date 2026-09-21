@@ -719,7 +719,9 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_string_to_lower_case"
                     | "__thaw_string_to_upper_case"
                     | "__thaw_atob"
-                    | "__thaw_btoa" => {
+                    | "__thaw_btoa"
+                    | "__thaw_escape"
+                    | "__thaw_unescape" => {
                         let [argument] = args.as_slice() else {
                             return Err("string trim expects one operand".into());
                         };
@@ -947,6 +949,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::Str, value, "instanceof receiver")?;
                         self.expect_type(&HirType::Str, class_name, "instanceof class name")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_error_is_error" => {
+                        let [value] = args.as_slice() else {
+                            return Err("Error.isError expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "Error.isError receiver")?;
                         return Ok(HirType::Bool);
                     }
                     "__thaw_set_pending_exception_object" => {

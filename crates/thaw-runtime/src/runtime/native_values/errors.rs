@@ -268,6 +268,22 @@ pub unsafe extern "C" fn thaw_error_is_instance(
     class_name == "Error" || chain.split('$').any(|name| name == class_name)
 }
 
+/// `Error.isError(value)` for a caught/tagged error string: true when the
+/// value carries the leading error tag that a `new Error(...)`-family
+/// construction (or a QuickJS-thrown error) produces. An untagged string
+/// is a plain value, not an `Error`.
+///
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_is_error(message: *const c_char) -> bool {
+    if message.is_null() {
+        return false;
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    text.starts_with(ERROR_TAG_MARKER)
+}
+
 #[cfg(test)]
 mod error_native_tests {
     use super::*;

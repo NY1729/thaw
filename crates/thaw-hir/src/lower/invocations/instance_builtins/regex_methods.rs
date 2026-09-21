@@ -19,6 +19,26 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let regex_type = regex_object_type();
+                    // A replacer *function* has no native lowering (the
+                    // runtime regex engine can't call back into a compiled
+                    // closure), so route the whole call through QuickJS:
+                    // retain the receiver/argument as live JS values, pass
+                    // the closure as a native callback
+                    // (`registerNativeCallback`, via `coerce_to_declared`),
+                    // and invoke `String.prototype.replace` on the JS side.
+                    if matches!(
+                        self.infer_expr_type(replacement)?,
+                        HirType::Function(_, _) | HirType::CallableFunction(..)
+                    ) {
+                        let search_is_regex = self.infer_expr_type(search)? == regex_type;
+                        return self.lower_replace_with_function(
+                            property.sym.as_ref(),
+                            receiver,
+                            search.clone(),
+                            search_is_regex,
+                            replacement.clone(),
+                        );
+                    }
                     if self.infer_expr_type(search)? == regex_type {
                         let pattern = search.clone();
                         let replacement = self.coerce_primitive_to_string(replacement.clone())?;
@@ -676,6 +696,76 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
         unreachable!("instance builtin category was checked before lowering")
+    }
+
+    /// Lowers `receiver.{replace,replaceAll}(search, replacerFn)` for a
+    /// function `replacerFn` by delegating to the QuickJS realm, which can
+    /// call the compiled closure (registered as a native callback) for
+    /// every match. A `RegExp` `search` is reconstructed as a live JS
+    /// `RegExp` so `replaceAll`'s global-flag `TypeError` and the
+    /// replacer's capture/offset arguments keep their real semantics.
+    fn lower_replace_with_function(
+        &mut self,
+        property: &str,
+        receiver: HirExpr,
+        search: HirExpr,
+        search_is_regex: bool,
+        replacement: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let regex_type = regex_object_type();
+        let receiver_json = self.coerce_to_declared(&HirType::Json, receiver)?;
+        let receiver_handle = HirExpr::Call(
+            Box::new(HirExpr::Var("retainDynamicJson".to_string())),
+            vec![receiver_json],
+        );
+        let search_handle = if search_is_regex {
+            let source = HirExpr::PropAccess(
+                Box::new(search.clone()),
+                regex_type.clone(),
+                "source".to_string(),
+            );
+            let flags = HirExpr::PropAccess(
+                Box::new(search),
+                regex_type,
+                "flags".to_string(),
+            );
+            let source_json = self.coerce_to_declared(&HirType::Json, source)?;
+            let flags_json = self.coerce_to_declared(&HirType::Json, flags)?;
+            let arguments = self.coerce_to_declared(
+                &HirType::Json,
+                HirExpr::ArrayLit(vec![source_json, flags_json]),
+            )?;
+            HirExpr::Call(
+                Box::new(HirExpr::Var("constructDynamicValue".to_string())),
+                vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                        vec![HirExpr::Lit(HirLit::Str("RegExp".to_string()))],
+                    ),
+                    arguments,
+                ],
+            )
+        } else {
+            let search_json = self.coerce_to_declared(&HirType::Json, search)?;
+            HirExpr::Call(
+                Box::new(HirExpr::Var("retainDynamicJson".to_string())),
+                vec![search_json],
+            )
+        };
+        let replacement_handle = self.coerce_to_declared(&HirType::JsValue, replacement)?;
+        let arguments = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(vec![search_handle, replacement_handle]),
+        )?;
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+            vec![
+                receiver_handle,
+                HirExpr::Lit(HirLit::Str(property.to_string())),
+                arguments,
+            ],
+        );
+        self.coerce_to_declared(&HirType::Str, result)
     }
 }
 

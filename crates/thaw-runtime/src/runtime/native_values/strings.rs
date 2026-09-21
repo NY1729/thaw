@@ -924,3 +924,77 @@ pub unsafe extern "C" fn thaw_atob(value: *const c_char) -> *const c_char {
     let text: String = bytes.iter().map(|&byte| byte as char).collect();
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
+
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+///
+/// Annex B `escape(value)`: every UTF-16 code unit outside
+/// `A-Za-z0-9@*_+-./` becomes `%XX` (unit <= 0xFF) or `%uXXXX`.
+pub unsafe extern "C" fn thaw_escape(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let mut out = String::new();
+    for unit in value.encode_utf16() {
+        let keep = unit < 0x80
+            && (unit as u8).is_ascii_alphanumeric()
+            || (unit < 0x80
+                && matches!(unit as u8, b'@' | b'*' | b'_' | b'+' | b'-' | b'.' | b'/'));
+        if keep {
+            out.push(unit as u8 as char);
+        } else if unit <= 0xFF {
+            out.push_str(&format!("%{unit:02X}"));
+        } else {
+            out.push_str(&format!("%u{unit:04X}"));
+        }
+    }
+    arena_c_string(&out).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+///
+/// Annex B `unescape(value)`: decodes `%uXXXX` and `%XX` escapes back into
+/// UTF-16 code units (invalid escapes are passed through literally).
+pub unsafe extern "C" fn thaw_unescape(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let hex2 = |bytes: &[u16]| -> Option<u16> {
+        let mut result = 0u16;
+        for byte in bytes {
+            let digit = char::from_u32(u32::from(*byte))?.to_digit(16)? as u16;
+            result = result * 16 + digit;
+        }
+        Some(result)
+    };
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let units: Vec<u16> = value.encode_utf16().collect();
+    let mut out: Vec<u16> = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        if units[index] == u16::from(b'%') {
+            if index + 5 < units.len() && units[index + 1] == u16::from(b'u') {
+                if let Some(code) = hex2(&units[index + 2..index + 6]) {
+                    out.push(code);
+                    index += 6;
+                    continue;
+                }
+            }
+            if index + 2 < units.len() {
+                if let Some(code) = hex2(&units[index + 1..index + 3]) {
+                    out.push(code);
+                    index += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(units[index]);
+        index += 1;
+    }
+    let text = String::from_utf16_lossy(&out);
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
