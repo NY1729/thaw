@@ -614,6 +614,118 @@ macro_rules! jit_returns {
         Some((token, member.obj.as_ref(), call.args[0].expr.as_ref()))
     }
 
+    /// Recognizes an untyped, empty `new Map()` (real JIT-compiled package
+    /// JavaScript has no type arguments).
+    fn is_untyped_map_constructor(new_expr: &NewExpr) -> bool {
+        let Expr::Ident(callee) = new_expr.callee.as_ref() else {
+            return false;
+        };
+        callee.sym == "Map"
+            && new_expr.type_args.is_none()
+            && matches!(new_expr.args.as_deref(), None | Some([]))
+    }
+
+    /// Infers a JIT dictionary value-kind prefix from a `Map.set` value
+    /// expression's syntax (literal or simple arithmetic). Returns `None`
+    /// when it can't be inferred, so the caller falls back to QuickJS.
+    fn infer_map_value_kind(expr: &Expr) -> Option<&'static str> {
+        match expr {
+            Expr::Paren(parenthesized) => infer_map_value_kind(parenthesized.expr.as_ref()),
+            Expr::Lit(Lit::Num(_)) => Some("dn"),
+            Expr::Lit(Lit::Str(_)) => Some("ds"),
+            Expr::Lit(Lit::Bool(_)) => Some("db"),
+            Expr::Unary(unary) if matches!(unary.op, UnaryOp::Minus | UnaryOp::Plus) => Some("dn"),
+            Expr::Bin(binary)
+                if matches!(
+                    binary.op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                        | BinaryOp::Exp
+                ) =>
+            {
+                let left = infer_map_value_kind(binary.left.as_ref())?;
+                let right = infer_map_value_kind(binary.right.as_ref())?;
+                if left == "ds" || right == "ds" {
+                    (binary.op == BinaryOp::Add).then_some("ds")
+                } else {
+                    Some("dn")
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Collects the inferred value-kind prefix for each `new Map()` local
+    /// from its `.set(k, v)` statements (first inference wins; a later
+    /// conflicting one surfaces as a `.set` mismatch and falls back).
+    fn collect_map_value_kinds(
+        steps: &[LocalStep<'_>],
+        output: &mut std::collections::HashMap<String, &'static str>,
+    ) {
+        for step in steps {
+            let LocalStep::Effect(expression) = step else {
+                continue;
+            };
+            let Expr::Call(call) = expression else {
+                continue;
+            };
+            let Callee::Expr(callee) = &call.callee else {
+                continue;
+            };
+            let Expr::Member(member) = callee.as_ref() else {
+                continue;
+            };
+            let MemberProp::Ident(property) = &member.prop else {
+                continue;
+            };
+            if property.sym != *"set" || call.args.len() != 2 {
+                continue;
+            }
+            let Expr::Ident(name) = member.obj.as_ref() else {
+                continue;
+            };
+            let Some(kind) = infer_map_value_kind(call.args[1].expr.as_ref()) else {
+                continue;
+            };
+            output.entry(name.sym.to_string()).or_insert(kind);
+        }
+    }
+
+    /// Recognizes `map.get(k)` / `map.set(k, v)` where `map` is a tracked
+    /// native JIT `Map` local.
+    fn map_method<'a>(
+        call: &'a CallExpr,
+        map_locals: &std::collections::HashMap<String, String>,
+    ) -> Option<(&'static str, &'a Expr)> {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        let operation = match property.sym.as_ref() {
+            "get" if call.args.len() == 1 => "get",
+            "set" if call.args.len() == 2 => "set",
+            _ => return None,
+        };
+        let receiver_is_map = member_path(member.obj.as_ref())
+            .and_then(|path| map_locals.get(&path))
+            .is_some();
+        if !receiver_is_map {
+            return None;
+        }
+        Some((operation, member.obj.as_ref()))
+    }
+
     fn string_static_constructor<'a>(
         call: &'a CallExpr,
         parameters: &std::collections::HashMap<String, String>,
