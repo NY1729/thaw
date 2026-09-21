@@ -994,11 +994,16 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
         );
-        self.module.add_function(
+        for name in [
             "thaw_temporal_instant_from_string",
-            f64_type.fn_type(&[i8_ptr.into()], false),
-            Some(Linkage::External),
-        );
+            "thaw_temporal_plain_time_from_string",
+        ] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         for name in [
             "thaw_temporal_instant_to_string",
             "thaw_temporal_plain_date_to_string",
@@ -1014,7 +1019,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
-        for name in ["thaw_temporal_shift", "thaw_temporal_compare"] {
+        for name in [
+            "thaw_temporal_shift",
+            "thaw_temporal_compare",
+            "thaw_temporal_duration_component",
+        ] {
             self.module.add_function(
                 name,
                 f64_type.fn_type(&[f64_type.into(), f64_type.into()], false),

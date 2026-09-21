@@ -3782,7 +3782,16 @@ fn compiles_temporal_values() {
             console.log(d.dayOfWeek);
             console.log(Temporal.PlainDate.compare(d, Temporal.PlainDate.from("2021-03-16")));
             console.log(d.add(Temporal.Duration.from("P1D")).toString());
-            console.log(Temporal.Duration.from({ hours: 2, minutes: 30 }).toString());
+            const dur = Temporal.Duration.from({ hours: 2, minutes: 30 });
+            console.log(dur.toString());
+            console.log(dur.hours);
+            console.log(dur.minutes);
+            console.log(dur.total({ unit: "minutes" }));
+            console.log(Temporal.Duration.from("PT90M").total("hours"));
+            const t = Temporal.PlainTime.from("12:30:45.678");
+            console.log(t.toString());
+            console.log(t.hour);
+            console.log(Temporal.PlainTime.from("2022-06-07T08:09:10").toString());
         }
     "#;
     assert_eq!(
@@ -3790,7 +3799,7 @@ fn compiles_temporal_values() {
         "UTC\n2020-01-02T03:04:05.678Z\n1577934245678\n1577934245.678\n\
          1970-01-01T00:00:00.000Z\n0\ntrue\n2020-01-02T04:04:05.678Z\n\
          2020-01-02T02:04:05.678Z\n2021-03-15\n2021\n3\n15\n1\n-1\n\
-         2021-03-16\nPT2H30M\n"
+         2021-03-16\nPT2H30M\n2\n30\n150\n1.5\n12:30:45.678\n12\n08:09:10\n"
     );
 }
 

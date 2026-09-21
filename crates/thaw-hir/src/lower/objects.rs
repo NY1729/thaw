@@ -917,6 +917,11 @@ impl<'a> FnLowerer<'a> {
                     | "second"
                     | "millisecond"
                     | "dayOfWeek"
+                    | "days"
+                    | "hours"
+                    | "minutes"
+                    | "seconds"
+                    | "milliseconds"
             ) {
                 if let Some(kind) = self
                     .peek_type_without_lowering(&member.obj)
