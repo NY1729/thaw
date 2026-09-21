@@ -292,6 +292,11 @@ impl<'a> FnLowerer<'a> {
                 // link.
                 Callee::Expr(callee) => match callee.as_ref() {
                     Expr::Member(inner_member) => {
+                        if matches!(inner_member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Iterator")
+                            && member_property_name(&inner_member.prop).as_deref() == Some("from")
+                        {
+                            return Some(HirType::JsValue);
+                        }
                         // A chained *native class* method call
                         // (`cart.add(1).add(2)`, no `const` in between) has
                         // a declared method return type to look up, exactly

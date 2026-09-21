@@ -1261,3 +1261,38 @@ fn compiles_set_symmetric_difference_and_relational_predicates() {
         "1,4\nfalse\ntrue\ntrue\nfalse\nfalse\ntrue\n3 3\n"
     );
 }
+
+#[test]
+fn compiles_iterator_from() {
+    let source = r#"
+        function main(): void {
+            const iterator = Iterator.from([1, 2, 3]);
+            const first = iterator.next();
+            const second = iterator.next();
+            console.log(first.value, first.done);
+            console.log(second.value, second.done);
+
+            const selected = Iterator.from([1, 2, 3, 4]).drop(1).take(2).toArray();
+            console.log(selected.join(","));
+            const mapped = Iterator.from([1, 2, 3])
+                .map(value => value * 2)
+                .filter(value => value > 2)
+                .toArray();
+            console.log(mapped.join(","));
+            console.log(Iterator.from([1, 2, 3]).reduce(
+                (sum: number, value: number) => sum + value,
+                0,
+            ));
+            console.log(Iterator.from([1, 2, 3]).find(value => value > 1));
+            console.log(Iterator.from([1, 2, 3]).some(value => value === 2));
+            console.log(Iterator.from([2, 4]).every(value => value % 2 === 0));
+            console.log(Iterator.from(new Set<number>([3, 4])).toArray().join(","));
+            const entries = Iterator.from(new Map<string, number>([["a", 1]])).toArray();
+            console.log(entries[0][0], entries[0][1]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "iterator_from"),
+        "1 false\n2 false\n2,3\n4,6\n6\n2\ntrue\ntrue\n3,4\na 1\n"
+    );
+}
