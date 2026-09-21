@@ -22,3 +22,6 @@ regex = "1"
 # reporting "no match".
 fancy-regex = "0.18"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+# Timezone database + civil-time arithmetic for the native Temporal
+# `ZonedDateTime` support (thaw-quickjs uses the same crate for `Intl`).
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
