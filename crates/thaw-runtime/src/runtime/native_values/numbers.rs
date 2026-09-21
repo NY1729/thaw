@@ -935,6 +935,210 @@ bigint_decimal_operation_fn!(thaw_bigint_decimal_mul, 2);
 bigint_decimal_operation_fn!(thaw_bigint_decimal_div, 3);
 bigint_decimal_operation_fn!(thaw_bigint_decimal_mod, 4);
 
+/// Non-negative decimal magnitude -> little-endian binary bits.
+fn decimal_to_bits(digits: &[u8]) -> Vec<u8> {
+    if decimal_is_zero(digits) {
+        return vec![0];
+    }
+    let mut value = digits.to_vec();
+    let mut bits = Vec::new();
+    while !decimal_is_zero(&value) {
+        let (quotient, remainder) = decimal_divmod_magnitude(&value, &[2]);
+        bits.push(remainder[0]);
+        value = quotient;
+    }
+    bits
+}
+
+/// Little-endian binary bits -> non-negative decimal magnitude.
+fn bits_to_decimal(bits: &[u8]) -> Vec<u8> {
+    let mut digits = vec![0u8];
+    for bit in bits.iter().rev() {
+        digits = decimal_mul_magnitude(&digits, &[2]);
+        if *bit == 1 {
+            digits = decimal_add_magnitude(&digits, &[1]);
+        }
+    }
+    digits
+}
+
+/// The two's-complement bits (width `width`) of a signed decimal value.
+fn signed_to_twos(negative: bool, digits: &[u8], width: usize) -> Vec<u8> {
+    let mut bits = decimal_to_bits(digits);
+    bits.resize(width, 0);
+    if negative {
+        for bit in bits.iter_mut() {
+            *bit ^= 1;
+        }
+        let mut carry = 1u8;
+        for bit in bits.iter_mut() {
+            let sum = *bit + carry;
+            *bit = sum & 1;
+            carry = sum >> 1;
+            if carry == 0 {
+                break;
+            }
+        }
+    }
+    bits
+}
+
+/// A signed decimal value from its two's-complement bits.
+fn twos_to_signed(bits: &[u8]) -> (bool, Vec<u8>) {
+    if bits.last().copied().unwrap_or(0) == 0 {
+        return (false, bits_to_decimal(bits));
+    }
+    let mut inverted: Vec<u8> = bits.iter().map(|bit| bit ^ 1).collect();
+    let mut carry = 1u8;
+    for bit in inverted.iter_mut() {
+        let sum = *bit + carry;
+        *bit = sum & 1;
+        carry = sum >> 1;
+        if carry == 0 {
+            break;
+        }
+    }
+    (true, bits_to_decimal(&inverted))
+}
+
+/// `&`/`|`/`^` (`operation` `0`/`1`/`2`) between two decimal strings.
+///
+/// # Safety
+/// Both pointers must be null or valid NUL-terminated UTF-8 strings.
+unsafe fn bigint_decimal_bitwise(
+    left: *const c_char,
+    right: *const c_char,
+    operation: u8,
+) -> String {
+    let read = |pointer: *const c_char| -> (bool, Vec<u8>) {
+        if pointer.is_null() {
+            return (false, vec![0]);
+        }
+        decimal_digits(&unsafe { CStr::from_ptr(pointer) }.to_string_lossy())
+    };
+    let (left_negative, left_digits) = read(left);
+    let (right_negative, right_digits) = read(right);
+    let width = decimal_to_bits(&left_digits)
+        .len()
+        .max(decimal_to_bits(&right_digits).len())
+        + 1;
+    let left_bits = signed_to_twos(left_negative, &left_digits, width);
+    let right_bits = signed_to_twos(right_negative, &right_digits, width);
+    let result: Vec<u8> = left_bits
+        .iter()
+        .zip(&right_bits)
+        .map(|(left, right)| match operation {
+            0 => left & right,
+            1 => left | right,
+            _ => left ^ right,
+        })
+        .collect();
+    let (negative, digits) = twos_to_signed(&result);
+    decimal_to_string(negative, &digits)
+}
+
+/// `<<`/`>>` (`left_shift` true/false) of a decimal string by a decimal
+/// shift amount. A negative amount shifts the other way; `>>` is an
+/// arithmetic (sign-propagating) shift.
+///
+/// # Safety
+/// Both pointers must be null or valid NUL-terminated UTF-8 strings.
+unsafe fn bigint_decimal_shift(
+    left: *const c_char,
+    amount: *const c_char,
+    left_shift: bool,
+) -> String {
+    let read = |pointer: *const c_char| -> (bool, Vec<u8>) {
+        if pointer.is_null() {
+            return (false, vec![0]);
+        }
+        decimal_digits(&unsafe { CStr::from_ptr(pointer) }.to_string_lossy())
+    };
+    let (negative, digits) = read(left);
+    let (amount_negative, amount_digits) = read(amount);
+    let amount = if amount_digits.len() > 18 {
+        usize::MAX
+    } else {
+        amount_digits
+            .iter()
+            .rev()
+            .fold(0usize, |value, digit| value * 10 + *digit as usize)
+    };
+    let left_shift = if amount_negative { !left_shift } else { left_shift };
+    if amount == 0 {
+        return decimal_to_string(negative, &digits);
+    }
+    if amount == usize::MAX {
+        return if left_shift {
+            "0".to_string()
+        } else if negative {
+            "-1".to_string()
+        } else {
+            "0".to_string()
+        };
+    }
+    let base_bits = decimal_to_bits(&digits);
+    let width = base_bits.len() + amount + 2;
+    let twos = signed_to_twos(negative, &digits, width);
+    let result = if left_shift {
+        let mut out = vec![0u8; amount];
+        out.extend_from_slice(&twos);
+        out.truncate(width);
+        out
+    } else {
+        let sign = twos[width - 1];
+        let mut out = twos[amount.min(width - 1)..].to_vec();
+        while out.len() < width {
+            out.push(sign);
+        }
+        out
+    };
+    let (negative, digits) = twos_to_signed(&result);
+    decimal_to_string(negative, &digits)
+}
+
+macro_rules! bigint_decimal_bitwise_fn {
+    ($name:ident, $operation:expr) => {
+        #[no_mangle]
+        /// A decimal bigint bitwise operation (see
+        /// `bigint_decimal_bitwise`).
+        ///
+        /// # Safety
+        /// Both pointers must be null or valid NUL-terminated UTF-8 strings.
+        pub unsafe extern "C" fn $name(
+            left: *const c_char,
+            right: *const c_char,
+        ) -> *const c_char {
+            let text = unsafe { bigint_decimal_bitwise(left, right, $operation) };
+            arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+        }
+    };
+}
+
+bigint_decimal_bitwise_fn!(thaw_bigint_decimal_and, 0);
+bigint_decimal_bitwise_fn!(thaw_bigint_decimal_or, 1);
+bigint_decimal_bitwise_fn!(thaw_bigint_decimal_xor, 2);
+
+macro_rules! bigint_decimal_shift_fn {
+    ($name:ident, $left_shift:expr) => {
+        #[no_mangle]
+        /// A decimal bigint shift (see `bigint_decimal_shift`).
+        ///
+        /// # Safety
+        /// Both pointers must be null or valid NUL-terminated UTF-8 strings.
+        pub unsafe extern "C" fn $name(
+            left: *const c_char,
+            amount: *const c_char,
+        ) -> *const c_char {
+            let text = unsafe { bigint_decimal_shift(left, amount, $left_shift) };
+            arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+        }
+    };
+}
+
+bigint_decimal_shift_fn!(thaw_bigint_decimal_shl, true);
+bigint_decimal_shift_fn!(thaw_bigint_decimal_shr, false);
+
 #[cfg(test)]
 mod bigint_decimal_tests {
     use super::*;
@@ -963,6 +1167,37 @@ mod bigint_decimal_tests {
         assert_eq!(operate("0", "5", 3), "0");
         assert_eq!(operate("5", "0", 3), "0");
         assert_eq!(operate("007", "3", 0), "10");
+    }
+
+    fn bitwise(left: &str, right: &str, operation: u8) -> String {
+        let left = std::ffi::CString::new(left).unwrap();
+        let right = std::ffi::CString::new(right).unwrap();
+        unsafe { bigint_decimal_bitwise(left.as_ptr(), right.as_ptr(), operation) }
+    }
+
+    fn shift(left: &str, amount: &str, left_shift: bool) -> String {
+        let left = std::ffi::CString::new(left).unwrap();
+        let amount = std::ffi::CString::new(amount).unwrap();
+        unsafe { bigint_decimal_shift(left.as_ptr(), amount.as_ptr(), left_shift) }
+    }
+
+    #[test]
+    fn bitwise_matches_bigint_semantics() {
+        let a = "123456789012345678901234567890";
+        assert_eq!(bitwise(a, "18446744073709551615", 0), "14083847773837265618");
+        assert_eq!(bitwise(a, "1", 1), "123456789012345678901234567891");
+        assert_eq!(bitwise(a, a, 2), "0");
+        assert_eq!(
+            shift(a, "8", true),
+            "31604937987160493798716049379840"
+        );
+        assert_eq!(shift(a, "8", false), "482253082079475308207947530");
+        // Two's-complement semantics for negatives.
+        assert_eq!(bitwise("-123456789012345678901234567890", "255", 0), "46");
+        assert_eq!(
+            shift("-123456789012345678901234567890", "8", false),
+            "-482253082079475308207947531"
+        );
     }
 }
 
