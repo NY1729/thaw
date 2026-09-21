@@ -341,11 +341,24 @@ fn x_cache_key(specs: &[String]) -> String {
 }
 
 fn cached_package_matches(spec: &str, package: &str, directory: &Path) -> bool {
-    spec != package
+    // Only an *exact* version pin may reuse the cache: a range/tag
+    // (`foo@^2`, `foo@latest`) can resolve to a newer release than the one
+    // cached, so it always re-resolves rather than serving a stale version.
+    // (`find_local_package_dir`/`local_package_matches` still reuse a
+    // satisfying `node_modules` install for a range -- that is the
+    // project's own already-installed tree, not a cache thaw owns.)
+    exact_requested_version(spec, package).is_some()
         && local_package_matches(spec, package, directory)
         && package_bins(directory, package).is_ok_and(|bins| {
             bins.iter().all(|(_, path)| path.is_file())
         })
+}
+
+/// The exact version `spec` pins `package` to (`foo@1.2.3`), or `None` for a
+/// range/tag/bare spec.
+fn exact_requested_version<'a>(spec: &'a str, package: &str) -> Option<&'a str> {
+    let requested = spec.strip_prefix(package)?.strip_prefix('@')?;
+    semver::Version::parse(requested).ok().map(|_| requested)
 }
 
 /// `$XDG_CACHE_HOME/thaw/x` (or `$HOME/.cache/thaw/x`, or the temp
