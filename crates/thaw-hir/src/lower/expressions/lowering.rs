@@ -919,6 +919,31 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     BinaryOp::Add
+                        if self.infer_expr_type(&lhs)? == HirType::JsValue
+                            && self.infer_expr_type(&rhs)? == HirType::JsValue =>
+                    {
+                        // Both operands are live handles: let JS itself pick
+                        // between numeric addition, string concatenation, and
+                        // BigInt addition (which a compiled `String(x) +
+                        // String(y)` would get wrong for a BigInt).
+                        let callable = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_add".into()))],
+                        );
+                        let empty_arguments = self.wrap_native_value_as_json(
+                            HirExpr::ArrayLit(Vec::new()),
+                            HirType::Array(Box::new(HirType::Json)),
+                        )?;
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+                            vec![
+                                callable,
+                                empty_arguments,
+                                HirExpr::ArrayLit(vec![lhs, rhs]),
+                            ],
+                        )
+                    }
+                    BinaryOp::Add
                         if matches!(
                             self.infer_expr_type(&lhs)?,
                             HirType::Json | HirType::JsValue

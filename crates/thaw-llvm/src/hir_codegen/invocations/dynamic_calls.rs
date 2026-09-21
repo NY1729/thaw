@@ -28,6 +28,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 args,
             ),
             "callDynamicValueMixed" => self.compile_call_dynamic_value_mixed(args),
+            "callDynamicValueMixedHandle" => {
+                self.compile_call_dynamic_value_mixed_handle(args)
+            }
             "constructDynamicValue" => self.compile_construct_dynamic_value(args),
             "loadNativeAddon" => self.compile_load_native_addon(args),
             "loadNativeAddonEmbedded" => self.compile_load_embedded_native_addon(args),
