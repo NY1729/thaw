@@ -2834,6 +2834,9 @@ fn compiles_regex_exec_last_index_state() {
             console.log(sticky.exec("12abc") !== undefined);
             sticky.lastIndex = 0;
             console.log(sticky.exec("12abc") !== undefined);
+            const misplaced = /\d/y;
+            console.log(misplaced.exec("a1") !== undefined);
+            console.log(misplaced.lastIndex);
 
             const plain = /\d+/;
             plain.lastIndex = 5;
@@ -2855,7 +2858,7 @@ fn compiles_regex_exec_last_index_state() {
     "#;
     assert_eq!(
         compile_and_run(source, "regex_exec_last_index_state"),
-        "12\n34\n56\nno match\n0\ntrue\nfalse\ntrue\n5\n4\n"
+        "12\n34\n56\nno match\n0\ntrue\nfalse\ntrue\nfalse\n0\n5\n4\n"
     );
 }
 
@@ -3531,13 +3534,49 @@ fn compiles_using_declarations() {
             console.log("body");
             return;
         }
+        function valueBeforeDispose(): number {
+            const resource = {
+                value: 1,
+                [Symbol.dispose]() { this.value = 2; }
+            };
+            using held = resource;
+            return held.value;
+        }
         function main(): void {
             early();
+            console.log(valueBeforeDispose());
         }
     "#;
     assert_eq!(
         compile_and_run(source, "using_decl"),
-        "body\ndispose b\ndispose a\n"
+        "body\ndispose b\ndispose a\n1\n"
+    );
+}
+
+#[test]
+fn using_disposal_failures_continue_and_suppress_the_pending_error() {
+    let source = r#"
+        function failing(name: string) {
+            return {
+                [Symbol.dispose]() {
+                    console.log("dispose " + name);
+                    throw new Error(name);
+                }
+            };
+        }
+        function main(): void {
+            try {
+                using a = failing("a");
+                using b = failing("b");
+                throw new Error("body");
+            } catch (error) {
+                console.log(error.name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_suppressed_error"),
+        "dispose b\ndispose a\nSuppressedError\n"
     );
 }
 
@@ -4228,25 +4267,37 @@ fn compiles_regex_backreferences_and_lookaround() {
     );
 }
 
-/// `Object.setPrototypeOf` (no-op returning the object),
-/// `Object.getOwnPropertySymbols` (always empty) and
-/// `Object.prototype.isPrototypeOf` (always false) -- thaw models no
-/// prototype chain or symbol-keyed fields.
+/// Symbol-keyed native fields are reported by `Object.getOwnPropertySymbols`.
 #[test]
 fn compiles_object_prototype_statics() {
     let source = r#"
         function main(): void {
-            const o = { a: 1 };
-            const same = Object.setPrototypeOf(o, null);
-            console.log(same.a);
+            const o = { a: 1, [Symbol.dispose]() {} };
             console.log(Object.getOwnPropertySymbols(o).length);
-            console.log(o.isPrototypeOf({ b: 2 }));
+            console.log(Object.getOwnPropertySymbols(o)[0] === Symbol.dispose);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_prototype_statics"),
-        "1\n0\nfalse\n"
+        "1\ntrue\n"
     );
+}
+
+#[test]
+fn rejects_native_prototype_mutation_instead_of_returning_fake_results() {
+    for (source, expected) in [
+        (
+            "function main(): void { Object.setPrototypeOf({ a: 1 }, null); }",
+            "Object.setPrototypeOf` is not supported",
+        ),
+        (
+            "function main(): void { ({ a: 1 }).isPrototypeOf({ b: 2 }); }",
+            "isPrototypeOf()` is unavailable",
+        ),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(thaw_hir::lower_module(&module).unwrap_err().contains(expected));
+    }
 }
 
 /// `String.raw` as a tagged template and as a direct

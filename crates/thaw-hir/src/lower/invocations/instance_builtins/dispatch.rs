@@ -165,12 +165,10 @@ impl<'a> FnLowerer<'a> {
                 self.lower_native_has_own_property(member, call)
             }
             "isPrototypeOf" => {
-                // Approx: thaw models no prototype chain, so nothing is a
-                // prototype of anything.
                 if call.args.len() != 1 {
                     return Err("native `.isPrototypeOf()` expects exactly one argument".into());
                 }
-                Ok(HirExpr::Lit(HirLit::Bool(false)))
+                Err("native `.isPrototypeOf()` is unavailable without a prototype chain".into())
             }
             "deref" => self.lower_native_weakref_deref(member, call),
             "group" | "groupToMap" => self.lower_native_array_group(member, property, call),

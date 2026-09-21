@@ -151,32 +151,129 @@ impl<'a> FnLowerer<'a> {
         if using_disposals.is_empty() {
             return Ok(out);
         }
-        // `using` resources are disposed in reverse declaration order when
-        // the block exits. `finally` is expanded around the abrupt exits
-        // lowering already models (`return`/`throw`); a `break`/`continue`
-        // out of the block does not dispose yet.
         using_disposals.reverse();
+        // A return expression is evaluated before the enclosing resources
+        // are disposed. Hoist it once so injecting the finalizer before the
+        // actual Return cannot observe mutations performed by a disposer.
+        let out = self.hoist_using_return_values(out)?;
         let mut name = "__thaw_using_finally".to_string();
         while self.scope.contains_key(&name) {
             name.push('_');
         }
         let catch_name = self.bind_local(&name, HirType::Str);
-        self.generator_finalizers
-            .insert(catch_name.clone(), using_disposals.clone());
-        let body = inject_finally_before_exits(out, &using_disposals, false);
-        let catch_body = inject_finally_before_exits(
-            vec![HirStmt::Throw(HirExpr::Var(catch_name.clone()))],
+        let normal_disposal = self.lower_using_disposal_sequence(&using_disposals, None);
+        let exceptional_disposal = self.lower_using_disposal_sequence(
             &using_disposals,
-            true,
+            Some(HirExpr::Var(catch_name.clone())),
         );
+        self.generator_finalizers
+            .insert(catch_name.clone(), normal_disposal.clone());
+        let body = inject_finally_before_exits(out, &normal_disposal, false);
         let mut lowered = vec![HirStmt::Try(
             body,
             catch_name.clone(),
-            catch_body,
+            exceptional_disposal,
             Some(catch_name),
         )];
-        lowered.extend(using_disposals);
+        lowered.extend(normal_disposal);
         Ok(lowered)
+    }
+
+    fn hoist_using_return_values(
+        &mut self,
+        statements: Vec<HirStmt>,
+    ) -> Result<Vec<HirStmt>, String> {
+        let mut lowered = Vec::new();
+        for statement in statements {
+            match statement {
+                HirStmt::Return(Some(value)) => {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = self.bind_local("__thaw_using_return", ty.clone());
+                    lowered.push(HirStmt::Let(name.clone(), ty, value));
+                    lowered.push(HirStmt::Return(Some(HirExpr::Var(name))));
+                }
+                HirStmt::If(condition, then_body, else_body) => lowered.push(HirStmt::If(
+                    condition,
+                    self.hoist_using_return_values(then_body)?,
+                    self.hoist_using_return_values(else_body)?,
+                )),
+                HirStmt::While(condition, body) => lowered.push(HirStmt::While(
+                    condition,
+                    self.hoist_using_return_values(body)?,
+                )),
+                HirStmt::Try(body, catch, catch_body, hidden) => lowered.push(HirStmt::Try(
+                    self.hoist_using_return_values(body)?,
+                    catch,
+                    self.hoist_using_return_values(catch_body)?,
+                    hidden,
+                )),
+                other => lowered.push(other),
+            }
+        }
+        Ok(lowered)
+    }
+
+    /// Dispose every resource even if an earlier disposer throws. When an
+    /// exception is already pending, or a second disposer also fails, expose
+    /// the combined completion as a `SuppressedError` on thaw's tagged-string
+    /// exception channel.
+    fn lower_using_disposal_sequence(
+        &mut self,
+        disposals: &[HirStmt],
+        pending: Option<HirExpr>,
+    ) -> Vec<HirStmt> {
+        let has_pending = pending.is_some();
+        let pending_name = self.bind_local("__thaw_using_pending", HirType::Str);
+        let has_pending_name = self.bind_local("__thaw_using_has_pending", HirType::Bool);
+        let mut statements = vec![
+            HirStmt::Let(
+                pending_name.clone(),
+                HirType::Str,
+                pending.unwrap_or_else(|| HirExpr::Lit(HirLit::Str(String::new()))),
+            ),
+            HirStmt::Let(
+                has_pending_name.clone(),
+                HirType::Bool,
+                HirExpr::Lit(HirLit::Bool(has_pending)),
+            ),
+        ];
+        for disposal in disposals {
+            let error_name = self.bind_local("__thaw_using_dispose_error", HirType::Str);
+            statements.push(HirStmt::Try(
+                vec![disposal.clone()],
+                error_name.clone(),
+                vec![
+                    HirStmt::If(
+                        HirExpr::Var(has_pending_name.clone()),
+                        vec![HirStmt::Expr(HirExpr::Assign(
+                            pending_name.clone(),
+                            Box::new(HirExpr::Lit(HirLit::Str(
+                                "\u{1}SuppressedError\u{1}".to_string(),
+                            ))),
+                        ))],
+                        vec![HirStmt::Expr(HirExpr::Assign(
+                            pending_name.clone(),
+                            Box::new(HirExpr::Var(error_name.clone())),
+                        ))],
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(
+                        has_pending_name.clone(),
+                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                    )),
+                ],
+                Some(error_name),
+            ));
+        }
+        if has_pending {
+            statements.push(HirStmt::Throw(HirExpr::Var(pending_name)));
+        } else {
+            statements.push(HirStmt::If(
+                HirExpr::Var(has_pending_name),
+                vec![HirStmt::Throw(HirExpr::Var(pending_name))],
+                Vec::new(),
+            ));
+        }
+        statements
     }
 
     fn stmt_definitely_exits(stmt: &Stmt) -> bool {

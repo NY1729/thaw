@@ -350,31 +350,41 @@ impl<'a> FnLowerer<'a> {
                         );
                     }
                     if object.sym == *"Object" && property.sym == *"setPrototypeOf" {
-                        // Approx: thaw models no prototype chain, so setting
-                        // one is a no-op that returns the object.
-                        let (arguments, bindings) = self
+                        let (arguments, _bindings) = self
                             .lower_native_spread_values(&call.args, "Object.setPrototypeOf")?;
-                        let [target, _prototype] = arguments.as_slice() else {
+                        let [_target, _prototype] = arguments.as_slice() else {
                             return Err(
                                 "`Object.setPrototypeOf` expects exactly two arguments".into()
                             );
                         };
-                        return self.wrap_call_argument_bindings(target.clone(), &bindings);
+                        return Err(
+                            "`Object.setPrototypeOf` is not supported for fixed-layout native objects"
+                                .into(),
+                        );
                     }
                     if object.sym == *"Object" && property.sym == *"getOwnPropertySymbols" {
-                        // Approx: symbol-keyed properties aren't representable
-                        // as object fields, so there are never any.
                         let (arguments, bindings) = self.lower_native_spread_values(
                             &call.args,
                             "Object.getOwnPropertySymbols",
                         )?;
-                        let [_target] = arguments.as_slice() else {
+                        let [target] = arguments.as_slice() else {
                             return Err(
                                 "`Object.getOwnPropertySymbols` expects exactly one argument".into()
                             );
                         };
+                        let symbols = match self.infer_expr_type(target)? {
+                            HirType::Object(fields) => fields
+                                .into_iter()
+                                .filter_map(|(name, _)| {
+                                    name.strip_prefix("\u{1f}@@").map(|symbol| {
+                                        HirExpr::Lit(HirLit::Str(format!("\u{1f}@@{symbol}")))
+                                    })
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        };
                         return self.wrap_call_argument_bindings(
-                            HirExpr::ArrayLit(Vec::new()),
+                            HirExpr::ArrayLit(symbols),
                             &bindings,
                         );
                     }
