@@ -479,6 +479,45 @@ pub unsafe extern "C" fn thaw_string_slice(
         .map_or(std::ptr::null(), |value| value.cast())
 }
 
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+///
+/// `String.prototype.substring`: each bound is clamped to `[0, length]`
+/// (a negative or `NaN` bound becomes `0`), then the two are swapped if
+/// `start > end` -- unlike `slice`, negative indices never count from the
+/// end.
+pub unsafe extern "C" fn thaw_string_substring(
+    value: *const c_char,
+    start: f64,
+    end: f64,
+) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let units = value.encode_utf16().collect::<Vec<_>>();
+    let length = units.len() as f64;
+    let clamp = |position: f64| {
+        if position.is_nan() {
+            0.0
+        } else {
+            position.trunc().clamp(0.0, length)
+        }
+    };
+    let start = clamp(start);
+    let end = clamp(end);
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    arena_c_string(&String::from_utf16_lossy(
+        &units[start as usize..end as usize],
+    ))
+    .map_or(std::ptr::null(), |value| value.cast())
+}
+
 fn is_javascript_whitespace(character: char) -> bool {
     matches!(
         character,

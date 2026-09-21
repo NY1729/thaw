@@ -141,6 +141,36 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    // `RegExp.prototype.toString()` is `"/" + source + "/" +
+                    // flags`, not the generic `[object Object]` an object
+                    // receiver otherwise coerces to.
+                    if receiver_type == regex_object_type() {
+                        if !call.args.is_empty() {
+                            return Err("native `.toString()` expects no arguments".into());
+                        }
+                        let source = HirExpr::PropAccess(
+                            Box::new(receiver.clone()),
+                            receiver_type.clone(),
+                            "source".to_string(),
+                        );
+                        let flags = HirExpr::PropAccess(
+                            Box::new(receiver.clone()),
+                            receiver_type.clone(),
+                            "flags".to_string(),
+                        );
+                        let open = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                            vec![HirExpr::Lit(HirLit::Str("/".to_string())), source],
+                        );
+                        let close = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                            vec![open, HirExpr::Lit(HirLit::Str("/".to_string()))],
+                        );
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                            vec![close, flags],
+                        ));
+                    }
                     if receiver_type == HirType::Array(Box::new(HirType::F64))
                         && call.args.len() == 1
                     {
@@ -311,5 +341,63 @@ impl<'a> FnLowerer<'a> {
                     return Ok(receiver);
                 }
         unreachable!("instance builtin category was checked before lowering")
+    }
+
+    /// `obj.hasOwnProperty(key)` -- the instance-method spelling of
+    /// `Object.hasOwn` (which static_builtins.rs already lowers the same
+    /// way): a fixed native object compares the key against its known
+    /// field names, while a `Json`/dictionary object defers to
+    /// `__thaw_json_has_own` at runtime.
+    fn lower_native_has_own_property(
+        &mut self,
+        member: &MemberExpr,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let (arguments, mut bindings) =
+            self.lower_native_spread_values(&call.args, "hasOwnProperty")?;
+        let [key_value] = arguments.as_slice() else {
+            return Err("`hasOwnProperty` expects exactly one argument".into());
+        };
+        let key_value = self.coerce_primitive_to_string(key_value.clone())?;
+        let receiver = self.lower_expr(&member.obj)?;
+        let receiver_type = self.infer_expr_type(&receiver)?;
+        if matches!(receiver_type, HirType::Json | HirType::Dictionary(_)) {
+            let result = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_has_own".to_string())),
+                vec![receiver, key_value],
+            );
+            return self.wrap_call_argument_bindings(result, &bindings);
+        }
+        let HirType::Object(fields) = &receiver_type else {
+            return Err(format!(
+                "`.hasOwnProperty()` currently requires a fixed object or dictionary, got {receiver_type:?}"
+            ));
+        };
+        let field_names = fields
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let object_name = format!("__thaw_has_own_object_{}", self.next_binding);
+        self.next_binding += 1;
+        let key_name = format!("__thaw_has_own_key_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(object_name.clone(), receiver_type.clone());
+        self.scope.insert(key_name.clone(), HirType::Str);
+        let mut comparisons = field_names.into_iter().map(|field| {
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Var(key_name.clone())),
+                Box::new(HirExpr::Lit(HirLit::Str(field))),
+            )
+        });
+        let mut result = comparisons
+            .next()
+            .unwrap_or(HirExpr::Lit(HirLit::Bool(false)));
+        for comparison in comparisons {
+            result = self.lower_logical_expr(result, comparison, false)?;
+        }
+        bindings.push((object_name, receiver_type, receiver));
+        bindings.push((key_name, HirType::Str, key_value));
+        self.wrap_call_argument_bindings(result, &bindings)
     }
 }

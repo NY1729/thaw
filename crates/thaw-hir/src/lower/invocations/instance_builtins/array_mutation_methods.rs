@@ -633,8 +633,9 @@ impl<'a> FnLowerer<'a> {
                         this_arg,
                     );
                 }
-                if property.sym == *"slice" || property.sym == *"subarray" {
+                if property.sym == *"slice" || property.sym == *"subarray" || property.sym == *"substring" {
                     let is_subarray = property.sym == *"subarray";
+                    let is_substring = property.sym == *"substring";
                     let mut receiver = self.lower_expr(&member.obj)?;
                     // `slice`/`subarray` keep the byte-buffer identity: a
                     // sliced `Buffer` is still a `Buffer`, so a chained
@@ -653,11 +654,17 @@ impl<'a> FnLowerer<'a> {
                             "`.subarray()` is only supported on a Buffer / array, got {receiver_type:?}"
                         ));
                     }
+                    if is_substring && receiver_type != HirType::Str {
+                        return Err(format!(
+                            "`.substring()` requires a string receiver, got {receiver_type:?}"
+                        ));
+                    }
                     if receiver_type == HirType::Str {
+                        let label = if is_substring { "String.substring" } else { "String.slice" };
                         let (arguments, bindings) =
-                            self.lower_native_spread_values(&call.args, "String.slice")?;
+                            self.lower_native_spread_values(&call.args, label)?;
                         if arguments.len() > 2 {
-                            return Err("native string `.slice()` expects zero to two arguments".into());
+                            return Err(format!("native `{label}` expects zero to two arguments"));
                         }
                         let start = arguments
                             .first()
@@ -671,8 +678,13 @@ impl<'a> FnLowerer<'a> {
                             .map(|value| self.coerce_primitive_to_number(value))
                             .transpose()?
                             .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                        let intrinsic = if is_substring {
+                            "__thaw_string_substring"
+                        } else {
+                            "__thaw_string_slice"
+                        };
                         let result = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_string_slice".into())),
+                            Box::new(HirExpr::Var(intrinsic.into())),
                             vec![receiver, start, end],
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
