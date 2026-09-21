@@ -49,6 +49,13 @@ macro_rules! jit_callables {
         /// `.size` read can lower to the dictionary length instead of a
         /// field lookup.
         set_locals: std::collections::HashSet<String>,
+        /// Locals bound to a native `Map` (a string-keyed dictionary), with
+        /// the dictionary value-kind prefix (`dn`/`db`/`ds`), so
+        /// `.get`/`.set`/`.size` can lower to dictionary operations.
+        map_locals: std::collections::HashMap<String, String>,
+        /// Inferred value-kind prefix per `new Map()` local, from its
+        /// `.set(k, v)` calls.
+        map_value_kinds: std::collections::HashMap<String, &'static str>,
     }
 
     fn same_callable(left: NumericCallable<'_>, right: NumericCallable<'_>) -> bool {

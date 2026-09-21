@@ -8,6 +8,7 @@ macro_rules! jit_loop_bodies {
         context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
+        collect_map_value_kinds(&steps, &mut context.map_value_kinds);
         if let NumericBody::Statements(statements) = &body {
             if matches!(statements.first(), Some(Stmt::While(_))) {
                 return encode_while_body(
@@ -137,6 +138,7 @@ macro_rules! jit_loop_bodies {
                     let is_set = match initializer {
                         Expr::New(new_expr) => {
                             set_constructor(new_expr, parameters, &locals, context.helpers).is_some()
+                                || is_untyped_map_constructor(new_expr)
                         }
                         _ => false,
                     };

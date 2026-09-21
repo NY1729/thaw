@@ -870,6 +870,12 @@ macro_rules! jit_expressions {
                     output.push("t".into());
                 }
             }
+            Expr::New(new_expr) if is_untyped_map_constructor(new_expr) => {
+                // `new Map()`, when not a declaration initializer whose
+                // value kind was inferred, defaults to a string-valued
+                // dictionary.
+                output.push("dsempty".into());
+            }
             Expr::New(new_expr)
                 if set_constructor(new_expr, parameters, locals, context.helpers).is_some() =>
             {
@@ -1099,7 +1105,8 @@ macro_rules! jit_expressions {
                         // still reads normally.
                         let set_size = property.sym == *"size"
                             && matches!(member.obj.as_ref(), Expr::Ident(name)
-                                if context.set_locals.contains(name.sym.as_ref()));
+                                if context.set_locals.contains(name.sym.as_ref())
+                                    || context.map_locals.contains_key(name.sym.as_ref()));
                         if set_size {
                             output.extend(receiver);
                             output.push("dlen".into());
@@ -2029,6 +2036,61 @@ macro_rules! jit_expressions {
                     }
                     .into(),
                 );
+            }
+            Expr::Call(call) if map_method(call, &context.map_locals).is_some() => {
+                let (operation, receiver) = map_method(call, &context.map_locals)?;
+                let path = member_path(receiver)?;
+                let prefix = context.map_locals.get(&path)?.clone();
+                let mut encoded = Vec::new();
+                encode_expression(receiver, parameters, locals, context, &mut encoded)?;
+                if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                let mut key = Vec::new();
+                encode_expression(
+                    call.args[0].expr.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut key,
+                )?;
+                match jit_expression_kind(&key)?.0 {
+                    JitKind::String => {}
+                    JitKind::Number => key.push("numstr".into()),
+                    JitKind::Boolean => key.push("boolstr".into()),
+                    _ => return None,
+                }
+                output.extend(encoded);
+                match operation {
+                    "get" => {
+                        output.extend(key);
+                        output.push(format!("{prefix}get"));
+                    }
+                    "set" => {
+                        let expected = match prefix.as_str() {
+                            "dn" => JitKind::Number,
+                            "db" => JitKind::Boolean,
+                            _ => JitKind::String,
+                        };
+                        let mut value = Vec::new();
+                        encode_expression(
+                            call.args[1].expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut value,
+                        )?;
+                        if jit_expression_kind(&value)?.0 != expected {
+                            return None;
+                        }
+                        output.push("dup".into());
+                        output.extend(key);
+                        output.extend(value);
+                        output.push(format!("{prefix}set"));
+                        output.push("drop".into());
+                    }
+                    _ => return None,
+                }
             }
             Expr::Call(call) if set_combine_method(call, locals).is_some() => {
                 let (token, receiver, other) = set_combine_method(call, locals)?;

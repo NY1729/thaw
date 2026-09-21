@@ -2081,3 +2081,39 @@ fn set_from_iterable_uses_jit_without_quickjs() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n1\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn map_get_set_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-map-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-map");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function run(): number;\nexport declare function removed(): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.run = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); return m.get('a') + (m.size === 2 ? 10 : 0); }; module.exports.removed = function() { const m = new Map(); m.set('a', 5); m.delete('a'); return m.has('a') ? 1 : 0; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { run, removed } from 'jit-map';\nfunction main(): void { console.log(run()); console.log(removed()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "11\n0\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
