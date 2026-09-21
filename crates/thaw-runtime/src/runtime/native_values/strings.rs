@@ -939,9 +939,8 @@ pub unsafe extern "C" fn thaw_escape(value: *const c_char) -> *const c_char {
     let mut out = String::new();
     for unit in value.encode_utf16() {
         let keep = unit < 0x80
-            && (unit as u8).is_ascii_alphanumeric()
-            || (unit < 0x80
-                && matches!(unit as u8, b'@' | b'*' | b'_' | b'+' | b'-' | b'.' | b'/'));
+            && ((unit as u8).is_ascii_alphanumeric()
+                || matches!(unit as u8, b'@' | b'*' | b'_' | b'+' | b'-' | b'.' | b'/'));
         if keep {
             out.push(unit as u8 as char);
         } else if unit <= 0xFF {

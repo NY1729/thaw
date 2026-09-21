@@ -194,7 +194,7 @@ fn jit_export(
 ) -> Option<JitExport> {
     use thaw_parser::ast::{
         ArrowExpr, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr,
-        ExprOrSpread, ForHead, Function, Ident, Lit, MemberProp, ModuleItem, OptChainBase, Pat,
+        ExprOrSpread, ForHead, Function, Ident, Lit, MemberProp, ModuleItem, NewExpr, OptChainBase, Pat,
         ObjectPatProp, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp, UpdateOp,
         VarDeclKind, VarDeclOrExpr,
     };

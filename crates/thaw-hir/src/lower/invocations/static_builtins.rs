@@ -1071,10 +1071,7 @@ impl<'a> FnLowerer<'a> {
                                     Some(&HirType::Json),
                                 )?
                             }
-                            other => {
-                                let value = self.lower_expr(other)?;
-                                value
-                            }
+                            other => self.lower_expr(other)?,
                         };
                         let reviver = self.coerce_to_declared(&HirType::JsValue, reviver)?;
                         let json_handle = HirExpr::Call(

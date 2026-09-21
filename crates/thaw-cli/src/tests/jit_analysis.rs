@@ -676,3 +676,28 @@ fn jit_tags_fixed_aggregate_union_results() {
         assert!(jit_numeric_export(body, name, false, &function).is_some());
     }
 }
+
+#[test]
+fn recognizes_set_constructor_and_methods_for_jit() {
+    let function = |name: &str| thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
+        name: name.into(),
+        generic: None,
+        params: vec![],
+        required_params: 0,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let export = jit_numeric_export(
+        "function roundTrip() { const s = new Set([1, 2, 3]); s.add(4); s.delete(1); return s.has(2) ? (s.has(3) ? 1 : 2) : 3; } module.exports = { roundTrip };",
+        "roundTrip",
+        false,
+        &function("roundTrip"),
+    );
+    let export = export.expect("Set operations should be JIT-specializable");
+    assert!(export.contains("dsempty"), "expected a dictionary Set: {export}");
+    assert!(export.contains("dsset"), "expected Set.add -> dsset: {export}");
+    assert!(export.contains("dhasown"), "expected Set.has -> dhasown: {export}");
+    assert!(export.contains("ddelete"), "expected Set.delete -> ddelete: {export}");
+    assert!(export.contains("dsl"), "expected a materialized Set local: {export}");
+}

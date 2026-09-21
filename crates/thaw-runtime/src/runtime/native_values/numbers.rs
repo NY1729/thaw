@@ -645,8 +645,11 @@ pub extern "C" fn thaw_i64_from_number(value: f64) -> i64 {
 /// at the first non-digit (real JS rejects trailing garbage with a
 /// `SyntaxError`; thaw keeps the leading integer, or `0` when there is
 /// none), saturating at the `i64` bounds.
+///
+/// # Safety
+/// `value` must be null or a valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn thaw_i64_from_string(value: *const c_char) -> i64 {
+pub unsafe extern "C" fn thaw_i64_from_string(value: *const c_char) -> i64 {
     let text = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let trimmed = text.trim();
     let (negative, digits) = match trimmed.strip_prefix('-') {
@@ -675,7 +678,7 @@ pub extern "C" fn thaw_i64_from_string(value: *const c_char) -> i64 {
 #[no_mangle]
 pub extern "C" fn thaw_i64_as_int_n(value: i64, bits: f64) -> i64 {
     let bits = bits.trunc();
-    if !(bits > 0.0) {
+    if bits.is_nan() || bits <= 0.0 {
         return 0;
     }
     let bits = if bits >= 64.0 { 64 } else { bits as u32 };
@@ -697,7 +700,7 @@ pub extern "C" fn thaw_i64_as_int_n(value: i64, bits: f64) -> i64 {
 #[no_mangle]
 pub extern "C" fn thaw_i64_as_uint_n(value: i64, bits: f64) -> i64 {
     let bits = bits.trunc();
-    if !(bits > 0.0) {
+    if bits.is_nan() || bits <= 0.0 {
         return 0;
     }
     let bits = if bits >= 64.0 { 64 } else { bits as u32 };
