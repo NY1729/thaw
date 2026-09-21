@@ -1091,7 +1091,8 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_shift"
                     | "__thaw_temporal_compare"
                     | "__thaw_temporal_duration_component"
-                    | "__thaw_temporal_duration_from_string" => return Ok(HirType::F64),
+                    | "__thaw_temporal_duration_from_string"
+                    | "__thaw_temporal_duration_nanos_from_string" => return Ok(HirType::F64),
                     "__thaw_temporal_instant_to_string"
                     | "__thaw_temporal_plain_date_to_string"
                     | "__thaw_temporal_plain_date_time_to_string"

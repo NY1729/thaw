@@ -3847,6 +3847,11 @@ fn compiles_temporal_values() {
             console.log(precise.equals(Temporal.Instant.from("2020-01-02T03:04:05.678123456Z")));
             console.log(Temporal.PlainTime.from("12:30:45.123456789").toString());
             console.log(Temporal.PlainDateTime.from("2022-06-07T08:09:10.111222333").toString());
+            console.log(Temporal.Instant.from("2020-01-02T03:04:05Z")
+                .add(Temporal.Duration.from("PT0.000000001S")).toString());
+            console.log(Temporal.Instant.from("2020-01-02T03:04:05Z")
+                .subtract(Temporal.Duration.from("PT0.000000001S")).toString());
+            console.log(Temporal.Duration.from("PT0.000000001S").toString());
         }
     "#;
     assert_eq!(
@@ -3856,7 +3861,9 @@ fn compiles_temporal_values() {
          2020-01-02T02:04:05.678Z\n2021-03-15\n2021\n3\n15\n1\n-1\n\
          2021-03-16\nPT2H30M\n2\n30\n150\n1.5\n12:30:45.678\n12\n08:09:10\n\
          2020-01-02T03:04:05.678123456Z\n1577934245678123456\n-1\ntrue\n\
-         12:30:45.123456789\n2022-06-07T08:09:10.111222333\n"
+         12:30:45.123456789\n2022-06-07T08:09:10.111222333\n\
+         2020-01-02T03:04:05.000000001Z\n2020-01-02T03:04:04.999999999Z\n\
+         PT0.000000001S\n"
     );
 }
 
