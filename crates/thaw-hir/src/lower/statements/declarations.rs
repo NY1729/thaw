@@ -143,6 +143,14 @@ impl<'a> FnLowerer<'a> {
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
                 let sparse_array = self.expression_may_be_sparse_array(init);
+                let sparse_array_function = match init {
+                    Expr::Arrow(arrow) => arrow_returns_sparse_array(arrow),
+                    Expr::Fn(function) => function_returns_sparse_array(&function.function),
+                    Expr::Ident(identifier) => self
+                        .sparse_array_functions
+                        .contains(&self.resolve_binding(identifier.sym.as_ref())),
+                    _ => false,
+                };
                 if let Expr::Yield(yield_expr) = init {
                     let Some((values, element, input, input_type, returns, _)) =
                         self.generator_yields.clone()
@@ -689,6 +697,9 @@ impl<'a> FnLowerer<'a> {
                 }
                 if sparse_array {
                     self.sparse_arrays.insert(hir_name.clone());
+                }
+                if sparse_array_function {
+                    self.sparse_array_functions.insert(hir_name.clone());
                 }
                 statements.push(HirStmt::Let(hir_name, storage_type, value));
                 continue;

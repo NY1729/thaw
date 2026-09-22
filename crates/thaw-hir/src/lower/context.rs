@@ -25,6 +25,7 @@ struct FnLowerer<'a> {
     bindings: HashMap<Symbol, Vec<Symbol>>,
     used_hir_bindings: HashSet<Symbol>,
     sparse_arrays: HashSet<Symbol>,
+    sparse_array_functions: HashSet<Symbol>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
     interfaces: &'a HashMap<Symbol, HirType>,

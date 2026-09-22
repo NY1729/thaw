@@ -146,6 +146,7 @@ impl<'a> FnLowerer<'a> {
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
+        let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let result = (|| {
             let mut params = Vec::with_capacity(source_params.len());
@@ -394,6 +395,7 @@ impl<'a> FnLowerer<'a> {
         self.scope = saved_scope;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
+        self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
         result
     }
@@ -421,6 +423,7 @@ impl<'a> FnLowerer<'a> {
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
+        let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let saved_generator_yields = self.generator_yields.clone();
         let saved_generator_finalizers = self.generator_finalizers.clone();
@@ -471,6 +474,7 @@ impl<'a> FnLowerer<'a> {
         self.scope = saved_scope;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
+        self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
         self.generator_yields = saved_generator_yields;
         self.generator_finalizers = saved_generator_finalizers;
@@ -843,6 +847,7 @@ impl<'a> FnLowerer<'a> {
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
+        let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let result = (|| {
             let mut params = Vec::with_capacity(parameter_types.len());
@@ -957,6 +962,7 @@ impl<'a> FnLowerer<'a> {
         self.scope = saved_scope;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
+        self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
         result
     }
