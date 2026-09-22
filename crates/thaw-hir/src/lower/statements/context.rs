@@ -165,6 +165,21 @@ impl<'a> FnLowerer<'a> {
                 Some(Expr::Member(member))
                     if matches!(
                         &member.prop,
+                        MemberProp::Ident(property) if property.sym == "catch"
+                    ) => {
+                        self.expression_may_be_sparse_array(&member.obj)
+                            || call.args.first().is_some_and(|argument| {
+                                self.callable_may_return_sparse_array(&argument.expr)
+                            })
+                    }
+                Some(Expr::Member(member))
+                    if matches!(
+                        &member.prop,
+                        MemberProp::Ident(property) if property.sym == "finally"
+                    ) => self.expression_may_be_sparse_array(&member.obj),
+                Some(Expr::Member(member))
+                    if matches!(
+                        &member.prop,
                         MemberProp::Ident(property)
                             if matches!(property.sym.as_ref(), "slice" | "concat" | "map")
                     ) => self.expression_may_be_sparse_array(&member.obj),
