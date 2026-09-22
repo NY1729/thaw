@@ -484,17 +484,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let handle = self.compile_expr(&args[0])?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
-                let mut arguments = Vec::with_capacity(4);
-                arguments.push(buffer.into());
-                arguments.push(
+                let length = self
+                    .builder
+                    .build_load(self.context.i64_type(), buffer, "array_slice_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let start = self.compile_expr(&args[1])?.into_float_value();
+                let end = self.compile_expr(&args[2])?.into_float_value();
+                let arguments = vec![
+                    buffer.into(),
                     self.context
                         .i64_type()
                         .const_int(array_element_storage_bytes(&element), false)
                         .into(),
-                );
-                for argument in &args[1..] {
-                    arguments.push(self.compile_expr(argument)?.into());
-                }
+                    start.into(),
+                    end.into(),
+                ];
                 let result = self
                     .builder
                     .build_call(
@@ -507,7 +512,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array slice returned no value".to_string())?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                let presence = self.compile_array_presence(handle)?;
+                let sliced_presence = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_slice")
+                            .unwrap(),
+                        &[presence.into(), length.into(), start.into(), end.into()],
+                        "array_slice_presence",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence slice returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self
+                    .compile_array_wrap_with_presence(result, sliced_presence)?
+                    .into());
             }
             "__thaw_array_to_reversed" => {
                 let [array] = args else {

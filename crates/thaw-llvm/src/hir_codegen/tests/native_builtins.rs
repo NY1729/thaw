@@ -3683,11 +3683,24 @@ fn compiles_array_holes() {
                 return value > 1;
             });
             console.log(filteredCalls, filtered.length, filtered[0], filtered[1]);
+            let mappedCalls = 0;
+            const mapped = spread.map((value) => {
+                mappedCalls += 1;
+                return value * 2;
+            });
+            let mappedVisited = 0;
+            mapped.forEach(() => { mappedVisited += 1; });
+            console.log(mappedCalls, mapped.length, mappedVisited, mapped[2]);
+            const sliced = spread.slice(1, 5);
+            let slicedVisited = 0;
+            sliced.forEach(() => { slicedVisited += 1; });
+            console.log(sliced.length, slicedVisited, sliced[1]);
+            console.log(JSON.stringify(spread));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_holes"),
-        "3 true\n2\n2 1\n6 4\n4 2 2 4\n"
+        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n[0,null,1,2,null,4]\n"
     );
 }
 

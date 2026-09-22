@@ -75,6 +75,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 return Ok(self.compile_array_has_index(handle, index)?.into());
             }
+            "__thaw_array_copy_presence" => {
+                let [target, source] = args else {
+                    return Err("array presence copy expects two operands".into());
+                };
+                let target = self.compile_expr(target)?.into_pointer_value();
+                let source = self.compile_expr(source)?.into_pointer_value();
+                return Ok(self.compile_array_copy_presence(target, source)?.into());
+            }
             "console.log" | "console.info" | "console.debug" => {
                 return self.compile_console_log(args, false)
             }
