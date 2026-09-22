@@ -470,6 +470,46 @@ impl<'a> FnLowerer<'a> {
             mode,
             ArrayPredicateMode::FindLast | ArrayPredicateMode::FindLastIndex
         );
+        let visit = vec![
+            HirStmt::Let(
+                element_name,
+                element_type.clone(),
+                HirExpr::TypedIndex(
+                    Box::new(HirExpr::Var(receiver_name.clone())),
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    element_type,
+                ),
+            ),
+            HirStmt::If(
+                stop_condition,
+                vec![HirStmt::Return(Some(stop_result))],
+                Vec::new(),
+            ),
+        ];
+        let visit = if matches!(mode, ArrayPredicateMode::Some | ArrayPredicateMode::Every) {
+            vec![HirStmt::If(
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                    vec![
+                        HirExpr::Var(receiver_name.clone()),
+                        HirExpr::Var(index_name.clone()),
+                    ],
+                ),
+                visit,
+                Vec::new(),
+            )]
+        } else {
+            visit
+        };
+        let mut loop_body = visit;
+        loop_body.push(HirStmt::Expr(HirExpr::Assign(
+            index_name.clone(),
+            Box::new(HirExpr::BinOp(
+                if reverse { BinOp::Sub } else { BinOp::Add },
+                Box::new(HirExpr::Var(index_name.clone())),
+                Box::new(one()),
+            )),
+        )));
         let body = HirExpr::Block(vec![
             HirStmt::Let(
                 length_name.clone(),
@@ -499,30 +539,7 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Var(length_name)
                     }),
                 ),
-                vec![
-                    HirStmt::Let(
-                        element_name,
-                        element_type.clone(),
-                        HirExpr::TypedIndex(
-                            Box::new(HirExpr::Var(receiver_name.clone())),
-                            Box::new(HirExpr::Var(index_name.clone())),
-                            element_type.clone(),
-                        ),
-                    ),
-                    HirStmt::If(
-                        stop_condition,
-                        vec![HirStmt::Return(Some(stop_result))],
-                        Vec::new(),
-                    ),
-                    HirStmt::Expr(HirExpr::Assign(
-                        index_name.clone(),
-                        Box::new(HirExpr::BinOp(
-                            if reverse { BinOp::Sub } else { BinOp::Add },
-                            Box::new(HirExpr::Var(index_name)),
-                            Box::new(one()),
-                        )),
-                    )),
-                ],
+                loop_body,
             ),
             HirStmt::Return(Some(final_result)),
         ]);
