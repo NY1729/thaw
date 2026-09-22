@@ -254,30 +254,27 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let element_name = format!("__thaw_reduce_element_{}", self.next_binding);
         self.next_binding += 1;
+        let found_name = format!("__thaw_reduce_found_{}", self.next_binding);
+        self.next_binding += 1;
         self.scope.insert(length_name.clone(), HirType::F64);
         self.scope.insert(index_name.clone(), HirType::F64);
         self.scope
             .insert(accumulator_name.clone(), accumulator_type.clone());
         self.scope
             .insert(element_name.clone(), element_type.clone());
+        self.scope.insert(found_name.clone(), HirType::Bool);
 
         let one = || HirExpr::Lit(HirLit::F64(1.0));
         let length = || HirExpr::Var(length_name.clone());
         let index = || HirExpr::Var(index_name.clone());
         let receiver_var = || HirExpr::Var(receiver_name.clone());
-        let (initial_value, initial_index, empty_guard, initial_name) = if initial.is_some() {
+        let (initial_value, initial_name) = if initial.is_some() {
             let initial_name = format!("__thaw_reduce_initial_{}", self.next_binding);
             self.next_binding += 1;
             self.scope
                 .insert(initial_name.clone(), accumulator_type.clone());
             (
                 HirExpr::Var(initial_name.clone()),
-                if reverse {
-                    HirExpr::BinOp(BinOp::Sub, Box::new(length()), Box::new(one()))
-                } else {
-                    HirExpr::Lit(HirLit::F64(0.0))
-                },
-                None,
                 Some(initial_name),
             )
         } else {
@@ -291,26 +288,6 @@ impl<'a> FnLowerer<'a> {
                     }),
                     element_type.clone(),
                 ),
-                if reverse {
-                    HirExpr::BinOp(
-                        BinOp::Sub,
-                        Box::new(length()),
-                        Box::new(HirExpr::Lit(HirLit::F64(2.0))),
-                    )
-                } else {
-                    one()
-                },
-                Some(HirStmt::If(
-                    HirExpr::BinOp(
-                        BinOp::EqEqEq,
-                        Box::new(length()),
-                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                    ),
-                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                        "Reduce of empty array with no initial value".into(),
-                    )))],
-                    Vec::new(),
-                )),
                 None,
             )
         };
@@ -332,12 +309,35 @@ impl<'a> FnLowerer<'a> {
             HirType::F64,
             HirExpr::ArrayLen(Box::new(receiver_var())),
         )];
-        if let Some(empty_guard) = empty_guard {
-            statements.push(empty_guard);
+        if initial.is_none() {
+            statements.push(HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(length()),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                ),
+                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                    "Reduce of empty array with no initial value".into(),
+                )))],
+                Vec::new(),
+            ));
         }
         statements.extend([
             HirStmt::Let(accumulator_name.clone(), accumulator_type, initial_value),
-            HirStmt::Let(index_name.clone(), HirType::F64, initial_index),
+            HirStmt::Let(
+                found_name.clone(),
+                HirType::Bool,
+                HirExpr::Lit(HirLit::Bool(initial.is_some())),
+            ),
+            HirStmt::Let(
+                index_name.clone(),
+                HirType::F64,
+                if reverse {
+                    HirExpr::BinOp(BinOp::Sub, Box::new(length()), Box::new(one()))
+                } else {
+                    HirExpr::Lit(HirLit::F64(0.0))
+                },
+            ),
             HirStmt::While(
                 HirExpr::BinOp(
                     if reverse { BinOp::GtEq } else { BinOp::Lt },
@@ -349,19 +349,45 @@ impl<'a> FnLowerer<'a> {
                     }),
                 ),
                 vec![
-                    HirStmt::Let(
-                        element_name,
-                        element_type.clone(),
-                        HirExpr::TypedIndex(
-                            Box::new(receiver_var()),
-                            Box::new(index()),
-                            element_type,
+                    HirStmt::If(
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                            vec![receiver_var(), index()],
                         ),
+                        vec![
+                            HirStmt::Let(
+                                element_name.clone(),
+                                element_type.clone(),
+                                HirExpr::TypedIndex(
+                                    Box::new(receiver_var()),
+                                    Box::new(index()),
+                                    element_type,
+                                ),
+                            ),
+                            HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::Var(found_name.clone())),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                ),
+                                vec![
+                                    HirStmt::Expr(HirExpr::Assign(
+                                        accumulator_name.clone(),
+                                        Box::new(HirExpr::Var(element_name.clone())),
+                                    )),
+                                    HirStmt::Expr(HirExpr::Assign(
+                                        found_name.clone(),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                    )),
+                                ],
+                                vec![HirStmt::Expr(HirExpr::Assign(
+                                    accumulator_name.clone(),
+                                    Box::new(callback_call),
+                                ))],
+                            ),
+                        ],
+                        Vec::new(),
                     ),
-                    HirStmt::Expr(HirExpr::Assign(
-                        accumulator_name.clone(),
-                        Box::new(callback_call),
-                    )),
                     HirStmt::Expr(HirExpr::Assign(
                         index_name.clone(),
                         Box::new(HirExpr::BinOp(
@@ -371,6 +397,17 @@ impl<'a> FnLowerer<'a> {
                         )),
                     )),
                 ],
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(found_name)),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                ),
+                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                    "Reduce of empty array with no initial value".into(),
+                )))],
+                Vec::new(),
             ),
             HirStmt::Return(Some(HirExpr::Var(accumulator_name))),
         ]);
