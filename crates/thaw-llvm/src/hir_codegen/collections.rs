@@ -233,6 +233,29 @@ impl<'ctx> HirCompiler<'ctx> {
                 "array_presence",
             )
             .map_err(|error| error.to_string())?;
+        let source_data = self.compile_array_data(source)?;
+        let length = self
+            .builder
+            .build_load(self.context.i64_type(), source_data, "array_presence_length")
+            .map_err(|error| error.to_string())?;
+        let presence = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_array_presence_slice")
+                    .unwrap(),
+                &[
+                    presence.into(),
+                    length.into(),
+                    self.context.f64_type().const_zero().into(),
+                    self.context.f64_type().const_float(f64::INFINITY).into(),
+                ],
+                "array_presence_copy",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("array presence copy returned no value")?;
         self.builder
             .build_store(target_slot, presence)
             .map_err(|error| error.to_string())?;
@@ -576,6 +599,14 @@ impl<'ctx> HirCompiler<'ctx> {
         array: &HirExpr,
         index: &HirExpr,
     ) -> Result<PointerValue<'ctx>, String> {
+        self.compile_element_parts(array, index).map(|parts| parts.0)
+    }
+
+    fn compile_element_parts(
+        &mut self,
+        array: &HirExpr,
+        index: &HirExpr,
+    ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>, IntValue<'ctx>), String> {
         let handle = self.compile_expr(array)?.into_pointer_value();
         let arr_ptr = self.compile_array_data(handle)?;
         let idx_val = self.compile_expr(index)?.into_float_value();
@@ -608,11 +639,12 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|e| e.to_string())?;
 
-        unsafe {
+        let element = unsafe {
             self.builder
                 .build_in_bounds_gep(self.context.i8_type(), arr_ptr, &[byte_offset], "elem_ptr")
                 .map_err(|e| e.to_string())
-        }
+        }?;
+        Ok((element, handle, idx_int))
     }
 
     /// Allocates native fields from the arena in the order `fields` lists

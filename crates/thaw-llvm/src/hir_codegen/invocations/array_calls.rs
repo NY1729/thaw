@@ -417,23 +417,21 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 let handle = self.compile_expr(&args[0])?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
-                let mut arguments = Vec::with_capacity(4);
-                arguments.push(buffer.into());
-                for (index, argument) in args.iter().enumerate().skip(1) {
-                    let mut value = self.compile_expr(argument)?;
-                    if index == 1 && name == "__thaw_bool_array_fill" {
-                        value = self
-                            .builder
-                            .build_int_z_extend(
-                                value.into_int_value(),
-                                self.context.i8_type(),
-                                "array_fill_bool",
-                            )
-                            .map_err(|error| error.to_string())?
-                            .into();
-                    }
-                    arguments.push(value.into());
+                let mut value = self.compile_expr(&args[1])?;
+                if name == "__thaw_bool_array_fill" {
+                    value = self
+                        .builder
+                        .build_int_z_extend(
+                            value.into_int_value(),
+                            self.context.i8_type(),
+                            "array_fill_bool",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .into();
                 }
+                let start = self.compile_expr(&args[2])?.into_float_value();
+                let end = self.compile_expr(&args[3])?.into_float_value();
+                let arguments = [buffer.into(), value.into(), start.into(), end.into()];
                 let runtime = name.trim_start_matches("__thaw_");
                 // Mutates in place and returns the same pointer -- keep
                 // using the original handle as this expression's value.
@@ -444,6 +442,14 @@ impl<'ctx> HirCompiler<'ctx> {
                             .unwrap(),
                         &arguments,
                         "array_fill",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_array_presence_fill").unwrap(),
+                        &[presence.into(), start.into(), end.into()],
+                        "array_presence_fill",
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(handle.into());
@@ -473,6 +479,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         "array_fill_value_bytes",
                     )
                     .map_err(|error| error.to_string())?;
+                let start = self.compile_expr(&args[2])?.into_float_value();
+                let end = self.compile_expr(&args[3])?.into_float_value();
                 let arguments = [
                     array.into(),
                     value_bytes.into(),
@@ -480,8 +488,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         .i64_type()
                         .const_int(array_element_storage_bytes(&element), false)
                         .into(),
-                    self.compile_expr(&args[2])?.into(),
-                    self.compile_expr(&args[3])?.into(),
+                    start.into(),
+                    end.into(),
                 ];
                 // Mutates in place and returns the same pointer -- keep
                 // using the original handle as this expression's value.
@@ -490,6 +498,14 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.module.get_function("thaw_array_fill").unwrap(),
                         &arguments,
                         "array_fill",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_array_presence_fill").unwrap(),
+                        &[presence.into(), start.into(), end.into()],
+                        "array_presence_fill",
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(handle.into());
@@ -562,6 +578,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
+                let length = self
+                    .builder
+                    .build_load(self.context.i64_type(), buffer, "array_to_reversed_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
                 let width = self
                     .context
                     .i64_type()
@@ -578,7 +599,38 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array toReversed returned no value".to_string())?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                let presence = self.compile_array_presence(handle)?;
+                let copied_presence = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_slice")
+                            .unwrap(),
+                        &[
+                            presence.into(),
+                            length.into(),
+                            self.context.f64_type().const_zero().into(),
+                            self.context.f64_type().const_float(f64::INFINITY).into(),
+                        ],
+                        "array_to_reversed_presence",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence copy returned no value")?
+                    .into_pointer_value();
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_reverse")
+                            .unwrap(),
+                        &[copied_presence.into()],
+                        "array_to_reversed_presence_reverse",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(self
+                    .compile_array_wrap_with_presence(result, copied_presence)?
+                    .into());
             }
             "__thaw_array_push" | "__thaw_array_unshift" => {
                 let [receiver, values @ ..] = args else {
@@ -591,6 +643,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 let width = array_element_storage_bytes(&element);
                 let handle = self.compile_expr(receiver)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
+                let old_length = self
+                    .builder
+                    .build_load(i64_type, buffer, "array_extend_old_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
                 // Build a scratch buffer holding each pushed/unshifted
                 // value's bytes contiguously, matching the raw array
                 // element layout, so a single runtime call can append/
@@ -653,6 +710,25 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(handle, new_buffer)
                     .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                let new_presence = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_presence_extend").unwrap(),
+                        &[
+                            presence.into(),
+                            old_length.into(),
+                            i64_type.const_int(values.len() as u64, false).into(),
+                            self.context.i8_type().const_int(u64::from(name == "__thaw_array_unshift"), false).into(),
+                        ],
+                        "array_extend_presence",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence extend returned no value")?
+                    .into_pointer_value();
+                self.compile_array_set_presence(handle, new_presence)?;
                 let new_length = self
                     .builder
                     .build_load(i64_type, new_buffer, "array_extend_length")
@@ -722,6 +798,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(handle, new_buffer)
                     .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                let new_presence = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_presence_remove").unwrap(),
+                        &[
+                            presence.into(),
+                            old_length.into(),
+                            self.context.i8_type().const_int(u64::from(name == "__thaw_array_shift"), false).into(),
+                        ],
+                        "array_remove_presence",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence remove returned no value")?
+                    .into_pointer_value();
+                self.compile_array_set_presence(handle, new_presence)?;
                 // An empty receiver has nothing to remove -- the runtime
                 // zero-fills `out_slot` in that case, which is only a valid
                 // representation for scalar/pointer element types, so branch
@@ -893,6 +987,33 @@ impl<'ctx> HirCompiler<'ctx> {
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
+                let old_len = self
+                    .builder
+                    .build_load(self.context.i64_type(), buffer, "array_sort_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let presence = self.compile_array_presence(handle)?;
+                let present_len = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_compact")
+                            .unwrap(),
+                        &[
+                            buffer.into(),
+                            presence.into(),
+                            self.context.i64_type().const_int(8, false).into(),
+                        ],
+                        "array_sort_present_length",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence compaction returned no value".to_string())?
+                    .into_int_value();
+                self.builder
+                    .build_store(buffer, present_len)
+                    .map_err(|error| error.to_string())?;
                 // Mutates in place and returns the same pointer -- keep
                 // using the original handle as this expression's value.
                 self.builder
@@ -901,6 +1022,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         &[buffer.into()],
                         "array_sort",
                     )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(buffer, old_len)
                     .map_err(|error| error.to_string())?;
                 return Ok(handle.into());
             }
@@ -911,22 +1035,91 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [array] = args else {
                     return Err("array toSorted expects one operand".to_string());
                 };
-                let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
+                let runtime = format!(
+                    "thaw_{}",
+                    name.trim_start_matches("__thaw_")
+                        .trim_end_matches("_to_sorted")
+                        .to_string()
+                        + "_sort"
+                );
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
+                let old_len = self
+                    .builder
+                    .build_load(self.context.i64_type(), buffer, "array_to_sorted_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
                 let result = self
                     .builder
                     .build_call(
-                        self.module.get_function(&runtime).unwrap(),
-                        &[buffer.into()],
-                        "array_to_sorted",
+                        self.module.get_function("thaw_array_slice").unwrap(),
+                        &[
+                            buffer.into(),
+                            self.context.i64_type().const_int(8, false).into(),
+                            self.context.f64_type().const_zero().into(),
+                            self.context.f64_type().const_float(f64::INFINITY).into(),
+                        ],
+                        "array_to_sorted_copy",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
                     .ok_or("array toSorted returned no value".to_string())?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                let presence = self.compile_array_presence(handle)?;
+                let copied_presence = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_slice")
+                            .unwrap(),
+                        &[
+                            presence.into(),
+                            old_len.into(),
+                            self.context.f64_type().const_zero().into(),
+                            self.context.f64_type().const_float(f64::INFINITY).into(),
+                        ],
+                        "array_to_sorted_presence",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence slice returned no value".to_string())?
+                    .into_pointer_value();
+                let present_len = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_compact")
+                            .unwrap(),
+                        &[
+                            result.into(),
+                            copied_presence.into(),
+                            self.context.i64_type().const_int(8, false).into(),
+                        ],
+                        "array_to_sorted_present_length",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence compaction returned no value".to_string())?
+                    .into_int_value();
+                self.builder
+                    .build_store(result, present_len)
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[result.into()],
+                        "array_to_sorted",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(result, old_len)
+                    .map_err(|error| error.to_string())?;
+                return Ok(self
+                    .compile_array_wrap_with_presence(result, copied_presence)?
+                    .into());
             }
             "__thaw_number_array_index_of"
             | "__thaw_number_array_includes"

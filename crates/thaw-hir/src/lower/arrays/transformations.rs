@@ -610,6 +610,10 @@ impl<'a> FnLowerer<'a> {
                 array_type.clone(),
                 HirExpr::ArrayAlloc(Box::new(var(&length_name)), element_type.clone()),
             ),
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_copy_presence".into())),
+                vec![var(&result_name), var(&receiver_name)],
+            )),
             HirStmt::Let(copy_index_name.clone(), HirType::F64, number(0.0)),
             HirStmt::While(
                 HirExpr::BinOp(
@@ -629,15 +633,22 @@ impl<'a> FnLowerer<'a> {
                             Box::new(var(&copy_index_name)),
                             Box::new(var(&value_name)),
                         ))],
-                        vec![HirStmt::Expr(HirExpr::IndexAssign(
-                            Box::new(var(&result_name)),
-                            Box::new(var(&copy_index_name)),
-                            Box::new(HirExpr::TypedIndex(
-                                Box::new(var(&receiver_name)),
+                        vec![HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                                vec![var(&receiver_name), var(&copy_index_name)],
+                            ),
+                            vec![HirStmt::Expr(HirExpr::IndexAssign(
+                                Box::new(var(&result_name)),
                                 Box::new(var(&copy_index_name)),
-                                element_type.clone(),
-                            )),
-                        ))],
+                                Box::new(HirExpr::TypedIndex(
+                                    Box::new(var(&receiver_name)),
+                                    Box::new(var(&copy_index_name)),
+                                    element_type.clone(),
+                                )),
+                            ))],
+                            Vec::new(),
+                        )],
                     ),
                     assign(
                         &copy_index_name,
