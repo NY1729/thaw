@@ -1479,6 +1479,14 @@ impl<'ctx> HirCompiler<'ctx> {
             );
         }
         self.module.add_function(
+            "thaw_map_iterator_next",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_map_size",
             f64_type.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

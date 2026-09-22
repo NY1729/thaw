@@ -2018,10 +2018,16 @@ impl<'a> FnLowerer<'a> {
                                     )),
                                 ));
                             };
-                            let entries = self.lower_expr(&argument.expr)?;
+                            let mut entries = self.lower_expr(&argument.expr)?;
                             let pair_type =
                                 HirType::Tuple(vec![key_type.clone(), value_type.clone()]);
                             let entries_type = HirType::Array(Box::new(pair_type.clone()));
+                            let actual_type = self.infer_expr_type(&entries)?;
+                            if let Some((collected, _)) =
+                                self.collect_generator_for_array_spread(entries.clone(), &actual_type)?
+                            {
+                                entries = collected;
+                            }
                             self.expect_type(
                                 &entries_type,
                                 &entries,
@@ -2059,8 +2065,14 @@ impl<'a> FnLowerer<'a> {
                                 )),
                             ));
                         };
-                        let iterable = self.lower_expr(&argument.expr)?;
+                        let mut iterable = self.lower_expr(&argument.expr)?;
                         let iterable_type = HirType::Array(Box::new(element_type.clone()));
+                        let actual_type = self.infer_expr_type(&iterable)?;
+                        if let Some((collected, _)) = self
+                            .collect_generator_for_array_spread(iterable.clone(), &actual_type)?
+                        {
+                            iterable = collected;
+                        }
                         self.expect_type(
                             &iterable_type,
                             &iterable,
