@@ -15,11 +15,11 @@
 // mutates in place, so every reference to a `Map`/`Set` value keeps
 // observing the same growing table.
 //
-// Entries live in a compact, append-only, insertion-ordered array;
+// Entries live in an append-only, insertion-ordered array;
 // buckets are a separate open-addressed (linear probing) index from hash
-// to entry position. Growth compacts out tombstoned (deleted) entries and
-// rebuilds the bucket index from each surviving entry's already-computed
-// hash, so the table never needs to re-hash a key.
+// to entry position. Growth preserves tombstoned positions and rebuilds
+// the bucket index from each surviving entry's already-computed hash. Stable
+// positions let live Map/Set iterators keep a simple cursor through mutations.
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -179,7 +179,7 @@ unsafe fn find_bucket<K: KeyKind>(header: &MapHeader, key: u64, hash: u64) -> (u
     }
 }
 
-/// Reallocates entries/buckets, compacting out tombstones and rebuilding
+/// Reallocates entries/buckets, preserving entry positions and rebuilding
 /// the bucket index from each surviving entry's already-known hash.
 /// Returns `false` (leaving `header` unchanged) only on allocation
 /// failure.
@@ -195,27 +195,23 @@ fn grow(header: &mut MapHeader) -> bool {
         return false;
     }
     let mask = new_buckets_len - 1;
-    let mut new_len = 0u64;
     for index in 0..header.entries_len {
         let entry = unsafe { *header.entries.add(index as usize) };
+        unsafe { new_entries.add(index as usize).write(entry) };
         if entry.state != ENTRY_LIVE {
             continue;
         }
-        unsafe { new_entries.add(new_len as usize).write(entry) };
         let mut bucket_index = (entry.hash & mask) as usize;
         loop {
             if unsafe { *new_buckets.add(bucket_index) } == BUCKET_EMPTY {
-                unsafe { new_buckets.add(bucket_index).write(new_len as i64) };
+                unsafe { new_buckets.add(bucket_index).write(index as i64) };
                 break;
             }
             bucket_index = (bucket_index + 1) & mask as usize;
         }
-        new_len += 1;
     }
     header.entries = new_entries;
-    header.entries_len = new_len;
     header.entries_cap = new_cap;
-    header.live = new_len;
     header.buckets = new_buckets;
     header.buckets_len = new_buckets_len;
     true
@@ -353,12 +349,13 @@ pub unsafe extern "C" fn thaw_map_clear(map: *mut u8) {
         return;
     }
     let header = unsafe { header_of(map) };
-    header.entries = std::ptr::null_mut();
-    header.entries_len = 0;
-    header.entries_cap = 0;
+    for index in 0..header.entries_len {
+        unsafe { (*header.entries.add(index as usize)).state = ENTRY_TOMBSTONE };
+    }
+    for index in 0..header.buckets_len {
+        unsafe { header.buckets.add(index as usize).write(BUCKET_EMPTY) };
+    }
     header.live = 0;
-    header.buckets = std::ptr::null_mut();
-    header.buckets_len = 0;
 }
 
 /// Builds a native array (`[i64 length][word0][word1]...]`, the same
@@ -452,6 +449,59 @@ fn arena_pair(first: u64, second: u64) -> u64 {
         handle.cast::<u64>().write_unaligned(pair as u64);
     }
     handle as u64
+}
+
+#[no_mangle]
+/// Returns `[nextCursor, value]` for the next live entry at or after `cursor`,
+/// or an empty native array when iteration is complete. `mode` selects keys,
+/// values, Map entries, or Set entries (`0..=3`).
+///
+/// # Safety
+/// `map` must be null or a pointer returned by `thaw_map_new`.
+pub unsafe extern "C" fn thaw_map_iterator_next(
+    map: *const u8,
+    cursor: f64,
+    mode: f64,
+) -> *mut u8 {
+    let empty = || {
+        let output = thaw_arena::thaw_arena_alloc(8, 8);
+        if !output.is_null() {
+            unsafe { output.cast::<i64>().write(0) };
+        }
+        output
+    };
+    if map.is_null() {
+        return empty();
+    }
+    let header = unsafe { &*map.cast::<MapHeader>() };
+    let start = cursor.max(0.0) as u64;
+    for index in start..header.entries_len {
+        let entry = unsafe { *header.entries.add(index as usize) };
+        if entry.state != ENTRY_LIVE {
+            continue;
+        }
+        let value = match mode as u8 {
+            0 => entry.key,
+            1 => entry.value,
+            2 => arena_pair(entry.key, entry.value),
+            3 => arena_pair(entry.key, entry.key),
+            _ => return empty(),
+        };
+        let output = thaw_arena::thaw_arena_alloc(24, 8);
+        if output.is_null() {
+            return output;
+        }
+        unsafe {
+            output.cast::<i64>().write(2);
+            output
+                .add(8)
+                .cast::<u64>()
+                .write_unaligned(((index + 1) as f64).to_bits());
+            output.add(16).cast::<u64>().write_unaligned(value);
+        }
+        return output;
+    }
+    empty()
 }
 
 #[no_mangle]
@@ -708,7 +758,7 @@ mod map_native_tests {
         }
 
         // White-box: entries must still be in insertion order after the
-        // compacting growth above, skipping tombstoned (deleted) ones.
+        // growth above, skipping tombstoned (deleted) ones.
         let header = unsafe { &*map.cast::<MapHeader>() };
         let mut previous_key: Option<u64> = None;
         let mut live_count = 0u64;
@@ -780,5 +830,24 @@ mod map_native_tests {
         assert_eq!(unsafe { read_word_array(thaw_map_snapshot_keys(std::ptr::null())) }, Vec::<u64>::new());
         let map = unsafe { thaw_map_new() };
         assert_eq!(unsafe { read_word_array(thaw_map_snapshot_values(map)) }, Vec::<u64>::new());
+    }
+
+    #[test]
+    fn iterator_cursor_survives_deletion_clear_and_append() {
+        let map = unsafe { thaw_map_new() };
+        for key in [1.0, 2.0, 3.0] {
+            unsafe { thaw_map_num_set(map, key, value(key)) };
+        }
+        let first = unsafe { read_word_array(thaw_map_iterator_next(map, 0.0, 0.0)) };
+        assert_eq!(first.iter().copied().map(f64::from_bits).collect::<Vec<_>>(), vec![1.0, 1.0]);
+
+        unsafe { thaw_map_num_delete(map, 2.0) };
+        let third = unsafe { read_word_array(thaw_map_iterator_next(map, 1.0, 0.0)) };
+        assert_eq!(third.iter().copied().map(f64::from_bits).collect::<Vec<_>>(), vec![3.0, 3.0]);
+
+        unsafe { thaw_map_clear(map) };
+        unsafe { thaw_map_num_set(map, 4.0, value(4.0)) };
+        let appended = unsafe { read_word_array(thaw_map_iterator_next(map, 3.0, 0.0)) };
+        assert_eq!(appended.iter().copied().map(f64::from_bits).collect::<Vec<_>>(), vec![4.0, 4.0]);
     }
 }
