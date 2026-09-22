@@ -265,10 +265,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|e| e.to_string())
             }
             HirExpr::IndexAssign(arr, idx, value) => {
-                let elem_ptr = self.compile_element_ptr(arr, idx)?;
+                let (elem_ptr, handle, index) = self.compile_element_parts(arr, idx)?;
                 let val = self.compile_expr(value)?;
                 self.builder
                     .build_store(elem_ptr, val)
+                    .map_err(|e| e.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_mark")
+                            .unwrap(),
+                        &[presence.into(), index.into()],
+                        "array_presence_mark",
+                    )
                     .map_err(|e| e.to_string())?;
                 Ok(val)
             }

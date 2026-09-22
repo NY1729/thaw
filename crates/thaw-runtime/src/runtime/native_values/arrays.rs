@@ -163,6 +163,47 @@ pub unsafe extern "C" fn thaw_array_presence_reverse(presence: *mut u8) -> *mut 
     presence
 }
 
+#[no_mangle]
+/// Compacts present elements to the front before sorting and moves holes to
+/// the end of the presence mask. Returns the number of present elements.
+///
+/// # Safety
+/// `array` and `presence` must describe the same writable Thaw array.
+pub unsafe extern "C" fn thaw_array_presence_compact(
+    array: *mut u8,
+    presence: *mut u8,
+    element_width: usize,
+) -> usize {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return 0;
+    };
+    if presence.is_null() || element_width == 0 {
+        return length;
+    }
+    let mask_len = unsafe { presence.cast::<u64>().read() as usize };
+    let mut write = 0;
+    for read in 0..length {
+        let present = read >= mask_len || unsafe { presence.add(8 + read).read() != 0 };
+        if present {
+            if write != read {
+                unsafe {
+                    std::ptr::copy(
+                        array.add(8 + read * element_width),
+                        array.add(8 + write * element_width),
+                        element_width,
+                    );
+                }
+            }
+            write += 1;
+        }
+    }
+    unsafe {
+        std::ptr::write_bytes(presence.add(8), 1, write);
+        std::ptr::write_bytes(presence.add(8 + write), 0, length - write);
+    }
+    write
+}
+
 fn relative_array_index(index: f64, length: usize) -> usize {
     if index.is_nan() || index == f64::NEG_INFINITY {
         return 0;
@@ -237,6 +278,105 @@ pub unsafe extern "C" fn thaw_array_presence_copy_within(
         unsafe { std::ptr::copy(presence.add(8 + start), presence.add(8 + target), count) };
     }
     presence
+}
+
+#[no_mangle]
+/// Marks a filled range as present in an array presence mask.
+///
+/// # Safety
+/// `presence` must be null or point to a writable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_fill(
+    presence: *mut u8,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    if presence.is_null() {
+        return presence;
+    }
+    let length = unsafe { presence.cast::<u64>().read() as usize };
+    let start = relative_array_index(start, length);
+    let end = relative_array_index(end, length);
+    if end > start {
+        unsafe { std::ptr::write_bytes(presence.add(8 + start), 1, end - start) };
+    }
+    presence
+}
+
+#[no_mangle]
+/// Marks one indexed assignment as present.
+///
+/// # Safety
+/// `presence` must be null or point to a writable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_mark(presence: *mut u8, index: usize) {
+    if presence.is_null() {
+        return;
+    }
+    let length = unsafe { presence.cast::<u64>().read() as usize };
+    if index < length {
+        unsafe { presence.add(8 + index).write(1) };
+    }
+}
+
+#[no_mangle]
+/// Resizes a presence mask after push/unshift.
+///
+/// # Safety
+/// `presence` must be null or point to a readable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_extend(
+    presence: *const u8,
+    old_len: usize,
+    count: usize,
+    prepend: u8,
+) -> *mut u8 {
+    if presence.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mask_len = unsafe { presence.cast::<u64>().read() as usize };
+    let new_len = old_len + count;
+    let output = thaw_arena::thaw_arena_alloc(8 + new_len, 1);
+    if output.is_null() {
+        return output;
+    }
+    unsafe {
+        output.cast::<u64>().write(new_len as u64);
+        std::ptr::write_bytes(output.add(8), 1, new_len);
+        let destination = if prepend != 0 { count } else { 0 };
+        std::ptr::copy_nonoverlapping(
+            presence.add(8),
+            output.add(8 + destination),
+            old_len.min(mask_len),
+        );
+    }
+    output
+}
+
+#[no_mangle]
+/// Resizes a presence mask after pop/shift.
+///
+/// # Safety
+/// `presence` must be null or point to a readable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_remove(
+    presence: *const u8,
+    old_len: usize,
+    shift: u8,
+) -> *mut u8 {
+    if presence.is_null() || old_len == 0 {
+        return presence.cast_mut();
+    }
+    let mask_len = unsafe { presence.cast::<u64>().read() as usize };
+    let new_len = old_len - 1;
+    let output = thaw_arena::thaw_arena_alloc(8 + new_len, 1);
+    if output.is_null() {
+        return output;
+    }
+    unsafe {
+        output.cast::<u64>().write(new_len as u64);
+        std::ptr::write_bytes(output.add(8), 1, new_len);
+        let source = usize::from(shift != 0);
+        let available = mask_len.saturating_sub(source).min(new_len);
+        std::ptr::copy_nonoverlapping(presence.add(8 + source), output.add(8), available);
+    }
+    output
 }
 
 unsafe fn fill_array_slots<T: Copy>(array: *mut u8, value: T, start: f64, end: f64) -> *mut u8 {
