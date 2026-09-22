@@ -787,6 +787,18 @@ impl<'a> FnLowerer<'a> {
                 vec![none()],
                 Vec::new(),
             ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                        vec![var(&receiver_name), var(&actual_index_name)],
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                ),
+                vec![none()],
+                Vec::new(),
+            ),
             HirStmt::Return(Some(HirExpr::OptionalSome(
                 Box::new(HirExpr::TypedIndex(
                     Box::new(var(&receiver_name)),

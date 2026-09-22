@@ -449,11 +449,13 @@ fn compiles_native_array_at() {
             console.log(empty.at(0));
             console.log(receiver().at(index()));
             console.log((await delayedReceiver()).at(await delayedIndex()));
+            const sparse: number[] = [1, , 3];
+            console.log(sparse.at(1), sparse.at(-2), sparse.at(2));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_at"),
-        "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n{\"value\":1}\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\n"
+        "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n{\"value\":1}\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\nundefined undefined 3\n"
     );
 }
 
