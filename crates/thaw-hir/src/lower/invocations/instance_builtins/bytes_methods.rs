@@ -331,10 +331,14 @@ impl<'a> FnLowerer<'a> {
             return Err(format!("`{}` expects exactly one argument", property.sym));
         };
         let source = self.coerce_primitive_to_string(source.clone())?;
-        let written = HirExpr::Call(
+        let written_call = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_bytes_set_from_string".to_string())),
             vec![receiver, source, encoding_lit],
         );
+        let written_name = format!("__thaw_bytes_written_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(written_name.clone(), HirType::F64);
+        let written = HirExpr::Var(written_name.clone());
         // `read` is the number of source characters consumed to produce
         // `written` bytes: 2 per byte for hex, 4 per 3-byte group for
         // base64 (so a truncating write stops at a group boundary).
@@ -362,6 +366,8 @@ impl<'a> FnLowerer<'a> {
             ("read".to_string(), read),
             ("written".to_string(), written),
         ]);
+        let mut bindings = bindings;
+        bindings.push((written_name, HirType::F64, written_call));
         self.wrap_call_argument_bindings(result, &bindings)
     }
 }
