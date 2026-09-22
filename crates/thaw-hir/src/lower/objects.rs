@@ -912,6 +912,7 @@ impl<'a> FnLowerer<'a> {
                     | "epochNanoseconds"
                     | "timeZoneId"
                     | "offset"
+                    | "hoursInDay"
                     | "calendarId"
                     | "monthCode"
                     | "era"
