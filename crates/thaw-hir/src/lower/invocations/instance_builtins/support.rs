@@ -43,7 +43,9 @@ fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> 
         | HirType::Dictionary(_)
         | HirType::Promise(_)
         | HirType::Map(_, _)
-        | HirType::Set(_) => Ok("ref"),
+        | HirType::WeakMap(_, _)
+        | HirType::Set(_)
+        | HirType::WeakSet(_) => Ok("ref"),
         other => Err(format!(
             "Map/Set keys must be `number`, `string`, or a reference type \
              (object, array, ...), got {other:?}"
@@ -80,4 +82,3 @@ fn map_value_get_suffix(value_type: &HirType) -> Result<(&'static str, bool), St
         _ => Ok(("ptr", true)),
     }
 }
-

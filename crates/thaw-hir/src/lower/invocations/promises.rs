@@ -22,13 +22,11 @@ impl<'a> FnLowerer<'a> {
         let Some((callback_arg, argument_exprs)) = call.args.split_first() else {
             return Err("`Promise.try` expects a callback".into());
         };
-        if call.args.iter().any(|argument| argument.spread.is_some()) {
-            return Err("`Promise.try` does not yet support spread arguments".into());
+        if callback_arg.spread.is_some() {
+            return Err("`Promise.try` callback must not be spread".into());
         }
-        let arguments = argument_exprs
-            .iter()
-            .map(|argument| self.lower_expr(&argument.expr))
-            .collect::<Result<Vec<_>, _>>()?;
+        let (arguments, spread_bindings) =
+            self.lower_native_spread_values(argument_exprs, "Promise.try")?;
         let argument_types = arguments
             .iter()
             .map(|argument| self.infer_expr_type(argument))
@@ -70,6 +68,7 @@ impl<'a> FnLowerer<'a> {
         self.scope
             .insert(callback_name.clone(), callback_type.clone());
         let mut bindings = vec![(callback_name.clone(), callback_type, callback)];
+        bindings.extend(spread_bindings);
         let mut call_arguments = Vec::with_capacity(arguments.len());
         let mut captures = vec![HirParam {
             name: callback_name.clone(),

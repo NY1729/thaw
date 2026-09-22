@@ -8,10 +8,14 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"get" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let HirType::Map(key_type, value_type) = &receiver_type else {
-                        return Err(format!(
-                            "native `.get()` requires a Map receiver, got {receiver_type:?}"
-                        ));
+                    let (key_type, value_type) = match &receiver_type {
+                        HirType::Map(key_type, value_type)
+                        | HirType::WeakMap(key_type, value_type) => (key_type, value_type),
+                        _ => {
+                            return Err(format!(
+                                "native `.get()` requires a Map receiver, got {receiver_type:?}"
+                            ))
+                        }
                     };
                     let key_type = key_type.as_ref().clone();
                     let value_type = value_type.as_ref().clone();
@@ -86,10 +90,14 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"set" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let HirType::Map(key_type, value_type) = &receiver_type else {
-                        return Err(format!(
-                            "native `.set()` requires a Map receiver, got {receiver_type:?}"
-                        ));
+                    let (key_type, value_type) = match &receiver_type {
+                        HirType::Map(key_type, value_type)
+                        | HirType::WeakMap(key_type, value_type) => (key_type, value_type),
+                        _ => {
+                            return Err(format!(
+                                "native `.set()` requires a Map receiver, got {receiver_type:?}"
+                            ))
+                        }
                     };
                     let key_type = key_type.as_ref().clone();
                     let value_type = value_type.as_ref().clone();
@@ -128,11 +136,15 @@ impl<'a> FnLowerer<'a> {
                     let label = format!("Map.{}", property.sym);
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let HirType::Map(key_type, value_type) = &receiver_type else {
-                        return Err(format!(
-                            "native `.{}()` requires a Map receiver, got {receiver_type:?}",
-                            property.sym
-                        ));
+                    let (key_type, value_type) = match &receiver_type {
+                        HirType::Map(key_type, value_type)
+                        | HirType::WeakMap(key_type, value_type) => (key_type, value_type),
+                        _ => {
+                            return Err(format!(
+                                "native `.{}()` requires a Map receiver, got {receiver_type:?}",
+                                property.sym
+                            ))
+                        }
                     };
                     let key_type = key_type.as_ref().clone();
                     let value_type = value_type.as_ref().clone();
@@ -239,10 +251,13 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"add" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let HirType::Set(element_type) = &receiver_type else {
-                        return Err(format!(
-                            "native `.add()` requires a Set receiver, got {receiver_type:?}"
-                        ));
+                    let element_type = match &receiver_type {
+                        HirType::Set(element_type) | HirType::WeakSet(element_type) => element_type,
+                        _ => {
+                            return Err(format!(
+                                "native `.add()` requires a Set receiver, got {receiver_type:?}"
+                            ))
+                        }
                     };
                     let element_type = element_type.as_ref().clone();
                     let key_suffix = map_key_intrinsic_suffix(&element_type)?;
@@ -276,7 +291,9 @@ impl<'a> FnLowerer<'a> {
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let key_type = match &receiver_type {
                         HirType::Map(key_type, _) => key_type.as_ref().clone(),
+                        HirType::WeakMap(key_type, _) => key_type.as_ref().clone(),
                         HirType::Set(element_type) => element_type.as_ref().clone(),
+                        HirType::WeakSet(element_type) => element_type.as_ref().clone(),
                         other => {
                             return Err(format!(
                                 "native `.{}()` requires a Map or Set receiver, got {other:?}",
@@ -530,4 +547,3 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 }
-
