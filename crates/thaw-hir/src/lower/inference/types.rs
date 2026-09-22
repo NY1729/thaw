@@ -1029,6 +1029,15 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_pending_exception_object" => {
                         return Ok(HirType::Object(Vec::new()));
                     }
+                    "__thaw_exception_object_present" => {
+                        let [value] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        if !matches!(self.infer_expr_type(value)?, HirType::Object(_)) {
+                            return Err(format!("{name} expects an object operand"));
+                        }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_pending_exception_tag" | "__thaw_pending_exception_i64" => {
                         return Ok(HirType::I64);
                     }

@@ -1091,7 +1091,8 @@ fn lower_fn_decl(
             .push("__thaw_this".into());
     }
     let runtime_params = &params[usize::from(func.this_param.is_some())..];
-    for (source, param) in func.params.iter().zip(runtime_params) {
+    let promise_rejection_callback = name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX);
+    for (index, (source, param)) in func.params.iter().zip(runtime_params).enumerate() {
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
@@ -1099,6 +1100,9 @@ fn lower_fn_decl(
             .entry(param.name.clone())
             .or_default()
             .push(param.name.clone());
+        if promise_rejection_callback && index == 0 {
+            lowerer.promise_catch_bindings.insert(param.name.clone());
+        }
         let annotation = match &source.pat {
             Pat::Ident(binding) => binding.type_ann.as_ref(),
             Pat::Object(pattern) => pattern.type_ann.as_ref(),

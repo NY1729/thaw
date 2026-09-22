@@ -289,20 +289,32 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         vec![input.clone()]
                     };
-                    let on_fulfilled = self.lower_promise_callback(
-                        &call.args[0].expr,
-                        &fulfilled_params,
-                        None,
-                    )?;
-                    let HirType::Function(_, fulfilled_output) =
-                        self.infer_expr_type(&on_fulfilled)?
-                    else {
-                        unreachable!()
+                    let omitted_fulfilled = matches!(
+                        call.args[0].expr.as_ref(),
+                        Expr::Ident(ident) if ident.sym == *"undefined"
+                    ) || matches!(call.args[0].expr.as_ref(), Expr::Lit(Lit::Null(_)));
+                    let fulfilled = if omitted_fulfilled {
+                        None
+                    } else {
+                        let callback = self.lower_promise_callback(
+                            &call.args[0].expr,
+                            &fulfilled_params,
+                            None,
+                        )?;
+                        let HirType::Function(_, callback_output) =
+                            self.infer_expr_type(&callback)?
+                        else {
+                            unreachable!()
+                        };
+                        let (output, flatten) = match callback_output.as_ref() {
+                            HirType::Promise(inner) => (inner.as_ref().clone(), true),
+                            other => (other.clone(), false),
+                        };
+                        Some((callback, output, flatten))
                     };
-                    let (output, flatten_fulfilled) = match fulfilled_output.as_ref() {
-                        HirType::Promise(inner) => (inner.as_ref().clone(), true),
-                        other => (other.clone(), false),
-                    };
+                    let output = fulfilled
+                        .as_ref()
+                        .map_or_else(|| input.clone(), |(_, output, _)| output.clone());
                     let on_rejected =
                         self.lower_promise_rejection_callback(&call.args[1].expr, None)?;
                     let HirType::Function(_, rejected_output) =
@@ -310,30 +322,33 @@ impl<'a> FnLowerer<'a> {
                     else {
                         unreachable!()
                     };
-                    let rejected_output = match rejected_output.as_ref() {
-                        HirType::Promise(inner) => inner.as_ref().clone(),
-                        other => other.clone(),
+                    let (rejected_output, flatten_rejected) = match rejected_output.as_ref() {
+                        HirType::Promise(inner) => (inner.as_ref().clone(), true),
+                        other => (other.clone(), false),
                     };
                     if rejected_output != output {
                         return Err(format!(
                             "`.then` rejection callback resolves to {rejected_output:?}, expected {output:?}"
                         ));
                     }
-                    let fulfilled = HirExpr::PromiseThen(
-                        Box::new(source),
-                        Box::new(on_fulfilled),
-                        input,
-                        output.clone(),
-                        false,
-                        flatten_fulfilled,
-                    );
+                    let fulfilled = match fulfilled {
+                        Some((callback, output, flatten)) => HirExpr::PromiseThen(
+                            Box::new(source),
+                            Box::new(callback),
+                            input,
+                            output,
+                            false,
+                            flatten,
+                        ),
+                        None => source,
+                    };
                     return Ok(HirExpr::PromiseThen(
                         Box::new(fulfilled),
                         Box::new(on_rejected),
                         output.clone(),
                         output,
                         true,
-                        false,
+                        flatten_rejected,
                     ));
                 }
                 if property.sym == *"then" || property.sym == *"catch" {
