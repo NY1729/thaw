@@ -522,6 +522,7 @@ fn frame_split_promise_all_settled_preserves_order_and_never_rejects() {
             console.log(results[2].status);
             console.log(results[2].value);
             console.log(results.length);
+            console.log(results.map((result) => result.status).join(","));
             const empty: { status: string; value: number; reason: string }[] =
                 await Promise.allSettled([]);
             console.log(empty.length);
@@ -529,7 +530,7 @@ fn frame_split_promise_all_settled_preserves_order_and_never_rejects() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_all_settled_order"),
-        "fulfilled\n1\n\nrejected\nbroken\nfulfilled\n3\n3\n0\n"
+        "fulfilled\n1\n\nrejected\nbroken\nfulfilled\n3\n3\nfulfilled,rejected,fulfilled\n0\n"
     );
 }
 
