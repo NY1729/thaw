@@ -1031,6 +1031,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_temporal_instant_nanos_from_string",
             "thaw_temporal_plain_time_from_string",
             "thaw_temporal_plain_time_nanos_from_string",
+            "thaw_temporal_plain_month_day_from_string",
             "thaw_temporal_duration_nanos_from_string",
         ] {
             self.module.add_function(
@@ -1091,6 +1092,11 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_temporal_zoned_start_of_day",
+            f64_type.fn_type(&[f64_type.into(), f64_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         for name in [
             "thaw_temporal_zoned_to_string",
             "thaw_temporal_zoned_offset",
@@ -1145,6 +1151,14 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_temporal_date_difference",
+            i8_ptr.fn_type(
+                &[f64_type.into(), f64_type.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_duration_balance",
             i8_ptr.fn_type(
                 &[f64_type.into(), f64_type.into(), i8_ptr.into()],
                 false,

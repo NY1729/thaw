@@ -303,6 +303,62 @@ pub extern "C" fn thaw_temporal_plain_date_field(milliseconds: f64, field: f64) 
 }
 
 #[no_mangle]
+/// `Temporal.PlainMonthDay.from(text)`: parses `"MM-DD"` (or a full
+/// `YYYY-MM-DD`, taking its month/day) into the spec's 1972 reference
+/// date, so `.monthCode`/`.day` and `toString` work.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_plain_month_day_from_string(
+    text: *const c_char,
+) -> f64 {
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    let text = text.trim();
+    let text = text.split_once('[').map_or(text, |(head, _)| head);
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(r"^(?:(\d{4})-)?(\d{2})-(\d{2})$").unwrap()
+    });
+    let Some(captures) = pattern.captures(text) else {
+        return f64::NAN;
+    };
+    let month: u32 = captures[2].parse().unwrap_or(0);
+    let day: u32 = captures[3].parse().unwrap_or(0);
+    // The reference year is 1972 (a leap year), so `02-29` is representable.
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(1972, month) {
+        return f64::NAN;
+    }
+    days_from_civil(1972, month, day) as f64 * 86_400_000.0
+}
+
+#[no_mangle]
+/// `Temporal.ZonedDateTime.prototype.startOfDay` / `PlainDateTime`
+/// equivalent in a zone: the instant of the zone's local midnight.
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_start_of_day(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: *const c_char,
+) -> f64 {
+    if zone.is_null() {
+        return f64::NAN;
+    }
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+        return f64::NAN;
+    };
+    let Ok(start) = zoned.start_of_day() else {
+        return f64::NAN;
+    };
+    (start.timestamp().as_nanosecond().div_euclid(1_000_000)) as f64
+}
+
+#[no_mangle]
 /// `Temporal.PlainDate.prototype.monthCode`: `"M01"`..`"M12"` (ISO).
 pub extern "C" fn thaw_temporal_month_code(milliseconds: f64) -> *const c_char {
     let Some(fields) = civil_from_timestamp(milliseconds) else {
@@ -969,6 +1025,93 @@ fn split_duration_nanoseconds(milliseconds: f64) -> (f64, f64) {
         whole_milliseconds,
         total_nanoseconds - whole_milliseconds * 1_000_000.0,
     )
+}
+
+/// `(name, nanoseconds)` for each `Duration` unit, largest first.
+const TEMPORAL_DURATION_UNITS: [(&str, i128); 10] = [
+    ("year", 365 * 86_400_000_000_000),
+    ("month", 30 * 86_400_000_000_000),
+    ("week", 7 * 86_400_000_000_000),
+    ("day", 86_400_000_000_000),
+    ("hour", 3_600_000_000_000),
+    ("minute", 60_000_000_000),
+    ("second", 1_000_000_000),
+    ("millisecond", 1_000_000),
+    ("microsecond", 1_000),
+    ("nanosecond", 1),
+];
+
+#[no_mangle]
+/// `Temporal.Duration.prototype.balance({ largestUnit })`: redistributes a
+/// duration's total into components from `largestUnit` down. Unknown or
+/// absent units default to `"nanosecond"`. Returns a components JSON
+/// object.
+///
+/// # Safety
+/// `largest_unit` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_duration_balance(
+    milliseconds: f64,
+    nanoseconds: f64,
+    largest_unit: *const c_char,
+) -> *const c_char {
+    let unit = if largest_unit.is_null() {
+        "nanosecond".to_string()
+    } else {
+        unsafe { CStr::from_ptr(largest_unit) }
+            .to_string_lossy()
+            .to_ascii_lowercase()
+    };
+    let start = TEMPORAL_DURATION_UNITS
+        .iter()
+        .position(|(name, _)| *name == unit || format!("{name}s") == unit)
+        .unwrap_or(TEMPORAL_DURATION_UNITS.len() - 1);
+    let total = (milliseconds.round() as i128) * 1_000_000 + nanoseconds.round() as i128;
+    let mut remaining = total;
+    let mut components: Vec<(&str, i128)> = Vec::with_capacity(TEMPORAL_DURATION_UNITS.len());
+    for (index, (name, factor)) in TEMPORAL_DURATION_UNITS.iter().enumerate() {
+        if index < start {
+            components.push((name, 0));
+        } else {
+            components.push((name, remaining / factor));
+            remaining %= factor;
+        }
+    }
+    // The component names are singular here (for unit matching); the
+    // `Duration` components object uses the plural spellings.
+    let object = components
+        .iter()
+        .map(|(name, value)| (format!("{name}s"), serde_json::json!(value)))
+        .collect::<serde_json::Map<_, _>>();
+    let value = serde_json::Value::Object(object);
+    arena_c_string(&value.to_string()).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[cfg(test)]
+mod temporal_duration_balance_tests {
+    use super::*;
+
+    fn balance(milliseconds: f64, unit: &str) -> String {
+        let unit = std::ffi::CString::new(unit).unwrap();
+        let result = unsafe { thaw_temporal_duration_balance(milliseconds, 0.0, unit.as_ptr()) };
+        assert!(!result.is_null());
+        unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn balances_minutes_into_hours() {
+        let json = balance(5_400_000.0, "hour");
+        assert!(json.contains("\"hours\":1"), "{json}");
+        assert!(json.contains("\"minutes\":30"), "{json}");
+    }
+
+    #[test]
+    fn balances_hours_into_days() {
+        let json = balance(108_000_000.0, "day");
+        assert!(json.contains("\"days\":1"), "{json}");
+        assert!(json.contains("\"hours\":6"), "{json}");
+    }
 }
 
 #[no_mangle]
