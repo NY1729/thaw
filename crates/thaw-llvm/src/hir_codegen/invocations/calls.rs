@@ -407,6 +407,85 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal plain-date field returned no value".into());
             }
+            "__thaw_temporal_calendar_valid" => {
+                let [calendar] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let calendar = self.compile_expr(calendar)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_calendar_valid")
+                            .unwrap(),
+                        &[calendar.into()],
+                        "temporal_calendar_valid",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal calendar check returned no value".into());
+            }
+            "__thaw_temporal_calendar_from_string" => {
+                let [text] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let text = self.compile_expr(text)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_calendar_from_string")
+                            .unwrap(),
+                        &[text.into()],
+                        "temporal_calendar_from_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal calendar parse returned no value".into());
+            }
+            "__thaw_temporal_calendar_field" => {
+                let [milliseconds, calendar, field] = args else {
+                    return Err(format!("{name} expects three operands"));
+                };
+                let milliseconds = self.compile_expr(milliseconds)?;
+                let calendar = self.compile_expr(calendar)?;
+                let field = self.compile_expr(field)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_calendar_field")
+                            .unwrap(),
+                        &[milliseconds.into(), calendar.into(), field.into()],
+                        "temporal_calendar_field",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal calendar field returned no value".into());
+            }
+            "__thaw_temporal_calendar_month_code" | "__thaw_temporal_calendar_era" => {
+                let [milliseconds, calendar] = args else {
+                    return Err(format!("{name} expects two operands"));
+                };
+                let milliseconds = self.compile_expr(milliseconds)?;
+                let calendar = self.compile_expr(calendar)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[milliseconds.into(), calendar.into()],
+                        "temporal_calendar_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal calendar string returned no value".into());
+            }
             "__thaw_temporal_month_code" => {
                 let [milliseconds] = args else {
                     return Err(format!("{name} expects one operand"));
