@@ -49,33 +49,28 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match name {
-            "__thaw_number_array_to_string" => {
-                return self.compile_single_array_arg_call(
-                    "thaw_number_array_to_string",
-                    args,
-                    "String(number[])",
-                )
-            }
-            "__thaw_string_array_to_string" => {
-                return self.compile_single_array_arg_call(
-                    "thaw_string_array_to_string",
-                    args,
-                    "String(string[])",
-                )
-            }
-            "__thaw_bool_array_to_string" => {
-                return self.compile_single_array_arg_call(
-                    "thaw_bool_array_to_string",
-                    args,
-                    "String(boolean[])",
-                )
-            }
-            "__thaw_object_array_to_string" => {
-                return self.compile_single_array_arg_call(
-                    "thaw_object_array_to_string",
-                    args,
-                    "String(object[])",
-                )
+            "__thaw_number_array_to_string"
+            | "__thaw_string_array_to_string"
+            | "__thaw_bool_array_to_string"
+            | "__thaw_object_array_to_string" => {
+                let [array] = args else {
+                    return Err("array string conversion expects one operand".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let data = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
+                let runtime = name.trim_start_matches("__thaw_");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
+                        &[data.into(), presence.into()],
+                        "array_to_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array string conversion returned no value".into());
             }
             "__thaw_bytes_to_string" => {
                 let [buffer, encoding] = args else {
@@ -320,12 +315,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let array = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
                 let separator = self.compile_expr(separator)?;
                 return self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
-                        &[array.into(), separator.into()],
+                        &[array.into(), presence.into(), separator.into()],
                         "array_join",
                     )
                     .map_err(|error| error.to_string())?
