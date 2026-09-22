@@ -1124,6 +1124,35 @@ impl<'ctx> HirCompiler<'ctx> {
             f64_type.fn_type(&[f64_type.into(), f64_type.into()], false),
             Some(Linkage::External),
         );
+        // Non-ISO calendar systems (ICU4X).
+        self.module.add_function(
+            "thaw_temporal_calendar_valid",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_calendar_from_string",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_calendar_field",
+            f64_type.fn_type(
+                &[f64_type.into(), i8_ptr.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_calendar_month_code",
+            "thaw_temporal_calendar_era",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[f64_type.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_temporal_month_code",
             i8_ptr.fn_type(&[f64_type.into()], false),

@@ -1097,7 +1097,12 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_zoned_nanos_from_string"
                     | "__thaw_temporal_zoned_field"
                     | "__thaw_temporal_zoned_plain_timestamp"
-                    | "__thaw_temporal_plain_date_field" => return Ok(HirType::F64),
+                    | "__thaw_temporal_plain_date_field"
+                    | "__thaw_temporal_calendar_field" => return Ok(HirType::F64),
+                    "__thaw_temporal_calendar_valid" => return Ok(HirType::Bool),
+                    "__thaw_temporal_calendar_month_code"
+                    | "__thaw_temporal_calendar_era"
+                    | "__thaw_temporal_calendar_from_string" => return Ok(HirType::Str),
                     "__thaw_temporal_month_code" => return Ok(HirType::Str),
                     "__thaw_temporal_zoned_to_string"
                     | "__thaw_temporal_zoned_offset"

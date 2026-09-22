@@ -1183,11 +1183,20 @@ checksum = "58655df2f728e46e4eee80bddebefacf52ec3e77cdb925014b47c5a5905eb55c"
 dependencies = [
  "calendrical_calculations",
  "displaydoc",
+ "icu_calendar_data",
  "icu_locale_core",
+ "icu_locale_fallback",
  "icu_provider",
+ "ixdtf",
  "tinystr",
  "zerovec",
 ]
+
+[[package]]
+name = "icu_calendar_data"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc00caaa3fb3201ff7a18aa458e8c3ab042b9da154cfdf948bdde3936c31c36e"
 
 [[package]]
 name = "icu_casemap"
@@ -1587,6 +1596,12 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "ixdtf"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d3667095d64c3ecffc96463a21157b04bf3e252f6e8d5750b20c02e33c194e3"
 
 [[package]]
 name = "jiff"
@@ -3062,6 +3077,7 @@ name = "thaw-runtime"
 version = "0.1.0"
 dependencies = [
  "fancy-regex",
+ "icu_calendar",
  "icu_normalizer",
  "jiff",
  "libc",
