@@ -129,6 +129,28 @@ impl<'a> FnLowerer<'a> {
                         MemberProp::Ident(property)
                             if matches!(property.sym.as_ref(), "slice" | "concat" | "map")
                     ) => self.expression_may_be_sparse_array(&member.obj),
+                Some(Expr::Member(member)) => member_property_name(&member.prop).is_some_and(|method| {
+                    let instance_symbol = || {
+                        let receiver_type = self.infer_member_receiver_type(&member.obj)?;
+                        class_name_from_type(&receiver_type)
+                            .map(|class| class_method_symbol(class, &method))
+                    };
+                    let symbol = match member.obj.as_ref() {
+                        Expr::Ident(class) => {
+                            let static_symbol = class_static_method_symbol(class.sym.as_ref(), &method);
+                            if self.signatures.contains_key(&static_symbol) {
+                                Some(static_symbol)
+                            } else {
+                                instance_symbol()
+                            }
+                        }
+                        _ => instance_symbol(),
+                    };
+                    let Some(symbol) = symbol else { return false };
+                    self.signatures
+                        .get(&symbol)
+                        .is_some_and(|signature| signature.returns_sparse_array)
+                }),
                 Some(Expr::Ident(callee)) => self
                     .signatures
                     .get(callee.sym.as_ref())
