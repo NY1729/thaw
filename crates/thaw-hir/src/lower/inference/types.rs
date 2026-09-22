@@ -1781,7 +1781,8 @@ impl<'a> FnLowerer<'a> {
                     "callDynamicValueWithValue" => return Ok(HirType::Json),
                     "releaseDynamicValue" => return Ok(HirType::Bool),
                     "getDynamicProperty" => return Ok(HirType::JsValue),
-                    "setDynamicProperty" | "setDynamicPropertyJson" => {
+                    "setDynamicProperty" | "setDynamicPropertyJson"
+                    | "deleteDynamicProperty" | "hasDynamicProperty" => {
                         return Ok(HirType::Bool)
                     }
                     "callDynamicMethod" => return Ok(HirType::Json),

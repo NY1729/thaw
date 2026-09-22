@@ -264,6 +264,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "releaseDynamicValue"
                         | "setDynamicProperty"
                         | "setDynamicPropertyJson"
+                        | "deleteDynamicProperty"
+                        | "hasDynamicProperty"
                         | "__thaw_error_is_error"
                         | "__thaw_error_is_instance" => {
                             return Some(HirType::Bool)

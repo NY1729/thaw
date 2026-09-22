@@ -888,7 +888,9 @@ impl<'a> FnLowerer<'a> {
                         HirType::Str => Some("String"),
                         HirType::Bool => Some("Boolean"),
                         HirType::Map(_, _) => Some("Map"),
+                        HirType::WeakMap(_, _) => Some("WeakMap"),
                         HirType::Set(_) => Some("Set"),
+                        HirType::WeakSet(_) => Some("WeakSet"),
                         HirType::Bytes => Some("Uint8Array"),
                         HirType::Symbol => Some("Symbol"),
                         HirType::Promise(_) => Some("Promise"),
@@ -1229,11 +1231,11 @@ impl<'a> FnLowerer<'a> {
                     HirType::JsValue | HirType::Dynamic => {
                         let key = self.lower_expr(&computed.expr)?;
                         let key = match self.infer_expr_type(&key)? {
-                            HirType::Str | HirType::Dynamic => key,
+                            HirType::Str | HirType::Symbol | HirType::Dynamic => key,
                             HirType::F64 => self.coerce_primitive_to_string(key)?,
                             other => {
                                 return Err(format!(
-                                    "dynamic value index expression must be string or number, got {other:?}"
+                                    "dynamic value index expression must be string, number, or symbol, got {other:?}"
                                 ))
                             }
                         };

@@ -1553,7 +1553,10 @@ pub extern "C" fn thaw_js_get_property_result(
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let object = boxed_object_for_handle(&ctx, handle)?;
         // See `invoke_raw`'s doc comment -- a getter can throw too.
-        let value = object.get(name.as_str()).map_err(|error| match error {
+        let key = dynamic_property_key(&ctx, &name)?;
+        let key = rquickjs::Atom::from_value(ctx.clone(), &key)
+            .map_err(|error| error.to_string())?;
+        let value = object.get(key).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
             error => error.to_string(),
         })?;
@@ -1609,8 +1612,11 @@ pub extern "C" fn thaw_js_set_property_result(
         let object = object_for_handle(&ctx, handle)?;
         let value = value_for_handle(&ctx, value_handle)?;
         // See `invoke_raw`'s doc comment -- a setter can throw too.
+        let key = dynamic_property_key(&ctx, &name)?;
+        let key = rquickjs::Atom::from_value(ctx.clone(), &key)
+            .map_err(|error| error.to_string())?;
         object
-            .set(name.as_str(), value)
+            .set(key, value)
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
                 error => error.to_string(),
@@ -1663,7 +1669,10 @@ pub extern "C" fn thaw_js_set_property_json_result(
             .map(|value| value.to_string().unwrap_or_default())
             .unwrap_or_else(|| r#"{"$__thaw_napi_undefined$":true}"#.to_string());
         // See `invoke_raw`'s doc comment -- a setter can throw too.
-        object.set(name.as_str(), value).map_err(|error| match error {
+        let key = dynamic_property_key(&ctx, &name)?;
+        let key = rquickjs::Atom::from_value(ctx.clone(), &key)
+            .map_err(|error| error.to_string())?;
+        object.set(key, value).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
             error => error.to_string(),
         })?;
@@ -1679,6 +1688,62 @@ pub extern "C" fn thaw_js_set_property_json_result(
             error: CString::new(error).unwrap_or_default().into_raw(),
         },
     }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_delete_property_result(
+    handle: u64,
+    name: *const c_char,
+) -> ThawHandleResult {
+    dynamic_property_predicate(handle, name, true)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_has_property_result(
+    handle: u64,
+    name: *const c_char,
+) -> ThawHandleResult {
+    dynamic_property_predicate(handle, name, false)
+}
+
+fn dynamic_property_predicate(
+    handle: u64,
+    name: *const c_char,
+    delete: bool,
+) -> ThawHandleResult {
+    let name = to_str(name);
+    let result: Result<u64, String> = with_active_or_context(|ctx| {
+        let object = object_for_handle(&ctx, handle)?;
+        let key = dynamic_property_key(&ctx, &name)?;
+        let reflect: Object = ctx
+            .globals()
+            .get("Reflect")
+            .map_err(|error| error.to_string())?;
+        let operation: Function = reflect
+            .get(if delete { "deleteProperty" } else { "has" })
+            .map_err(|error| error.to_string())?;
+        operation
+            .call::<_, bool>((object, key))
+            .map(u64::from)
+            .map_err(|error| error.to_string())
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+fn dynamic_property_key<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Value<'js>, String> {
+    ctx.globals()
+        .get::<_, Function>("__thaw_property_key")
+        .and_then(|resolve| resolve.call((name,)))
+        .map_err(|error| error.to_string())
 }
 
 fn invoke_method<'js>(
