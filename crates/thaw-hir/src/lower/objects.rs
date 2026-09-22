@@ -657,6 +657,49 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    fn unwrap_required_optional_member(
+        &mut self,
+        obj: HirExpr,
+        obj_ty: HirType,
+        property: &str,
+    ) -> (HirExpr, HirType) {
+        let HirType::Optional(payload) = &obj_ty else {
+            return (obj, obj_ty);
+        };
+        let optional_type = obj_ty.clone();
+        let payload = payload.as_ref().clone();
+        let name = format!("__thaw_required_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let bound = HirExpr::Var(name.clone());
+        (
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name,
+                        ty: optional_type,
+                    }],
+                    payload.clone(),
+                    Box::new(HirExpr::Block(vec![
+                        HirStmt::If(
+                            HirExpr::OptionalIsNone(Box::new(bound.clone()), payload.clone()),
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                                "Cannot read properties of undefined (reading '{property}')"
+                            ))))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(HirExpr::OptionalValue(
+                            Box::new(bound),
+                            payload.clone(),
+                        ))),
+                    ])),
+                )),
+                vec![obj],
+            ),
+            payload,
+        )
+    }
+
     fn lower_unbound_this_member(&self, property: &str) -> Result<HirExpr, String> {
         let ty = self.unbound_this_member_type(property).ok_or_else(|| {
             format!(
@@ -1085,6 +1128,8 @@ impl<'a> FnLowerer<'a> {
             MemberProp::Computed(computed) => {
                 let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
+                let (obj, obj_ty) =
+                    self.unwrap_required_optional_member(obj, obj_ty, "computed property");
                 match obj_ty {
                     HirType::Array(element) => {
                         let index = self.lower_expr(&computed.expr)?;
@@ -1279,6 +1324,8 @@ impl<'a> FnLowerer<'a> {
                 }
                 let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
+                let (obj, obj_ty) =
+                    self.unwrap_required_optional_member(obj, obj_ty, prop.sym.as_ref());
                 // A custom property read on a *catch-bound* error string
                 // (`catch (e) { e.status }`, real trigger: koa's
                 // `http-errors` error) has no declared field to read.

@@ -251,8 +251,19 @@ impl<'a> FnLowerer<'a> {
                 }
                 if let Some((allowed, elements)) = self.union_narrowings.get(&name) {
                     if let [index] = allowed.as_slice() {
+                        let value = match self.scope.get(&name) {
+                            Some(HirType::Optional(payload))
+                                if matches!(payload.as_ref(), HirType::Union(_)) =>
+                            {
+                                HirExpr::OptionalValue(
+                                    Box::new(HirExpr::Var(name)),
+                                    payload.as_ref().clone(),
+                                )
+                            }
+                            _ => HirExpr::Var(name),
+                        };
                         return Ok(HirExpr::UnionValue(
-                            Box::new(HirExpr::Var(name)),
+                            Box::new(value),
                             *index,
                             elements.clone(),
                         ));

@@ -166,7 +166,11 @@ impl<'a> FnLowerer<'a> {
                         }
                         _ => None,
                     };
-                    let value_type = if return_element == HirType::Undefined {
+                    let value_type = if return_element == HirType::Undefined
+                        && matches!(&element, HirType::Optional(_))
+                    {
+                        element.clone()
+                    } else if return_element == HirType::Undefined {
                         HirType::Optional(Box::new(element.clone()))
                     } else if return_is_optional_element {
                         return_element.clone()
@@ -227,20 +231,30 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_array_shift".into())),
                         vec![HirExpr::Var(forced_name.clone())],
                     );
-                    let (undefined, completion, yielded, forced) = match &value_type {
-                        HirType::Optional(_) if return_element == HirType::Undefined => (
+                    let (undefined, completion, yielded, forced) = match (&value_type, &element) {
+                        (HirType::Optional(payload), HirType::Optional(_))
+                            if return_element == HirType::Undefined =>
+                        {
+                            (
+                                HirExpr::OptionalNone(payload.as_ref().clone()),
+                                HirExpr::OptionalNone(payload.as_ref().clone()),
+                                yielded_shift,
+                                HirExpr::OptionalNone(payload.as_ref().clone()),
+                            )
+                        }
+                        (HirType::Optional(_), _) if return_element == HirType::Undefined => (
                             HirExpr::OptionalNone(element.clone()),
                             HirExpr::OptionalNone(element.clone()),
                             HirExpr::OptionalSome(Box::new(yielded_shift), element.clone()),
                             HirExpr::OptionalNone(element.clone()),
                         ),
-                        HirType::Optional(_) => (
+                        (HirType::Optional(_), _) => (
                             HirExpr::OptionalNone(element.clone()),
                             completion_shift,
                             HirExpr::OptionalSome(Box::new(yielded_shift), element.clone()),
                             forced_shift,
                         ),
-                        HirType::Union(members) => (
+                        (HirType::Union(members), _) => (
                             HirExpr::UnionInject(
                                 Box::new(HirExpr::Lit(HirLit::Undefined)),
                                 members.len() - 1,
