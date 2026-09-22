@@ -1987,9 +1987,7 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         let error = self.lower_expr(&args[0].expr)?;
-                        let error = self.coerce_primitive_to_string(error)?;
                         let suppressed = self.lower_expr(&args[1].expr)?;
-                        let suppressed = self.coerce_primitive_to_string(suppressed)?;
                         let message = match args.get(2) {
                             Some(argument) => {
                                 let message = self.lower_expr(&argument.expr)?;
@@ -1997,10 +1995,19 @@ impl<'a> FnLowerer<'a> {
                             }
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
-                        return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_error_suppress".to_string())),
-                            vec![error, suppressed, message],
-                        ));
+                        return Ok(HirExpr::ObjectLit(vec![
+                            (
+                                "__thaw_class_identity_SuppressedError$Error".to_string(),
+                                HirExpr::Lit(HirLit::Bool(true)),
+                            ),
+                            ("message".to_string(), message),
+                            (
+                                "name".to_string(),
+                                HirExpr::Lit(HirLit::Str("SuppressedError".to_string())),
+                            ),
+                            ("error".to_string(), error),
+                            ("suppressed".to_string(), suppressed),
+                        ]));
                     }
                     if class.sym == *"AggregateError" {
                         // `new AggregateError(errors, message?, options?)`.
