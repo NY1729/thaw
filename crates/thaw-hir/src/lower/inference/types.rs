@@ -1120,6 +1120,8 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_plain_year_month_to_string"
                     | "__thaw_temporal_plain_month_day_to_string"
                     | "__thaw_temporal_duration_to_string"
+                    | "__thaw_temporal_duration_components_json"
+                    | "__thaw_temporal_duration_to_string_components"
                     | "__thaw_temporal_epoch_nanoseconds"
                     | "__thaw_temporal_time_zone_id" => return Ok(HirType::Str),
                     "__thaw_date_set_full_year"

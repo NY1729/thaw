@@ -1134,6 +1134,16 @@ impl<'ctx> HirCompiler<'ctx> {
             f64_type.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        for name in [
+            "thaw_temporal_duration_components_json",
+            "thaw_temporal_duration_to_string_components",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         // `new Error(message)`/`new TypeError(...)`/etc. tag the thrown
         // string with a class name ahead of the message (see
         // `thaw_hir::lower::expressions::lowering` and
