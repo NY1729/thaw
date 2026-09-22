@@ -571,11 +571,33 @@ fn compiles_native_array_reduce_and_reduce_right() {
             } catch (error) {
                 console.log(error);
             }
+            const sparse: number[] = [, 2, , 4, ];
+            let calls = 0;
+            console.log(sparse.reduce((accumulator, value) => {
+                calls += 1;
+                return accumulator + value;
+            }), calls);
+            calls = 0;
+            console.log(sparse.reduceRight((accumulator, value) => {
+                calls += 1;
+                return accumulator - value;
+            }), calls);
+            calls = 0;
+            console.log(sparse.reduce((accumulator, value) => {
+                calls += 1;
+                return accumulator + value;
+            }, 10), calls);
+            const holes: number[] = [, ,];
+            try {
+                holes.reduce((accumulator, value) => accumulator + value);
+            } catch (error) {
+                console.log(error);
+            }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_reduce"),
-        "1\n2\n6\nreceiver\ninitial\n16\ncba\n12\n7\n2\nawaited\ncba\nReduce of empty array with no initial value\n"
+        "1\n2\n6\nreceiver\ninitial\n16\ncba\n12\n7\n2\nawaited\ncba\nReduce of empty array with no initial value\n6 1\n2 1\n16 2\nReduce of empty array with no initial value\n"
     );
 }
 
