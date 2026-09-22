@@ -4390,6 +4390,29 @@ fn compiles_json_reviver_and_suppressed_error() {
     );
 }
 
+#[test]
+fn suppressed_error_preserves_arbitrary_values_and_nested_identity() {
+    let source = r#"
+        function main(): void {
+            const original = { code: 7 };
+            const inner = new SuppressedError(original, 42, "inner");
+            const outer = new SuppressedError(inner, original, "outer");
+            console.log(inner.error === original);
+            console.log(inner.error.code);
+            console.log(inner.suppressed);
+            console.log(outer.error === inner);
+            console.log(outer.error.message);
+            console.log(outer.suppressed === original);
+            console.log(outer instanceof SuppressedError);
+            console.log(outer instanceof Error);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "suppressed_error_arbitrary_values"),
+        "true\n7\n42\ntrue\ninner\ntrue\ntrue\ntrue\n"
+    );
+}
+
 /// `Map.prototype.getOrInsert` / `getOrInsertComputed`.
 #[test]
 fn compiles_map_get_or_insert() {
