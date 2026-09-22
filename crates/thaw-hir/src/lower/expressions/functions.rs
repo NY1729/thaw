@@ -731,6 +731,7 @@ impl<'a> FnLowerer<'a> {
                 abstract_class_constructor: false,
                 ret: HirType::Dynamic,
                 is_async: false,
+                returns_sparse_array: false,
                 uses_this: false,
                 is_extern: false,
                 source_range: (arrow.span.lo.0, arrow.span.hi.0),
