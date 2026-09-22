@@ -4413,6 +4413,265 @@ fn suppressed_error_preserves_arbitrary_values_and_nested_identity() {
     );
 }
 
+#[test]
+fn catch_preserves_arbitrary_object_identity_through_typed_assertions() {
+    let source = r#"
+        interface BoxedError { code: number; }
+
+        function rethrow(value: BoxedError): void {
+            try {
+                throw value;
+            } catch (error) {
+                throw error;
+            }
+        }
+
+        function main(): void {
+            const original: BoxedError = { code: 7 };
+            try {
+                rethrow(original);
+            } catch (error) {
+                const caught = error as BoxedError;
+                console.log(caught === original);
+                console.log(caught.code);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_arbitrary_catch_object"),
+        "true\n7\n"
+    );
+}
+
+#[test]
+fn catch_preserves_typed_primitive_values() {
+    let source = r#"
+        function throwNumber(): void { throw 42; }
+        function rethrowNumber(): void {
+            try { throwNumber(); } catch (error) { throw error; }
+        }
+        function throwBoolean(): void { throw true; }
+        function throwBigInt(): void { throw 9007199254740993n; }
+
+        function main(): void {
+            try { rethrowNumber(); } catch (error) {
+                console.log(typeof error);
+                console.log((error as number) + 1);
+            }
+            try { throwBoolean(); } catch (error) {
+                console.log(typeof error);
+                console.log((error as boolean) === true);
+            }
+            try { throwBigInt(); } catch (error) {
+                console.log(typeof error);
+                console.log((error as bigint) + 1n);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_primitive_catch_values"),
+        "number\n43\nboolean\ntrue\nbigint\n9007199254740994n\n"
+    );
+}
+
+#[test]
+fn catch_reports_string_null_and_undefined_types() {
+    let source = r#"
+        function main(): void {
+            try { throw "text"; } catch (error) { console.log(typeof error); }
+            try { throw null; } catch (error) { console.log(typeof error); }
+            try { throw undefined; } catch (error) { console.log(typeof error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "catch_reports_string_null_and_undefined_types"),
+        "string\nobject\nundefined\n"
+    );
+}
+
+#[test]
+fn async_catch_preserves_a_typed_primitive_thrown_after_await() {
+    let source = r#"
+        async function fail(): Promise<void> {
+            await Promise.resolve(undefined);
+            throw 41;
+        }
+
+        async function main(): Promise<void> {
+            try {
+                await fail();
+            } catch (error) {
+                console.log(typeof error, (error as number) + 1);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_catch_preserves_a_typed_primitive_thrown_after_await"),
+        "number 42\n"
+    );
+}
+
+#[test]
+fn async_catch_preserves_object_identity_across_a_rejection() {
+    let source = r#"
+        interface Failure { code: number; }
+        let original: Failure = { code: 41 };
+
+        async function fail(): Promise<void> {
+            await Promise.resolve(undefined);
+            throw original;
+        }
+
+        async function main(): Promise<void> {
+            try {
+                await fail();
+            } catch (error) {
+                const failure = error as Failure;
+                console.log(failure === original, failure.code + 1);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_catch_preserves_object_identity_across_a_rejection"),
+        "true 42\n"
+    );
+}
+
+#[test]
+fn promise_all_preserves_typed_catch_values() {
+    let source = r#"
+        async function fail(): Promise<number> {
+            await Promise.resolve(undefined);
+            throw 41;
+        }
+
+        async function main(): Promise<void> {
+            try {
+                await Promise.all([fail()]);
+            } catch (error) {
+                console.log(typeof error, (error as number) + 1);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_all_preserves_typed_catch_values"),
+        "number 42\n"
+    );
+}
+
+#[test]
+fn promise_finally_preserves_typed_catch_values() {
+    let source = r#"
+        async function fail(): Promise<number> {
+            await Promise.resolve(undefined);
+            throw 41;
+        }
+        async function cleanup(): Promise<void> {
+            await Promise.resolve(undefined);
+        }
+        async function main(): Promise<void> {
+            try {
+                await fail().finally(() => {});
+            } catch (error) {
+                console.log(typeof error, (error as number) + 1);
+            }
+            try {
+                await fail().finally(() => cleanup());
+            } catch (error) {
+                console.log(typeof error, (error as number) + 1);
+            }
+            try {
+                await Promise.resolve(1).then(value => { throw value + 40; });
+            } catch (error) {
+                console.log(typeof error, (error as number) + 1);
+            }
+            try {
+                await Promise.resolve(1).finally(() => { throw 41; });
+            } catch (error) {
+                console.log(typeof error, (error as number) + 1);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_finally_preserves_typed_catch_values"),
+        "number 42\nnumber 42\nnumber 42\nnumber 42\n"
+    );
+}
+
+#[test]
+fn promise_catch_callback_preserves_typed_values() {
+    let source = r#"
+        interface Failure { code: number; }
+        let failure: Failure = { code: 41 };
+        async function failNumber(): Promise<number> {
+            throw 41;
+        }
+        async function failObject(): Promise<number> {
+            throw failure;
+        }
+        async function main(): Promise<void> {
+            const numberValue = await failNumber().catch(error => {
+                console.log(typeof error, (error as number) + 1);
+                return 42;
+            });
+            const objectValue = await failObject().catch(error => {
+                const caught = error as Failure;
+                console.log(typeof error, caught === failure, caught.code + 1);
+                return 43;
+            });
+            try {
+                await failObject().catch(error => {
+                    throw error;
+                    return 0;
+                });
+            } catch (error) {
+                const caught = error as Failure;
+                console.log(typeof error, caught === failure, caught.code + 1);
+            }
+            console.log(numberValue, objectValue);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_catch_callback_preserves_typed_values"),
+        "number 42\nobject true 42\nobject true 42\n42 43\n"
+    );
+}
+
+#[test]
+fn promise_reject_preserves_typed_values() {
+    let source = r#"
+        interface Failure { code: number; }
+        async function main(): Promise<void> {
+            try {
+                await Promise.reject(41);
+            } catch (error) {
+                console.log(typeof error, (error as number) + 1);
+            }
+            const failure: Failure = { code: 41 };
+            try {
+                await Promise.reject(failure);
+            } catch (error) {
+                const caught = error as Failure;
+                console.log(typeof error, caught === failure, caught.code + 1);
+            }
+            try {
+                await Promise.reject("later");
+            } catch (error) {
+                console.log(typeof error, error);
+            }
+            try {
+                await new Promise<void>((resolve, reject) => reject("constructor"));
+            } catch (error) {
+                console.log(typeof error, error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_reject_preserves_typed_values"),
+        "number 42\nobject true 42\nstring later\nstring constructor\n"
+    );
+}
+
 /// `Map.prototype.getOrInsert` / `getOrInsertComputed`.
 #[test]
 fn compiles_map_get_or_insert() {

@@ -169,6 +169,9 @@ impl<'a> FnLowerer<'a> {
                     param.ty.clone()
                 };
                 let name = self.bind_local(&param.name, ty.clone());
+                if self.promise_catch_parameter.as_ref() == Some(&param.name) {
+                    self.promise_catch_bindings.insert(name.clone());
+                }
                 if !matches!(pattern, Pat::Ident(_) | Pat::Rest(_)) {
                     destructuring.push((pattern, name.clone(), ty.clone()));
                 }
@@ -277,6 +280,7 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(executor),
                                 resolved.clone(),
                                 assimilates,
+                                false,
                             );
                             inferred = HirType::Promise(Box::new(resolved));
                         }
@@ -358,6 +362,7 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(executor),
                                     resolved.clone(),
                                     assimilates,
+                                    false,
                                 ),
                                 HirType::Promise(Box::new(resolved)),
                             )

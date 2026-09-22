@@ -44,6 +44,8 @@ struct FnLowerer<'a> {
     /// the binding is stored as the tagged error *string* internally --
     /// see `statements/lowering.rs`'s catch handling.
     catch_bindings: HashSet<Symbol>,
+    promise_catch_bindings: HashSet<Symbol>,
+    promise_catch_parameter: Option<Symbol>,
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,

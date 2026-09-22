@@ -5,6 +5,11 @@ pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
     let promise = Box::into_raw(Box::new(ThawPromise {
         result: None,
         rejected: false,
+        exception_tag: 0,
+        exception_f64: 0.0,
+        exception_i64: 0,
+        exception_bool: false,
+        exception_object: std::ptr::null(),
         handled: false,
         reported_unhandled: false,
         subscribers: Vec::new(),
@@ -94,6 +99,67 @@ pub extern "C" fn thaw_promise_reject(promise: *mut ThawPromise, error: *const u
     settle_promise(promise, error, true)
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_promise_reject_typed(
+    promise: *mut ThawPromise,
+    error: *const u8,
+    tag: u64,
+    f64_value: f64,
+    i64_value: i64,
+    bool_value: bool,
+    object: *const u8,
+) -> u8 {
+    if settle_promise(promise, error, true) == 0 {
+        return 0;
+    }
+    let promise = unsafe { &mut *promise };
+    promise.exception_tag = tag;
+    promise.exception_f64 = f64_value;
+    promise.exception_i64 = i64_value;
+    promise.exception_bool = bool_value;
+    promise.exception_object = object;
+    1
+}
+
+macro_rules! promise_exception_getter {
+    ($name:ident, $field:ident, $ty:ty, $default:expr) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(promise: *const ThawPromise) -> $ty {
+            unsafe { promise.as_ref() }.map_or($default, |promise| promise.$field)
+        }
+    };
+}
+
+promise_exception_getter!(thaw_promise_exception_tag, exception_tag, u64, 0);
+promise_exception_getter!(thaw_promise_exception_f64, exception_f64, f64, 0.0);
+promise_exception_getter!(thaw_promise_exception_i64, exception_i64, i64, 0);
+promise_exception_getter!(thaw_promise_exception_bool, exception_bool, bool, false);
+promise_exception_getter!(
+    thaw_promise_exception_object,
+    exception_object,
+    *const u8,
+    std::ptr::null()
+);
+
+fn forward_promise_rejection(
+    output: *mut ThawPromise,
+    input: *const ThawPromise,
+    error: *const u8,
+) -> u8 {
+    let Some(input) = (unsafe { input.as_ref() }) else {
+        return thaw_promise_reject(output, error);
+    };
+    thaw_promise_reject_typed(
+        output,
+        error,
+        input.exception_tag,
+        input.exception_f64,
+        input.exception_i64,
+        input.exception_bool,
+        input.exception_object,
+    )
+}
+
 struct DetachedPromise {
     promise: *mut ThawPromise,
     pending_exception: *mut *const u8,
@@ -148,9 +214,9 @@ extern "C" fn resume_promise_chain(frame: *mut u8, result: *const u8) {
     let state = unsafe { Box::from_raw(frame.cast::<PromiseChainState>()) };
     let rejected = unsafe { thaw_promise_state(state.input) } == 2;
     if rejected == state.on_rejected {
-        (state.callback)(state.context, state.output, result);
+        (state.callback)(state.context, state.output, state.input, result);
     } else if rejected {
-        thaw_promise_reject(state.output, result);
+        forward_promise_rejection(state.output, state.input, result);
     } else {
         thaw_promise_resolve(state.output, result);
     }
@@ -196,7 +262,7 @@ struct PromiseAdoptState {
 extern "C" fn resume_promise_adopt(frame: *mut u8, result: *const u8) {
     let state = unsafe { Box::from_raw(frame.cast::<PromiseAdoptState>()) };
     if unsafe { thaw_promise_state(state.input) } == 2 {
-        thaw_promise_reject(state.output, result);
+        forward_promise_rejection(state.output, state.input, result);
     } else {
         thaw_promise_resolve(state.output, result);
     }
@@ -236,7 +302,13 @@ struct PromiseFinallyState {
 extern "C" fn resume_promise_finally(frame: *mut u8, result: *const u8) {
     let state = unsafe { Box::from_raw(frame.cast::<PromiseFinallyState>()) };
     let rejected = unsafe { thaw_promise_state(state.input) } == 2;
-    (state.callback)(state.context, state.output, result, u8::from(rejected));
+    (state.callback)(
+        state.context,
+        state.output,
+        state.input,
+        result,
+        u8::from(rejected),
+    );
     unsafe { thaw_promise_destroy(state.input) };
 }
 
@@ -273,14 +345,27 @@ struct PromiseFinallyAdoptState {
     input: *mut ThawPromise,
     original: *const u8,
     original_rejected: bool,
+    original_tag: u64,
+    original_f64: f64,
+    original_i64: i64,
+    original_bool: bool,
+    original_object: *const u8,
 }
 
 extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
     let state = unsafe { Box::from_raw(frame.cast::<PromiseFinallyAdoptState>()) };
     if unsafe { thaw_promise_state(state.input) } == 2 {
-        thaw_promise_reject(state.output, result);
+        forward_promise_rejection(state.output, state.input, result);
     } else if state.original_rejected {
-        thaw_promise_reject(state.output, state.original);
+        thaw_promise_reject_typed(
+            state.output,
+            state.original,
+            state.original_tag,
+            state.original_f64,
+            state.original_i64,
+            state.original_bool,
+            state.original_object,
+        );
     } else {
         thaw_promise_resolve(state.output, state.original);
     }
@@ -300,6 +385,11 @@ pub unsafe extern "C" fn thaw_promise_finally_adopt(
     input: *mut ThawPromise,
     original: *const u8,
     original_rejected: u8,
+    original_tag: u64,
+    original_f64: f64,
+    original_i64: i64,
+    original_bool: bool,
+    original_object: *const u8,
 ) -> u8 {
     if output.is_null() || input.is_null() || output == input {
         return 0;
@@ -309,6 +399,11 @@ pub unsafe extern "C" fn thaw_promise_finally_adopt(
         input,
         original,
         original_rejected: original_rejected != 0,
+        original_tag,
+        original_f64,
+        original_i64,
+        original_bool,
+        original_object,
     }));
     thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast());
     1
@@ -339,7 +434,7 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
         if !state.rejected {
             state.rejected = true;
             state.first_error = result;
-            thaw_promise_reject(state.output, result);
+            forward_promise_rejection(state.output, child.promise, result);
         }
     } else if !state.rejected {
         for index in &child.indices {
@@ -527,7 +622,7 @@ extern "C" fn resume_promise_race_child(frame: *mut u8, result: *const u8) {
     if !state.settled {
         state.settled = true;
         if unsafe { thaw_promise_state(child.promise) } == 2 {
-            thaw_promise_reject(state.output, result);
+            forward_promise_rejection(state.output, child.promise, result);
         } else {
             thaw_promise_resolve(state.output, result);
         }

@@ -69,7 +69,7 @@ pub enum HirExpr {
     /// A homogeneous `Promise.allSettled` supplied through an array value.
     PromiseAllSettledArray(Box<HirExpr>, HirType),
     /// `new Promise<T>((resolve, reject) => ...)`.
-    PromiseNew(Box<HirExpr>, HirType, bool),
+    PromiseNew(Box<HirExpr>, HirType, bool, bool),
     /// A typed `.then`/`.catch` continuation. `on_rejected` distinguishes
     /// catch from then while retaining the input and output native layouts.
     PromiseThen(Box<HirExpr>, Box<HirExpr>, HirType, HirType, bool, bool),

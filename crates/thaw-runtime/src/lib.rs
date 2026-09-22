@@ -612,6 +612,11 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
 pub struct ThawPromise {
     result: Option<*const u8>,
     rejected: bool,
+    exception_tag: u64,
+    exception_f64: f64,
+    exception_i64: i64,
+    exception_bool: bool,
+    exception_object: *const u8,
     handled: bool,
     reported_unhandled: bool,
     subscribers: Vec<PromiseSubscription>,
