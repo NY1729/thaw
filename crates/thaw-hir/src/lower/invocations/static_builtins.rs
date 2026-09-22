@@ -352,6 +352,25 @@ impl<'a> FnLowerer<'a> {
                         let [value] = arguments.as_slice() else {
                             return Err(format!("`{label}` expects exactly one argument"));
                         };
+                        let value_type = self.infer_expr_type(value)?;
+                        let primitive = matches!(
+                            value_type,
+                            HirType::F64
+                                | HirType::I64
+                                | HirType::Str
+                                | HirType::StrLiteral(_)
+                                | HirType::Symbol
+                                | HirType::Bool
+                                | HirType::Null
+                                | HirType::Undefined
+                        );
+                        if primitive {
+                            let result = property.sym != *"isExtensible";
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Lit(HirLit::Bool(result)),
+                                &bindings,
+                            );
+                        }
                         // Reflect the tracked freeze/seal/extensibility state
                         // a prior `Object.freeze`/`seal`/`preventExtensions`
                         // (or `Reflect` equivalent) recorded for this binding,

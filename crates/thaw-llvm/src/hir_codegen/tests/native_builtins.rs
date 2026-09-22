@@ -3670,12 +3670,13 @@ fn compiles_object_freeze_state() {
             console.log(Object.isFrozen(f));
             console.log(Reflect.isExtensible(o), Reflect.preventExtensions(o));
             console.log(Reflect.setPrototypeOf(o, null));
+            console.log(Object.isFrozen(1), Object.isSealed("x"), Object.isExtensible(null));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_freeze_state"),
         "false false true\ntrue true false\ntrue false false\nfalse false\ntrue\n\
-         true\nfalse true\ntrue\n"
+         true\nfalse true\ntrue\ntrue true false\n"
     );
 }
 
