@@ -60,6 +60,42 @@ impl<'a> FnLowerer<'a> {
         HirExpr::PropAccess(Box::new(value), ty.clone(), "time_zone".to_string())
     }
 
+    fn temporal_components(value: HirExpr, ty: &HirType) -> HirExpr {
+        HirExpr::PropAccess(Box::new(value), ty.clone(), "components".to_string())
+    }
+
+    /// A `Duration`'s components with each value negated or taken absolute
+    /// (for `Duration.prototype.negated`/`abs`).
+    fn duration_components_transform(
+        &mut self,
+        components: &HirExpr,
+        absolute: bool,
+    ) -> Result<HirExpr, String> {
+        let entries = Self::DURATION_COMPONENTS
+            .iter()
+            .map(|name| {
+                let value = HirExpr::JsonAsNumber(Box::new(HirExpr::JsonGet(
+                    Box::new(components.clone()),
+                    (*name).to_string(),
+                )));
+                let value = if absolute {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_math_abs".into())),
+                        vec![value],
+                    )
+                } else {
+                    HirExpr::BinOp(
+                        BinOp::Mul,
+                        Box::new(value),
+                        Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+                    )
+                };
+                (*name, value)
+            })
+            .collect();
+        self.duration_components_json(entries)
+    }
+
     /// A `Duration`'s total as nanoseconds (`ms * 1e6 + ns`).
     fn duration_total_nanoseconds(milliseconds: &HirExpr, nanoseconds: &HirExpr) -> HirExpr {
         HirExpr::BinOp(
@@ -71,6 +107,119 @@ impl<'a> FnLowerer<'a> {
             )),
             Box::new(nanoseconds.clone()),
         )
+    }
+
+    /// The component names a `Duration` stores, in canonical order.
+    const DURATION_COMPONENTS: &'static [&'static str] = &[
+        "years",
+        "months",
+        "weeks",
+        "days",
+        "hours",
+        "minutes",
+        "seconds",
+        "milliseconds",
+        "microseconds",
+        "nanoseconds",
+    ];
+
+    /// A `Duration` value: the epoch-millisecond/nanosecond total for
+    /// arithmetic plus its component breakdown (so an unnormalized input
+    /// such as `{ minutes: 90 }` keeps `minutes` 90).
+    fn temporal_duration_object(
+        milliseconds: HirExpr,
+        nanoseconds: HirExpr,
+        components: HirExpr,
+    ) -> HirExpr {
+        HirExpr::ObjectLit(vec![
+            ("timestamp".to_string(), milliseconds),
+            ("nanoseconds".to_string(), nanoseconds),
+            ("components".to_string(), components),
+            (
+                "__temporal_duration".to_string(),
+                HirExpr::Lit(HirLit::F64(1.0)),
+            ),
+        ])
+    }
+
+    /// Wraps a native number as a JSON value and assembles a `components`
+    /// JSON object from `(name, number expression)` pairs.
+    fn duration_components_json(
+        &mut self,
+        entries: Vec<(&'static str, HirExpr)>,
+    ) -> Result<HirExpr, String> {
+        let mut fields = Vec::with_capacity(entries.len());
+        for (name, value) in entries {
+            let value = self.coerce_primitive_to_number(value)?;
+            let value = self.wrap_native_value_as_json(value, HirType::F64)?;
+            fields.push((name.to_string(), value));
+        }
+        Ok(HirExpr::JsonObjectLit(fields, HirType::Json))
+    }
+
+    /// The component breakdown of a normalized (total-milliseconds)
+    /// duration: years/months/weeks are 0, and the rest are derived by
+    /// remainder.
+    fn duration_components_from_ms(
+        &mut self,
+        milliseconds: &HirExpr,
+        nanoseconds: &HirExpr,
+    ) -> Result<HirExpr, String> {
+        let component = |unit: f64| {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_temporal_duration_component".into())),
+                vec![milliseconds.clone(), HirExpr::Lit(HirLit::F64(unit))],
+            )
+        };
+        let microseconds = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+            vec![HirExpr::BinOp(
+                BinOp::Div,
+                Box::new(nanoseconds.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(1_000.0))),
+            )],
+        );
+        let remaining_nanoseconds = HirExpr::BinOp(
+            BinOp::Sub,
+            Box::new(nanoseconds.clone()),
+            Box::new(HirExpr::BinOp(
+                BinOp::Mul,
+                Box::new(microseconds.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(1_000.0))),
+            )),
+        );
+        self.duration_components_json(vec![
+            ("years", HirExpr::Lit(HirLit::F64(0.0))),
+            ("months", HirExpr::Lit(HirLit::F64(0.0))),
+            ("weeks", HirExpr::Lit(HirLit::F64(0.0))),
+            ("days", component(0.0)),
+            ("hours", component(1.0)),
+            ("minutes", component(2.0)),
+            ("seconds", component(3.0)),
+            ("milliseconds", component(4.0)),
+            ("microseconds", microseconds),
+            ("nanoseconds", remaining_nanoseconds),
+        ])
+    }
+
+    /// The component breakdown of a `Duration.from` object-literal input
+    /// (absent components are 0).
+    fn duration_components_from_fields(
+        &mut self,
+        fields: &[(Symbol, HirExpr)],
+    ) -> Result<HirExpr, String> {
+        let entries = Self::DURATION_COMPONENTS
+            .iter()
+            .map(|name| {
+                let value = fields
+                    .iter()
+                    .find(|(field, _)| field.as_str() == *name)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_else(|| HirExpr::Lit(HirLit::F64(0.0)));
+                (*name, value)
+            })
+            .collect();
+        self.duration_components_json(entries)
     }
 
     /// `(milliseconds, sub-millisecond nanoseconds)` that represent a total
@@ -192,6 +341,21 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// A Duration operand's component JSON: a `Duration` value's own
+    /// components, a `Duration.from` object literal's fields, or a
+    /// normalized breakdown of its total.
+    fn duration_components_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&value)?;
+        if Self::temporal_kind(&ty) == Some("duration") {
+            return Ok(Self::temporal_components(value, &ty));
+        }
+        if let HirExpr::ObjectLit(fields) = &value {
+            return self.duration_components_from_fields(fields);
+        }
+        let (milliseconds, nanoseconds) = self.temporal_duration_operand(value)?;
+        self.duration_components_from_ms(&milliseconds, &nanoseconds)
+    }
+
     /// Sums a Duration-like object literal's components into milliseconds.
     fn duration_fields_milliseconds(fields: &[(Symbol, HirExpr)]) -> Result<HirExpr, String> {
         let mut total: Option<HirExpr> = None;
@@ -297,7 +461,16 @@ impl<'a> FnLowerer<'a> {
                     };
                     let (milliseconds, nanoseconds) =
                         self.temporal_duration_operand(value.clone())?;
-                    Self::temporal_object("duration", milliseconds, nanoseconds)
+                    // An object-literal input keeps its own component
+                    // breakdown (so `{ minutes: 90 }` reports 90); a string
+                    // or a native duration is normalized from its total.
+                    let components = match value {
+                        HirExpr::ObjectLit(fields) => {
+                            self.duration_components_from_fields(fields)?
+                        }
+                        _ => self.duration_components_from_ms(&milliseconds, &nanoseconds)?,
+                    };
+                    Self::temporal_duration_object(milliseconds, nanoseconds, components)
                 }
                 other => return Err(format!("`Temporal.Duration.{other}` is not supported")),
             };
@@ -570,14 +743,51 @@ impl<'a> FnLowerer<'a> {
                     )),
                     Box::new(carry),
                 );
-                match &time_zone {
-                    Some(zone) => Self::temporal_zoned_object(
+                if kind == "duration" {
+                    // `Duration.add`/`subtract` are component-wise, so an
+                    // unnormalized input stays unnormalized.
+                    let left_components =
+                        Self::temporal_components(receiver.clone(), &receiver_type);
+                    let right_components =
+                        self.duration_components_operand(duration.clone())?;
+                    let subtract = property.sym == *"subtract";
+                    let entries = Self::DURATION_COMPONENTS
+                        .iter()
+                        .map(|name| {
+                            let left = HirExpr::JsonAsNumber(Box::new(HirExpr::JsonGet(
+                                Box::new(left_components.clone()),
+                                (*name).to_string(),
+                            )));
+                            let right = HirExpr::JsonAsNumber(Box::new(HirExpr::JsonGet(
+                                Box::new(right_components.clone()),
+                                (*name).to_string(),
+                            )));
+                            let value = HirExpr::BinOp(
+                                if subtract { BinOp::Sub } else { BinOp::Add },
+                                Box::new(left),
+                                Box::new(right),
+                            );
+                            (*name, value)
+                        })
+                        .collect();
+                    let components = self.duration_components_json(entries)?;
+                    Self::temporal_duration_object(
                         result_milliseconds,
                         result_nanoseconds,
-                        zone.clone(),
-                    ),
-                    None => {
-                        Self::temporal_object(kind, result_milliseconds, result_nanoseconds)
+                        components,
+                    )
+                } else {
+                    match &time_zone {
+                        Some(zone) => Self::temporal_zoned_object(
+                            result_milliseconds,
+                            result_nanoseconds,
+                            zone.clone(),
+                        ),
+                        None => Self::temporal_object(
+                            kind,
+                            result_milliseconds,
+                            result_nanoseconds,
+                        ),
                     }
                 }
             }
@@ -592,11 +802,12 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     (timestamp, other_ms)
                 };
-                Self::temporal_object(
-                    "duration",
-                    HirExpr::BinOp(BinOp::Sub, Box::new(left), Box::new(right)),
-                    HirExpr::Lit(HirLit::F64(0.0)),
-                )
+                let milliseconds =
+                    HirExpr::BinOp(BinOp::Sub, Box::new(left), Box::new(right));
+                let nanoseconds = HirExpr::Lit(HirLit::F64(0.0));
+                let components =
+                    self.duration_components_from_ms(&milliseconds, &nanoseconds)?;
+                Self::temporal_duration_object(milliseconds, nanoseconds, components)
             }
             "toPlainDate" | "toPlainDateTime" | "toPlainTime" => {
                 let plain_kind = match property.sym.as_ref() {
@@ -687,7 +898,13 @@ impl<'a> FnLowerer<'a> {
                 };
                 let (milliseconds, nanoseconds) =
                     Self::duration_from_total_nanoseconds(total);
-                Self::temporal_object("duration", milliseconds, nanoseconds)
+                // The components are transformed the same way, so an
+                // unnormalized input stays unnormalized.
+                let components = self.duration_components_transform(
+                    &Self::temporal_components(receiver, &receiver_type),
+                    property.sym == *"abs",
+                )?;
+                Self::temporal_duration_object(milliseconds, nanoseconds, components)
             }
             "total" if kind == "duration" => {
                 let [unit] = arguments.as_slice() else {
@@ -790,21 +1007,16 @@ impl<'a> FnLowerer<'a> {
                     HirType::F64,
                 )));
             }
-            let unit = match property.sym.as_ref() {
-                "days" => 0.0,
-                "hours" => 1.0,
-                "minutes" => 2.0,
-                "seconds" => 3.0,
-                "milliseconds" => 4.0,
-                _ => return Ok(None),
-            };
-            let receiver = self.lower_expr(&member.obj)?;
-            let receiver_type = self.infer_expr_type(&receiver)?;
-            let timestamp = Self::temporal_timestamp(receiver, &receiver_type);
-            return Ok(Some(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_temporal_duration_component".into())),
-                vec![timestamp, HirExpr::Lit(HirLit::F64(unit))],
-            )));
+            if Self::DURATION_COMPONENTS.contains(&property.sym.as_ref()) {
+                let receiver = self.lower_expr(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                let components = Self::temporal_components(receiver, &receiver_type);
+                return Ok(Some(HirExpr::JsonAsNumber(Box::new(HirExpr::JsonGet(
+                    Box::new(components),
+                    property.sym.to_string(),
+                )))));
+            }
+            return Ok(None);
         }
         // `epochNanoseconds` is a BigInt of the full nanosecond count,
         // built from the runtime's decimal string (an `i64` couldn't hold
