@@ -281,7 +281,7 @@ fn lowers_promise_void_constructor_with_zero_argument_resolve() {
     let HirStmt::Expr(HirExpr::Await(inner)) = &program.functions[0].body[0] else {
         panic!("expected awaited Promise<void>");
     };
-    let HirExpr::PromiseNew(executor, HirType::Void, false) = inner.as_ref() else {
+    let HirExpr::PromiseNew(executor, HirType::Void, false, false) = inner.as_ref() else {
         panic!("expected Promise<void> constructor");
     };
     let HirExpr::Lambda(_, params, HirType::Void, _) = executor.as_ref() else {

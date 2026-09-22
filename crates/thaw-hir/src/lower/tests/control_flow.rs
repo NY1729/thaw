@@ -233,7 +233,15 @@ fn lowers_try_catch() {
     assert_eq!(
         f.body,
         vec![HirStmt::Try(
-            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str("boom".into())))],
+            vec![
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var(
+                        "__thaw_set_pending_exception_tag".into()
+                    )),
+                    vec![HirExpr::Lit(HirLit::I64(4))],
+                )),
+                HirStmt::Throw(HirExpr::Lit(HirLit::Str("boom".into()))),
+            ],
             "e".into(),
             vec![HirStmt::Expr(HirExpr::Call(
                 Box::new(HirExpr::Var("console.log".into())),
@@ -264,7 +272,7 @@ fn lowers_finally_onto_normal_return_and_rethrow_paths() {
     assert!(matches!(body[0], HirStmt::Expr(_)));
     assert!(matches!(body[1], HirStmt::Return(_)));
     assert!(matches!(catch_body[0], HirStmt::Expr(_)));
-    assert!(matches!(catch_body[1], HirStmt::Throw(_)));
+    assert!(matches!(catch_body.last(), Some(HirStmt::Throw(_))));
     assert!(matches!(program.functions[0].body[1], HirStmt::Expr(_)));
 }
 

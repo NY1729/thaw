@@ -413,6 +413,51 @@ impl<'ctx> HirCompiler<'ctx> {
             format!("{catch_name}__thaw_exception_object"),
             (object_slot, str_ty),
         );
+        for (suffix, symbol, ty) in [
+            (
+                "tag",
+                PENDING_EXCEPTION_VALUE_TAG_SYMBOL,
+                self.context.i64_type().into(),
+            ),
+            ("f64", PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
+            ("i64", PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
+            ("bool", PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
+        ] {
+            let slot = self
+                .builder
+                .build_alloca(ty, &format!("catch_{suffix}_slot"))
+                .map_err(|e| e.to_string())?;
+            let value = self
+                .builder
+                .build_load(
+                    ty,
+                    self.pending_exception_value(symbol).as_pointer_value(),
+                    &format!("caught_exception_{suffix}"),
+                )
+                .map_err(|e| e.to_string())?;
+            self.builder
+                .build_store(slot, value)
+                .map_err(|e| e.to_string())?;
+            self.variables.insert(
+                format!("{catch_name}__thaw_exception_{suffix}"),
+                (slot, ty),
+            );
+            self.variable_hir_types.insert(
+                format!("{catch_name}__thaw_exception_{suffix}"),
+                match suffix {
+                    "f64" => HirType::F64,
+                    "bool" => HirType::Bool,
+                    _ => HirType::I64,
+                },
+            );
+        }
+        self.builder
+            .build_store(
+                self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
+                    .as_pointer_value(),
+                self.context.i64_type().const_zero(),
+            )
+            .map_err(|e| e.to_string())?;
         // The hidden tag is the same caught string under a private name,
         // for a catch body (or nested handler) that reads the raw tagged
         // error rather than the materialized object. Bound to the same

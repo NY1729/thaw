@@ -247,6 +247,39 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(binding_slot, resume_result)
                 .map_err(|e| e.to_string())?;
+            for (suffix, getter) in [
+                ("object", "thaw_promise_exception_object"),
+                ("tag", "thaw_promise_exception_tag"),
+                ("f64", "thaw_promise_exception_f64"),
+                ("i64", "thaw_promise_exception_i64"),
+                ("bool", "thaw_promise_exception_bool"),
+            ] {
+                let name = format!("{}__thaw_exception_{suffix}", handler.catch_binding);
+                let index = plan
+                    .locals
+                    .iter()
+                    .position(|(local, _)| local == &name)
+                    .ok_or_else(|| format!("missing async catch metadata `{name}`"))?;
+                let slot = self.async_frame_field(
+                    resume_frame,
+                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                    &format!("frame_{name}"),
+                )?;
+                let value = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(getter).unwrap(),
+                        &[waiting.into()],
+                        "caught_promise_exception_value",
+                    )
+                    .map_err(|e| e.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("{getter} returned no value"))?;
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(|e| e.to_string())?;
+            }
             self.builder
                 .build_call(
                     self.module.get_function("thaw_promise_destroy").unwrap(),
@@ -268,13 +301,12 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         self.builder.position_at_end(propagate_rejection);
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_promise_reject").unwrap(),
-                &[resume_completion.into(), resume_result.into()],
-                "reject_completion",
-            )
-            .map_err(|e| e.to_string())?;
+        self.reject_promise_with_source_exception(
+            resume_completion,
+            resume_result,
+            waiting,
+            "reject_completion",
+        )?;
         self.builder
             .build_call(
                 self.module.get_function("thaw_promise_destroy").unwrap(),
@@ -843,13 +875,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             if let HirStmt::Return(Some(HirExpr::ThrowValue(error, _))) = stmt {
                 let error = self.compile_expr(error)?.into_pointer_value();
-                self.builder
-                    .build_call(
-                        self.module.get_function("thaw_promise_reject").unwrap(),
-                        &[completion.into(), error.into()],
-                        "reject_throw_value",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.reject_promise_with_pending_exception(
+                    completion,
+                    error,
+                    "reject_throw_value",
+                )?;
                 return Ok(AsyncBlockExit::Rejected);
             }
             if let HirStmt::Return(Some(expr)) = stmt {
@@ -866,13 +896,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             if let HirStmt::Throw(expr) = stmt {
                 let error = self.compile_expr(expr)?.into_pointer_value();
-                self.builder
-                    .build_call(
-                        self.module.get_function("thaw_promise_reject").unwrap(),
-                        &[completion.into(), error.into()],
-                        "reject_completion",
-                    )
-                    .map_err(|e| e.to_string())?;
+                self.reject_promise_with_pending_exception(
+                    completion,
+                    error,
+                    "reject_completion",
+                )?;
                 return Ok(AsyncBlockExit::Rejected);
             }
             if let HirStmt::Let(name, ty, expr) = stmt {

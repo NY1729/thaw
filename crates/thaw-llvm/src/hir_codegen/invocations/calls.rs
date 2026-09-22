@@ -870,6 +870,121 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(self.pending_exception_object().as_pointer_value(), value)
                     .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(
+                        self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
+                            .as_pointer_value(),
+                        self.context.i64_type().const_zero(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_pending_exception_object" => {
+                return self
+                    .builder
+                    .build_load(
+                        self.context.ptr_type(AddressSpace::default()),
+                        self.pending_exception_object().as_pointer_value(),
+                        "pending_exception_object_value",
+                    )
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_pending_exception_tag"
+            | "__thaw_pending_exception_f64"
+            | "__thaw_pending_exception_i64"
+            | "__thaw_pending_exception_bool" => {
+                let (symbol, ty): (&str, BasicTypeEnum) = match name.as_str() {
+                    "__thaw_pending_exception_tag" => (
+                        PENDING_EXCEPTION_VALUE_TAG_SYMBOL,
+                        self.context.i64_type().into(),
+                    ),
+                    "__thaw_pending_exception_f64" => {
+                        (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into())
+                    }
+                    "__thaw_pending_exception_i64" => {
+                        (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into())
+                    }
+                    _ => (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
+                };
+                return self
+                    .builder
+                    .build_load(
+                        ty,
+                        self.pending_exception_value(symbol).as_pointer_value(),
+                        "pending_exception_value",
+                    )
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_set_pending_exception_f64"
+            | "__thaw_set_pending_exception_i64"
+            | "__thaw_set_pending_exception_bool" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let (symbol, tag) = match name.as_str() {
+                    "__thaw_set_pending_exception_f64" => (PENDING_EXCEPTION_F64_SYMBOL, 1),
+                    "__thaw_set_pending_exception_i64" => (PENDING_EXCEPTION_I64_SYMBOL, 2),
+                    _ => (PENDING_EXCEPTION_BOOL_SYMBOL, 3),
+                };
+                let value = self.compile_expr(value)?;
+                self.builder
+                    .build_store(
+                        self.pending_exception_value(symbol).as_pointer_value(),
+                        value,
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(
+                        self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
+                            .as_pointer_value(),
+                        self.context.i64_type().const_int(tag, false),
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_exception_typeof" => {
+                let [tag] = args else {
+                    return Err("exception typeof expects one tag".into());
+                };
+                let tag = self.compile_expr(tag)?.into_int_value();
+                let choices = [
+                    (1, "number"),
+                    (2, "bigint"),
+                    (3, "boolean"),
+                    (4, "string"),
+                    (5, "undefined"),
+                ];
+                let mut result = self.compile_expr(&HirExpr::Lit(HirLit::Str("object".into())))?;
+                for (expected, label) in choices.into_iter().rev() {
+                    let matches = self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            tag,
+                            self.context.i64_type().const_int(expected, false),
+                            "exception_type_matches",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let label = self.compile_expr(&HirExpr::Lit(HirLit::Str(label.into())))?;
+                    result = self
+                        .builder
+                        .build_select(matches, label, result, "exception_typeof")
+                        .map_err(|error| error.to_string())?;
+                }
+                return Ok(result);
+            }
+            "__thaw_set_pending_exception_tag" => {
+                let [tag] = args else {
+                    return Err("exception tag setter expects one tag".into());
+                };
+                let tag = self.compile_expr(tag)?;
+                self.builder
+                    .build_store(
+                        self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
+                            .as_pointer_value(),
+                        tag,
+                    )
+                    .map_err(|error| error.to_string())?;
                 return Ok(self.context.i32_type().const_int(0, false).into());
             }
             "__thaw_detach_promise" | "__thaw_detach_rejection" => {

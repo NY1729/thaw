@@ -314,9 +314,9 @@ impl<'a> FnLowerer<'a> {
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
             Expr::TsAs(assertion) => {
-                // `(e as MyError)` on a caught exception (`e`, always
+                // `(e as T)` on a caught exception (`e`, always
                 // `HirType::Str` -- see `statements/lowering.rs`) reads the
-                // parallel object channel a `MyError`-instance `throw`
+                // parallel object channel an object `throw`
                 // populated alongside the tagged string (see
                 // `docs/design/exceptions.md` section 3 and
                 // `HirStmt::Throw`'s lowering just above `Stmt::Throw`),
@@ -337,13 +337,68 @@ impl<'a> FnLowerer<'a> {
                 {
                     if let swc_ecma_ast::TsEntityName::Ident(class) = &reference.type_name {
                         let resolved = self.resolve_binding(ident.sym.as_ref());
+                        let promise_catch = self.promise_catch_bindings.contains(&resolved)
+                            || self
+                                .promise_catch_parameter
+                                .as_deref()
+                                .is_some_and(|name| self.resolve_binding(name) == resolved);
                         let target = self.interfaces.get(class.sym.as_ref()).cloned();
                         if self.scope.get(&resolved) == Some(&HirType::Str) {
-                            if let Some(target) = target.filter(object_type_is_error_family) {
+                            if let Some(target @ HirType::Object(_)) = target {
+                                if promise_catch {
+                                    let value = HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_pending_exception_object".to_string(),
+                                        )),
+                                        Vec::new(),
+                                    );
+                                    return Ok(HirExpr::Conditional(
+                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                        Box::new(value.clone()),
+                                        Box::new(value),
+                                        target,
+                                    ));
+                                }
                                 let object_name = format!("{resolved}__thaw_exception_object");
                                 self.scope.insert(object_name.clone(), target);
                                 return Ok(HirExpr::Var(object_name));
                             }
+                        }
+                    }
+                }
+                if let Expr::Ident(ident) = assertion.expr.as_ref() {
+                    let resolved = self.resolve_binding(ident.sym.as_ref());
+                    let promise_catch = self.promise_catch_bindings.contains(&resolved)
+                        || self
+                            .promise_catch_parameter
+                            .as_deref()
+                            .is_some_and(|name| self.resolve_binding(name) == resolved);
+                    if self.catch_bindings.contains(&resolved)
+                        || promise_catch
+                    {
+                        let target = lower_ts_type(
+                            &assertion.type_ann,
+                            self.interfaces,
+                            self.generic_interfaces,
+                        )?;
+                        let suffix = match target {
+                            HirType::F64 => Some("f64"),
+                            HirType::I64 => Some("i64"),
+                            HirType::Bool => Some("bool"),
+                            _ => None,
+                        };
+                        if let Some(suffix) = suffix {
+                            if promise_catch {
+                                return Ok(HirExpr::Call(
+                                    Box::new(HirExpr::Var(format!(
+                                        "__thaw_pending_exception_{suffix}"
+                                    ))),
+                                    Vec::new(),
+                                ));
+                            }
+                            let name = format!("{resolved}__thaw_exception_{suffix}");
+                            self.scope.insert(name.clone(), target);
+                            return Ok(HirExpr::Var(name));
                         }
                     }
                 }
@@ -1088,8 +1143,34 @@ impl<'a> FnLowerer<'a> {
                         // generic `Str -> "string"` inference below would
                         // otherwise be wrong here.
                         if let HirExpr::Var(name) = &value {
-                            if self.catch_bindings.contains(name) {
-                                return Ok(HirExpr::Lit(HirLit::Str("object".into())));
+                            let promise_catch = self.promise_catch_bindings.contains(name)
+                                || self
+                                    .promise_catch_parameter
+                                    .as_deref()
+                                    .is_some_and(|parameter| {
+                                        self.resolve_binding(parameter) == *name
+                                    });
+                            if self.catch_bindings.contains(name)
+                                || promise_catch
+                            {
+                                let tag = if promise_catch {
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_pending_exception_tag".to_string(),
+                                        )),
+                                        Vec::new(),
+                                    )
+                                } else {
+                                    let tag = format!("{name}__thaw_exception_tag");
+                                    self.scope.insert(tag.clone(), HirType::I64);
+                                    HirExpr::Var(tag)
+                                };
+                                return Ok(HirExpr::Call(
+                                    Box::new(HirExpr::Var(
+                                        "__thaw_exception_typeof".to_string(),
+                                    )),
+                                    vec![tag],
+                                ));
                             }
                         }
                         // `generic_arrows`/`generic_named_templates` describe *this same*

@@ -188,6 +188,7 @@ struct ChainNumberContext {
 extern "C" fn transform_chain_number(
     context: *mut u8,
     output: *mut ThawPromise,
+    _input: *mut ThawPromise,
     result: *const u8,
 ) {
     let context = unsafe { &mut *context.cast::<ChainNumberContext>() };
@@ -526,6 +527,81 @@ fn rejected_promise_queues_subscribers_and_settles_once() {
     assert_eq!(record.result, &error);
     assert_eq!(thaw_runtime_run_until_resolved(promise), &error);
     unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
+fn rejected_promise_preserves_typed_exception_metadata() {
+    let promise = thaw_promise_new();
+    let error = 1u8;
+    let object = 2u8;
+    assert_eq!(
+        thaw_promise_reject_typed(promise, &error, 1, 42.5, 43, true, &object),
+        1
+    );
+    unsafe {
+        assert_eq!(thaw_promise_exception_tag(promise), 1);
+        assert_eq!(thaw_promise_exception_f64(promise), 42.5);
+        assert_eq!(thaw_promise_exception_i64(promise), 43);
+        assert!(thaw_promise_exception_bool(promise));
+        assert_eq!(thaw_promise_exception_object(promise), &object);
+        thaw_promise_destroy(promise);
+    }
+}
+
+#[test]
+fn promise_forwarders_preserve_typed_exception_metadata() {
+    fn rejected(error: &u8, object: &u8) -> *mut ThawPromise {
+        let promise = thaw_promise_new();
+        assert_eq!(
+            thaw_promise_reject_typed(promise, error, 1, 42.5, 43, true, object),
+            1
+        );
+        promise
+    }
+
+    unsafe fn assert_metadata(promise: *mut ThawPromise, object: &u8) {
+        assert_eq!(unsafe { thaw_promise_exception_tag(promise) }, 1);
+        assert_eq!(unsafe { thaw_promise_exception_f64(promise) }, 42.5);
+        assert_eq!(unsafe { thaw_promise_exception_i64(promise) }, 43);
+        assert!(unsafe { thaw_promise_exception_bool(promise) });
+        assert_eq!(unsafe { thaw_promise_exception_object(promise) }, object);
+    }
+
+    let error = 1u8;
+    let object = 2u8;
+
+    let adopted = thaw_promise_new();
+    unsafe { thaw_promise_adopt(adopted, rejected(&error, &object)) };
+    thaw_runtime_run_until_idle();
+    unsafe { assert_metadata(adopted, &object) };
+
+    let chained = unsafe {
+        thaw_promise_chain(
+            rejected(&error, &object),
+            transform_chain_number,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    thaw_runtime_run_until_idle();
+    unsafe { assert_metadata(chained, &object) };
+
+    let all_input = rejected(&error, &object);
+    let all = unsafe { thaw_promise_all_slots(&all_input, 1, size_of::<u64>()) };
+    thaw_runtime_run_until_idle();
+    unsafe { assert_metadata(all, &object) };
+
+    let race_input = rejected(&error, &object);
+    let race = unsafe { thaw_promise_race(&race_input, 1) };
+    thaw_runtime_run_until_idle();
+    unsafe { assert_metadata(race, &object) };
+
+    unsafe {
+        thaw_promise_destroy(adopted);
+        thaw_promise_destroy(chained);
+        thaw_promise_destroy(all);
+        thaw_promise_destroy(race);
+    }
 }
 
 #[test]

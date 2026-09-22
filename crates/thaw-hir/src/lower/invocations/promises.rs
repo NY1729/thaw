@@ -126,7 +126,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(body),
         );
         self.wrap_call_argument_bindings(
-            HirExpr::PromiseNew(Box::new(executor), resolved, assimilates),
+            HirExpr::PromiseNew(Box::new(executor), resolved, assimilates, false),
             &bindings,
         )
     }
@@ -207,7 +207,7 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(
                 promise_name.clone(),
                 promise_type,
-                HirExpr::PromiseNew(Box::new(executor), resolved, false),
+                HirExpr::PromiseNew(Box::new(executor), resolved, false, false),
             ),
             assign("promise", &promise_name),
             HirStmt::Return(Some(HirExpr::Var(result_name))),
@@ -303,11 +303,8 @@ impl<'a> FnLowerer<'a> {
                         HirType::Promise(inner) => (inner.as_ref().clone(), true),
                         other => (other.clone(), false),
                     };
-                    let on_rejected = self.lower_promise_callback(
-                        &call.args[1].expr,
-                        &[HirType::Str],
-                        None,
-                    )?;
+                    let on_rejected =
+                        self.lower_promise_rejection_callback(&call.args[1].expr, None)?;
                     let HirType::Function(_, rejected_output) =
                         self.infer_expr_type(&on_rejected)?
                     else {
@@ -378,11 +375,15 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         (
                             source,
-                            self.lower_promise_callback(
-                                &callback.expr,
-                                &callback_params,
-                                None,
-                            )?,
+                            if on_rejected {
+                                self.lower_promise_rejection_callback(&callback.expr, None)?
+                            } else {
+                                self.lower_promise_callback(
+                                    &callback.expr,
+                                    &callback_params,
+                                    None,
+                                )?
+                            },
                             Vec::new(),
                         )
                     };

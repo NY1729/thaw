@@ -171,7 +171,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn is_frame_await_source(&self, expr: &HirExpr) -> bool {
         matches!(
             expr,
-            HirExpr::PromiseNew(_, _, _)
+            HirExpr::PromiseNew(_, _, _, _)
                 | HirExpr::PromiseThen(_, _, _, _, _, _)
                 | HirExpr::PromiseFinally(_, _, _, _)
                 | HirExpr::PromiseAll(_, _)

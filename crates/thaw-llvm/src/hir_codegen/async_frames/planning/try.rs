@@ -18,7 +18,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let try_guard = format!("__thaw_try_{}", *next_guard);
         let catch_guard = format!("__thaw_catch_{}", *next_guard);
         *next_guard += 1;
-        extra_locals.push((catch_name.to_string(), HirType::Str));
+        Self::push_async_catch_locals(extra_locals, catch_name);
 
         let current = segments.last_mut().unwrap();
         current.stmts.push(HirStmt::Let(
@@ -65,22 +65,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 continue;
             }
             if let HirStmt::Throw(error) = stmt {
+                let mut caught = Self::async_catch_assignments(catch_name, error.clone());
+                caught.extend([
+                    HirStmt::Expr(HirExpr::Assign(
+                        try_guard.clone(),
+                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                    )),
+                    HirStmt::Expr(HirExpr::Assign(
+                        catch_guard.clone(),
+                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                    )),
+                ]);
                 segments.last_mut().unwrap().stmts.push(HirStmt::If(
                     HirExpr::Var(try_guard.clone()),
-                    vec![
-                        HirStmt::Expr(HirExpr::Assign(
-                            catch_name.to_string(),
-                            Box::new(error.clone()),
-                        )),
-                        HirStmt::Expr(HirExpr::Assign(
-                            try_guard.clone(),
-                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                        )),
-                        HirStmt::Expr(HirExpr::Assign(
-                            catch_guard.clone(),
-                            Box::new(HirExpr::Lit(HirLit::Bool(true))),
-                        )),
-                    ],
+                    caught,
                     Vec::new(),
                 ));
                 continue;

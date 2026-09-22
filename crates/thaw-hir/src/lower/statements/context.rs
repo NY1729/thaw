@@ -79,6 +79,8 @@ impl<'a> FnLowerer<'a> {
             member_receiver_bindings: HashSet::new(),
             awaited_bindings: HashSet::new(),
             catch_bindings: HashSet::new(),
+            promise_catch_bindings: HashSet::new(),
+            promise_catch_parameter: None,
             loop_depth: 0,
             labels: Vec::new(),
             super_initializer: None,

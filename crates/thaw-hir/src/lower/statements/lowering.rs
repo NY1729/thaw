@@ -2048,6 +2048,14 @@ impl<'a> FnLowerer<'a> {
             }
 
             Stmt::Throw(throw_stmt) => {
+                let promise_rethrow = throw_stmt.arg.as_ident().is_some_and(|ident| {
+                    let name = self.resolve_binding(ident.sym.as_ref());
+                    self.promise_catch_bindings.contains(&name)
+                        || self
+                            .promise_catch_parameter
+                            .as_deref()
+                            .is_some_and(|parameter| self.resolve_binding(parameter) == name)
+                });
                 // The exception channel is a single tagged string end to
                 // end (see `new Error(...)`'s lowering and
                 // `thaw_runtime::split_error_tag`); a thrown non-string
@@ -2060,20 +2068,50 @@ impl<'a> FnLowerer<'a> {
                 // one representation honest; unsupported types (a thrown
                 // `Promise`, function, `Map`/`Set`, etc.) are a compile
                 // error instead of memory corruption.
+                let rethrow_object = throw_stmt.arg.as_ident().and_then(|ident| {
+                    let name = self.resolve_binding(ident.sym.as_ref());
+                    self.catch_bindings
+                        .contains(&name)
+                        .then(|| format!("{name}__thaw_exception_object"))
+                });
                 let value = self.lower_expr(&throw_stmt.arg)?;
                 let value_type = self.infer_expr_type(&value)?;
-                // A real (Error-family) class instance also gets its raw
-                // object pointer stashed in the parallel, opt-in
+                if promise_rethrow {
+                    return Ok(vec![HirStmt::Throw(value)]);
+                }
+                if let Some(object_name) = rethrow_object {
+                    let tag_name = object_name.replace("_object", "_tag");
+                    self.scope
+                        .insert(object_name.clone(), HirType::Object(Vec::new()));
+                    self.scope.insert(tag_name.clone(), HirType::I64);
+                    return Ok(vec![
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_set_pending_exception_object".to_string(),
+                            )),
+                            vec![HirExpr::Var(object_name)],
+                        )),
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_set_pending_exception_tag".to_string(),
+                            )),
+                            vec![HirExpr::Var(tag_name)],
+                        )),
+                        HirStmt::Throw(value),
+                    ]);
+                }
+                // A fixed-layout object also gets its raw pointer stashed in
+                // the parallel, opt-in
                 // `__thaw_pending_exception_object` channel (see
                 // `docs/design/exceptions.md` section 3) *in addition* to
                 // the tagged string every other reader already
-                // understands, so an explicit `(e as MyError).code` at a
-                // `catch` site downstream can recover fields beyond
-                // `message`/`name`. A plain string or fieldless Error
+                // understands, so an explicit `(e as T)` at a `catch` site
+                // downstream can recover the original object identity. A
+                // plain string or fieldless Error
                 // throw leaves that channel untouched (still null, or
                 // stale from a previous throw already cleared at the
                 // catching `catch` -- see `compile_try`).
-                let error_object_name = object_type_is_error_family(&value_type).then(|| {
+                let error_object_name = matches!(value_type, HirType::Object(_)).then(|| {
                     let name = format!("__thaw_thrown_object_{}", self.next_binding);
                     self.next_binding += 1;
                     name
@@ -2091,6 +2129,43 @@ impl<'a> FnLowerer<'a> {
                             vec![object_var],
                         )),
                         HirStmt::Throw(message),
+                    ]);
+                }
+                let setter = match value_type {
+                    HirType::F64 => Some("__thaw_set_pending_exception_f64"),
+                    HirType::I64 => Some("__thaw_set_pending_exception_i64"),
+                    HirType::Bool => Some("__thaw_set_pending_exception_bool"),
+                    _ => None,
+                };
+                if let Some(setter) = setter {
+                    let name = format!("__thaw_thrown_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), value_type.clone());
+                    let value_var = HirExpr::Var(name.clone());
+                    let message = self.coerce_primitive_to_string(value_var.clone())?;
+                    return Ok(vec![
+                        HirStmt::Let(name, value_type, value),
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(setter.to_string())),
+                            vec![value_var],
+                        )),
+                        HirStmt::Throw(message),
+                    ]);
+                }
+                let tag = match value_type {
+                    HirType::Str | HirType::StrLiteral(_) => Some(4),
+                    HirType::Undefined | HirType::Void => Some(5),
+                    _ => None,
+                };
+                if let Some(tag) = tag {
+                    return Ok(vec![
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_set_pending_exception_tag".to_string(),
+                            )),
+                            vec![HirExpr::Lit(HirLit::I64(tag))],
+                        )),
+                        HirStmt::Throw(self.coerce_primitive_to_string(value)?),
                     ]);
                 }
                 let value = self.coerce_primitive_to_string(value)?;

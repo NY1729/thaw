@@ -129,7 +129,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         }
         HirExpr::Await(value)
         | HirExpr::AwaitPromise(value, _)
-        | HirExpr::PromiseNew(value, _, _)
+        | HirExpr::PromiseNew(value, _, _, _)
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
@@ -261,7 +261,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
         | HirExpr::PromiseAllSettledArray(value, _)
-        | HirExpr::PromiseNew(value, _, _)
+        | HirExpr::PromiseNew(value, _, _, _)
         | HirExpr::Assign(_, value)
         | HirExpr::ArrayAlloc(value, _)
         | HirExpr::ArrayLen(value)

@@ -1483,7 +1483,7 @@ fn lower_function_statements(
             );
             (
                 HirType::Promise(Box::new(generated.clone())),
-                HirExpr::PromiseNew(Box::new(executor), generated.clone(), false),
+                HirExpr::PromiseNew(Box::new(executor), generated.clone(), false, false),
             )
         } else {
             (generated.clone(), generator_body)
