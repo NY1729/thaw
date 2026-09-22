@@ -109,6 +109,13 @@ impl<'a> FnLowerer<'a> {
         if matches!(ty, HirType::Array(_)) {
             self.sparse_arrays.insert(name.to_string());
         }
+        if matches!(
+            ty,
+            HirType::Function(_, result) | HirType::CallableFunction(_, _, _, result)
+                if matches!(result.as_ref(), HirType::Array(_))
+        ) {
+            self.sparse_array_functions.insert(name.to_string());
+        }
     }
 
     fn expression_may_be_sparse_array(&self, expression: &Expr) -> bool {
