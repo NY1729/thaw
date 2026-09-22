@@ -1,11 +1,12 @@
-// Native approximations for the `Temporal` namespace. Every `Temporal`
-// value is lowered as an ordinary object
-// `{ timestamp, nanoseconds, __temporal_<kind> }`: `timestamp` is the same
-// epoch-millisecond `f64` `Date` uses, and `nanoseconds` is the
-// sub-millisecond remainder (0..999999), so `.timestamp` field access and
-// the object codegen carry it while fractional seconds keep nanosecond
-// precision. There is no nanosecond clock or timezone database, so `Now`
-// and the zone are millisecond/UTC.
+// Native support for the `Temporal` namespace. Every `Temporal` value is
+// lowered as an ordinary object `{ timestamp, nanoseconds, calendar,
+// [time_zone,] __temporal_<kind> }`: `timestamp` is the same
+// epoch-millisecond `f64` `Date` uses, `nanoseconds` is the sub-millisecond
+// remainder (0..999999), `calendar` is an ICU4X calendar identifier
+// (`"iso8601"` by default), and `time_zone` is only on `ZonedDateTime`.
+// Time zones use jiff's bundled tzdb, calendars use ICU4X, and `Now` reads a
+// real nanosecond `CLOCK_REALTIME`. Calendar *arithmetic* (`add`/`subtract`/
+// `since`/`until`) is still computed on the ISO/epoch timeline.
 
 /// Parses an offset string (`"Z"`, `"+09:00"`, `"-0500"`, `"+09"`) into
 /// seconds east of UTC, or `None`.
@@ -106,6 +107,171 @@ pub unsafe extern "C" fn thaw_temporal_zone_valid(zone: *const c_char) -> bool {
     }
     let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
     jiff_time_zone(&zone).is_some()
+}
+
+/// Maps a Temporal calendar identifier to an ICU4X calendar.
+fn temporal_calendar_kind(id: &str) -> Option<icu_calendar::AnyCalendarKind> {
+    use icu_calendar::AnyCalendarKind as Kind;
+    Some(match id.trim().to_ascii_lowercase().as_str() {
+        "iso8601" => Kind::Iso,
+        "gregory" => Kind::Gregorian,
+        "buddhist" => Kind::Buddhist,
+        "chinese" => Kind::Chinese,
+        "coptic" => Kind::Coptic,
+        "dangi" => Kind::Dangi,
+        "ethiopic" => Kind::Ethiopian,
+        "ethioaa" => Kind::EthiopianAmeteAlem,
+        "hebrew" => Kind::Hebrew,
+        "indian" => Kind::Indian,
+        "islamic" | "islamic-rgsa" => Kind::HijriSimulatedMecca,
+        "islamic-umalqura" => Kind::HijriUmmAlQura,
+        "islamic-tbla" => Kind::HijriTabularTypeIIThursday,
+        "islamic-civil" => Kind::HijriTabularTypeIIFriday,
+        "japanese" => Kind::Japanese,
+        "persian" => Kind::Persian,
+        "roc" => Kind::Roc,
+        _ => return None,
+    })
+}
+
+fn temporal_calendar_date(
+    milliseconds: f64,
+    calendar: &str,
+) -> Option<icu_calendar::Date<icu_calendar::AnyCalendar>> {
+    let fields = civil_from_timestamp(milliseconds)?;
+    let iso = icu_calendar::Date::try_new_iso(
+        fields.year as i32,
+        fields.month as u8,
+        fields.day as u8,
+    )
+    .ok()?;
+    let kind = temporal_calendar_kind(calendar)?;
+    Some(iso.to_calendar(icu_calendar::AnyCalendar::new(kind)))
+}
+
+#[no_mangle]
+/// Whether `calendar` is a calendar identifier thaw supports.
+///
+/// # Safety
+/// `calendar` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_calendar_valid(calendar: *const c_char) -> bool {
+    if calendar.is_null() {
+        return false;
+    }
+    let calendar = unsafe { CStr::from_ptr(calendar) }.to_string_lossy();
+    temporal_calendar_kind(&calendar).is_some()
+}
+
+#[no_mangle]
+/// One field of a date in the given calendar. `field` is `0`=year,
+/// `1`=month, `2`=day, `3`=dayOfWeek (1=Mon..7=Sun), `4`=dayOfYear,
+/// `5`=daysInMonth, `6`=daysInYear, `7`=monthsInYear, `8`=inLeapYear
+/// (1/0), `9`=eraYear.
+///
+/// # Safety
+/// `calendar` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_calendar_field(
+    milliseconds: f64,
+    calendar: *const c_char,
+    field: f64,
+) -> f64 {
+    if calendar.is_null() {
+        return f64::NAN;
+    }
+    let calendar = unsafe { CStr::from_ptr(calendar) }.to_string_lossy();
+    let Some(date) = temporal_calendar_date(milliseconds, &calendar) else {
+        return f64::NAN;
+    };
+    match field as i64 {
+        0 => date.year().extended_year() as f64,
+        1 => date.month().number() as f64,
+        2 => date.day_of_month().0 as f64,
+        3 => date.weekday() as i32 as f64,
+        4 => date.day_of_year().0 as f64,
+        5 => date.days_in_month() as f64,
+        6 => date.days_in_year() as f64,
+        7 => date.months_in_year() as f64,
+        8 => {
+            if date.is_in_leap_year() {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        _ => date.year().era_year_or_related_iso() as f64,
+    }
+}
+
+#[no_mangle]
+/// The `monthCode` of a date in the given calendar (e.g. `"M05"`, or
+/// `"M05L"` for a leap month).
+///
+/// # Safety
+/// `calendar` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_calendar_month_code(
+    milliseconds: f64,
+    calendar: *const c_char,
+) -> *const c_char {
+    if calendar.is_null() {
+        return std::ptr::null();
+    }
+    let calendar = unsafe { CStr::from_ptr(calendar) }.to_string_lossy();
+    let Some(date) = temporal_calendar_date(milliseconds, &calendar) else {
+        return std::ptr::null();
+    };
+    let leap = if date.month().to_input().is_leap() {
+        "L"
+    } else {
+        ""
+    };
+    let text = format!("M{:02}{leap}", date.month().number());
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// The `era` of a date in the given calendar (`"reiwa"`, `"am"`, ...), or
+/// an empty string when the calendar has no era.
+///
+/// # Safety
+/// `calendar` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_calendar_era(
+    milliseconds: f64,
+    calendar: *const c_char,
+) -> *const c_char {
+    if calendar.is_null() {
+        return std::ptr::null();
+    }
+    let calendar = unsafe { CStr::from_ptr(calendar) }.to_string_lossy();
+    let Some(date) = temporal_calendar_date(milliseconds, &calendar) else {
+        return std::ptr::null();
+    };
+    let text = date
+        .year()
+        .era()
+        .map(|era| era.era.as_str().to_string())
+        .unwrap_or_default();
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// The `[u-ca=<id>]` calendar annotation of an ISO 8601 string, or
+/// `"iso8601"` when absent.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_calendar_from_string(
+    text: *const c_char,
+) -> *const c_char {
+    let annotation = if text.is_null() {
+        None
+    } else {
+        let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+        text.split_once("[u-ca=")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(id, _)| id.to_string())
+    };
+    let calendar = annotation.unwrap_or_else(|| "iso8601".to_string());
+    arena_c_string(&calendar).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -377,7 +543,10 @@ fn parse_temporal_date_time(text: &str) -> Option<(f64, f64)> {
         )
         .unwrap()
     });
-    let captures = pattern.captures(text.trim())?;
+    // Drop any `[u-ca=...]`/`[Zone]` annotation before the date/time itself.
+    let text = text.trim();
+    let text = text.split_once('[').map_or(text, |(head, _)| head);
+    let captures = pattern.captures(text)?;
     let field = |index: usize| -> Option<i64> { captures.get(index)?.as_str().parse().ok() };
     let year = field(1)?;
     let month = field(2).unwrap_or(1) as u32;
@@ -507,6 +676,8 @@ pub extern "C" fn thaw_temporal_epoch_nanoseconds(
 /// out-of-range field.
 fn parse_time_of_day(text: &str) -> Option<(f64, f64)> {
     let text = text.trim();
+    // Drop any `[u-ca=...]`/`[Zone]` annotation.
+    let text = text.split_once('[').map_or(text, |(head, _)| head);
     // A full date-time string: keep only the time part.
     let time = match text.rsplit_once('T') {
         Some((_, time)) => time.trim_end_matches('Z'),

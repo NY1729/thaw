@@ -3418,10 +3418,37 @@ fn compiles_temporal_duration_sign_and_normalization() {
     );
 }
 
-/// The ISO-calendar surface of the native Temporal slice: `calendarId`
-/// (always `"iso8601"`), `withCalendar("iso8601")`, the date helpers
+/// Non-ISO calendars (via ICU4X): a `[u-ca=...]` annotation,
+/// `withCalendar`, `calendarId`, and the calendar-aware date fields
+/// (`year`/`month`/`day`/`monthCode`/`era`/`eraYear`).
+#[test]
+fn compiles_temporal_non_iso_calendars() {
+    let source = r#"
+        function main(): void {
+            const d = Temporal.PlainDate.from("2021-03-15[u-ca=hebrew]");
+            console.log(d.calendarId, d.year, d.month, d.day, d.monthCode);
+            const j = Temporal.PlainDate.from("2021-03-15").withCalendar("japanese");
+            console.log(j.calendarId, j.year, j.era, j.eraYear, j.day);
+            const i = Temporal.PlainDate.from("2021-03-15").withCalendar("islamic-umalqura");
+            console.log(i.year, i.month, i.day);
+            const iso = Temporal.PlainDate.from("2020-02-15");
+            console.log(iso.calendarId, iso.year, iso.month, iso.day, iso.inLeapYear);
+            const z = Temporal.ZonedDateTime.from("2021-03-15T12:00:00+09:00[Asia/Tokyo][u-ca=japanese]");
+            console.log(z.calendarId, z.era, z.eraYear, z.timeZoneId);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_non_iso_calendars"),
+        "hebrew 5781 7 2 M07\njapanese 2021 reiwa 3 15\n1442 8 2\n\
+         iso8601 2020 2 15 true\njapanese reiwa 3 Asia/Tokyo\n"
+    );
+}
+
+/// The default ISO-calendar surface of the native Temporal slice:
+/// `calendarId` (`"iso8601"`), the date helpers
 /// (`monthCode`/`daysInMonth`/`daysInYear`/`monthsInYear`/`inLeapYear`),
-/// and a nanosecond-precision `Temporal.Now.instant()`.
+/// and a nanosecond-precision `Temporal.Now.instant()`. Non-ISO calendars
+/// are covered by `compiles_temporal_non_iso_calendars`.
 #[test]
 fn compiles_temporal_calendar_and_helpers() {
     let source = r#"

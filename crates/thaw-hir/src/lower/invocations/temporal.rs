@@ -31,9 +31,24 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn temporal_object(kind: &str, timestamp: HirExpr, nanoseconds: HirExpr) -> HirExpr {
+        Self::temporal_object_calendar(
+            kind,
+            timestamp,
+            nanoseconds,
+            HirExpr::Lit(HirLit::Str("iso8601".to_string())),
+        )
+    }
+
+    fn temporal_object_calendar(
+        kind: &str,
+        timestamp: HirExpr,
+        nanoseconds: HirExpr,
+        calendar: HirExpr,
+    ) -> HirExpr {
         HirExpr::ObjectLit(vec![
             ("timestamp".to_string(), timestamp),
             ("nanoseconds".to_string(), nanoseconds),
+            ("calendar".to_string(), calendar),
             (format!("__temporal_{kind}"), HirExpr::Lit(HirLit::F64(1.0))),
         ])
     }
@@ -45,15 +60,55 @@ impl<'a> FnLowerer<'a> {
         nanoseconds: HirExpr,
         time_zone: HirExpr,
     ) -> HirExpr {
+        Self::temporal_zoned_object_calendar(
+            timestamp,
+            nanoseconds,
+            time_zone,
+            HirExpr::Lit(HirLit::Str("iso8601".to_string())),
+        )
+    }
+
+    fn temporal_zoned_object_calendar(
+        timestamp: HirExpr,
+        nanoseconds: HirExpr,
+        time_zone: HirExpr,
+        calendar: HirExpr,
+    ) -> HirExpr {
         HirExpr::ObjectLit(vec![
             ("timestamp".to_string(), timestamp),
             ("nanoseconds".to_string(), nanoseconds),
             ("time_zone".to_string(), time_zone),
+            ("calendar".to_string(), calendar),
             (
                 "__temporal_zonedDateTime".to_string(),
                 HirExpr::Lit(HirLit::F64(1.0)),
             ),
         ])
+    }
+
+    fn temporal_calendar(value: HirExpr, ty: &HirType) -> HirExpr {
+        HirExpr::PropAccess(Box::new(value), ty.clone(), "calendar".to_string())
+    }
+
+    /// The UTC timestamp of a date-bearing value's own date, for
+    /// calendar-aware field extraction (a `ZonedDateTime`'s local date, or
+    /// a `Plain*` value's stored date).
+    fn temporal_date_timestamp(receiver: &HirExpr, ty: &HirType, kind: &str) -> HirExpr {
+        if kind == "zonedDateTime" {
+            HirExpr::Call(
+                Box::new(HirExpr::Var(
+                    "__thaw_temporal_zoned_plain_timestamp".into(),
+                )),
+                vec![
+                    Self::temporal_timestamp(receiver.clone(), ty),
+                    Self::temporal_nanoseconds(receiver.clone(), ty),
+                    Self::temporal_zone(receiver.clone(), ty),
+                    HirExpr::Lit(HirLit::F64(0.0)),
+                ],
+            )
+        } else {
+            Self::temporal_timestamp(receiver.clone(), ty)
+        }
     }
 
     fn temporal_zone(value: HirExpr, ty: &HirType) -> HirExpr {
@@ -108,6 +163,28 @@ impl<'a> FnLowerer<'a> {
             Box::new(nanoseconds.clone()),
         )
     }
+
+    /// Calendar identifiers thaw supports (via ICU4X).
+    const SUPPORTED_CALENDARS: &'static [&'static str] = &[
+        "iso8601",
+        "gregory",
+        "buddhist",
+        "chinese",
+        "coptic",
+        "dangi",
+        "ethiopic",
+        "ethioaa",
+        "hebrew",
+        "indian",
+        "islamic",
+        "islamic-umalqura",
+        "islamic-tbla",
+        "islamic-civil",
+        "islamic-rgsa",
+        "japanese",
+        "persian",
+        "roc",
+    ];
 
     /// The component names a `Duration` stores, in canonical order.
     const DURATION_COMPONENTS: &'static [&'static str] = &[
@@ -609,9 +686,20 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var(
                         "__thaw_temporal_zoned_zone_from_string".into(),
                     )),
+                    vec![text.clone()],
+                );
+                let calendar = HirExpr::Call(
+                    Box::new(HirExpr::Var(
+                        "__thaw_temporal_calendar_from_string".into(),
+                    )),
                     vec![text],
                 );
-                Self::temporal_zoned_object(milliseconds, nanoseconds, time_zone)
+                Self::temporal_zoned_object_calendar(
+                    milliseconds,
+                    nanoseconds,
+                    time_zone,
+                    calendar,
+                )
             }
             "from" => {
                 let [value] = arguments.as_slice() else {
@@ -637,9 +725,15 @@ impl<'a> FnLowerer<'a> {
                 );
                 let nanoseconds = HirExpr::Call(
                     Box::new(HirExpr::Var(nanoseconds_parser.into())),
+                    vec![text.clone()],
+                );
+                let calendar = HirExpr::Call(
+                    Box::new(HirExpr::Var(
+                        "__thaw_temporal_calendar_from_string".into(),
+                    )),
                     vec![text],
                 );
-                Self::temporal_object(kind, milliseconds, nanoseconds)
+                Self::temporal_object_calendar(kind, milliseconds, nanoseconds, calendar)
             }
             "compare" => {
                 let [left, right] = arguments.as_slice() else {
@@ -802,16 +896,26 @@ impl<'a> FnLowerer<'a> {
                     )
                 } else {
                     match &time_zone {
-                        Some(zone) => Self::temporal_zoned_object(
-                            result_milliseconds,
-                            result_nanoseconds,
-                            zone.clone(),
-                        ),
-                        None => Self::temporal_object(
-                            kind,
-                            result_milliseconds,
-                            result_nanoseconds,
-                        ),
+                        Some(zone) => {
+                            let calendar =
+                                Self::temporal_calendar(receiver.clone(), &receiver_type);
+                            Self::temporal_zoned_object_calendar(
+                                result_milliseconds,
+                                result_nanoseconds,
+                                zone.clone(),
+                                calendar,
+                            )
+                        }
+                        None => {
+                            let calendar =
+                                Self::temporal_calendar(receiver, &receiver_type);
+                            Self::temporal_object_calendar(
+                                kind,
+                                result_milliseconds,
+                                result_nanoseconds,
+                                calendar,
+                            )
+                        }
                     }
                 }
             }
@@ -860,17 +964,30 @@ impl<'a> FnLowerer<'a> {
                                 HirExpr::Lit(HirLit::F64(mode)),
                             ],
                         );
-                        Self::temporal_object(plain_kind, local, nanoseconds)
+                        let calendar =
+                            Self::temporal_calendar(receiver.clone(), &receiver_type);
+                        Self::temporal_object_calendar(
+                            plain_kind,
+                            local,
+                            nanoseconds,
+                            calendar,
+                        )
                     }
-                    None => Self::temporal_object(plain_kind, timestamp, nanoseconds),
+                    None => {
+                        let calendar = Self::temporal_calendar(receiver, &receiver_type);
+                        Self::temporal_object_calendar(
+                            plain_kind,
+                            timestamp,
+                            nanoseconds,
+                            calendar,
+                        )
+                    }
                 }
             }
             "toInstant" => {
                 Self::temporal_object("instant", timestamp, nanoseconds)
             }
             "withCalendar" => {
-                // Only the ISO 8601 calendar exists here, so
-                // `withCalendar("iso8601")` is an identity.
                 let [calendar] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one calendar"));
                 };
@@ -880,19 +997,32 @@ impl<'a> FnLowerer<'a> {
                         return Err(format!("`{label}` requires a string-literal calendar"));
                     }
                 };
-                if calendar_name != "iso8601" {
-                    return Err(format!(
-                        "only the `iso8601` calendar is supported, got `{calendar_name}`"
-                    ));
+                if !Self::SUPPORTED_CALENDARS.contains(&calendar_name.as_str()) {
+                    return Err(format!("unknown Temporal calendar `{calendar_name}`"));
                 }
-                receiver
+                let calendar_literal = HirExpr::Lit(HirLit::Str(calendar_name));
+                match &time_zone {
+                    Some(zone) => Self::temporal_zoned_object_calendar(
+                        timestamp,
+                        nanoseconds,
+                        zone.clone(),
+                        calendar_literal,
+                    ),
+                    None => Self::temporal_object_calendar(
+                        kind,
+                        timestamp,
+                        nanoseconds,
+                        calendar_literal,
+                    ),
+                }
             }
             "withTimeZone" => {
                 let [zone] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one time zone"));
                 };
                 let zone = self.coerce_primitive_to_string(zone.clone())?;
-                Self::temporal_zoned_object(timestamp, nanoseconds, zone)
+                let calendar = Self::temporal_calendar(receiver.clone(), &receiver_type);
+                Self::temporal_zoned_object_calendar(timestamp, nanoseconds, zone, calendar)
             }
             "toZonedDateTimeISO" => {
                 let zone = match arguments.first() {
@@ -904,7 +1034,8 @@ impl<'a> FnLowerer<'a> {
                         }
                     },
                 };
-                Self::temporal_zoned_object(timestamp, nanoseconds, zone)
+                let calendar = Self::temporal_calendar(receiver.clone(), &receiver_type);
+                Self::temporal_zoned_object_calendar(timestamp, nanoseconds, zone, calendar)
             }
             "abs" | "negated" if kind == "duration" => {
                 let total = Self::duration_total_nanoseconds(&timestamp, &nanoseconds);
@@ -988,10 +1119,10 @@ impl<'a> FnLowerer<'a> {
         property: &IdentName,
         kind: &'static str,
     ) -> Result<Option<HirExpr>, String> {
-        // Every Temporal value thaw models uses the ISO 8601 calendar
-        // (jiff is ISO-only), so `calendarId` is constant.
         if property.sym == *"calendarId" {
-            return Ok(Some(HirExpr::Lit(HirLit::Str("iso8601".to_string()))));
+            let receiver = self.lower_expr(&member.obj)?;
+            let receiver_type = self.infer_expr_type(&receiver)?;
+            return Ok(Some(Self::temporal_calendar(receiver, &receiver_type)));
         }
         // A `Duration`'s components are approximated from its total
         // milliseconds (a duration isn't stored component-wise, so an
@@ -1065,46 +1196,48 @@ impl<'a> FnLowerer<'a> {
                 vec![constructor, arguments],
             )));
         }
-        // ISO-calendar date helpers shared by `PlainDate`/`PlainDateTime`/
-        // `PlainYearMonth` (and, for a `ZonedDateTime`, its local date).
+        // Calendar-aware date fields, shared by `PlainDate`/`PlainDateTime`/
+        // `PlainYearMonth` (and a `ZonedDateTime`'s local date). ICU4X
+        // handles the ISO calendar too, so this is used for every calendar.
         let calendar_field = match property.sym.as_ref() {
-            "daysInMonth" => Some(0.0),
-            "daysInYear" => Some(1.0),
-            "monthsInYear" => Some(2.0),
-            "inLeapYear" => Some(3.0),
+            "year" => Some(0.0),
+            "month" => Some(1.0),
+            "day" => Some(2.0),
+            "dayOfWeek" => Some(3.0),
+            "dayOfYear" => Some(4.0),
+            "daysInMonth" => Some(5.0),
+            "daysInYear" => Some(6.0),
+            "monthsInYear" => Some(7.0),
+            "inLeapYear" => Some(8.0),
+            "eraYear" => Some(9.0),
             _ => None,
         };
-        if property.sym == *"monthCode" || calendar_field.is_some() {
+        if property.sym == *"monthCode"
+            || property.sym == *"era"
+            || calendar_field.is_some()
+        {
             let receiver = self.lower_expr(&member.obj)?;
             let receiver_type = self.infer_expr_type(&receiver)?;
-            let date_timestamp = if kind == "zonedDateTime" {
-                let milliseconds = Self::temporal_timestamp(receiver.clone(), &receiver_type);
-                let nanoseconds = Self::temporal_nanoseconds(receiver.clone(), &receiver_type);
-                let time_zone = Self::temporal_zone(receiver, &receiver_type);
-                HirExpr::Call(
-                    Box::new(HirExpr::Var(
-                        "__thaw_temporal_zoned_plain_timestamp".into(),
-                    )),
-                    vec![
-                        milliseconds,
-                        nanoseconds,
-                        time_zone,
-                        HirExpr::Lit(HirLit::F64(0.0)),
-                    ],
-                )
-            } else {
-                Self::temporal_timestamp(receiver, &receiver_type)
-            };
+            let date_timestamp =
+                Self::temporal_date_timestamp(&receiver, &receiver_type, kind);
+            let calendar = Self::temporal_calendar(receiver, &receiver_type);
             if property.sym == *"monthCode" {
                 return Ok(Some(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_temporal_month_code".into())),
-                    vec![date_timestamp],
+                    Box::new(HirExpr::Var("__thaw_temporal_calendar_month_code".into())),
+                    vec![date_timestamp, calendar],
+                )));
+            }
+            if property.sym == *"era" {
+                return Ok(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_calendar_era".into())),
+                    vec![date_timestamp, calendar],
                 )));
             }
             let value = HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_temporal_plain_date_field".into())),
+                Box::new(HirExpr::Var("__thaw_temporal_calendar_field".into())),
                 vec![
                     date_timestamp,
+                    calendar,
                     HirExpr::Lit(HirLit::F64(calendar_field.unwrap())),
                 ],
             );
@@ -1131,14 +1264,10 @@ impl<'a> FnLowerer<'a> {
                 return Ok(Some(Self::temporal_zone(receiver, &receiver_type)));
             }
             let field = match property.sym.as_ref() {
-                "year" => Some(0.0),
-                "month" => Some(1.0),
-                "day" => Some(2.0),
                 "hour" => Some(3.0),
                 "minute" => Some(4.0),
                 "second" => Some(5.0),
                 "millisecond" => Some(6.0),
-                "dayOfWeek" => Some(7.0),
                 "offset" => None,
                 _ => None,
             };
@@ -1168,18 +1297,14 @@ impl<'a> FnLowerer<'a> {
         let getter = match property.sym.as_ref() {
             "epochMilliseconds" => None,
             "epochSeconds" => Some(("__thaw_temporal_epoch_seconds", false)),
-            "month" => Some(("__thaw_date_get_month", false)),
-            "year" | "day" | "hour" | "minute" | "second" | "millisecond" => {
+            "hour" | "minute" | "second" | "millisecond" => {
                 Some((match property.sym.as_ref() {
-                    "year" => "__thaw_date_get_full_year",
-                    "day" => "__thaw_date_get_date",
                     "hour" => "__thaw_date_get_hours",
                     "minute" => "__thaw_date_get_minutes",
                     "second" => "__thaw_date_get_seconds",
                     _ => "__thaw_date_get_milliseconds",
                 }, false))
             }
-            "dayOfWeek" => Some(("__thaw_date_get_day", true)),
             _ => return Ok(None),
         };
         let receiver = self.lower_expr(&member.obj)?;
