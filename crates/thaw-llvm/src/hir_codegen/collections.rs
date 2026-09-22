@@ -369,7 +369,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_int_add(total, length, "spread_total")
                 .map_err(|error| error.to_string())?;
-            arrays.push((array, length));
+            arrays.push((handle, array, length));
         }
 
         let element_width = array_element_storage_bytes(element);
@@ -405,8 +405,33 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(result, total)
             .map_err(|error| error.to_string())?;
 
+        // Array spread must retain holes from every source. Keep one mask for
+        // the result; dense inputs simply contribute `true` entries.
+        let presence = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    self.builder
+                        .build_int_add(total, i64_type.const_int(8, false), "spread_presence_size")
+                        .map_err(|error| error.to_string())?
+                        .into(),
+                    i64_type.const_int(1, false).into(),
+                ],
+                "spread_presence",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a spread presence mask")?
+            .into_pointer_value();
+        self.builder
+            .build_store(presence, total)
+            .map_err(|error| error.to_string())?;
+
         let mut destination_offset = i64_type.const_int(ARRAY_HEADER_BYTES, false);
-        for (array, length) in arrays {
+        let mut destination_index = i64_type.const_zero();
+        for (handle, array, length) in arrays {
             let bytes = self
                 .builder
                 .build_int_mul(length, element_bytes, "spread_copy_size")
@@ -438,12 +463,51 @@ impl<'ctx> HirCompiler<'ctx> {
                     "copy_spread_part",
                 )
                 .map_err(|error| error.to_string())?;
+            self.compile_array_presence_copy(handle, length, presence, destination_index)?;
             destination_offset = self
                 .builder
                 .build_int_add(destination_offset, bytes, "next_spread_destination")
                 .map_err(|error| error.to_string())?;
+            destination_index = self
+                .builder
+                .build_int_add(destination_index, length, "next_spread_presence_offset")
+                .map_err(|error| error.to_string())?;
         }
-        Ok(self.compile_array_wrap(result)?.into())
+        Ok(self.compile_array_wrap_with_presence(result, presence)?.into())
+    }
+
+    fn compile_array_presence_copy(
+        &mut self,
+        source: PointerValue<'ctx>,
+        length: IntValue<'ctx>,
+        destination: PointerValue<'ctx>,
+        destination_offset: IntValue<'ctx>,
+    ) -> Result<(), String> {
+        let i64_type = self.context.i64_type();
+        let function = self.current_function();
+        let entry = self.builder.get_insert_block().ok_or("array spread has no block")?;
+        let condition = self.context.append_basic_block(function, "spread_presence_next");
+        let body = self.context.append_basic_block(function, "spread_presence_element");
+        let done = self.context.append_basic_block(function, "spread_presence_done");
+        self.builder.build_unconditional_branch(condition).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(condition);
+        let index = self.builder.build_phi(i64_type, "spread_presence_index").map_err(|e| e.to_string())?;
+        index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+        let current = index.as_basic_value().into_int_value();
+        let more = self.builder.build_int_compare(IntPredicate::ULT, current, length, "spread_presence_more").map_err(|e| e.to_string())?;
+        self.builder.build_conditional_branch(more, body, done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(body);
+        let present = self.compile_array_has_index(source, current)?;
+        let target_index = self.builder.build_int_add(destination_offset, current, "spread_presence_target").map_err(|e| e.to_string())?;
+        let target = unsafe { self.builder.build_in_bounds_gep(self.context.i8_type(), destination, &[self.builder.build_int_add(target_index, i64_type.const_int(8, false), "spread_presence_payload").map_err(|e| e.to_string())?], "spread_presence_slot").map_err(|e| e.to_string())? };
+        let present = self.builder.build_int_z_extend(present, self.context.i8_type(), "spread_presence_byte").map_err(|e| e.to_string())?;
+        self.builder.build_store(target, present).map_err(|e| e.to_string())?;
+        let next = self.builder.build_int_add(current, i64_type.const_int(1, false), "spread_presence_increment").map_err(|e| e.to_string())?;
+        let body_end = self.builder.get_insert_block().ok_or("array spread lost its body block")?;
+        self.builder.build_unconditional_branch(condition).map_err(|e| e.to_string())?;
+        index.add_incoming(&[(&next, body_end)]);
+        self.builder.position_at_end(done);
+        Ok(())
     }
 
     /// Computes the address of `array[index]` (past the length header).
