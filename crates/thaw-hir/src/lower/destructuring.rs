@@ -6,6 +6,23 @@ impl<'a> FnLowerer<'a> {
         ty: &HirType,
         statements: &mut Vec<HirStmt>,
     ) -> Result<(), String> {
+        if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
+            if let HirType::Optional(payload) = ty {
+                statements.push(HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
+                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                        "Cannot destructure undefined".into(),
+                    )))],
+                    Vec::new(),
+                ));
+                return self.lower_binding_pattern(
+                    pattern,
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
+                    payload,
+                    statements,
+                );
+            }
+        }
         match pattern {
             Pat::Ident(binding) => {
                 let array_discriminants = self.hir_array_element_discriminants(&value);

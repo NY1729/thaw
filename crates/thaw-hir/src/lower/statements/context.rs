@@ -63,6 +63,7 @@ impl<'a> FnLowerer<'a> {
             function_value_object_function_property_discriminants: HashMap::new(),
             bindings: HashMap::new(),
             used_hir_bindings: HashSet::new(),
+            sparse_arrays: HashSet::new(),
             next_binding: 0,
             signatures,
             interfaces,
@@ -101,6 +102,41 @@ impl<'a> FnLowerer<'a> {
             .and_then(|names| names.last())
             .cloned()
             .unwrap_or_else(|| source_name.to_string())
+    }
+
+    fn mark_array_parameter(&mut self, name: &str, ty: &HirType) {
+        if matches!(ty, HirType::Array(_)) {
+            self.sparse_arrays.insert(name.to_string());
+        }
+    }
+
+    fn expression_may_be_sparse_array(&self, expression: &Expr) -> bool {
+        match expression {
+            Expr::Array(array) => array.elems.iter().any(|element| {
+                element.as_ref().is_none_or(|element| {
+                    element.spread.is_some()
+                        && self.expression_may_be_sparse_array(&element.expr)
+                })
+            }),
+            Expr::Ident(ident) => {
+                let resolved = self.resolve_binding(ident.sym.as_ref());
+                self.sparse_arrays.contains(&resolved)
+            }
+            Expr::Call(call) => match call.callee.as_expr().map(Box::as_ref) {
+                Some(Expr::Member(member))
+                    if matches!(
+                        &member.prop,
+                        MemberProp::Ident(property)
+                            if matches!(property.sym.as_ref(), "slice" | "concat" | "map")
+                    ) => self.expression_may_be_sparse_array(&member.obj),
+                _ => false,
+            },
+            Expr::Paren(paren) => self.expression_may_be_sparse_array(&paren.expr),
+            Expr::TsAs(assertion) => self.expression_may_be_sparse_array(&assertion.expr),
+            Expr::TsSatisfies(assertion) => self.expression_may_be_sparse_array(&assertion.expr),
+            Expr::TsNonNull(assertion) => self.expression_may_be_sparse_array(&assertion.expr),
+            _ => false,
+        }
     }
 }
 

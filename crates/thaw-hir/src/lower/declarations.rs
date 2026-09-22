@@ -362,6 +362,7 @@ fn lower_class_constructor(
         .or_default()
         .push(this_name.clone());
     for parameter in &initializer_params {
+        lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
         lowerer
             .scope
             .insert(parameter.name.clone(), parameter.ty.clone());
@@ -833,6 +834,7 @@ fn lower_class_methods(
             ));
         }
         for parameter in &params {
+            lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
             lowerer
                 .scope
                 .insert(parameter.name.clone(), parameter.ty.clone());
@@ -1093,6 +1095,7 @@ fn lower_fn_decl(
     let runtime_params = &params[usize::from(func.this_param.is_some())..];
     let promise_rejection_callback = name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX);
     for (index, (source, param)) in func.params.iter().zip(runtime_params).enumerate() {
+        lowerer.mark_array_parameter(&param.name, &param.ty);
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
