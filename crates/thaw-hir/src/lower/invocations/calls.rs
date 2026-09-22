@@ -645,9 +645,11 @@ impl<'a> FnLowerer<'a> {
                         | "toInstant"
                         | "startOfDay"
                         | "getTimeZoneTransition"
+                        | "with"
                         | "withTimeZone"
                         | "withCalendar"
                         | "toZonedDateTimeISO"
+                        | "toZonedDateTime"
                 );
                 let generic_method = matches!(property.sym.as_ref(), "toString" | "toJSON");
                 let receiver_maybe_temporal = self

@@ -1124,6 +1124,24 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_temporal_plain_to_zoned",
+            f64_type.fn_type(
+                &[
+                    f64_type.into(),
+                    f64_type.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_with_fields",
+            f64_type.fn_type(&vec![f64_type.into(); 12], false),
+            Some(Linkage::External),
+        );
         for name in [
             "thaw_temporal_zoned_to_string",
             "thaw_temporal_zoned_offset",

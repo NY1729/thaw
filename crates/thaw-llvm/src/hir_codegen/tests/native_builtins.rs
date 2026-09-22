@@ -3539,6 +3539,7 @@ fn compiles_temporal_zoned_date_time() {
             console.log(winter.getTimeZoneTransition("next")?.toString());
             console.log(winter.getTimeZoneTransition("previous")?.toString());
             console.log(Temporal.ZonedDateTime.from("2021-01-01T12:00:00Z[UTC]").getTimeZoneTransition("next") === null);
+            console.log(Temporal.PlainDate.from("2021-03-14").toZonedDateTime("America/New_York").toString());
             console.log(Temporal.Now.zonedDateTimeISO("Asia/Tokyo").timeZoneId);
         }
     "#;
@@ -3550,7 +3551,8 @@ fn compiles_temporal_zoned_date_time() {
          2020-01-01T18:04:05.678123456+00:00[UTC]\n\
          2020-01-02 03:04:05.678123456\n-04:00\n-05:00\n23\n25\n24\n\
          2021-03-14T03:00:00-04:00[America/New_York]\n\
-         2020-11-01T01:00:00-05:00[America/New_York]\ntrue\nAsia/Tokyo\n"
+         2020-11-01T01:00:00-05:00[America/New_York]\ntrue\n\
+         2021-03-14T00:00:00-05:00[America/New_York]\nAsia/Tokyo\n"
     );
 }
 
@@ -4173,11 +4175,22 @@ fn compiles_temporal_rounding() {
                 roundingMode: "ceil"
             }).toString());
             console.log(Temporal.PlainTime.from("12:30:45").round("minute").toString());
+            console.log(Temporal.PlainDate.from("2020-02-29").with({ year: 2021 }).toString());
+            console.log(Temporal.PlainDateTime.from("2020-02-29T12:34:56.123456789").with({
+                year: 2022,
+                minute: 5,
+                nanosecond: 7
+            }).toString());
+            const start = Temporal.Instant.from("2020-01-01T00:00:00.000000500Z");
+            const end = Temporal.Instant.from("2020-01-01T00:00:01.000600500Z");
+            console.log(start.until(end).toString());
+            console.log(start.until(end, { smallestUnit: "millisecond" }).toString());
         }
     "#;
     assert_eq!(
         compile_and_run(source, "temporal_rounding"),
-        "PT2H\n2020-01-02T03:04:00Z\n2020-01-02T03:05:00\n12:31:00\n"
+        "PT2H\n2020-01-02T03:04:00Z\n2020-01-02T03:05:00\n12:31:00\n\
+         2021-02-28\n2022-02-28T12:05:56.123456007\nPT1.0006S\nPT1.001S\n"
     );
 }
 

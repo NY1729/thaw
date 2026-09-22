@@ -1033,6 +1033,37 @@ impl<'a> FnLowerer<'a> {
                 let nanoseconds = HirExpr::Lit(HirLit::F64(0.0));
                 Self::temporal_duration_object(milliseconds, nanoseconds, components)
             }
+            "since" | "until" if kind == "instant" => {
+                if !(1..=2).contains(&arguments.len()) {
+                    return Err(format!("`{label}` expects an instant and optional options"));
+                }
+                let (other_ms, other_ns) = self.temporal_operand(arguments[0].clone())?;
+                let (left_ms, left_ns, right_ms, right_ns) = if property.sym == *"until" {
+                    (other_ms, other_ns, timestamp, nanoseconds)
+                } else {
+                    (timestamp, nanoseconds, other_ms, other_ns)
+                };
+                let milliseconds = HirExpr::BinOp(BinOp::Sub, Box::new(left_ms), Box::new(right_ms));
+                let nanos = HirExpr::BinOp(BinOp::Sub, Box::new(left_ns), Box::new(right_ns));
+                let mut total = Self::duration_total_nanoseconds(&milliseconds, &nanos);
+                if let Some(options) = call.args.get(1) {
+                    let (unit, increment, mode) = Self::temporal_round_options(options)?;
+                    Self::validate_temporal_round_increment("instant", &unit, increment)?;
+                    total = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_temporal_round".into())),
+                        vec![
+                            total,
+                            HirExpr::Lit(HirLit::F64(
+                                Self::temporal_round_unit_factor(&unit)? * increment as f64,
+                            )),
+                            HirExpr::Lit(HirLit::F64(mode)),
+                        ],
+                    );
+                }
+                let (milliseconds, nanoseconds) = Self::duration_from_total_nanoseconds(total);
+                let components = self.duration_components_from_ms(&milliseconds, &nanoseconds)?;
+                Self::temporal_duration_object(milliseconds, nanoseconds, components)
+            }
             "since" | "until" => {
                 let [other] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
@@ -1226,6 +1257,92 @@ impl<'a> FnLowerer<'a> {
                 };
                 let calendar = Self::temporal_calendar(receiver.clone(), &receiver_type);
                 Self::temporal_zoned_object_calendar(timestamp, nanoseconds, zone, calendar)
+            }
+            "toZonedDateTime" if kind == "plainDate" => {
+                let [zone] = arguments.as_slice() else {
+                    return Err(format!("`{label}` expects exactly one time zone"));
+                };
+                let zone = self.coerce_primitive_to_string(zone.clone())?;
+                let converted = |part| HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_plain_to_zoned".into())),
+                    vec![
+                        timestamp.clone(),
+                        nanoseconds.clone(),
+                        zone.clone(),
+                        HirExpr::Lit(HirLit::F64(part)),
+                    ],
+                );
+                Self::temporal_zoned_object_calendar(
+                    converted(0.0),
+                    converted(1.0),
+                    zone,
+                    Self::temporal_calendar(receiver, &receiver_type),
+                )
+            }
+            "with" if matches!(kind, "plainDate" | "plainDateTime") => {
+                if !(1..=2).contains(&call.args.len()) {
+                    return Err(format!("`{label}` expects a fields object and optional options"));
+                }
+                let HirExpr::ObjectLit(fields) = &arguments[0] else {
+                    return Err(format!("`{label}` requires an object literal"));
+                };
+                let names = [
+                    "year",
+                    "month",
+                    "day",
+                    "hour",
+                    "minute",
+                    "second",
+                    "millisecond",
+                    "microsecond",
+                    "nanosecond",
+                ];
+                let mut replacements = vec![HirExpr::Lit(HirLit::F64(f64::NAN)); names.len()];
+                for (name, value) in fields {
+                    let Some(index) = names.iter().position(|candidate| *candidate == name) else {
+                        return Err(format!("`{label}` does not support the `{name}` field"));
+                    };
+                    if kind == "plainDate" && index >= 3 {
+                        return Err(format!("`{label}` does not support the `{name}` field"));
+                    }
+                    replacements[index] = self.coerce_primitive_to_number(value.clone())?;
+                }
+                if replacements.iter().all(|value| matches!(value, HirExpr::Lit(HirLit::F64(value)) if value.is_nan())) {
+                    return Err(format!("`{label}` requires at least one recognized field"));
+                }
+                let mut replacement_bindings = Vec::new();
+                for value in &mut replacements {
+                    if matches!(value, HirExpr::Lit(HirLit::F64(value)) if value.is_nan()) {
+                        continue;
+                    }
+                    let name = format!("__thaw_temporal_with_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), HirType::F64);
+                    replacement_bindings.push((name.clone(), HirType::F64, value.clone()));
+                    *value = HirExpr::Var(name);
+                }
+                let converted = |part| {
+                    let mut values = vec![timestamp.clone(), nanoseconds.clone()];
+                    values.extend(replacements.iter().enumerate().map(|(index, value)| {
+                        if (part == 0.0 && index <= 6) || (part == 1.0 && index >= 7) {
+                            value.clone()
+                        } else {
+                            HirExpr::Lit(HirLit::F64(f64::NAN))
+                        }
+                    }));
+                    values.push(HirExpr::Lit(HirLit::F64(part)));
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_temporal_with_fields".into())),
+                        values,
+                    )
+                };
+                let result = Self::temporal_object_calendar(
+                    kind,
+                    converted(0.0),
+                    converted(1.0),
+                    Self::temporal_calendar(receiver, &receiver_type),
+                );
+                self.wrap_call_argument_bindings(result, &replacement_bindings)?
             }
             "abs" | "negated" if kind == "duration" => {
                 let total = Self::duration_total_nanoseconds(&timestamp, &nanoseconds);

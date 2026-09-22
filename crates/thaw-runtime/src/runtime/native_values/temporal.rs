@@ -67,6 +67,107 @@ fn zoned_for(
     Some(jiff::Zoned::new(timestamp, time_zone))
 }
 
+#[no_mangle]
+/// Converts a plain ISO date/time stored on the UTC-like timeline into the
+/// matching wall-clock time in `zone`. `part` is `0` for epoch milliseconds
+/// and `1` for sub-millisecond nanoseconds.
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_plain_to_zoned(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: *const c_char,
+    part: f64,
+) -> f64 {
+    if zone.is_null() {
+        return f64::NAN;
+    }
+    let Some(fields) = civil_from_timestamp(milliseconds) else {
+        return f64::NAN;
+    };
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    let Some(zone) = jiff_time_zone(&zone) else {
+        return f64::NAN;
+    };
+    let subsecond = fields.milliseconds as i32 * 1_000_000 + nanoseconds.round() as i32;
+    let Ok(datetime) = jiff::civil::DateTime::new(
+        fields.year as i16,
+        fields.month as i8,
+        fields.day as i8,
+        fields.hours as i8,
+        fields.minutes as i8,
+        fields.seconds as i8,
+        subsecond,
+    ) else {
+        return f64::NAN;
+    };
+    let Ok(zoned) = datetime.to_zoned(zone) else {
+        return f64::NAN;
+    };
+    let total = zoned.timestamp().as_nanosecond();
+    if part == 0.0 {
+        total.div_euclid(1_000_000) as f64
+    } else {
+        total.rem_euclid(1_000_000) as f64
+    }
+}
+
+#[no_mangle]
+/// Replaces selected fields of a plain date or date-time. NaN means that a
+/// field was omitted. `part` is `0` for milliseconds and `1` for the
+/// sub-millisecond nanosecond remainder.
+pub extern "C" fn thaw_temporal_with_fields(
+    milliseconds: f64,
+    nanoseconds: f64,
+    year: f64,
+    month: f64,
+    day: f64,
+    hour: f64,
+    minute: f64,
+    second: f64,
+    millisecond: f64,
+    microsecond: f64,
+    nanosecond: f64,
+    part: f64,
+) -> f64 {
+    let Some(fields) = civil_from_timestamp(milliseconds) else {
+        return f64::NAN;
+    };
+    let pick = |replacement: f64, original: i64| {
+        if replacement.is_nan() { original } else { replacement.trunc() as i64 }
+    };
+    let year = pick(year, fields.year).clamp(i16::MIN as i64, i16::MAX as i64);
+    let month = pick(month, fields.month as i64).clamp(1, 12);
+    let day = pick(day, fields.day as i64).clamp(1, days_in_month(year, month as u32) as i64);
+    let hour = pick(hour, fields.hours as i64);
+    let minute = pick(minute, fields.minutes as i64);
+    let second = pick(second, fields.seconds as i64);
+    let old_subsecond = fields.milliseconds as i64 * 1_000_000 + nanoseconds.round() as i64;
+    let millisecond = pick(millisecond, old_subsecond / 1_000_000);
+    let microsecond = pick(microsecond, old_subsecond / 1_000 % 1_000);
+    let nanosecond = pick(nanosecond, old_subsecond % 1_000);
+    if !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=59).contains(&second)
+        || !(0..=999).contains(&millisecond)
+        || !(0..=999).contains(&microsecond)
+        || !(0..=999).contains(&nanosecond)
+    {
+        return f64::NAN;
+    }
+    let epoch_milliseconds = days_from_civil(year, month as u32, day as u32) as i128 * 86_400_000
+        + hour as i128 * 3_600_000
+        + minute as i128 * 60_000
+        + second as i128 * 1_000
+        + millisecond as i128;
+    if part == 0.0 {
+        epoch_milliseconds as f64
+    } else {
+        (microsecond * 1_000 + nanosecond) as f64
+    }
+}
+
 /// The wall clock as `(seconds, nanoseconds since the epoch)` from
 /// `CLOCK_REALTIME`, or the epoch on failure.
 fn realtime_now() -> (i64, i64) {
