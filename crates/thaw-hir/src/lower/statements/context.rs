@@ -64,6 +64,7 @@ impl<'a> FnLowerer<'a> {
             bindings: HashMap::new(),
             used_hir_bindings: HashSet::new(),
             sparse_arrays: HashSet::new(),
+            sparse_array_functions: HashSet::new(),
             next_binding: 0,
             signatures,
             interfaces,
@@ -151,10 +152,14 @@ impl<'a> FnLowerer<'a> {
                         .get(&symbol)
                         .is_some_and(|signature| signature.returns_sparse_array)
                 }),
-                Some(Expr::Ident(callee)) => self
-                    .signatures
-                    .get(callee.sym.as_ref())
-                    .is_some_and(|signature| signature.returns_sparse_array),
+                Some(Expr::Ident(callee)) => {
+                    let resolved = self.resolve_binding(callee.sym.as_ref());
+                    self.sparse_array_functions.contains(&resolved)
+                        || self
+                            .signatures
+                            .get(callee.sym.as_ref())
+                            .is_some_and(|signature| signature.returns_sparse_array)
+                }
                 _ => false,
             },
             Expr::Paren(paren) => self.expression_may_be_sparse_array(&paren.expr),
