@@ -570,6 +570,20 @@ impl<'ctx> HirCompiler<'ctx> {
             array_slice_type,
             Some(Linkage::External),
         );
+        let array_presence_slice_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
+        self.module.add_function(
+            "thaw_array_presence_slice",
+            array_presence_slice_type,
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_array_to_reversed",
             array_reverse_type,

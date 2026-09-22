@@ -690,7 +690,8 @@ impl<'ctx> HirCompiler<'ctx> {
         // `array` is a handle (see `compile_array_wrap`'s doc comment);
         // unwrap it once here so every existing byte-level access below
         // keeps working against the raw buffer unchanged.
-        let array = self.compile_array_data(array)?;
+        let array_handle = array;
+        let array = self.compile_array_data(array_handle)?;
         let json = self
             .builder
             .build_call(
@@ -740,6 +741,18 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(body);
+        let present = self.compile_array_has_index(
+            array_handle,
+            index.as_basic_value().into_int_value(),
+        )?;
+        let present_block = self.context.append_basic_block(function, "console_array_present");
+        let hole_block = self.context.append_basic_block(function, "console_array_hole");
+        let pushed = self.context.append_basic_block(function, "console_array_pushed");
+        self.builder
+            .build_conditional_branch(present, present_block, hole_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(present_block);
         let offset = self
             .builder
             .build_int_mul(
@@ -780,6 +793,28 @@ impl<'ctx> HirCompiler<'ctx> {
             element_type,
             preserve_undefined,
         )?;
+        self.builder
+            .build_unconditional_branch(pushed)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(hole_block);
+        let null = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_null").unwrap(),
+                &[],
+                "array_hole_json_null",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_null returned no value")?;
+        self.compile_json_array_push_owned(json, null)?;
+        self.builder
+            .build_unconditional_branch(pushed)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(pushed);
         let next = self
             .builder
             .build_int_add(

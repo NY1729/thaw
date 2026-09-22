@@ -71,28 +71,37 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(BasicValueEnum::into_pointer_value)
     }
 
+    fn compile_array_presence(
+        &mut self,
+        handle: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    handle,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "array_presence_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                slot,
+                "array_presence",
+            )
+            .map_err(|error| error.to_string())
+            .map(BasicValueEnum::into_pointer_value)
+    }
+
     fn compile_array_has_index(
         &mut self,
         handle: PointerValue<'ctx>,
         index: IntValue<'ctx>,
     ) -> Result<IntValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let slot = unsafe {
-            self.builder
-                .build_in_bounds_gep(
-                    self.context.i8_type(),
-                    handle,
-                    &[i64_type.const_int(8, false)],
-                    "array_presence_slot",
-                )
-                .map_err(|error| error.to_string())?
-        };
-        let presence = self
-            .builder
-            .build_load(ptr_type, slot, "array_presence")
-            .map_err(|error| error.to_string())?
-            .into_pointer_value();
+        let presence = self.compile_array_presence(handle)?;
         let function = self.current_function();
         let dense = self.context.append_basic_block(function, "array_dense");
         let sparse = self.context.append_basic_block(function, "array_sparse");
@@ -177,6 +186,36 @@ impl<'ctx> HirCompiler<'ctx> {
             (&present_by_default, beyond_mask),
         ]);
         Ok(phi.as_basic_value().into_int_value())
+    }
+
+    fn compile_array_copy_presence(
+        &mut self,
+        target: PointerValue<'ctx>,
+        source: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let offset = self.context.i64_type().const_int(8, false);
+        let target_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), target, &[offset], "array_presence_target")
+                .map_err(|error| error.to_string())?
+        };
+        let source_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), source, &[offset], "array_presence_source")
+                .map_err(|error| error.to_string())?
+        };
+        let presence = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                source_slot,
+                "array_presence",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(target_slot, presence)
+            .map_err(|error| error.to_string())?;
+        Ok(target)
     }
 
     /// Like `compile_array_wrap`, but for a runtime call that signals
