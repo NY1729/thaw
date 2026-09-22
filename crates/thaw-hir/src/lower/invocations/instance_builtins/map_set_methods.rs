@@ -479,18 +479,12 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.values()` expects no arguments".into());
                     }
-                    if let HirType::Array(_) = &receiver_type {
-                        // Keep the eager-snapshot iterator simplification
-                        // used by the collection methods without aliasing
-                        // the receiver itself. `slice` also preserves holes.
-                        return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_array_slice".into())),
-                            vec![
-                                receiver,
-                                HirExpr::Lit(HirLit::F64(0.0)),
-                                HirExpr::Lit(HirLit::F64(f64::INFINITY)),
-                            ],
-                        ));
+                    if let HirType::Array(element_type) = &receiver_type {
+                        return self.lower_array_values(
+                            receiver,
+                            receiver_type.clone(),
+                            element_type.as_ref().clone(),
+                        );
                     }
                     let (value_type, intrinsic) = match &receiver_type {
                         HirType::Map(_, value_type) => {

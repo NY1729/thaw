@@ -1032,6 +1032,23 @@ impl<'a> FnLowerer<'a> {
                     &[(name, HirType::Undefined, value)],
                 )
             }
+            HirType::Optional(payload) => {
+                let optional_type = HirType::Optional(payload.clone());
+                let name = format!("__thaw_number_optional_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), optional_type.clone());
+                let bound = HirExpr::Var(name.clone());
+                let present = self.coerce_primitive_to_number(HirExpr::OptionalValue(
+                    Box::new(bound.clone()),
+                    payload.as_ref().clone(),
+                ))?;
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                    vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(f64::NAN))))],
+                    vec![HirStmt::Return(Some(present))],
+                )]);
+                self.wrap_call_argument_bindings(result, &[(name, optional_type, value)])
+            }
             other => Err(format!(
                 "numeric conversion is not defined for native type {other:?}"
             )),
@@ -1231,6 +1248,31 @@ impl<'a> FnLowerer<'a> {
                     Box::new(rhs),
                     payload.as_ref().clone(),
                 )),
+                (HirType::Optional(payload), other) if payload.as_ref() == other => {
+                    let left_name = format!("__thaw_optional_equality_left_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let right_name = format!("__thaw_optional_equality_right_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(left_name.clone(), lhs_type.clone());
+                    self.scope.insert(right_name.clone(), rhs_type.clone());
+                    let left = HirExpr::Var(left_name.clone());
+                    let result = HirExpr::Block(vec![HirStmt::If(
+                        HirExpr::OptionalIsNone(Box::new(left.clone()), other.clone()),
+                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+                        vec![HirStmt::Return(Some(HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::OptionalValue(Box::new(left), other.clone())),
+                            Box::new(HirExpr::Var(right_name.clone())),
+                        )))],
+                    )]);
+                    Some(self.wrap_call_argument_bindings(
+                        result,
+                        &[(left_name, lhs_type.clone(), lhs), (right_name, rhs_type.clone(), rhs)],
+                    )?)
+                }
+                (other, HirType::Optional(payload)) if payload.as_ref() == other => {
+                    return self.lower_optional_undefined_equality(rhs, lhs);
+                }
                 (HirType::Json, HirType::Null) => Some(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_json_is_null".into())),
                     vec![lhs],

@@ -984,8 +984,16 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Lit(HirLit::Bool(false))),
                     ),
                     BinaryOp::Add
-                        if self.infer_expr_type(&lhs)? == HirType::Str
-                            || self.infer_expr_type(&rhs)? == HirType::Str =>
+                        if matches!(self.infer_expr_type(&lhs)?, HirType::Str)
+                            || matches!(
+                                self.infer_expr_type(&lhs)?,
+                                HirType::Optional(payload) if payload.as_ref() == &HirType::Str
+                            )
+                            || matches!(self.infer_expr_type(&rhs)?, HirType::Str)
+                            || matches!(
+                                self.infer_expr_type(&rhs)?,
+                                HirType::Optional(payload) if payload.as_ref() == &HirType::Str
+                            ) =>
                     {
                         HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
@@ -1064,6 +1072,16 @@ impl<'a> FnLowerer<'a> {
                                 self.coerce_primitive_to_string(lhs)?,
                                 self.coerce_primitive_to_string(rhs)?,
                             ],
+                        )
+                    }
+                    other
+                        if matches!(self.infer_expr_type(&lhs)?, HirType::Optional(_))
+                            || matches!(self.infer_expr_type(&rhs)?, HirType::Optional(_)) =>
+                    {
+                        HirExpr::BinOp(
+                            lower_bin_op(other)?,
+                            Box::new(self.coerce_primitive_to_number(lhs)?),
+                            Box::new(self.coerce_primitive_to_number(rhs)?),
                         )
                     }
                     other => HirExpr::BinOp(
