@@ -280,6 +280,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal zone check returned no value".into());
             }
+            "__thaw_temporal_duration_components_json"
+            | "__thaw_temporal_duration_to_string_components" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let value = self.compile_expr(value)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[value.into()],
+                        "temporal_duration_components",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal duration components returned no value".into());
+            }
             "__thaw_temporal_zoned_from_string"
             | "__thaw_temporal_zoned_nanos_from_string" => {
                 let [text] = args else {

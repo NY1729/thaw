@@ -801,6 +801,53 @@ fn split_duration_nanoseconds(milliseconds: f64) -> (f64, f64) {
 }
 
 #[no_mangle]
+/// The components of an ISO 8601 duration as a JSON object, so
+/// `Duration.from(string)` preserves unnormalized components the same way
+/// its object-literal form does. All-zero on an unparsable input.
+///
+/// # Safety
+/// `text` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_duration_components_json(
+    text: *const c_char,
+) -> *const c_char {
+    let span = if text.is_null() {
+        None
+    } else {
+        let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+        text.parse::<jiff::Span>().ok()
+    };
+    let (years, months, weeks, days, hours, minutes, seconds, milliseconds, microseconds, nanoseconds) =
+        match &span {
+            Some(span) => (
+                span.get_years() as f64,
+                span.get_months() as f64,
+                span.get_weeks() as f64,
+                span.get_days() as f64,
+                span.get_hours() as f64,
+                span.get_minutes() as f64,
+                span.get_seconds() as f64,
+                span.get_milliseconds() as f64,
+                span.get_microseconds() as f64,
+                span.get_nanoseconds() as f64,
+            ),
+            None => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        };
+    let value = serde_json::json!({
+        "years": years,
+        "months": months,
+        "weeks": weeks,
+        "days": days,
+        "hours": hours,
+        "minutes": minutes,
+        "seconds": seconds,
+        "milliseconds": milliseconds,
+        "microseconds": microseconds,
+        "nanoseconds": nanoseconds,
+    });
+    arena_c_string(&value.to_string()).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
 /// `Temporal.Duration.from(text)`: an ISO 8601 duration's whole
 /// milliseconds.
 ///
@@ -831,6 +878,99 @@ pub unsafe extern "C" fn thaw_temporal_duration_nanos_from_string(
     duration_string_to_milliseconds(&text)
         .map(|milliseconds| split_duration_nanoseconds(milliseconds).1)
         .unwrap_or(f64::NAN)
+}
+
+/// Reads one numeric field of a `Duration` components JSON object.
+///
+/// # Safety
+/// `components` must point to a live `serde_json::Value` object.
+unsafe fn duration_component(components: *const u8, name: &str) -> f64 {
+    if components.is_null() {
+        return 0.0;
+    }
+    let value = unsafe { &*(components as *const serde_json::Value) };
+    value.get(name).and_then(serde_json::Value::as_f64).unwrap_or(0.0)
+}
+
+#[no_mangle]
+/// `Temporal.Duration.prototype.toString()` from its component breakdown,
+/// preserving an unnormalized duration (`{ minutes: 90 }` -> `"PT90M"`).
+///
+/// # Safety
+/// `components` must point to a live `serde_json::Value` object.
+pub unsafe extern "C" fn thaw_temporal_duration_to_string_components(
+    components: *const u8,
+) -> *const c_char {
+    let field = |name: &str| unsafe { duration_component(components, name) };
+    let (years, months, weeks, days) = (
+        field("years"),
+        field("months"),
+        field("weeks"),
+        field("days"),
+    );
+    let (hours, minutes, seconds) = (
+        field("hours"),
+        field("minutes"),
+        field("seconds"),
+    );
+    let (milliseconds, microseconds, nanoseconds) = (
+        field("milliseconds"),
+        field("microseconds"),
+        field("nanoseconds"),
+    );
+    // A `Duration` has a consistent sign, so the first non-zero component
+    // (in canonical order) gives it.
+    let order = [
+        years, months, weeks, days, hours, minutes, seconds, milliseconds, microseconds,
+        nanoseconds,
+    ];
+    let negative = order.iter().find(|value| **value != 0.0).is_some_and(|value| *value < 0.0);
+    let mut text = String::from(if negative { "-P" } else { "P" });
+    let mut any_date = false;
+    for (value, suffix) in [
+        (years, "Y"),
+        (months, "M"),
+        (weeks, "W"),
+        (days, "D"),
+    ] {
+        if value != 0.0 {
+            text.push_str(&format!("{}{suffix}", value.abs()));
+            any_date = true;
+        }
+    }
+    let _ = any_date;
+    let has_time = [hours, minutes, seconds, milliseconds, microseconds, nanoseconds]
+        .iter()
+        .any(|value| *value != 0.0);
+    if has_time {
+        text.push('T');
+        if hours != 0.0 {
+            text.push_str(&format!("{}H", hours.abs()));
+        }
+        if minutes != 0.0 {
+            text.push_str(&format!("{}M", minutes.abs()));
+        }
+        if seconds != 0.0 || milliseconds != 0.0 || microseconds != 0.0 || nanoseconds != 0.0 {
+            let mut seconds_text = format!("{}", seconds.abs());
+            let fraction = format!(
+                "{:03}{:03}{:03}",
+                milliseconds.abs() as i64,
+                microseconds.abs() as i64,
+                nanoseconds.abs() as i64,
+            );
+            let fraction = fraction.trim_end_matches('0');
+            if !fraction.is_empty() {
+                seconds_text.push('.');
+                seconds_text.push_str(fraction);
+            }
+            text.push_str(&seconds_text);
+            text.push('S');
+        }
+    }
+    if text == "P" {
+        text.push_str("T0S");
+    }
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
