@@ -356,6 +356,16 @@ impl<'ctx> HirCompiler<'ctx> {
                         "array_reverse",
                     )
                     .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_reverse")
+                            .unwrap(),
+                        &[presence.into()],
+                        "array_presence_reverse",
+                    )
+                    .map_err(|error| error.to_string())?;
                 return Ok(handle.into());
             }
             "__thaw_array_copy_within" => {
@@ -367,17 +377,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let handle = self.compile_expr(&args[0])?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
-                let mut arguments = Vec::with_capacity(5);
-                arguments.push(buffer.into());
-                arguments.push(
+                let target = self.compile_expr(&args[1])?.into_float_value();
+                let start = self.compile_expr(&args[2])?.into_float_value();
+                let end = self.compile_expr(&args[3])?.into_float_value();
+                let arguments = vec![
+                    buffer.into(),
                     self.context
                         .i64_type()
                         .const_int(array_element_storage_bytes(&element), false)
                         .into(),
-                );
-                for argument in &args[1..] {
-                    arguments.push(self.compile_expr(argument)?.into());
-                }
+                    target.into(),
+                    start.into(),
+                    end.into(),
+                ];
                 // Mutates in place and returns the same pointer -- keep
                 // using the original handle as this expression's value.
                 self.builder
@@ -385,6 +397,16 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.module.get_function("thaw_array_copy_within").unwrap(),
                         &arguments,
                         "array_copy_within",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_copy_within")
+                            .unwrap(),
+                        &[presence.into(), target.into(), start.into(), end.into()],
+                        "array_presence_copy_within",
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(handle.into());
@@ -750,6 +772,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 let width = array_element_storage_bytes(&element);
                 let handle = self.compile_expr(&args[0])?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
+                let old_len = self
+                    .builder
+                    .build_load(i64_type, buffer, "array_splice_old_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
                 let start = self.compile_expr(&args[1])?;
                 let delete_count = self.compile_expr(&args[2])?;
                 let items = &args[3..];
@@ -788,6 +815,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_alloca(ptr_type, "array_splice_removed")
                     .map_err(|error| error.to_string())?;
+                let out_removed_presence = self
+                    .builder
+                    .build_alloca(ptr_type, "array_splice_removed_presence")
+                    .map_err(|error| error.to_string())?;
                 let new_buffer = self
                     .builder
                     .build_call(
@@ -811,12 +842,46 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(handle, new_buffer)
                     .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                let new_presence = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_splice")
+                            .unwrap(),
+                        &[
+                            presence.into(),
+                            old_len.into(),
+                            start.into(),
+                            delete_count.into(),
+                            i64_type.const_int(items.len() as u64, false).into(),
+                            out_removed_presence.into(),
+                        ],
+                        "array_splice_presence",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence splice returned no value".to_string())?
+                    .into_pointer_value();
+                self.compile_array_set_presence(handle, new_presence)?;
                 let removed = self
                     .builder
                     .build_load(ptr_type, out_removed, "array_splice_removed_buffer")
                     .map_err(|error| error.to_string())?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap(removed)?.into());
+                let removed_presence = self
+                    .builder
+                    .build_load(
+                        ptr_type,
+                        out_removed_presence,
+                        "array_splice_removed_presence_value",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into_pointer_value();
+                return Ok(self
+                    .compile_array_wrap_with_presence(removed, removed_presence)?
+                    .into());
             }
             "__thaw_number_array_sort"
             | "__thaw_string_array_sort"
