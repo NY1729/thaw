@@ -1918,24 +1918,10 @@ impl<'a> FnLowerer<'a> {
                         // assignment target the way TypeScript itself
                         // does. Explicit type arguments are required.
                         //
-                        // `WeakMap`/`WeakSet` reuse `HirType::Map`/`Set`
-                        // outright rather than introducing distinct types
-                        // (the same "avoid a new exhaustive-match blast
-                        // radius" tradeoff `RegExp`/`Date` already made by
-                        // reusing `Object`) -- the only real difference is
-                        // that their key/element type must be a reference
-                        // type (`weak_key_intrinsic_suffix` rejects
-                        // `number`/`string`, matching the specification).
-                        // Two things this does NOT enforce, unlike the
-                        // specification: `.size`/`.keys()`/`.values()`/
-                        // `.entries()`/`.forEach()`/`for...of` all still
-                        // work (a real `WeakMap`/`WeakSet` isn't
-                        // enumerable at all), and a key's entry is never
-                        // actually reclaimed early just because it became
-                        // otherwise unreachable -- this runtime has no
-                        // fine-grained GC to do that with; every
-                        // allocation lives until the whole arena resets at
-                        // the next Lambda invocation regardless.
+                        // Weak collections have the same native table layout,
+                        // but distinct HIR types keep their non-enumerable API
+                        // surface separate. Entries live until the request
+                        // arena resets; there is no mid-request native GC.
                         let is_weak = matches!(class.sym.as_ref(), "WeakMap" | "WeakSet");
                         let key_validator: fn(&HirType) -> Result<&'static str, String> =
                             if is_weak {
@@ -1973,8 +1959,17 @@ impl<'a> FnLowerer<'a> {
                             key_validator(&key_type)?;
                             let value_type =
                                 lower_ts_type(value, self.interfaces, self.generic_interfaces)?;
-                            let map_type =
-                                HirType::Map(Box::new(key_type.clone()), Box::new(value_type.clone()));
+                            let map_type = if is_weak {
+                                HirType::WeakMap(
+                                    Box::new(key_type.clone()),
+                                    Box::new(value_type.clone()),
+                                )
+                            } else {
+                                HirType::Map(
+                                    Box::new(key_type.clone()),
+                                    Box::new(value_type.clone()),
+                                )
+                            };
                             let Some(argument) = args.first() else {
                                 return Ok(HirExpr::TypedClosure(
                                     map_type,
@@ -2011,7 +2006,11 @@ impl<'a> FnLowerer<'a> {
                         let element_type =
                             lower_ts_type(element, self.interfaces, self.generic_interfaces)?;
                         key_validator(&element_type)?;
-                        let set_type = HirType::Set(Box::new(element_type.clone()));
+                        let set_type = if is_weak {
+                            HirType::WeakSet(Box::new(element_type.clone()))
+                        } else {
+                            HirType::Set(Box::new(element_type.clone()))
+                        };
                         let Some(argument) = args.first() else {
                             return Ok(HirExpr::TypedClosure(
                                 set_type,

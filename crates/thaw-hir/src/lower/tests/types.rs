@@ -1463,12 +1463,14 @@ fn weak_map_accepts_object_keys_but_rejects_primitive_keys() {
     let program = lower(
         r#"function main(): void {
             const cache: WeakMap<{ x: number }, string> = new WeakMap<{ x: number }, string>();
-            console.log(cache.size);
+            const key = { x: 1 };
+            cache.set(key, "value");
+            console.log(cache.get(key));
         }"#,
     );
     assert!(matches!(
         program.functions[0].body[0],
-        HirStmt::Let(_, HirType::Map(_, _), _)
+        HirStmt::Let(_, HirType::WeakMap(_, _), _)
     ));
 
     let module = thaw_parser::parse_typescript(
@@ -1479,6 +1481,20 @@ fn weak_map_accepts_object_keys_but_rejects_primitive_keys() {
     .unwrap();
     let error = lower_module(&module).unwrap_err();
     assert!(error.contains("WeakMap/WeakSet keys must be"), "{error}");
+
+    for operation in [
+        "console.log(cache.size);",
+        "cache.clear();",
+        "cache.keys();",
+        "cache.forEach((value: string) => console.log(value));",
+        "for (const entry of cache) console.log(entry);",
+    ] {
+        let source = format!(
+            "function main(): void {{ const cache: WeakMap<{{ x: number }}, string> = new WeakMap<{{ x: number }}, string>(); {operation} }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        assert!(lower_module(&module).is_err(), "unexpectedly accepted {operation}");
+    }
 }
 
 #[test]

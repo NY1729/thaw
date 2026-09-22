@@ -441,7 +441,11 @@ fn lower_ts_type(
                     map_key_intrinsic_suffix(&key)?;
                 }
                 let value = lower_ts_type(value, interfaces, generic_interfaces)?;
-                return Ok(HirType::Map(Box::new(key), Box::new(value)));
+                return Ok(if name == "WeakMap" {
+                    HirType::WeakMap(Box::new(key), Box::new(value))
+                } else {
+                    HirType::Map(Box::new(key), Box::new(value))
+                });
             }
             if matches!(ref_name, Some("Set" | "WeakSet")) {
                 let name = ref_name.unwrap();
@@ -459,7 +463,11 @@ fn lower_ts_type(
                 } else {
                     map_key_intrinsic_suffix(&element)?;
                 }
-                return Ok(HirType::Set(Box::new(element)));
+                return Ok(if name == "WeakSet" {
+                    HirType::WeakSet(Box::new(element))
+                } else {
+                    HirType::Set(Box::new(element))
+                });
             }
             if matches!(ref_name, Some("Pick" | "Omit")) {
                 let [object, keys] = ty_ref

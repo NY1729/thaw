@@ -247,7 +247,11 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         HirType::Map(key, value) => {
             format!("Map<{}, {}>", render_ts_type(key), render_ts_type(value))
         }
+        HirType::WeakMap(key, value) => {
+            format!("WeakMap<{}, {}>", render_ts_type(key), render_ts_type(value))
+        }
         HirType::Set(element) => format!("Set<{}>", render_ts_type(element)),
+        HirType::WeakSet(element) => format!("WeakSet<{}>", render_ts_type(element)),
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
     }
 }

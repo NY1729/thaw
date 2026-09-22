@@ -494,7 +494,11 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
             HirType::Map(key, value) => {
                 format!("map_{}_{}", fingerprint(key), fingerprint(value))
             }
+            HirType::WeakMap(key, value) => {
+                format!("weak_map_{}_{}", fingerprint(key), fingerprint(value))
+            }
             HirType::Set(element) => format!("set_{}", fingerprint(element)),
+            HirType::WeakSet(element) => format!("weak_set_{}", fingerprint(element)),
             HirType::Optional(element) => format!("optional_{}", fingerprint(element)),
             HirType::Nullable(element) => format!("nullable_{}", fingerprint(element)),
             HirType::Nullish(element) => format!("nullish_{}", fingerprint(element)),

@@ -838,6 +838,11 @@ fn promise_try_wraps_values_promises_and_throws() {
                 20,
                 22,
             ));
+            const args: [number, number] = [19, 23];
+            console.log(await Promise.try(
+                (left: number, right: number) => left + right,
+                ...args,
+            ));
             console.log(await Promise.try<number>(() => Promise.resolve(7)));
             try {
                 await Promise.try<number>(fail);
@@ -848,6 +853,6 @@ fn promise_try_wraps_values_promises_and_throws() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_try"),
-        "42\n7\nboom\n"
+        "42\n42\n7\nboom\n"
     );
 }
