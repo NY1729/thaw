@@ -1250,6 +1250,8 @@ impl<'a> FnLowerer<'a> {
                     let mut values = self
                         .lower_expr_with_expected_type(&for_of.right, expected.as_ref())?;
                     let mut values_type = self.infer_expr_type(&values)?;
+                    let array_holes_possible =
+                        self.expression_may_be_sparse_array(&for_of.right);
                     let mut generator_producer = None;
                     if values_type == HirType::Str {
                         values = HirExpr::Call(
@@ -1361,7 +1363,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         _ => return Err("`for...of` currently requires a typed array".into()),
                     };
-                    let (item_type, await_item) = if for_of.is_await {
+                    let (mut item_type, await_item) = if for_of.is_await {
                         match &element {
                             HirType::Promise(resolved) => (resolved.as_ref().clone(), true),
                             synchronous => (synchronous.clone(), false),
@@ -1369,6 +1371,9 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         (element.clone(), false)
                     };
+                    if array_holes_possible && !for_of.is_await {
+                        item_type = HirType::Optional(Box::new(item_type));
+                    }
                     let values_name = format!("__thaw_for_of_values_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope
@@ -1376,8 +1381,24 @@ impl<'a> FnLowerer<'a> {
                     let index_name = format!("__thaw_for_of_index_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
+                    let array_item_value = if array_holes_possible
+                        && !for_of.is_await
+                        && generator_producer.is_none()
+                        && !json_array
+                    {
+                        Some(self.lower_array_at(
+                            HirExpr::Var(values_name.clone()),
+                            values_type.clone(),
+                            element.clone(),
+                            HirExpr::Var(index_name.clone()),
+                        )?)
+                    } else {
+                        None
+                    };
                     let item_value = || {
-                        let indexed = if generator_producer.is_some() {
+                        let indexed = if let Some(value) = &array_item_value {
+                            value.clone()
+                        } else if generator_producer.is_some() {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_array_shift".into())),
                                 vec![HirExpr::Var(values_name.clone())],

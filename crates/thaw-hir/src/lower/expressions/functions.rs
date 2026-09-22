@@ -145,6 +145,7 @@ impl<'a> FnLowerer<'a> {
 
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
+        let saved_sparse_arrays = self.sparse_arrays.clone();
         let saved_return = self.ret_type.clone();
         let result = (|| {
             let mut params = Vec::with_capacity(source_params.len());
@@ -169,6 +170,7 @@ impl<'a> FnLowerer<'a> {
                     param.ty.clone()
                 };
                 let name = self.bind_local(&param.name, ty.clone());
+                self.mark_array_parameter(&name, &ty);
                 if self.promise_catch_parameter.as_ref() == Some(&param.name) {
                     self.promise_catch_bindings.insert(name.clone());
                 }
@@ -391,6 +393,7 @@ impl<'a> FnLowerer<'a> {
         })();
         self.scope = saved_scope;
         self.bindings = saved_bindings;
+        self.sparse_arrays = saved_sparse_arrays;
         self.ret_type = saved_return;
         result
     }
@@ -417,6 +420,7 @@ impl<'a> FnLowerer<'a> {
         };
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
+        let saved_sparse_arrays = self.sparse_arrays.clone();
         let saved_return = self.ret_type.clone();
         let saved_generator_yields = self.generator_yields.clone();
         let saved_generator_finalizers = self.generator_finalizers.clone();
@@ -425,6 +429,7 @@ impl<'a> FnLowerer<'a> {
             let mut body = Vec::new();
             for (pattern, param) in arrow.params.iter().zip(source_params.clone()) {
                 let name = self.bind_local(&param.name, param.ty.clone());
+                self.mark_array_parameter(&name, &param.ty);
                 if !matches!(pattern, Pat::Ident(_) | Pat::Rest(_)) {
                     self.lower_binding_pattern(
                         pattern,
@@ -465,6 +470,7 @@ impl<'a> FnLowerer<'a> {
         let inferred_return = self.ret_type.clone();
         self.scope = saved_scope;
         self.bindings = saved_bindings;
+        self.sparse_arrays = saved_sparse_arrays;
         self.ret_type = saved_return;
         self.generator_yields = saved_generator_yields;
         self.generator_finalizers = saved_generator_finalizers;
@@ -835,6 +841,7 @@ impl<'a> FnLowerer<'a> {
         let parameter_types = declared_parameter_types.as_slice();
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
+        let saved_sparse_arrays = self.sparse_arrays.clone();
         let saved_return = self.ret_type.clone();
         let result = (|| {
             let mut params = Vec::with_capacity(parameter_types.len());
@@ -863,6 +870,7 @@ impl<'a> FnLowerer<'a> {
                     _ => return Err("unsupported Promise callback parameter pattern".into()),
                 };
                 let name = self.bind_local(&source_name, ty.clone());
+                self.mark_array_parameter(&name, ty);
                 if !matches!(pat, Pat::Ident(_) | Pat::Rest(_)) {
                     destructuring.push((pat, name.clone(), ty.clone()));
                 }
@@ -947,6 +955,7 @@ impl<'a> FnLowerer<'a> {
         })();
         self.scope = saved_scope;
         self.bindings = saved_bindings;
+        self.sparse_arrays = saved_sparse_arrays;
         self.ret_type = saved_return;
         result
     }

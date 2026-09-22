@@ -142,6 +142,7 @@ impl<'a> FnLowerer<'a> {
                     .init
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
+                let sparse_array = self.expression_may_be_sparse_array(init);
                 if let Expr::Yield(yield_expr) = init {
                     let Some((values, element, input, input_type, returns, _)) =
                         self.generator_yields.clone()
@@ -685,6 +686,9 @@ impl<'a> FnLowerer<'a> {
                 }
                 if let Some(method) = native_method_value {
                     self.native_method_values.insert(hir_name.clone(), method);
+                }
+                if sparse_array {
+                    self.sparse_arrays.insert(hir_name.clone());
                 }
                 statements.push(HirStmt::Let(hir_name, storage_type, value));
                 continue;

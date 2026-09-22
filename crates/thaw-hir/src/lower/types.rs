@@ -1703,6 +1703,7 @@ fn lower_generic_instance(
     );
     seed_global_scope(&mut lowerer, global_types, immutable_globals);
     for (source, param) in fn_decl.function.params.iter().zip(&params) {
+        lowerer.mark_array_parameter(&param.name, &param.ty);
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer

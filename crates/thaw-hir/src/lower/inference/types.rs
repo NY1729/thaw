@@ -1956,12 +1956,25 @@ impl<'a> FnLowerer<'a> {
                 if values.is_empty() {
                     return Ok(HirType::Array(Box::new(HirType::F64)));
                 }
+                let has_holes = values
+                    .iter()
+                    .any(|value| matches!(value, HirExpr::Lit(HirLit::ArrayHole)));
                 let array_element_type =
                     |value: &HirExpr| -> Result<HirType, String> { self.infer_expr_type(value) };
                 let elements = values
                     .iter()
+                    .filter(|value| !matches!(value, HirExpr::Lit(HirLit::ArrayHole)))
                     .map(array_element_type)
                     .collect::<Result<Vec<_>, _>>()?;
+                if elements.is_empty() {
+                    return Ok(HirType::Array(Box::new(HirType::F64)));
+                }
+                if has_holes {
+                    let first = &elements[0];
+                    if elements.iter().all(|element| element == first) {
+                        return Ok(HirType::Array(Box::new(first.clone())));
+                    }
+                }
                 if elements.iter().all(|element| element == &elements[0]) {
                     Ok(HirType::Array(Box::new(elements[0].clone())))
                 } else {
