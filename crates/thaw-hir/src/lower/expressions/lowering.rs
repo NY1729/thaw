@@ -326,12 +326,9 @@ impl<'a> FnLowerer<'a> {
                 // checks that an `instanceof` guard actually preceded it,
                 // matching real TypeScript's own unchecked `as` -- unlike
                 // real TypeScript, though, misusing it here (on a caught
-                // value that was never a matching object, e.g. a plain
-                // `throw "x"`) reads a null pointer and crashes the process
-                // rather than yielding `undefined`. This is a known sharp
-                // edge (see `docs/design/exceptions.md` section 5) accepted
-                // for now: always guard with the matching `instanceof`
-                // check first.
+                // value that was never an object, e.g. a plain `throw "x"`)
+                // raises a normal Thaw exception instead of exposing the
+                // parallel channel's null pointer.
                 if let (Expr::Ident(ident), TsType::TsTypeRef(reference)) =
                     (assertion.expr.as_ref(), assertion.type_ann.as_ref())
                 {
@@ -345,23 +342,43 @@ impl<'a> FnLowerer<'a> {
                         let target = self.interfaces.get(class.sym.as_ref()).cloned();
                         if self.scope.get(&resolved) == Some(&HirType::Str) {
                             if let Some(target @ HirType::Object(_)) = target {
-                                if promise_catch {
-                                    let value = HirExpr::Call(
+                                let value = if promise_catch {
+                                    HirExpr::Call(
                                         Box::new(HirExpr::Var(
                                             "__thaw_pending_exception_object".to_string(),
                                         )),
                                         Vec::new(),
-                                    );
-                                    return Ok(HirExpr::Conditional(
-                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
-                                        Box::new(value.clone()),
-                                        Box::new(value),
-                                        target,
-                                    ));
-                                }
-                                let object_name = format!("{resolved}__thaw_exception_object");
-                                self.scope.insert(object_name.clone(), target);
-                                return Ok(HirExpr::Var(object_name));
+                                    )
+                                } else if self.catch_bindings.contains(&resolved) {
+                                    let object_name =
+                                        format!("{resolved}__thaw_exception_object");
+                                    self.scope.insert(object_name.clone(), target.clone());
+                                    HirExpr::Var(object_name)
+                                } else {
+                                    return self.lower_expr(&assertion.expr);
+                                };
+                                let typed_value = HirExpr::Conditional(
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                    Box::new(value.clone()),
+                                    Box::new(value.clone()),
+                                    target.clone(),
+                                );
+                                return Ok(HirExpr::Conditional(
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_exception_object_present".to_string(),
+                                        )),
+                                        vec![value],
+                                    )),
+                                    Box::new(typed_value),
+                                    Box::new(HirExpr::ThrowValue(
+                                        Box::new(HirExpr::Lit(HirLit::Str(
+                                            "caught value is not an object".to_string(),
+                                        ))),
+                                        Box::new(Self::unreachable_value(&target)?),
+                                    )),
+                                    target,
+                                ));
                             }
                         }
                     }

@@ -114,11 +114,167 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_top_level_class_expressions(&normalized)?;
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
+    let normalized = specialize_named_promise_rejection_callbacks(&normalized)?;
     let mut program = lower_normalized_module(&normalized)?;
     // `HirType::Bytes` is a lowering-time distinction only; nothing past
     // here knows it, so collapse it to its physical `Array(F64)`.
     erase_bytes(&mut program);
     Ok(program)
+}
+
+const PROMISE_REJECTION_CALLBACK_SUFFIX: &str = "__thaw_promise_rejection";
+
+fn specialize_named_promise_rejection_callbacks(module: &Module) -> Result<Module, String> {
+    struct Collector {
+        names: HashSet<Symbol>,
+    }
+    impl Visit for Collector {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            let Callee::Expr(callee) = &call.callee else {
+                call.visit_children_with(self);
+                return;
+            };
+            let Expr::Member(member) = callee.as_ref() else {
+                call.visit_children_with(self);
+                return;
+            };
+            let MemberProp::Ident(property) = &member.prop else {
+                call.visit_children_with(self);
+                return;
+            };
+            let argument = match property.sym.as_ref() {
+                "catch" => call.args.first(),
+                "then" => call.args.get(1),
+                _ => None,
+            };
+            if let Some(Expr::Ident(ident)) = argument.map(|argument| argument.expr.as_ref()) {
+                self.names.insert(ident.sym.to_string());
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let mut collector = Collector {
+        names: HashSet::new(),
+    };
+    module.visit_with(&mut collector);
+    if collector.names.is_empty() {
+        return Ok(module.clone());
+    }
+
+    let declared = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => {
+                Some(function.ident.sym.to_string())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    collector.names.retain(|name| declared.contains(name));
+    struct BindingCounts {
+        counts: HashMap<Symbol, usize>,
+    }
+    impl Visit for BindingCounts {
+        fn visit_fn_decl(&mut self, declaration: &FnDecl) {
+            *self
+                .counts
+                .entry(declaration.ident.sym.to_string())
+                .or_default() += 1;
+            declaration.function.visit_with(self);
+        }
+
+        fn visit_binding_ident(&mut self, binding: &swc_ecma_ast::BindingIdent) {
+            *self.counts.entry(binding.id.sym.to_string()).or_default() += 1;
+            binding.type_ann.visit_with(self);
+        }
+    }
+    let mut binding_counts = BindingCounts {
+        counts: HashMap::new(),
+    };
+    module.visit_with(&mut binding_counts);
+    // ponytail: specialize only unshadowed top-level declarations; extend the
+    // lexical resolver when stored/local function values need the same path.
+    collector
+        .names
+        .retain(|name| binding_counts.counts.get(name) == Some(&1));
+    if collector.names.is_empty() {
+        return Ok(module.clone());
+    }
+
+    struct Rewriter<'a> {
+        names: &'a HashSet<Symbol>,
+    }
+    impl VisitMut for Rewriter<'_> {
+        fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
+            call.visit_mut_children_with(self);
+            let Callee::Expr(callee) = &call.callee else {
+                return;
+            };
+            let Expr::Member(member) = callee.as_ref() else {
+                return;
+            };
+            let MemberProp::Ident(property) = &member.prop else {
+                return;
+            };
+            let argument = match property.sym.as_ref() {
+                "catch" => call.args.first_mut(),
+                "then" => call.args.get_mut(1),
+                _ => None,
+            };
+            let Some(Expr::Ident(ident)) = argument.map(|argument| argument.expr.as_mut()) else {
+                return;
+            };
+            if self.names.contains(ident.sym.as_ref()) {
+                ident.sym = format!("{}{PROMISE_REJECTION_CALLBACK_SUFFIX}", ident.sym).into();
+            }
+        }
+    }
+
+    let mut specialized = module.clone();
+    specialized.visit_mut_with(&mut Rewriter {
+        names: &collector.names,
+    });
+    struct References {
+        names: HashSet<Symbol>,
+    }
+    impl Visit for References {
+        fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+            self.names.insert(ident.sym.to_string());
+        }
+
+        fn visit_fn_decl(&mut self, declaration: &FnDecl) {
+            declaration.function.visit_with(self);
+        }
+    }
+    let mut references = References {
+        names: HashSet::new(),
+    };
+    specialized.visit_with(&mut references);
+    specialized.body.retain(|item| {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item else {
+            return true;
+        };
+        !collector.names.contains(function.ident.sym.as_ref())
+            || references.names.contains(function.ident.sym.as_ref())
+    });
+    let clones = module.body.iter().filter_map(|item| {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item else {
+            return None;
+        };
+        collector
+            .names
+            .contains(function.ident.sym.as_ref())
+            .then(|| {
+                let mut function = function.clone();
+                function.ident.sym =
+                    format!("{}{PROMISE_REJECTION_CALLBACK_SUFFIX}", function.ident.sym).into();
+                ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function)))
+            })
+    });
+    specialized.body.extend(clones);
+    Ok(specialized)
 }
 
 fn normalize_interface_merges(module: &Module) -> Result<Module, String> {
@@ -340,6 +496,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .map(|p| p.ty)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                if name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX) && !params.is_empty() {
+                    params[0] = HirType::Str;
+                }
                 if let Some(this) = &func.this_param {
                     let annotation = this.type_ann.as_ref().ok_or_else(|| {
                         format!("function `{name}` needs a type annotation for `this`")

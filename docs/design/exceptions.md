@@ -23,6 +23,9 @@
   として運ぶ。拒否をそのまま転送する`then`/adopt/`Promise.all`/`Promise.race`/
   `Promise.prototype.finally`もメタデータを引き継ぐ。インラインの`.catch(error =>
   ...)`でも`typeof`・明示的な`as`・再throwから同じメタデータを利用できる。
+  一意なトップレベル関数宣言を渡す`.catch(recover)`および
+  `.then(undefined, recover)`も、rejection callback専用版へ特殊化して同じ
+  操作を利用できる。
   `Promise.reject(value)`も同じメタデータを生成するため、直接rejectした
   primitiveと固定レイアウトオブジェクトもawait先で復元できる。
   ただし3.2節で提案した「`instanceof`
@@ -194,13 +197,10 @@ try {
   無検査」なキャスト(`(e as MyError).code`)として実装した -- 実用上の
   価値の大部分は変わらず得られるが、自動ナローイングに比べて一手間書く
   必要がある。
-- **無検査`as`キャストの安全性**: `(e as MyError)`は、実際に投げられた値が
-  `MyError`かどうかを一切確認しない。対応する`instanceof`ガードなしで
-  誤用すると、`_object`チャンネルがnullのままフィールドを読もうとして
-  **プロセスがクラッシュする**(検証済み)。本物のTypeScriptの`as`が
-  `undefined`を返すのと違い、より危険側に倒れている。将来的には、
-  アクセス時にnullチェックを挟んで安全なThaw例外に倒す(または既定値を
-  返す)実装に強化する余地がある。
+- **`as`キャストはクラス同一性を検査しない**: `(e as MyError)`は、投げられた
+  オブジェクトが実際に`MyError`かどうかを確認しない。ただし非オブジェクトを
+  キャストした場合は、nullポインタを公開せず`caught value is not an object`
+  という通常のThaw例外を送出する。
 - **N-API側でユーザークラスをどう見せるか**: 現状はスコープ外にしている
   (3.1節)が、将来ネイティブアドオン側にユーザー定義Errorを渡したい場合は
   別途設計が要る。
