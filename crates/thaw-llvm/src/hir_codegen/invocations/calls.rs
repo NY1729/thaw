@@ -466,6 +466,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal calendar field returned no value".into());
             }
+            "__thaw_temporal_date_difference" => {
+                let [from, to, largest_unit] = args else {
+                    return Err(format!("{name} expects three operands"));
+                };
+                let from = self.compile_expr(from)?;
+                let to = self.compile_expr(to)?;
+                let largest_unit = self.compile_expr(largest_unit)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_date_difference")
+                            .unwrap(),
+                        &[from.into(), to.into(), largest_unit.into()],
+                        "temporal_date_difference",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal date difference returned no value".into());
+            }
             "__thaw_temporal_calendar_month_code" | "__thaw_temporal_calendar_era" => {
                 let [milliseconds, calendar] = args else {
                     return Err(format!("{name} expects two operands"));

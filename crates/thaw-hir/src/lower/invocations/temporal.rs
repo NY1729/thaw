@@ -919,6 +919,36 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
+            // `PlainDate.since/until` is calendar-aware and honors
+            // `largestUnit` (year/month/week/day).
+            "since" | "until" if kind == "plainDate" => {
+                let [other, _options @ ..] = arguments.as_slice() else {
+                    return Err(format!("`{label}` expects exactly one argument"));
+                };
+                let (other_ms, _) = self.temporal_operand(other.clone())?;
+                let (from, to) = if property.sym == *"until" {
+                    (timestamp.clone(), other_ms)
+                } else {
+                    (other_ms, timestamp.clone())
+                };
+                let largest_unit = Self::date_largest_unit(call.args.get(1))?;
+                let components_json = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_date_difference".into())),
+                    vec![
+                        from.clone(),
+                        to.clone(),
+                        HirExpr::Lit(HirLit::Str(largest_unit)),
+                    ],
+                );
+                let components = HirExpr::Call(
+                    Box::new(HirExpr::Var("JSON.parse".into())),
+                    vec![components_json],
+                );
+                let milliseconds =
+                    HirExpr::BinOp(BinOp::Sub, Box::new(to), Box::new(from));
+                let nanoseconds = HirExpr::Lit(HirLit::F64(0.0));
+                Self::temporal_duration_object(milliseconds, nanoseconds, components)
+            }
             "since" | "until" => {
                 let [other] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
@@ -1075,6 +1105,39 @@ impl<'a> FnLowerer<'a> {
             _ => return Ok(None),
         };
         self.wrap_call_argument_bindings(result, &bindings).map(Some)
+    }
+
+    /// The `largestUnit` of a `since`/`until` options object (`"day"`
+    /// default).
+    fn date_largest_unit(
+        options: Option<&swc_ecma_ast::ExprOrSpread>,
+    ) -> Result<String, String> {
+        let Some(options) = options else {
+            return Ok("day".to_string());
+        };
+        let Expr::Object(object) = options.expr.as_ref() else {
+            return Err("`since`/`until` options must be an object literal".into());
+        };
+        for property in &object.props {
+            let PropOrSpread::Prop(property) = property else {
+                continue;
+            };
+            let Prop::KeyValue(entry) = property.as_ref() else {
+                continue;
+            };
+            let name = match &entry.key {
+                PropName::Ident(ident) => ident.sym.to_string(),
+                PropName::Str(value) => value.value.to_string_lossy().into_owned(),
+                _ => continue,
+            };
+            if name == "largestUnit" {
+                let Expr::Lit(Lit::Str(unit)) = entry.value.as_ref() else {
+                    return Err("`largestUnit` must be a string literal".into());
+                };
+                return Ok(unit.value.to_string_lossy().to_ascii_lowercase());
+            }
+        }
+        Ok("day".to_string())
     }
 
     /// The unit name a `Duration.total`/`Duration.round` argument names: a

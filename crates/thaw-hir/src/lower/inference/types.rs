@@ -1102,7 +1102,8 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_temporal_calendar_valid" => return Ok(HirType::Bool),
                     "__thaw_temporal_calendar_month_code"
                     | "__thaw_temporal_calendar_era"
-                    | "__thaw_temporal_calendar_from_string" => return Ok(HirType::Str),
+                    | "__thaw_temporal_calendar_from_string"
+                    | "__thaw_temporal_date_difference" => return Ok(HirType::Str),
                     "__thaw_temporal_month_code" => return Ok(HirType::Str),
                     "__thaw_temporal_zoned_to_string"
                     | "__thaw_temporal_zoned_offset"
