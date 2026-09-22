@@ -129,6 +129,10 @@ impl<'a> FnLowerer<'a> {
                         MemberProp::Ident(property)
                             if matches!(property.sym.as_ref(), "slice" | "concat" | "map")
                     ) => self.expression_may_be_sparse_array(&member.obj),
+                Some(Expr::Ident(callee)) => self
+                    .signatures
+                    .get(callee.sym.as_ref())
+                    .is_some_and(|signature| signature.returns_sparse_array),
                 _ => false,
             },
             Expr::Paren(paren) => self.expression_may_be_sparse_array(&paren.expr),
