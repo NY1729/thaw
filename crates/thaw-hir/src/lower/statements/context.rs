@@ -118,6 +118,22 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn callable_may_return_sparse_array(&self, expression: &Expr) -> bool {
+        match expression {
+            Expr::Arrow(arrow) => arrow_returns_sparse_array(arrow),
+            Expr::Fn(function) => function_returns_sparse_array(&function.function),
+            Expr::Ident(identifier) => {
+                let resolved = self.resolve_binding(identifier.sym.as_ref());
+                self.sparse_array_functions.contains(&resolved)
+                    || self
+                        .signatures
+                        .get(identifier.sym.as_ref())
+                        .is_some_and(|signature| signature.returns_sparse_array)
+            }
+            _ => false,
+        }
+    }
+
     fn expression_may_be_sparse_array(&self, expression: &Expr) -> bool {
         match expression {
             Expr::Array(array) => array.elems.iter().any(|element| {
@@ -131,6 +147,21 @@ impl<'a> FnLowerer<'a> {
                 self.sparse_arrays.contains(&resolved)
             }
             Expr::Call(call) => match call.callee.as_expr().map(Box::as_ref) {
+                Some(Expr::Member(member))
+                    if matches!(
+                        (member.obj.as_ref(), &member.prop),
+                        (Expr::Ident(object), MemberProp::Ident(property))
+                            if object.sym == "Promise" && property.sym == "resolve"
+                    ) => call.args.first().is_some_and(|argument| {
+                        self.expression_may_be_sparse_array(&argument.expr)
+                    }),
+                Some(Expr::Member(member))
+                    if matches!(
+                        &member.prop,
+                        MemberProp::Ident(property) if property.sym == "then"
+                    ) => call.args.first().is_some_and(|argument| {
+                        self.callable_may_return_sparse_array(&argument.expr)
+                    }),
                 Some(Expr::Member(member))
                     if matches!(
                         &member.prop,
@@ -159,14 +190,7 @@ impl<'a> FnLowerer<'a> {
                         .get(&symbol)
                         .is_some_and(|signature| signature.returns_sparse_array)
                 }),
-                Some(Expr::Ident(callee)) => {
-                    let resolved = self.resolve_binding(callee.sym.as_ref());
-                    self.sparse_array_functions.contains(&resolved)
-                        || self
-                            .signatures
-                            .get(callee.sym.as_ref())
-                            .is_some_and(|signature| signature.returns_sparse_array)
-                }
+                Some(callee @ Expr::Ident(_)) => self.callable_may_return_sparse_array(callee),
                 _ => false,
             },
             Expr::Await(awaited) => self.expression_may_be_sparse_array(&awaited.arg),
