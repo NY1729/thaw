@@ -1,3 +1,9 @@
+enum ArrayIteratorKind {
+    Keys,
+    Values(HirType),
+    Entries(HirType),
+}
+
 impl<'a> FnLowerer<'a> {
     /// `Array.from({ length }, mapfn?)` -- the array-like-object overload,
     /// as opposed to the real-array/string overload `lower_array_map`
@@ -817,77 +823,8 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
-    /// `Array.prototype.keys`: a real, eagerly-built `number[]` of indices
-    /// `0..length` rather than the specification's lazy iterator, the same
-    /// simplification `Map`/`Set`'s own `.keys()`/`.values()`/`.entries()`
-    /// already make.
     fn lower_array_keys(&mut self, receiver: HirExpr, array_type: HirType) -> Result<HirExpr, String> {
-        let receiver_name = format!("__thaw_array_keys_receiver_{}", self.next_binding);
-        self.next_binding += 1;
-        let length_name = format!("__thaw_array_keys_length_{}", self.next_binding);
-        self.next_binding += 1;
-        let result_name = format!("__thaw_array_keys_result_{}", self.next_binding);
-        self.next_binding += 1;
-        let index_name = format!("__thaw_array_keys_index_{}", self.next_binding);
-        self.next_binding += 1;
-        self.scope.insert(receiver_name.clone(), array_type.clone());
-        self.scope.insert(length_name.clone(), HirType::F64);
-        let result_type = HirType::Array(Box::new(HirType::F64));
-        self.scope.insert(result_name.clone(), result_type.clone());
-        self.scope.insert(index_name.clone(), HirType::F64);
-        let var = |name: &str| HirExpr::Var(name.into());
-        let body = HirExpr::Block(vec![
-            HirStmt::Let(
-                length_name.clone(),
-                HirType::F64,
-                HirExpr::ArrayLen(Box::new(var(&receiver_name))),
-            ),
-            HirStmt::Let(
-                result_name.clone(),
-                result_type.clone(),
-                HirExpr::ArrayAlloc(Box::new(var(&length_name)), HirType::F64),
-            ),
-            HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
-            HirStmt::While(
-                HirExpr::BinOp(
-                    BinOp::Lt,
-                    Box::new(var(&index_name)),
-                    Box::new(var(&length_name)),
-                ),
-                vec![
-                    HirStmt::Expr(HirExpr::IndexAssign(
-                        Box::new(var(&result_name)),
-                        Box::new(var(&index_name)),
-                        Box::new(var(&index_name)),
-                    )),
-                    HirStmt::Expr(HirExpr::Assign(
-                        index_name.clone(),
-                        Box::new(HirExpr::BinOp(
-                            BinOp::Add,
-                            Box::new(var(&index_name)),
-                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                        )),
-                    )),
-                ],
-            ),
-            HirStmt::Return(Some(var(&result_name))),
-        ]);
-        let mut referenced = BTreeSet::new();
-        collect_referenced_bindings(&body, &mut referenced);
-        let captures = referenced
-            .into_iter()
-            .filter_map(|captured| {
-                self.scope
-                    .get(&captured)
-                    .cloned()
-                    .map(|ty| HirParam { name: captured, ty })
-            })
-            .collect();
-        let result = HirExpr::Call(
-            Box::new(HirExpr::Lambda(captures, Vec::new(), result_type, Box::new(body))),
-            Vec::new(),
-        );
-        self.wrap_call_argument_bindings(result, &[(receiver_name, array_type, receiver)])
+        self.lower_array_iterator(receiver, array_type, ArrayIteratorKind::Keys)
     }
 
     fn lower_array_values(
@@ -896,187 +833,156 @@ impl<'a> FnLowerer<'a> {
         array_type: HirType,
         element_type: HirType,
     ) -> Result<HirExpr, String> {
-        let receiver_name = format!("__thaw_array_values_receiver_{}", self.next_binding);
-        self.next_binding += 1;
-        let length_name = format!("__thaw_array_values_length_{}", self.next_binding);
-        self.next_binding += 1;
-        let result_name = format!("__thaw_array_values_result_{}", self.next_binding);
-        self.next_binding += 1;
-        let index_name = format!("__thaw_array_values_index_{}", self.next_binding);
-        self.next_binding += 1;
-        let value_type = HirType::Optional(Box::new(element_type.clone()));
-        let result_type = HirType::Array(Box::new(value_type.clone()));
-        self.scope.insert(receiver_name.clone(), array_type.clone());
-        self.scope.insert(length_name.clone(), HirType::F64);
-        self.scope.insert(result_name.clone(), result_type.clone());
-        self.scope.insert(index_name.clone(), HirType::F64);
-        let var = |name: &str| HirExpr::Var(name.into());
-        let assign = |value| {
-            HirStmt::Expr(HirExpr::IndexAssign(
-                Box::new(var(&result_name)),
-                Box::new(var(&index_name)),
-                Box::new(value),
-            ))
-        };
-        let body = HirExpr::Block(vec![
-            HirStmt::Let(
-                length_name.clone(),
-                HirType::F64,
-                HirExpr::ArrayLen(Box::new(var(&receiver_name))),
-            ),
-            HirStmt::Let(
-                result_name.clone(),
-                result_type.clone(),
-                HirExpr::ArrayAlloc(Box::new(var(&length_name)), value_type),
-            ),
-            HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
-            HirStmt::While(
-                HirExpr::BinOp(
-                    BinOp::Lt,
-                    Box::new(var(&index_name)),
-                    Box::new(var(&length_name)),
-                ),
-                vec![
-                    HirStmt::If(
-                        HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
-                            vec![var(&receiver_name), var(&index_name)],
-                        ),
-                        vec![assign(HirExpr::OptionalSome(
-                            Box::new(HirExpr::TypedIndex(
-                                Box::new(var(&receiver_name)),
-                                Box::new(var(&index_name)),
-                                element_type.clone(),
-                            )),
-                            element_type.clone(),
-                        ))],
-                        vec![assign(HirExpr::OptionalNone(element_type))],
-                    ),
-                    HirStmt::Expr(HirExpr::Assign(
-                        index_name.clone(),
-                        Box::new(HirExpr::BinOp(
-                            BinOp::Add,
-                            Box::new(var(&index_name)),
-                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                        )),
-                    )),
-                ],
-            ),
-            HirStmt::Return(Some(var(&result_name))),
-        ]);
-        let mut referenced = BTreeSet::new();
-        collect_referenced_bindings(&body, &mut referenced);
-        let captures = referenced
-            .into_iter()
-            .filter_map(|captured| {
-                self.scope
-                    .get(&captured)
-                    .cloned()
-                    .map(|ty| HirParam { name: captured, ty })
-            })
-            .collect();
-        let result = HirExpr::Call(
-            Box::new(HirExpr::Lambda(captures, Vec::new(), result_type, Box::new(body))),
-            Vec::new(),
-        );
-        self.wrap_call_argument_bindings(result, &[(receiver_name, array_type, receiver)])
+        self.lower_array_iterator(receiver, array_type, ArrayIteratorKind::Values(element_type))
     }
 
-    /// `Array.prototype.entries`: a real, eagerly-built array of `[index,
-    /// value]` pairs rather than the specification's lazy iterator (same
-    /// simplification as `lower_array_keys`). Building each pair via
-    /// `ArrayLit` (the same construction a literal `[i, element]` tuple
-    /// expression itself would use) keeps this correct regardless of the
-    /// element type's own storage width -- unlike a native implementation
-    /// that assumed a fixed per-element byte stride, which would silently
-    /// misread a wider element type such as `T | undefined`.
     fn lower_array_entries(
         &mut self,
         receiver: HirExpr,
         array_type: HirType,
         element_type: HirType,
     ) -> Result<HirExpr, String> {
-        let receiver_name = format!("__thaw_array_entries_receiver_{}", self.next_binding);
+        self.lower_array_iterator(receiver, array_type, ArrayIteratorKind::Entries(element_type))
+    }
+
+    fn lower_array_iterator(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        kind: ArrayIteratorKind,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_array_iterator_receiver_{}", self.next_binding);
         self.next_binding += 1;
-        let length_name = format!("__thaw_array_entries_length_{}", self.next_binding);
+        let index_name = format!("__thaw_array_iterator_index_{}", self.next_binding);
         self.next_binding += 1;
-        let result_name = format!("__thaw_array_entries_result_{}", self.next_binding);
+        let current_name = format!("__thaw_array_iterator_current_{}", self.next_binding);
         self.next_binding += 1;
-        let index_name = format!("__thaw_array_entries_index_{}", self.next_binding);
-        self.next_binding += 1;
-        let element_name = format!("__thaw_array_entries_element_{}", self.next_binding);
-        self.next_binding += 1;
-        self.scope.insert(receiver_name.clone(), array_type.clone());
-        self.scope.insert(length_name.clone(), HirType::F64);
-        let value_type = HirType::Optional(Box::new(element_type.clone()));
-        let pair_type = HirType::Tuple(vec![HirType::F64, value_type.clone()]);
-        let result_type = HirType::Array(Box::new(pair_type.clone()));
-        self.scope.insert(result_name.clone(), result_type.clone());
-        self.scope.insert(index_name.clone(), HirType::F64);
-        self.scope.insert(element_name.clone(), value_type.clone());
+        self.scope
+            .insert(receiver_name.clone(), array_type.clone());
+        self.scope.insert(current_name.clone(), HirType::F64);
         let var = |name: &str| HirExpr::Var(name.into());
-        let body = HirExpr::Block(vec![
-            HirStmt::Let(
-                length_name.clone(),
-                HirType::F64,
-                HirExpr::ArrayLen(Box::new(var(&receiver_name))),
-            ),
-            HirStmt::Let(
-                result_name.clone(),
-                result_type.clone(),
-                HirExpr::ArrayAlloc(Box::new(var(&length_name)), pair_type),
-            ),
-            HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
-            HirStmt::While(
-                HirExpr::BinOp(
-                    BinOp::Lt,
-                    Box::new(var(&index_name)),
-                    Box::new(var(&length_name)),
-                ),
-                vec![
-                    HirStmt::Let(
-                        element_name.clone(),
-                        value_type,
-                        self.lower_array_at(
-                            var(&receiver_name),
-                            array_type.clone(),
-                            element_type,
-                            var(&index_name),
-                        )?,
-                    ),
-                    HirStmt::Expr(HirExpr::IndexAssign(
-                        Box::new(var(&result_name)),
-                        Box::new(var(&index_name)),
-                        Box::new(HirExpr::ArrayLit(vec![var(&index_name), var(&element_name)])),
-                    )),
-                    HirStmt::Expr(HirExpr::Assign(
-                        index_name.clone(),
-                        Box::new(HirExpr::BinOp(
-                            BinOp::Add,
-                            Box::new(var(&index_name)),
-                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                        )),
-                    )),
-                ],
-            ),
-            HirStmt::Return(Some(var(&result_name))),
-        ]);
-        let mut referenced = BTreeSet::new();
-        collect_referenced_bindings(&body, &mut referenced);
-        let captures = referenced
+        let (yielded_type, yielded) = match kind {
+            ArrayIteratorKind::Keys => (HirType::F64, var(&current_name)),
+            ArrayIteratorKind::Values(element_type) => {
+                let value_type = HirType::Optional(Box::new(element_type.clone()));
+                let value = self.lower_array_at(
+                    var(&receiver_name),
+                    array_type.clone(),
+                    element_type,
+                    var(&current_name),
+                )?;
+                (value_type, value)
+            }
+            ArrayIteratorKind::Entries(element_type) => {
+                let value_type = HirType::Optional(Box::new(element_type.clone()));
+                let value = self.lower_array_at(
+                    var(&receiver_name),
+                    array_type.clone(),
+                    element_type,
+                    var(&current_name),
+                )?;
+                (
+                    HirType::Tuple(vec![HirType::F64, value_type]),
+                    HirExpr::ArrayLit(vec![var(&current_name), value]),
+                )
+            }
+        };
+        let generated_type = HirType::Array(Box::new(yielded_type.clone()));
+        let producer_type = generator_function_type(
+            false,
+            yielded_type,
+            HirType::Undefined,
+            HirType::Undefined,
+        );
+        let params = [HirType::I64, HirType::Str, HirType::Undefined]
             .into_iter()
-            .filter_map(|captured| {
-                self.scope
-                    .get(&captured)
-                    .cloned()
-                    .map(|ty| HirParam { name: captured, ty })
+            .chain(std::iter::repeat_n(
+                HirType::Array(Box::new(HirType::Undefined)),
+                3,
+            ))
+            .enumerate()
+            .map(|(index, ty)| HirParam {
+                name: format!("__thaw_array_iterator_arg_{index}_{}", self.next_binding),
+                ty,
             })
-            .collect();
-        let result = HirExpr::Call(
-            Box::new(HirExpr::Lambda(captures, Vec::new(), result_type, Box::new(body))),
+            .collect::<Vec<_>>();
+        self.next_binding += 1;
+        let control_name = params[0].name.clone();
+        let producer = HirExpr::Lambda(
+            vec![
+                HirParam {
+                    name: receiver_name.clone(),
+                    ty: array_type.clone(),
+                },
+                HirParam {
+                    name: index_name.clone(),
+                    ty: HirType::F64,
+                },
+            ],
+            params,
+            generated_type.clone(),
+            Box::new(HirExpr::Block(vec![
+                HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(var(&control_name)),
+                        Box::new(HirExpr::Lit(HirLit::I64(0))),
+                    ),
+                    Vec::new(),
+                    vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
+                ),
+                HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::Lt,
+                        Box::new(var(&index_name)),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    ),
+                    vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
+                    Vec::new(),
+                ),
+                HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::GtEq,
+                        Box::new(var(&index_name)),
+                        Box::new(HirExpr::ArrayLen(Box::new(var(&receiver_name)))),
+                    ),
+                    vec![
+                        HirStmt::Expr(HirExpr::Assign(
+                            index_name.clone(),
+                            Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+                        )),
+                        HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))),
+                    ],
+                    Vec::new(),
+                ),
+                HirStmt::Let(current_name, HirType::F64, var(&index_name)),
+                HirStmt::Expr(HirExpr::Assign(
+                    index_name.clone(),
+                    Box::new(HirExpr::BinOp(
+                        BinOp::Add,
+                        Box::new(var(&index_name)),
+                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    )),
+                )),
+                HirStmt::Return(Some(HirExpr::ArrayLit(vec![yielded]))),
+            ])),
+        );
+        let iterator = HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                vec![HirParam {
+                    name: receiver_name.clone(),
+                    ty: array_type.clone(),
+                }],
+                Vec::new(),
+                producer_type,
+                Box::new(HirExpr::Block(vec![
+                    HirStmt::Let(index_name, HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+                    HirStmt::Return(Some(producer)),
+                ])),
+            )),
             Vec::new(),
         );
-        self.wrap_call_argument_bindings(result, &[(receiver_name, array_type, receiver)])
+        self.wrap_call_argument_bindings(iterator, &[(receiver_name, array_type, receiver)])
     }
 
 }
