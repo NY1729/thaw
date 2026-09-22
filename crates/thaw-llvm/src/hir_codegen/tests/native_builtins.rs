@@ -3418,6 +3418,29 @@ fn compiles_temporal_duration_sign_and_normalization() {
     );
 }
 
+/// A few more native Temporal surfaces: the `from({...})` property bag,
+/// `PlainMonthDay.from("MM-DD")`, `ZonedDateTime.startOfDay`, and
+/// `Duration.balance`.
+#[test]
+fn compiles_temporal_api_surface() {
+    let source = r#"
+        function main(): void {
+            const d = Temporal.PlainDate.from({ year: 2021, month: 3, day: 15 });
+            console.log(d.toString(), d.dayOfWeek);
+            const md = Temporal.PlainMonthDay.from("03-15");
+            console.log(md.monthCode, md.day);
+            const z = Temporal.ZonedDateTime.from("2021-03-15T12:00:00+09:00[Asia/Tokyo]");
+            console.log(z.startOfDay().toString());
+            console.log(Temporal.Duration.from({ minutes: 90 }).balance({ largestUnit: "hour" }).toString());
+            console.log(Temporal.Duration.from({ hours: 30 }).balance({ largestUnit: "day" }).toString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_api_surface"),
+        "2021-03-15 1\nM03 15\n2021-03-15T00:00:00+09:00[Asia/Tokyo]\nPT1H30M\nP1DT6H\n"
+    );
+}
+
 /// `Temporal.PlainDate.prototype.since`/`until` as a calendar-aware
 /// difference, honoring `largestUnit` (day default, plus month/year/week).
 #[test]

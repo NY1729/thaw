@@ -701,6 +701,90 @@ impl<'a> FnLowerer<'a> {
                     calendar,
                 )
             }
+            "from"
+                if matches!(kind, "plainDate" | "plainYearMonth")
+                    && matches!(
+                        call.args.first().map(|argument| argument.expr.as_ref()),
+                        Some(Expr::Object(_))
+                    ) =>
+            {
+                // A property-bag form: `PlainDate.from({ year, month, day })`
+                // / `PlainYearMonth.from({ year, month })`.
+                let Expr::Object(object) = call.args[0].expr.as_ref() else {
+                    unreachable!("guarded by the match arm");
+                };
+                let mut year = None;
+                let mut month = None;
+                let mut day = None;
+                for property in &object.props {
+                    let PropOrSpread::Prop(property) = property else {
+                        return Err(format!("`{label}` object fields must not spread"));
+                    };
+                    let Prop::KeyValue(entry) = property.as_ref() else {
+                        return Err(format!("`{label}` object fields must be `key: value`"));
+                    };
+                    let name = match &entry.key {
+                        PropName::Ident(ident) => ident.sym.to_string(),
+                        PropName::Str(value) => value.value.to_string_lossy().into_owned(),
+                        _ => return Err(format!("`{label}` requires literal field names")),
+                    };
+                    let value = self.lower_expr(&entry.value)?;
+                    match name.as_str() {
+                        "year" => year = Some(value),
+                        "month" => month = Some(value),
+                        "day" if kind == "plainDate" => day = Some(value),
+                        "calendar" => {}
+                        other => {
+                            return Err(format!(
+                                "`{label}` does not support the `{other}` field"
+                            ));
+                        }
+                    }
+                }
+                let (Some(year), Some(month)) = (year, month) else {
+                    return Err(format!("`{label}` requires `year` and `month`"));
+                };
+                let day = day.unwrap_or(HirExpr::Lit(HirLit::F64(1.0)));
+                let zero = || HirExpr::Lit(HirLit::F64(0.0));
+                let month = HirExpr::BinOp(
+                    BinOp::Sub,
+                    Box::new(month),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                );
+                let milliseconds = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_date_utc".into())),
+                    vec![year, month, day, zero(), zero(), zero(), zero()],
+                );
+                Self::temporal_object_calendar(
+                    kind,
+                    milliseconds,
+                    zero(),
+                    HirExpr::Lit(HirLit::Str("iso8601".to_string())),
+                )
+            }
+            "from" if kind == "plainMonthDay" => {
+                // `PlainMonthDay.from("03-15")` (a month-day string).
+                let [value] = arguments.as_slice() else {
+                    return Err(format!("`{label}` expects exactly one argument"));
+                };
+                let text = self.coerce_primitive_to_string(value.clone())?;
+                let milliseconds = HirExpr::Call(
+                    Box::new(HirExpr::Var(
+                        "__thaw_temporal_plain_month_day_from_string".into(),
+                    )),
+                    vec![text.clone()],
+                );
+                let calendar = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_calendar_from_string".into())),
+                    vec![text],
+                );
+                Self::temporal_object_calendar(
+                    "plainMonthDay",
+                    milliseconds,
+                    HirExpr::Lit(HirLit::F64(0.0)),
+                    calendar,
+                )
+            }
             "from" => {
                 let [value] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
@@ -1014,6 +1098,22 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
+            "startOfDay" if kind == "zonedDateTime" => {
+                let zone = time_zone
+                    .clone()
+                    .expect("a zoned date-time always carries a time zone");
+                let milliseconds = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_zoned_start_of_day".into())),
+                    vec![timestamp, nanoseconds, zone.clone()],
+                );
+                let calendar = Self::temporal_calendar(receiver, &receiver_type);
+                Self::temporal_zoned_object_calendar(
+                    milliseconds,
+                    HirExpr::Lit(HirLit::F64(0.0)),
+                    zone,
+                    calendar,
+                )
+            }
             "toInstant" => {
                 Self::temporal_object("instant", timestamp, nanoseconds)
             }
@@ -1091,6 +1191,26 @@ impl<'a> FnLowerer<'a> {
                 )?;
                 Self::temporal_duration_object(milliseconds, nanoseconds, components)
             }
+            "balance" if kind == "duration" => {
+                let largest_unit = Self::object_string_field(
+                    call.args.first(),
+                    "largestUnit",
+                    "nanosecond",
+                )?;
+                let components_json = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_duration_balance".into())),
+                    vec![
+                        timestamp.clone(),
+                        nanoseconds.clone(),
+                        HirExpr::Lit(HirLit::Str(largest_unit)),
+                    ],
+                );
+                let components = HirExpr::Call(
+                    Box::new(HirExpr::Var("JSON.parse".into())),
+                    vec![components_json],
+                );
+                Self::temporal_duration_object(timestamp, nanoseconds, components)
+            }
             "total" if kind == "duration" => {
                 let [unit] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one unit argument"));
@@ -1107,16 +1227,17 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &bindings).map(Some)
     }
 
-    /// The `largestUnit` of a `since`/`until` options object (`"day"`
-    /// default).
-    fn date_largest_unit(
+    /// A string-literal field of an options object (`default` when absent).
+    fn object_string_field(
         options: Option<&swc_ecma_ast::ExprOrSpread>,
+        field: &str,
+        default: &str,
     ) -> Result<String, String> {
         let Some(options) = options else {
-            return Ok("day".to_string());
+            return Ok(default.to_string());
         };
         let Expr::Object(object) = options.expr.as_ref() else {
-            return Err("`since`/`until` options must be an object literal".into());
+            return Err("options must be an object literal".into());
         };
         for property in &object.props {
             let PropOrSpread::Prop(property) = property else {
@@ -1130,14 +1251,22 @@ impl<'a> FnLowerer<'a> {
                 PropName::Str(value) => value.value.to_string_lossy().into_owned(),
                 _ => continue,
             };
-            if name == "largestUnit" {
+            if name == field {
                 let Expr::Lit(Lit::Str(unit)) = entry.value.as_ref() else {
-                    return Err("`largestUnit` must be a string literal".into());
+                    return Err(format!("`{field}` must be a string literal"));
                 };
                 return Ok(unit.value.to_string_lossy().to_ascii_lowercase());
             }
         }
-        Ok("day".to_string())
+        Ok(default.to_string())
+    }
+
+    /// The `largestUnit` of a `since`/`until` options object (`"day"`
+    /// default).
+    fn date_largest_unit(
+        options: Option<&swc_ecma_ast::ExprOrSpread>,
+    ) -> Result<String, String> {
+        Self::object_string_field(options, "largestUnit", "day")
     }
 
     /// The unit name a `Duration.total`/`Duration.round` argument names: a

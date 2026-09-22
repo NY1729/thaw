@@ -2229,12 +2229,14 @@ impl<'a> FnLowerer<'a> {
                     if class.sym == *"WeakRef" {
                         // A *strong* approximation: the target is kept
                         // alive for the enclosing arena's lifetime, so
-                        // `.deref()` always yields it (a real weak
-                        // reference would be collected immediately --
-                        // the only holder is the `WeakRef` itself --
-                        // making `deref()` return `undefined`). Modeled as
-                        // a one-element array, so `.deref()` is a plain
-                        // index-0 read.
+                        // `.deref()` always yields it. This is
+                        // indistinguishable from a real weak reference here
+                        // -- thaw's arena never collects anything (the whole
+                        // invocation's values live until it returns) and the
+                        // only holder would be the `WeakRef` anyway, so a
+                        // real `deref()` could not reliably observe a
+                        // collection either. Modeled as a one-element array,
+                        // so `.deref()` is a plain index-0 read.
                         let args = new_expr.args.as_deref().unwrap_or_default();
                         if args.iter().any(|argument| argument.spread.is_some()) {
                             return Err("`new WeakRef()` does not support spread arguments".into());
