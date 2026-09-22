@@ -327,7 +327,8 @@ impl<'a> FnLowerer<'a> {
             let value_name = format!("__thaw_dynamic_assign_value_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(object_name.clone(), HirType::JsValue);
-            self.scope.insert(key_name.clone(), HirType::Str);
+            let key_type = self.infer_expr_type(key)?;
+            self.scope.insert(key_name.clone(), key_type.clone());
             self.scope.insert(value_name.clone(), rhs_type.clone());
             let encoded = self.coerce_to_declared(
                 &HirType::Json,
@@ -348,7 +349,7 @@ impl<'a> FnLowerer<'a> {
                 result,
                 &[
                     (object_name, HirType::JsValue, object.clone()),
-                    (key_name, HirType::Str, key.as_ref().clone()),
+                    (key_name, key_type, key.as_ref().clone()),
                     (value_name, rhs_type, rhs),
                 ],
             );

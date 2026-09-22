@@ -16,6 +16,13 @@ impl<'ctx> HirCompiler<'ctx> {
             "getDynamicProperty" => {
                 self.compile_dynamic_handle_operation("thaw_js_get_property_result", args)
             }
+            "deleteDynamicProperty" => self.compile_dynamic_property_predicate(
+                "thaw_js_delete_property_result",
+                args,
+            ),
+            "hasDynamicProperty" => {
+                self.compile_dynamic_property_predicate("thaw_js_has_property_result", args)
+            }
             "setDynamicProperty" => self.compile_set_dynamic_property(args),
             "setDynamicPropertyJson" => self.compile_set_dynamic_property_json(args),
             "callDynamicMethod" => self.compile_call_dynamic_method(args),
@@ -42,6 +49,25 @@ impl<'ctx> HirCompiler<'ctx> {
             "registerNativeCallback" => self.compile_register_native_callback(args),
             _ => return None,
         })
+    }
+
+    fn compile_dynamic_property_predicate(
+        &mut self,
+        symbol: &str,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let value = self
+            .compile_dynamic_handle_operation(symbol, args)?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                value,
+                self.context.i64_type().const_zero(),
+                "dynamic_property_predicate",
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
     }
 
     fn compile_set_dynamic_property(

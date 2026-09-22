@@ -1541,6 +1541,33 @@ fn compiles_symbol_keyed_properties() {
 }
 
 #[test]
+fn preserves_symbol_keys_on_dynamic_objects() {
+    let source = r#"
+        function main(): void {
+            const object: JsValue = retainDynamicJson({});
+            object[Symbol.iterator] = 7;
+            console.log(Number(object[Symbol.iterator]));
+            console.log(Symbol.iterator in object);
+
+            const first = Symbol("key");
+            const second = Symbol("key");
+            object[first] = 11;
+            object[second] = 22;
+            console.log(Number(object[first]), Number(object[second]));
+            console.log(first in object, second in object);
+            console.log(delete object[first]);
+            console.log(first in object, second in object);
+            console.log(delete object[Symbol.iterator]);
+            console.log(Symbol.iterator in object);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_symbol_keys"),
+        "7\ntrue\n11 22\ntrue true\ntrue\nfalse true\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn compiles_direct_generator_iteration() {
     let source = r#"
         function* values(): Generator<number> {
