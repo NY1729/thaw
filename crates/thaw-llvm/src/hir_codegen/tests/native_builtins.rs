@@ -4729,12 +4729,24 @@ fn named_promise_rejection_callbacks_preserve_typed_values() {
             throw failure;
         }
         async function main(): Promise<void> {
+            const recoverLocal: (error: string) => number = function recoverLocal(error: string): number {
+                const caught = error as Failure;
+                console.log("local", caught === failure, caught.code + 1);
+                return 44;
+            };
+            const recoverStored: (error: string) => number = (error: string): number => {
+                const caught = error as Failure;
+                console.log("stored", caught === failure, caught.code + 1);
+                return 45;
+            };
             console.log(await Promise.reject<number>(41).catch(recoverNumber));
             console.log(await Promise.reject<number>(failure).then(undefined, recoverObject));
             console.log(await Promise.all([Promise.reject<number>(41)])
                 .then(values => values[0])
                 .catch(recoverNumber));
             console.log(await failObject().catch(recoverObject));
+            console.log(await Promise.reject<number>(failure).catch(recoverLocal));
+            console.log(await Promise.reject<number>(failure).catch(recoverStored));
             try {
                 await Promise.reject<number>(failure).catch(rethrow);
             } catch (error) {
@@ -4748,7 +4760,7 @@ fn named_promise_rejection_callbacks_preserve_typed_values() {
             source,
             "named_promise_rejection_callbacks_preserve_typed_values"
         ),
-        "number 42\n42\nobject true 42\n43\nnumber 42\n42\nobject true 42\n43\nobject true 42\n"
+        "number 42\n42\nobject true 42\n43\nnumber 42\n42\nobject true 42\n43\nlocal true 42\n44\nstored true 42\n45\nobject true 42\n"
     );
 }
 

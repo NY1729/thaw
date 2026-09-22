@@ -231,6 +231,24 @@ impl<'a> FnLowerer<'a> {
                         _ => {}
                     }
                 }
+                if let Some(target) = self.exception_object_narrowings.get(&name).cloned() {
+                    let value = if self.catch_bindings.contains(&name) {
+                        HirExpr::Var(format!("{name}__thaw_exception_object"))
+                    } else {
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_pending_exception_object".to_string(),
+                            )),
+                            Vec::new(),
+                        )
+                    };
+                    return Ok(HirExpr::Conditional(
+                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                        Box::new(value.clone()),
+                        Box::new(value),
+                        target,
+                    ));
+                }
                 if let Some((allowed, elements)) = self.union_narrowings.get(&name) {
                     if let [index] = allowed.as_slice() {
                         return Ok(HirExpr::UnionValue(
@@ -334,28 +352,28 @@ impl<'a> FnLowerer<'a> {
                 {
                     if let swc_ecma_ast::TsEntityName::Ident(class) = &reference.type_name {
                         let resolved = self.resolve_binding(ident.sym.as_ref());
-                        let promise_catch = self.promise_catch_bindings.contains(&resolved)
-                            || self
-                                .promise_catch_parameter
-                                .as_deref()
-                                .is_some_and(|name| self.resolve_binding(name) == resolved);
                         let target = self.interfaces.get(class.sym.as_ref()).cloned();
                         if self.scope.get(&resolved) == Some(&HirType::Str) {
                             if let Some(target @ HirType::Object(_)) = target {
-                                let value = if promise_catch {
+                                let value = if self.catch_bindings.contains(&resolved) {
+                                    let object_name =
+                                        format!("{resolved}__thaw_exception_object");
+                                    self.scope.insert(object_name.clone(), target.clone());
+                                    HirExpr::Var(object_name)
+                                } else {
+                                    // Promise rejection adapters restore the
+                                    // typed side channel immediately before
+                                    // invoking any callback. This also covers
+                                    // callbacks stored in local function
+                                    // values; ordinary
+                                    // string calls see null and take the safe
+                                    // ThrowValue branch below.
                                     HirExpr::Call(
                                         Box::new(HirExpr::Var(
                                             "__thaw_pending_exception_object".to_string(),
                                         )),
                                         Vec::new(),
                                     )
-                                } else if self.catch_bindings.contains(&resolved) {
-                                    let object_name =
-                                        format!("{resolved}__thaw_exception_object");
-                                    self.scope.insert(object_name.clone(), target.clone());
-                                    HirExpr::Var(object_name)
-                                } else {
-                                    return self.lower_expr(&assertion.expr);
                                 };
                                 let typed_value = HirExpr::Conditional(
                                     Box::new(HirExpr::Lit(HirLit::Bool(true))),

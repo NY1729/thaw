@@ -1008,6 +1008,26 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    fn exception_instanceof_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType)> {
+        let Expr::Bin(binary) = expr else {
+            return None;
+        };
+        if binary.op != BinaryOp::InstanceOf {
+            return None;
+        }
+        let (Expr::Ident(value), Expr::Ident(class)) =
+            (binary.left.as_ref(), binary.right.as_ref())
+        else {
+            return None;
+        };
+        let name = self.resolve_binding(value.sym.as_ref());
+        if self.scope.get(&name) != Some(&HirType::Str) {
+            return None;
+        }
+        let target = self.interfaces.get(class.sym.as_ref())?.clone();
+        matches!(target, HirType::Object(_)).then_some((name, target))
+    }
+
     fn union_in_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
         let Expr::Bin(binary) = expr else { return None };
         if binary.op != BinaryOp::In {
@@ -1274,9 +1294,11 @@ impl<'a> FnLowerer<'a> {
         narrowing: Option<&[UnionNarrowingTarget]>,
         optional: Option<&(Symbol, HirType, u8)>,
         json: Option<&(Symbol, HirType)>,
+        exception: Option<&(Symbol, HirType)>,
     ) -> Result<Vec<HirStmt>, String> {
         let saved = self.union_narrowings.clone();
         let saved_json = self.json_narrowings.clone();
+        let saved_exceptions = self.exception_object_narrowings.clone();
         if let Some(targets) = narrowing {
             for target in targets {
                 self.union_narrowings.insert(
@@ -1288,9 +1310,14 @@ impl<'a> FnLowerer<'a> {
         if let Some((name, ty)) = json {
             self.json_narrowings.insert(name.clone(), ty.clone());
         }
+        if let Some((name, ty)) = exception {
+            self.exception_object_narrowings
+                .insert(name.clone(), ty.clone());
+        }
         let lowered = self.lower_body_with_optional_narrowing(stmt, optional);
         self.union_narrowings = saved;
         self.json_narrowings = saved_json;
+        self.exception_object_narrowings = saved_exceptions;
         lowered
     }
 

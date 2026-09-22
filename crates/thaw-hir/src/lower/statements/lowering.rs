@@ -1011,6 +1011,8 @@ impl<'a> FnLowerer<'a> {
                 let narrowing = self.optional_undefined_narrowing(&if_stmt.test);
                 let union_narrowing = self.union_narrowing(&if_stmt.test);
                 let json_narrowing = self.json_typeof_narrowing(&if_stmt.test);
+                let exception_narrowing =
+                    self.exception_instanceof_narrowing(&if_stmt.test);
                 let cond = self.lower_condition_expr(&if_stmt.test)?;
                 let then_narrowing = narrowing
                     .as_ref()
@@ -1060,6 +1062,7 @@ impl<'a> FnLowerer<'a> {
                             .filter(|(_, _, equal)| *equal)
                             .map(|(name, ty, _)| (name.clone(), ty.clone()))
                             .as_ref(),
+                        exception_narrowing.as_ref(),
                     )?;
                 let else_branch = match &if_stmt.alt {
                     Some(alt) => self.lower_body_with_union_narrowing(
@@ -1068,10 +1071,11 @@ impl<'a> FnLowerer<'a> {
                         else_narrowing.as_ref(),
                         json_narrowing
                             .as_ref()
-                            .filter(|(_, _, equal)| !*equal)
-                            .map(|(name, ty, _)| (name.clone(), ty.clone()))
-                            .as_ref(),
-                    )?,
+                                .filter(|(_, _, equal)| !*equal)
+                                .map(|(name, ty, _)| (name.clone(), ty.clone()))
+                                .as_ref(),
+                            None,
+                        )?,
                     None => Vec::new(),
                 };
                 Ok(vec![HirStmt::If(cond, then_branch, else_branch)])
