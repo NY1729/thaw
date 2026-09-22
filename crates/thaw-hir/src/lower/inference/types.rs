@@ -440,6 +440,18 @@ impl<'a> FnLowerer<'a> {
                     return Ok(*ret);
                 };
                 match name.as_str() {
+                    "__thaw_object_set_state"
+                    | "__thaw_object_set_state_and_return"
+                    | "__thaw_object_state" => {
+                        let [object, operation] = args.as_slice() else {
+                            return Err(format!("{name} expects an object and an operation"));
+                        };
+                        self.expect_type(&HirType::F64, operation, "object state operation")?;
+                        if name == "__thaw_object_set_state_and_return" {
+                            return self.infer_expr_type(object);
+                        }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_array_has_index" => {
                         let [array, index] = args.as_slice() else {
                             return Err("array presence check expects two operands".into());
