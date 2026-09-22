@@ -1372,6 +1372,9 @@ fn compiles_array_keys_values_entries() {
             for (const value of letters.values()) {
                 console.log(value);
             }
+            const values = letters.values();
+            values[0] = "z";
+            console.log(values[0], letters[0]);
             for (const [index, value] of letters.entries()) {
                 console.log(index + ":" + value);
             }
@@ -1385,7 +1388,7 @@ fn compiles_array_keys_values_entries() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_keys_values_entries"),
-        "0\n1\n2\na\nb\nc\n0:a\n1:b\n2:c\n0\n0=a\n1=c\n"
+        "0\n1\n2\na\nb\nc\nz a\n0:a\n1:b\n2:c\n0\n0=a\n1=c\n"
     );
 }
 

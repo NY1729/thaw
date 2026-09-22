@@ -480,13 +480,17 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.values()` expects no arguments".into());
                     }
                     if let HirType::Array(_) = &receiver_type {
-                        // The specification returns a fresh iterator, but
-                        // the receiver is already a real `Array(_)` value
-                        // -- already iterable, so this is just identity,
-                        // the same simplification `Map`/`Set` methods here
-                        // already make by eagerly snapshotting instead of
-                        // returning a lazy iterator.
-                        return Ok(receiver);
+                        // Keep the eager-snapshot iterator simplification
+                        // used by the collection methods without aliasing
+                        // the receiver itself. `slice` also preserves holes.
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                            vec![
+                                receiver,
+                                HirExpr::Lit(HirLit::F64(0.0)),
+                                HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                            ],
+                        ));
                     }
                     let (value_type, intrinsic) = match &receiver_type {
                         HirType::Map(_, value_type) => {
