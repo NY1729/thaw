@@ -83,6 +83,81 @@ impl<'ctx> HirCompiler<'ctx> {
                 let source = self.compile_expr(source)?.into_pointer_value();
                 return Ok(self.compile_array_copy_presence(target, source)?.into());
             }
+            "__thaw_array_compact_for_sort" => {
+                let [array] = args else {
+                    return Err("array sort compaction expects one operand".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
+                let length = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_array_presence_compact")
+                            .unwrap(),
+                        &[
+                            buffer.into(),
+                            presence.into(),
+                            self.context.i64_type().const_int(8, false).into(),
+                        ],
+                        "array_sort_present_length",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array presence compaction returned no value")?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_unsigned_int_to_float(
+                        length,
+                        self.context.f64_type(),
+                        "array_sort_present_length_number",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_array_to_spliced_presence" => {
+                let [target, source, start, delete_count, insert_count] = args else {
+                    return Err("array toSpliced presence expects five operands".into());
+                };
+                let target = self.compile_expr(target)?.into_pointer_value();
+                let source = self.compile_expr(source)?.into_pointer_value();
+                let buffer = self.compile_array_data(source)?;
+                let old_len = self
+                    .builder
+                    .build_load(self.context.i64_type(), buffer, "to_spliced_old_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let presence = self.compile_array_presence(source)?;
+                let removed = self
+                    .builder
+                    .build_alloca(self.context.ptr_type(AddressSpace::default()), "to_spliced_removed_presence")
+                    .map_err(|error| error.to_string())?;
+                let start = self.compile_expr(start)?;
+                let delete_count = self.compile_expr(delete_count)?;
+                let insert_count = self.compile_expr(insert_count)?.into_float_value();
+                let insert_count = self
+                    .builder
+                    .build_float_to_unsigned_int(
+                        insert_count,
+                        self.context.i64_type(),
+                        "to_spliced_insert_count",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let new_presence = self.builder.build_call(
+                    self.module.get_function("thaw_array_presence_splice").unwrap(),
+                    &[
+                        presence.into(), old_len.into(), start.into(),
+                        delete_count.into(), insert_count.into(),
+                        removed.into(),
+                    ],
+                    "to_spliced_presence",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("array presence splice returned no value")?.into_pointer_value();
+                self.compile_array_set_presence(target, new_presence)?;
+                return Ok(target.into());
+            }
             "console.log" | "console.info" | "console.debug" => {
                 return self.compile_console_log(args, false)
             }

@@ -3707,18 +3707,39 @@ fn compiles_array_holes() {
             const reversed = combined.slice();
             reversed.reverse();
             console.log(JSON.stringify(reversed));
+            console.log(JSON.stringify(combined.toReversed()));
             const copied = combined.slice();
             copied.copyWithin(0, 6, 9);
             console.log(JSON.stringify(copied));
             const spliced = combined.slice();
             const removed = spliced.splice(1, 3, 7);
             console.log(JSON.stringify(spliced), JSON.stringify(removed));
+            console.log(JSON.stringify(combined.toSpliced(1, 3, 7)));
+            const filled = combined.slice();
+            filled.fill(8, 1, 3);
+            console.log(JSON.stringify(filled));
+            const resized = combined.slice();
+            resized.shift();
+            resized.unshift(9);
+            resized.pop();
+            resized.push(10);
+            console.log(JSON.stringify(resized));
+            const sorted = combined.slice();
+            sorted.sort();
+            console.log(JSON.stringify(sorted));
+            console.log(JSON.stringify(combined.toSorted()));
+            const numericSorted = combined.slice();
+            numericSorted.sort((left, right) => right - left);
+            console.log(JSON.stringify(numericSorted));
+            console.log(JSON.stringify(combined.toSorted((left, right) => right - left)));
+            console.log(JSON.stringify(combined.with(1, 8)));
+            console.log(JSON.stringify(combined.with(2, 8)));
             console.log(JSON.stringify(spread));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_holes"),
-        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n4 2 1\n9 6 [0,null,1,2,null,4,5,null,6]\n[6,null,5,4,null,2,1,null,0]\n[5,null,6,2,null,4,5,null,6]\n[0,7,null,4,5,null,6] [null,1,2]\n[0,null,1,2,null,4]\n"
+        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n4 2 1\n9 6 [0,null,1,2,null,4,5,null,6]\n[6,null,5,4,null,2,1,null,0]\n[6,null,5,4,null,2,1,null,0]\n[5,null,6,2,null,4,5,null,6]\n[0,7,null,4,5,null,6] [null,1,2]\n[0,7,null,4,5,null,6]\n[0,8,8,2,null,4,5,null,6]\n[9,null,1,2,null,4,5,null,10]\n[0,1,2,4,5,6,null,null,null]\n[0,1,2,4,5,6,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[0,8,1,2,null,4,5,null,6]\n[0,null,8,2,null,4,5,null,6]\n[0,null,1,2,null,4]\n"
     );
 }
 

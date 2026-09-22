@@ -211,7 +211,16 @@ impl<'a> FnLowerer<'a> {
                     increment(&destination_index_name),
                 ],
             ),
-            HirStmt::Return(Some(var(&result_name))),
+            HirStmt::Return(Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_to_spliced_presence".into())),
+                vec![
+                    var(&result_name),
+                    var(&receiver_name),
+                    var(&start_name),
+                    var(&delete_name),
+                    number(argument_names.len().saturating_sub(2) as f64),
+                ],
+            ))),
         ]);
         self.wrap_call_argument_bindings(HirExpr::Block(statements), &bindings)
     }

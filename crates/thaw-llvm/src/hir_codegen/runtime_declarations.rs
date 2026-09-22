@@ -523,6 +523,14 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_array_presence_compact",
+            i64_type.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         let array_copy_within_type = i8_ptr.fn_type(
             &[
                 i8_ptr.into(),
@@ -547,6 +555,37 @@ impl<'ctx> HirCompiler<'ctx> {
                     f64_type.into(),
                     f64_type.into(),
                 ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_fill",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_mark",
+            self.context
+                .void_type()
+                .fn_type(&[i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_extend",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i64_type.into(), i64_type.into(), i8_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_remove",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i64_type.into(), i8_type.into()],
                 false,
             ),
             Some(Linkage::External),

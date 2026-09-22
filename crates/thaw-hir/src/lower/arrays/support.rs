@@ -252,7 +252,10 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(
                 length_name.clone(),
                 HirType::F64,
-                HirExpr::ArrayLen(Box::new(variable(&array_name))),
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_compact_for_sort".into())),
+                    vec![variable(&array_name)],
+                ),
             ),
             HirStmt::Let(outer_name.clone(), HirType::F64, number(0.0)),
             HirStmt::While(

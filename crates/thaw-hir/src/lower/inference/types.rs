@@ -475,6 +475,22 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(target_type);
                     }
+                    "__thaw_array_to_spliced_presence" => {
+                        let [target, source, start, delete_count, insert_count] = args.as_slice()
+                        else {
+                            return Err("array toSpliced presence expects five operands".into());
+                        };
+                        let target_type = self.infer_expr_type(target)?;
+                        if !matches!(target_type, HirType::Array(_))
+                            || !matches!(self.infer_expr_type(source)?, HirType::Array(_))
+                        {
+                            return Err("array toSpliced presence requires arrays".into());
+                        }
+                        for value in [start, delete_count, insert_count] {
+                            self.expect_type(&HirType::F64, value, "array toSpliced presence")?;
+                        }
+                        return Ok(target_type);
+                    }
                     "console.log" | "console.info" | "console.debug" | "console.warn"
                     | "console.error" | "console.assert" => return Ok(HirType::Void),
                     "__thaw_string_concat" => {
@@ -687,6 +703,15 @@ impl<'a> FnLowerer<'a> {
                             self.expect_type(element, item, "splice item")?;
                         }
                         return Ok(ty);
+                    }
+                    "__thaw_array_compact_for_sort" => {
+                        let [array] = args.as_slice() else {
+                            return Err("array sort compaction expects one operand".into());
+                        };
+                        if !matches!(self.infer_expr_type(array)?, HirType::Array(_)) {
+                            return Err("array sort compaction requires a homogeneous array".into());
+                        }
+                        return Ok(HirType::F64);
                     }
                     "__thaw_number_array_sort"
                     | "__thaw_string_array_sort"
