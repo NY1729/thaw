@@ -3363,6 +3363,34 @@ fn compiles_reflect_set_and_object_descriptor_queries() {
     );
 }
 
+/// `Temporal.Duration.from` keeps its own component breakdown, so an
+/// unnormalized input (`{ minutes: 90 }`) reports `minutes` 90 and
+/// `hours` 0, and `negated`/`abs`/`add` preserve that rather than
+/// normalizing through the total.
+#[test]
+fn compiles_temporal_duration_components() {
+    let source = r#"
+        function main(): void {
+            const d = Temporal.Duration.from({ hours: 2, minutes: 30 });
+            console.log(d.hours, d.minutes, d.seconds);
+            const un = Temporal.Duration.from({ minutes: 90 });
+            console.log(un.minutes, un.hours);
+            const y = Temporal.Duration.from({ years: 1, months: 2, weeks: 3, days: 4 });
+            console.log(y.years, y.months, y.weeks, y.days);
+            console.log(un.negated().minutes, un.negated().hours);
+            console.log(un.negated().negated().minutes);
+            const neg = Temporal.Duration.from({ minutes: -90 });
+            console.log(neg.minutes, neg.abs().minutes);
+            console.log(un.add({ minutes: 30 }).minutes);
+            console.log(un.add({ minutes: 30 }).hours);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_duration_components"),
+        "2 30 0\n90 0\n1 2 3 4\n-90 0\n90\n-90 90\n120\n0\n"
+    );
+}
+
 /// `Temporal.Duration`'s sign/blank introspection and the `abs`/`negated`
 /// normalization (each keeps the total nanoseconds exact, including a
 /// sub-millisecond duration).

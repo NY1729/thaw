@@ -933,6 +933,11 @@ impl<'a> FnLowerer<'a> {
                     | "minutes"
                     | "seconds"
                     | "milliseconds"
+                    | "years"
+                    | "months"
+                    | "weeks"
+                    | "microseconds"
+                    | "nanoseconds"
             ) {
                 // A receiver that's itself a Temporal-returning call
                 // (`Temporal.Now.zonedDateTimeISO(tz).timeZoneId`) can't be
