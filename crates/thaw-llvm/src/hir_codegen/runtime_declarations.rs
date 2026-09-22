@@ -1071,6 +1071,14 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_temporal_round",
+            f64_type.fn_type(
+                &[f64_type.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         // `ZonedDateTime` (timezone-aware) helpers.
         self.module.add_function(
             "thaw_temporal_zone_valid",
@@ -1095,6 +1103,25 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_temporal_zoned_start_of_day",
             f64_type.fn_type(&[f64_type.into(), f64_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_zoned_hours_in_day",
+            f64_type.fn_type(&[f64_type.into(), f64_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_zoned_transition",
+            f64_type.fn_type(
+                &[
+                    f64_type.into(),
+                    f64_type.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
             Some(Linkage::External),
         );
         for name in [

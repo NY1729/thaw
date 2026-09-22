@@ -264,6 +264,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal comparison returned no value".into());
             }
+            "__thaw_temporal_round" => {
+                let [total, increment, mode] = args else {
+                    return Err(format!("{name} expects three operands"));
+                };
+                let total = self.compile_expr(total)?;
+                let increment = self.compile_expr(increment)?;
+                let mode = self.compile_expr(mode)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_temporal_round").unwrap(),
+                        &[total.into(), increment.into(), mode.into()],
+                        "temporal_round",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal rounding returned no value".into());
+            }
             "__thaw_temporal_zone_valid" => {
                 let [zone] = args else {
                     return Err(format!("{name} expects one operand"));
@@ -340,7 +359,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal zoned zone parse returned no value".into());
             }
-            "__thaw_temporal_zoned_start_of_day" => {
+            "__thaw_temporal_zoned_start_of_day" | "__thaw_temporal_zoned_hours_in_day" => {
                 let [milliseconds, nanoseconds, zone] = args else {
                     return Err(format!("{name} expects three operands"));
                 };
@@ -350,16 +369,36 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self
                     .builder
                     .build_call(
-                        self.module
-                            .get_function("thaw_temporal_zoned_start_of_day")
-                            .unwrap(),
+                        self.module.get_function(name.trim_start_matches("__")).unwrap(),
                         &[milliseconds.into(), nanoseconds.into(), zone.into()],
-                        "temporal_zoned_start_of_day",
+                        "temporal_zoned_number",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
                     .ok_or("Temporal start of day returned no value".into());
+            }
+            "__thaw_temporal_zoned_transition" => {
+                let [milliseconds, nanoseconds, zone, direction, part] = args else {
+                    return Err(format!("{name} expects five operands"));
+                };
+                let values = [milliseconds, nanoseconds, zone, direction, part]
+                    .into_iter()
+                    .map(|value| self.compile_expr(value).map(Into::into))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_zoned_transition")
+                            .unwrap(),
+                        &values,
+                        "temporal_zoned_transition",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal time zone transition returned no value".into());
             }
             "__thaw_temporal_zoned_to_string" | "__thaw_temporal_zoned_offset" => {
                 let [milliseconds, nanoseconds, zone] = args else {

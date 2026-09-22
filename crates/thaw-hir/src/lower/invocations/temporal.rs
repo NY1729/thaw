@@ -1110,9 +1110,69 @@ impl<'a> FnLowerer<'a> {
                 Self::temporal_zoned_object_calendar(
                     milliseconds,
                     HirExpr::Lit(HirLit::F64(0.0)),
-                    zone,
+                    zone.clone(),
                     calendar,
                 )
+            }
+            "getTimeZoneTransition" if kind == "zonedDateTime" => {
+                let [direction] = arguments.as_slice() else {
+                    return Err(format!("`{label}` expects exactly one direction"));
+                };
+                let HirExpr::Lit(HirLit::Str(direction)) = direction else {
+                    return Err(format!("`{label}` requires a string-literal direction"));
+                };
+                let direction = match direction.as_str() {
+                    "next" => 1.0,
+                    "previous" => -1.0,
+                    other => return Err(format!("unknown time zone transition direction `{other}`")),
+                };
+                let zone = time_zone
+                    .clone()
+                    .expect("a zoned date-time always carries a time zone");
+                let transition = |part| HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_zoned_transition".into())),
+                    vec![
+                        timestamp.clone(),
+                        nanoseconds.clone(),
+                        zone.clone(),
+                        HirExpr::Lit(HirLit::F64(direction)),
+                        HirExpr::Lit(HirLit::F64(part)),
+                    ],
+                );
+                let milliseconds_name = format!("__thaw_temporal_transition_{}", self.next_binding);
+                self.next_binding += 1;
+                let nanoseconds_name = format!("__thaw_temporal_transition_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(milliseconds_name.clone(), HirType::F64);
+                self.scope.insert(nanoseconds_name.clone(), HirType::F64);
+                let milliseconds = HirExpr::Var(milliseconds_name.clone());
+                let transition_value = Self::temporal_zoned_object_calendar(
+                    milliseconds.clone(),
+                    HirExpr::Var(nanoseconds_name.clone()),
+                    zone.clone(),
+                    Self::temporal_calendar(receiver.clone(), &receiver_type),
+                );
+                let transition_type = self.infer_expr_type_inner(&transition_value)?;
+                let result = HirExpr::Conditional(
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(milliseconds.clone()),
+                        Box::new(milliseconds),
+                    )),
+                    Box::new(HirExpr::NullableSome(
+                        Box::new(transition_value),
+                        transition_type.clone(),
+                    )),
+                    Box::new(HirExpr::NullableNone(transition_type.clone())),
+                    HirType::Nullable(Box::new(transition_type)),
+                );
+                self.wrap_call_argument_bindings(
+                    result,
+                    &[
+                        (milliseconds_name, HirType::F64, transition(0.0)),
+                        (nanoseconds_name, HirType::F64, transition(1.0)),
+                    ],
+                )?
             }
             "toInstant" => {
                 Self::temporal_object("instant", timestamp, nanoseconds)
@@ -1222,6 +1282,34 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Lit(HirLit::F64(factor))),
                 )
             }
+            "round" if matches!(kind, "duration" | "instant" | "plainDateTime" | "plainTime") => {
+                let Some(argument) = call.args.first() else {
+                    return Err(format!("`{label}` requires a smallest unit"));
+                };
+                if call.args.len() != 1 {
+                    return Err(format!("`{label}` expects exactly one argument"));
+                }
+                let (unit, increment, mode) = Self::temporal_round_options(argument)?;
+                Self::validate_temporal_round_increment(kind, &unit, increment)?;
+                let factor = Self::temporal_round_unit_factor(&unit)? * increment as f64;
+                let total = Self::duration_total_nanoseconds(&timestamp, &nanoseconds);
+                let rounded = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_round".into())),
+                    vec![
+                        total,
+                        HirExpr::Lit(HirLit::F64(factor)),
+                        HirExpr::Lit(HirLit::F64(mode)),
+                    ],
+                );
+                let (milliseconds, nanoseconds) = Self::duration_from_total_nanoseconds(rounded);
+                if kind == "duration" {
+                    let components = self.duration_components_from_ms(&milliseconds, &nanoseconds)?;
+                    Self::temporal_duration_object(milliseconds, nanoseconds, components)
+                } else {
+                    let calendar = Self::temporal_calendar(receiver, &receiver_type);
+                    Self::temporal_object_calendar(kind, milliseconds, nanoseconds, calendar)
+                }
+            }
             _ => return Ok(None),
         };
         self.wrap_call_argument_bindings(result, &bindings).map(Some)
@@ -1302,6 +1390,108 @@ impl<'a> FnLowerer<'a> {
             "nanosecond" | "nanoseconds" => 0.000001,
             other => return Err(format!("unknown Duration unit `{other}`")),
         })
+    }
+
+    fn temporal_round_unit_factor(unit: &str) -> Result<f64, String> {
+        Ok(match unit {
+            "day" | "days" => 86_400_000_000_000.0,
+            "hour" | "hours" => 3_600_000_000_000.0,
+            "minute" | "minutes" => 60_000_000_000.0,
+            "second" | "seconds" => 1_000_000_000.0,
+            "millisecond" | "milliseconds" => 1_000_000.0,
+            "microsecond" | "microseconds" => 1_000.0,
+            "nanosecond" | "nanoseconds" => 1.0,
+            other => return Err(format!("unsupported Temporal rounding unit `{other}`")),
+        })
+    }
+
+    fn validate_temporal_round_increment(
+        kind: &str,
+        unit: &str,
+        increment: u32,
+    ) -> Result<(), String> {
+        let dividend = match unit {
+            "day" | "days" if matches!(kind, "instant" | "plainTime") => {
+                return Err(format!("Temporal {kind}.round does not support day rounding"));
+            }
+            "day" | "days" => 1,
+            "hour" | "hours" => 24,
+            "minute" | "minutes" | "second" | "seconds" => 60,
+            "millisecond" | "milliseconds" | "microsecond" | "microseconds"
+            | "nanosecond" | "nanoseconds" => 1_000,
+            other => return Err(format!("unsupported Temporal rounding unit `{other}`")),
+        };
+        if increment > dividend || dividend % increment != 0 {
+            return Err(format!(
+                "roundingIncrement {increment} does not divide evenly into {dividend}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// `(smallestUnit, roundingIncrement, roundingMode code)` for Temporal
+    /// rounding. Values must be literals because native specialization happens
+    /// while lowering.
+    fn temporal_round_options(
+        argument: &swc_ecma_ast::ExprOrSpread,
+    ) -> Result<(String, u32, f64), String> {
+        if let Expr::Lit(Lit::Str(unit)) = argument.expr.as_ref() {
+            return Ok((
+                unit.value.to_string_lossy().to_ascii_lowercase(),
+                1,
+                0.0,
+            ));
+        }
+        let Expr::Object(object) = argument.expr.as_ref() else {
+            return Err("Temporal rounding options must be a string or object literal".into());
+        };
+        let mut unit = None;
+        let mut increment = 1u32;
+        let mut mode = 0.0;
+        for property in &object.props {
+            let PropOrSpread::Prop(property) = property else { continue };
+            let Prop::KeyValue(entry) = property.as_ref() else { continue };
+            let name = match &entry.key {
+                PropName::Ident(ident) => ident.sym.as_ref(),
+                _ => continue,
+            };
+            match name {
+                "smallestUnit" => {
+                    let Expr::Lit(Lit::Str(value)) = entry.value.as_ref() else {
+                        return Err("`smallestUnit` must be a string literal".into());
+                    };
+                    unit = Some(value.value.to_string_lossy().to_ascii_lowercase());
+                }
+                "roundingIncrement" => {
+                    let Expr::Lit(Lit::Num(value)) = entry.value.as_ref() else {
+                        return Err("`roundingIncrement` must be a number literal".into());
+                    };
+                    if value.value < 1.0 || value.value.fract() != 0.0 || value.value > u32::MAX as f64 {
+                        return Err("`roundingIncrement` must be a positive integer".into());
+                    }
+                    increment = value.value as u32;
+                }
+                "roundingMode" => {
+                    let Expr::Lit(Lit::Str(value)) = entry.value.as_ref() else {
+                        return Err("`roundingMode` must be a string literal".into());
+                    };
+                    mode = match value.value.to_string_lossy().as_ref() {
+                        "halfExpand" => 0.0,
+                        "ceil" => 1.0,
+                        "floor" => 2.0,
+                        "trunc" => 3.0,
+                        "expand" => 4.0,
+                        "halfCeil" => 5.0,
+                        "halfFloor" => 6.0,
+                        "halfTrunc" => 7.0,
+                        "halfEven" => 8.0,
+                        other => return Err(format!("unknown Temporal rounding mode `{other}`")),
+                    };
+                }
+                _ => {}
+            }
+        }
+        Ok((unit.ok_or("Temporal rounding requires `smallestUnit`")?, increment, mode))
     }
 
     /// Property reads (`instant.epochMilliseconds`, `date.year`, ...).
@@ -1454,6 +1644,18 @@ impl<'a> FnLowerer<'a> {
                 let receiver = self.lower_expr(&member.obj)?;
                 let receiver_type = self.infer_expr_type(&receiver)?;
                 return Ok(Some(Self::temporal_zone(receiver, &receiver_type)));
+            }
+            if property.sym == *"hoursInDay" {
+                let receiver = self.lower_expr(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                return Ok(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_temporal_zoned_hours_in_day".into())),
+                    vec![
+                        Self::temporal_timestamp(receiver.clone(), &receiver_type),
+                        Self::temporal_nanoseconds(receiver.clone(), &receiver_type),
+                        Self::temporal_zone(receiver, &receiver_type),
+                    ],
+                )));
             }
             let field = match property.sym.as_ref() {
                 "hour" => Some(3.0),

@@ -359,6 +359,71 @@ pub unsafe extern "C" fn thaw_temporal_zoned_start_of_day(
 }
 
 #[no_mangle]
+/// The length of the receiver's local day in hours. This observes daylight
+/// saving transitions, so a day can contain 23 or 25 hours.
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_hours_in_day(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: *const c_char,
+) -> f64 {
+    if zone.is_null() {
+        return f64::NAN;
+    }
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+        return f64::NAN;
+    };
+    let Ok(start) = zoned.start_of_day() else {
+        return f64::NAN;
+    };
+    let Ok(end) = start.tomorrow().and_then(|value| value.start_of_day()) else {
+        return f64::NAN;
+    };
+    (end.timestamp().as_nanosecond() - start.timestamp().as_nanosecond()) as f64
+        / 3_600_000_000_000.0
+}
+
+#[no_mangle]
+/// The next (`direction > 0`) or previous time-zone transition. `part` is
+/// `0` for epoch milliseconds and `1` for sub-millisecond nanoseconds. A
+/// fixed-offset zone has no transitions and returns NaN.
+///
+/// # Safety
+/// `zone` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_zoned_transition(
+    milliseconds: f64,
+    nanoseconds: f64,
+    zone: *const c_char,
+    direction: f64,
+    part: f64,
+) -> f64 {
+    if zone.is_null() {
+        return f64::NAN;
+    }
+    let zone = unsafe { CStr::from_ptr(zone) }.to_string_lossy();
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+        return f64::NAN;
+    };
+    let transition = if direction > 0.0 {
+        zoned.time_zone().following(zoned.timestamp()).next()
+    } else {
+        zoned.time_zone().preceding(zoned.timestamp()).next()
+    };
+    let Some(transition) = transition else {
+        return f64::NAN;
+    };
+    let total = transition.timestamp().as_nanosecond();
+    if part == 0.0 {
+        total.div_euclid(1_000_000) as f64
+    } else {
+        total.rem_euclid(1_000_000) as f64
+    }
+}
+
+#[no_mangle]
 /// `Temporal.PlainDate.prototype.monthCode`: `"M01"`..`"M12"` (ISO).
 pub extern "C" fn thaw_temporal_month_code(milliseconds: f64) -> *const c_char {
     let Some(fields) = civil_from_timestamp(milliseconds) else {
@@ -952,6 +1017,63 @@ pub extern "C" fn thaw_temporal_compare(
         1.0
     } else {
         0.0
+    }
+}
+
+#[no_mangle]
+/// Rounds a Temporal nanosecond total by a positive increment. `mode` is
+/// 0=halfExpand, 1=ceil, 2=floor, 3=trunc, 4=expand, 5=halfCeil,
+/// 6=halfFloor, 7=halfTrunc, 8=halfEven.
+pub extern "C" fn thaw_temporal_round(total: f64, increment: f64, mode: f64) -> f64 {
+    if !total.is_finite() || !increment.is_finite() || increment <= 0.0 {
+        return f64::NAN;
+    }
+    let quotient = total / increment;
+    let rounded = match mode as i32 {
+        1 => quotient.ceil(),
+        2 => quotient.floor(),
+        3 => quotient.trunc(),
+        4 => {
+            if quotient.is_sign_negative() { quotient.floor() } else { quotient.ceil() }
+        }
+        5..=8 => {
+            let lower = quotient.floor();
+            let fraction = quotient - lower;
+            if fraction < 0.5 {
+                lower
+            } else if fraction > 0.5 {
+                lower + 1.0
+            } else {
+                match mode as i32 {
+                    5 => lower + 1.0,
+                    6 => lower,
+                    7 => quotient.trunc(),
+                    _ if (lower as i128) % 2 == 0 => lower,
+                    _ => lower + 1.0,
+                }
+            }
+        }
+        _ => {
+            if quotient.is_sign_negative() {
+                (quotient - 0.5).ceil()
+            } else {
+                (quotient + 0.5).floor()
+            }
+        }
+    };
+    rounded * increment
+}
+
+#[cfg(test)]
+mod temporal_round_tests {
+    use super::thaw_temporal_round;
+
+    #[test]
+    fn rounds_ties_according_to_the_requested_mode() {
+        assert_eq!(thaw_temporal_round(150.0, 100.0, 0.0), 200.0);
+        assert_eq!(thaw_temporal_round(-150.0, 100.0, 0.0), -200.0);
+        assert_eq!(thaw_temporal_round(250.0, 100.0, 8.0), 200.0);
+        assert_eq!(thaw_temporal_round(150.0, 100.0, 8.0), 200.0);
     }
 }
 

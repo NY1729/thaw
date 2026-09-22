@@ -3532,6 +3532,13 @@ fn compiles_temporal_zoned_date_time() {
             console.log(z.toPlainDate().toString(), z.toPlainTime().toString());
             console.log(Temporal.ZonedDateTime.from("2021-07-01T12:00:00[America/New_York]").offset);
             console.log(Temporal.ZonedDateTime.from("2021-01-01T12:00:00[America/New_York]").offset);
+            console.log(Temporal.ZonedDateTime.from("2021-03-14T12:00:00[America/New_York]").hoursInDay);
+            console.log(Temporal.ZonedDateTime.from("2021-11-07T12:00:00[America/New_York]").hoursInDay);
+            console.log(z.hoursInDay);
+            const winter = Temporal.ZonedDateTime.from("2021-01-01T12:00:00[America/New_York]");
+            console.log(winter.getTimeZoneTransition("next")?.toString());
+            console.log(winter.getTimeZoneTransition("previous")?.toString());
+            console.log(Temporal.ZonedDateTime.from("2021-01-01T12:00:00Z[UTC]").getTimeZoneTransition("next") === null);
             console.log(Temporal.Now.zonedDateTimeISO("Asia/Tokyo").timeZoneId);
         }
     "#;
@@ -3541,7 +3548,9 @@ fn compiles_temporal_zoned_date_time() {
          Asia/Tokyo +09:00\n2020 1 2 3 4 5 678 4\n1577901845678\n\
          2020-01-01T18:04:05.678123456Z\n\
          2020-01-01T18:04:05.678123456+00:00[UTC]\n\
-         2020-01-02 03:04:05.678123456\n-04:00\n-05:00\nAsia/Tokyo\n"
+         2020-01-02 03:04:05.678123456\n-04:00\n-05:00\n23\n25\n24\n\
+         2021-03-14T03:00:00-04:00[America/New_York]\n\
+         2020-11-01T01:00:00-05:00[America/New_York]\ntrue\nAsia/Tokyo\n"
     );
 }
 
@@ -3549,12 +3558,12 @@ fn compiles_temporal_zoned_date_time() {
 /// `SharedArrayBuffer` API (`transfer`, `transferToFixedLength`, `resize`,
 /// `grow`, `detached`/`resizable`/`growable`/`maxByteLength`), plus the
 /// `Atomics.waitAsync` bootstrap. `SharedArrayBuffer.grow` needs the SAB
-/// allocator hooks thaw now installs; `waitAsync` resolves a would-block
-/// wait as `"timed-out"` (no cross-thread notification here).
+/// allocator hooks thaw now installs; `waitAsync` supports synchronous
+/// mismatch/zero-timeout results and asynchronous notification.
 #[test]
 fn compiles_arraybuffer_and_atomics() {
     let source = r#"
-        function main(): void {
+        async function main(): Promise<void> {
             const ab = new ArrayBuffer(8);
             console.log(ab.byteLength, ab.detached);
             const moved = ab.transfer(16);
@@ -3574,11 +3583,17 @@ fn compiles_arraybuffer_and_atomics() {
             const i32 = new Int32Array(shared);
             const result = Atomics.waitAsync(i32, 0, 1);
             console.log(result.async, result.value);
+            const zeroTimeout = Atomics.waitAsync(i32, 0, 0, 0);
+            console.log(zeroTimeout.async, zeroTimeout.value);
+            const waiting = Atomics.waitAsync(i32, 0, 0, 100);
+            console.log(waiting.async, Atomics.notify(i32, 0, 1));
+            console.log(await waiting.value);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "arraybuffer_atomics"),
-        "8 false\n16 true\n4\ntrue 16\n12\n0 0\ntrue\n12\nfalse not-equal\n"
+        "8 false\n16 true\n4\ntrue 16\n12\n0 0\ntrue\n12\nfalse not-equal\n\
+         false timed-out\ntrue 1\nok\n"
     );
 }
 
@@ -4147,6 +4162,25 @@ fn compiles_large_bigint_literals() {
 /// field (so fractional seconds keep nanosecond precision; see
 /// `compiles_temporal_zoned_date_time` for the timezone-aware
 /// `ZonedDateTime`).
+#[test]
+fn compiles_temporal_rounding() {
+    let source = r#"
+        function main(): void {
+            console.log(Temporal.Duration.from("PT1H31M").round("hour").toString());
+            console.log(Temporal.Instant.from("2020-01-02T03:04:29.600Z").round("minute").toString());
+            console.log(Temporal.PlainDateTime.from("2020-01-02T03:04:29.600").round({
+                smallestUnit: "minute",
+                roundingMode: "ceil"
+            }).toString());
+            console.log(Temporal.PlainTime.from("12:30:45").round("minute").toString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_rounding"),
+        "PT2H\n2020-01-02T03:04:00Z\n2020-01-02T03:05:00\n12:31:00\n"
+    );
+}
+
 #[test]
 fn compiles_temporal_values() {
     let source = r#"
