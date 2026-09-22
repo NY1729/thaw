@@ -108,7 +108,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::I64(_)) => Some(HirType::I64),
             HirExpr::Lit(HirLit::Str(_)) => Some(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
-            HirExpr::Lit(HirLit::Undefined) => Some(HirType::Undefined),
+            HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Some(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
             HirExpr::Var(name) => self.variable_hir_types.get(name).cloned(),
             HirExpr::Assign(_, value) => self.expr_hir_type(value),

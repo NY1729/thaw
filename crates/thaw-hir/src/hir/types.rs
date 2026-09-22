@@ -181,6 +181,7 @@ pub enum HirLit {
     Str(String),
     Bool(bool),
     Undefined,
+    ArrayHole,
     Null,
 }
 

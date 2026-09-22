@@ -15,7 +15,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::Bool(b)) => {
                 Ok(self.context.bool_type().const_int(*b as u64, false).into())
             }
-            HirExpr::Lit(HirLit::Undefined) => Ok(self.context.bool_type().const_zero().into()),
+            HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => {
+                Ok(self.context.bool_type().const_zero().into())
+            }
             HirExpr::Lit(HirLit::Null) => Ok(self.context.bool_type().const_int(1, false).into()),
             HirExpr::Lit(HirLit::Str(s)) => {
                 let global = self

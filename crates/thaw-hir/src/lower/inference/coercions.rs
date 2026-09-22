@@ -639,6 +639,9 @@ impl<'a> FnLowerer<'a> {
                 .iter()
                 .enumerate()
                 .map(|(index, value)| {
+                    if matches!(value, HirExpr::Lit(HirLit::ArrayHole)) {
+                        return Ok(value.clone());
+                    }
                     self.coerce_to_declared(element, value.clone())
                         .map_err(|error| format!("array element {index}: {error}"))
                 })
