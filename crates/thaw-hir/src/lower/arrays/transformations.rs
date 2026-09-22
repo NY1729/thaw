@@ -436,17 +436,26 @@ impl<'a> FnLowerer<'a> {
                     Box::new(var(&outer_length_name)),
                 ),
                 vec![
-                    HirStmt::Let(
-                        inner_array_name.clone(),
-                        inner_array_type.clone(),
-                        load_inner(),
-                    ),
-                    assign(
-                        &total_length_name,
-                        add(
-                            var(&total_length_name),
-                            HirExpr::ArrayLen(Box::new(var(&inner_array_name))),
+                    HirStmt::If(
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                            vec![var(&receiver_name), var(&outer_index_name)],
                         ),
+                        vec![
+                            HirStmt::Let(
+                                inner_array_name.clone(),
+                                inner_array_type.clone(),
+                                load_inner(),
+                            ),
+                            assign(
+                                &total_length_name,
+                                add(
+                                    var(&total_length_name),
+                                    HirExpr::ArrayLen(Box::new(var(&inner_array_name))),
+                                ),
+                            ),
+                        ],
+                        Vec::new(),
                     ),
                     increment(&outer_index_name),
                 ],
@@ -465,41 +474,68 @@ impl<'a> FnLowerer<'a> {
                     Box::new(var(&outer_length_name)),
                 ),
                 vec![
-                    HirStmt::Let(
-                        inner_array_name.clone(),
-                        inner_array_type.clone(),
-                        load_inner(),
-                    ),
-                    HirStmt::Let(
-                        inner_length_name.clone(),
-                        HirType::F64,
-                        HirExpr::ArrayLen(Box::new(var(&inner_array_name))),
-                    ),
-                    HirStmt::Let(inner_index_name.clone(), HirType::F64, number(0.0)),
-                    HirStmt::While(
-                        HirExpr::BinOp(
-                            BinOp::Lt,
-                            Box::new(var(&inner_index_name)),
-                            Box::new(var(&inner_length_name)),
+                    HirStmt::If(
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                            vec![var(&receiver_name), var(&outer_index_name)],
                         ),
                         vec![
-                            HirStmt::Expr(HirExpr::IndexAssign(
-                                Box::new(var(&result_name)),
-                                Box::new(var(&destination_name)),
-                                Box::new(HirExpr::TypedIndex(
-                                    Box::new(var(&inner_array_name)),
+                            HirStmt::Let(
+                                inner_array_name.clone(),
+                                inner_array_type.clone(),
+                                load_inner(),
+                            ),
+                            HirStmt::Let(
+                                inner_length_name.clone(),
+                                HirType::F64,
+                                HirExpr::ArrayLen(Box::new(var(&inner_array_name))),
+                            ),
+                            HirStmt::Let(inner_index_name.clone(), HirType::F64, number(0.0)),
+                            HirStmt::While(
+                                HirExpr::BinOp(
+                                    BinOp::Lt,
                                     Box::new(var(&inner_index_name)),
-                                    element_type.clone(),
-                                )),
-                            )),
-                            increment(&inner_index_name),
-                            increment(&destination_name),
+                                    Box::new(var(&inner_length_name)),
+                                ),
+                                vec![
+                                    HirStmt::If(
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var(
+                                                "__thaw_array_has_index".into(),
+                                            )),
+                                            vec![
+                                                var(&inner_array_name),
+                                                var(&inner_index_name),
+                                            ],
+                                        ),
+                                        vec![
+                                            HirStmt::Expr(HirExpr::IndexAssign(
+                                                Box::new(var(&result_name)),
+                                                Box::new(var(&destination_name)),
+                                                Box::new(HirExpr::TypedIndex(
+                                                    Box::new(var(&inner_array_name)),
+                                                    Box::new(var(&inner_index_name)),
+                                                    element_type.clone(),
+                                                )),
+                                            )),
+                                            increment(&destination_name),
+                                        ],
+                                        Vec::new(),
+                                    ),
+                                    increment(&inner_index_name),
+                                ],
+                            ),
                         ],
+                        Vec::new(),
                     ),
                     increment(&outer_index_name),
                 ],
             ),
-            HirStmt::Return(Some(var(&result_name))),
+            HirStmt::Return(Some(HirExpr::ArraySetLen(
+                Box::new(var(&result_name)),
+                Box::new(var(&destination_name)),
+                element_type,
+            ))),
         ]);
         self.wrap_call_argument_bindings(body, &[(receiver_name, nested_array_type, receiver)])
     }
