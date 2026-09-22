@@ -2442,6 +2442,28 @@ fn shared_json_reviver_reconstructs_native_errors() {
     assert_eq!(call("reviveError", "[]"), "[true,\"TypeError\",\"bad\"]");
 }
 
+#[test]
+fn shared_json_reviver_reconstructs_well_known_symbol_values() {
+    assert_eq!(
+        load(
+            "function reviveSymbol() { const value = JSON.parse('[\"\\\\u001f@@iterator\"]', __thaw_json_date_reviver); return value[0] === Symbol.iterator; }"
+        ),
+        1
+    );
+    assert_eq!(call("reviveSymbol", "[]"), "true");
+}
+
+#[test]
+fn property_key_bridge_preserves_symbol_identity() {
+    assert_eq!(
+        load(
+            "function symbolPropertyKeys() { const object = {}; const wellKnown = __thaw_property_key('\\u001f@@iterator'); const first = __thaw_property_key('\\u00031:key'); const same = __thaw_property_key('\\u00031:key'); const other = __thaw_property_key('\\u00032:key'); object[wellKnown] = 1; object[first] = 2; return [wellKnown === Symbol.iterator, Reflect.has(object, Symbol.iterator), first === same, first !== other, object[same]]; }"
+        ),
+        1
+    );
+    assert_eq!(call("symbolPropertyKeys", "[]"), "[true,true,true,true,2]");
+}
+
 /// Regression guard for a previously-documented (2026-09-05,
 /// [[project_npm_interop_gaps_2]]) rquickjs/QuickJS-NG limitation: a
 /// function value reached through a *two-level* property chain

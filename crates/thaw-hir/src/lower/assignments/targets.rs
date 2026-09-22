@@ -54,11 +54,11 @@ impl<'a> FnLowerer<'a> {
             HirType::JsValue | HirType::Dynamic => {
                 let key = self.lower_expr(&computed.expr)?;
                 let key = match self.infer_expr_type(&key)? {
-                    HirType::Str | HirType::Dynamic => key,
+                    HirType::Str | HirType::Symbol | HirType::Dynamic => key,
                     HirType::F64 => self.coerce_primitive_to_string(key)?,
                     other => {
                         return Err(format!(
-                            "dynamic assignment key must be string or number, got {other:?}"
+                            "dynamic assignment key must be string, number, or symbol, got {other:?}"
                         ))
                     }
                 };

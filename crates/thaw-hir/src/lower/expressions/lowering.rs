@@ -829,7 +829,12 @@ impl<'a> FnLowerer<'a> {
                 let value = match bin.op {
                     BinaryOp::In => {
                         let right_type = self.infer_expr_type(&rhs)?;
-                        if matches!(right_type, HirType::Json | HirType::Dictionary(_)) {
+                        if matches!(right_type, HirType::JsValue | HirType::Dynamic) {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("hasDynamicProperty".into())),
+                                vec![rhs, lhs],
+                            )
+                        } else if matches!(right_type, HirType::Json | HirType::Dictionary(_)) {
                             let lhs = self.coerce_primitive_to_string(lhs)?;
                             let left_name = format!("__thaw_in_key_{}", self.next_binding);
                             self.next_binding += 1;
@@ -1078,6 +1083,21 @@ impl<'a> FnLowerer<'a> {
                     };
                     let object = self.lower_expr(&member.obj)?;
                     let object_type = self.infer_expr_type(&object)?;
+                    if matches!(object_type, HirType::JsValue | HirType::Dynamic) {
+                        let key = match &member.prop {
+                            MemberProp::Ident(property) => {
+                                HirExpr::Lit(HirLit::Str(property.sym.to_string()))
+                            }
+                            MemberProp::Computed(computed) => self.lower_expr(&computed.expr)?,
+                            MemberProp::PrivateName(_) => {
+                                return Err("native `delete` does not support private properties".into())
+                            }
+                        };
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("deleteDynamicProperty".into())),
+                            vec![object, key],
+                        ));
+                    }
                     if !matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         return Err(format!(
                             "native `delete` requires a JSON or dictionary receiver, got {object_type:?}"

@@ -188,7 +188,8 @@ impl<'a> FnLowerer<'a> {
             let old_name = format!("__thaw_update_dynamic_old_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(object_name.clone(), HirType::JsValue);
-            self.scope.insert(key_name.clone(), HirType::Str);
+            let key_type = self.infer_expr_type(&key)?;
+            self.scope.insert(key_name.clone(), key_type.clone());
             self.scope.insert(old_name.clone(), HirType::F64);
 
             let current = HirExpr::Call(
@@ -217,7 +218,7 @@ impl<'a> FnLowerer<'a> {
                 result,
                 &[
                     (object_name, HirType::JsValue, object),
-                    (key_name, HirType::Str, *key),
+                    (key_name, key_type, *key),
                     (old_name, HirType::F64, current),
                 ],
             );

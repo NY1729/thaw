@@ -1793,11 +1793,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let handle_result_type = self
             .context
             .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false);
-        self.module.add_function(
+        for name in [
             "thaw_js_get_property_result",
-            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
-            Some(Linkage::External),
-        );
+            "thaw_js_delete_property_result",
+            "thaw_js_has_property_result",
+        ] {
+            self.module.add_function(
+                name,
+                handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_js_retain_json_result",
             handle_result_type.fn_type(&[i8_ptr.into()], false),

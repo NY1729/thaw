@@ -32,7 +32,27 @@
   // like it already does for `Date`. Reviving it back to the real value
   // here, rather than a second Rust-side walk, reuses the exact same
   // hook this file already wires into every JSON-argument parse.
+  const thawSymbols = new Map();
+  globalThis.__thaw_property_key = (value) => {
+    if (typeof value !== 'string') return value;
+    if (value.startsWith('\u001f@@')) return Symbol[value.slice(3)] || value;
+    if (value.startsWith('__thaw_symbol_')) return Symbol[value.slice(14)] || value;
+    if (value.charCodeAt(0) !== 3) return value;
+    if (!thawSymbols.has(value)) {
+      const separator = value.indexOf(':');
+      thawSymbols.set(value, Symbol(separator < 0 ? undefined : value.slice(separator + 1)));
+    }
+    return thawSymbols.get(value);
+  };
   globalThis.__thaw_json_date_reviver = (key, value) => {
+    if (
+      typeof value === 'string' &&
+      (value.charCodeAt(0) === 3 ||
+        value.startsWith('\u001f@@') ||
+        value.startsWith('__thaw_symbol_'))
+    ) {
+      return globalThis.__thaw_property_key(value);
+    }
     if (typeof value === 'string' && value.charCodeAt(0) === 1) {
       const separator = value.indexOf('\u0001', 1);
       if (separator > 1) {
