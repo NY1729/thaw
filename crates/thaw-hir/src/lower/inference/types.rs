@@ -953,6 +953,19 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "error property receiver")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_error_suppress" => {
+                        let [error, suppressed, message] = args.as_slice() else {
+                            return Err(format!("{name} expects three operands"));
+                        };
+                        for (value, label) in [
+                            (error, "error"),
+                            (suppressed, "suppressed error"),
+                            (message, "SuppressedError message"),
+                        ] {
+                            self.expect_type(&HirType::Str, value, label)?;
+                        }
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_error_property" => {
                         let [receiver, key] = args.as_slice() else {
                             return Err(format!("{name} expects a receiver and a property name"));

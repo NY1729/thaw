@@ -39,9 +39,8 @@ const ERROR_NAME_OVERRIDE_MARKER: char = '\u{4}';
 /// Native `.message`/`.name` reads must ignore it.
 const ERROR_PROPS_MARKER: char = '\u{5}';
 /// A `SuppressedError`'s `.error` sub-error tag, appended after the message
-/// as `\u{1}SuppressedError\u{1}<message>\u{6}<error>\u{7}<suppressed>`.
-/// Nested error tags only use `\u{1}`-`\u{5}`, so `\u{6}`/`\u{7}` can't
-/// collide with one.
+/// as `\u{6}<byte length>:<error><suppressed>`. The length prefix preserves
+/// nested `SuppressedError` values without escaping or delimiter ambiguity.
 const ERROR_SUPPRESSED_ERROR_MARKER: char = '\u{6}';
 /// A `SuppressedError`'s `.suppressed` sub-error tag.
 const ERROR_SUPPRESSED_MARKER: char = '\u{7}';
@@ -118,6 +117,9 @@ fn split_error_code(message: &str) -> Option<&str> {
 /// A `SuppressedError`'s `.error` sub-error tag, or `None`.
 fn split_suppressed_error(message: &str) -> Option<&str> {
     let after = message.split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    if let Some((error, _)) = split_length_prefixed(after) {
+        return Some(error);
+    }
     let segment = after
         .split_once(ERROR_SUPPRESSED_MARKER)
         .map_or(after, |value| value.0);
@@ -130,12 +132,45 @@ fn split_suppressed_error(message: &str) -> Option<&str> {
 
 /// A `SuppressedError`'s `.suppressed` sub-error tag, or `None`.
 fn split_suppressed(message: &str) -> Option<&str> {
-    let after = message.split_once(ERROR_SUPPRESSED_MARKER)?.1;
+    let after_error = message.split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    if let Some((_, suppressed)) = split_length_prefixed(after_error) {
+        return Some(suppressed);
+    }
+    let after = after_error.split_once(ERROR_SUPPRESSED_MARKER)?.1;
     Some(
         after
             .split_once(ERROR_PROPS_MARKER)
             .map_or(after, |value| value.0),
     )
+}
+
+fn split_length_prefixed(value: &str) -> Option<(&str, &str)> {
+    let (length, body) = value.split_once(':')?;
+    let length = length.parse::<usize>().ok()?;
+    Some((body.get(..length)?, body.get(length..)?))
+}
+
+/// Builds the canonical, nesting-safe `SuppressedError` representation.
+///
+/// # Safety
+/// Every argument must be a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_suppress(
+    error: *const c_char,
+    suppressed: *const c_char,
+    message: *const c_char,
+) -> *const c_char {
+    if error.is_null() || suppressed.is_null() || message.is_null() {
+        return std::ptr::null();
+    }
+    let error = unsafe { CStr::from_ptr(error) }.to_string_lossy();
+    let suppressed = unsafe { CStr::from_ptr(suppressed) }.to_string_lossy();
+    let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    let tagged = format!(
+        "{ERROR_TAG_MARKER}SuppressedError{ERROR_TAG_MARKER}{message}{ERROR_SUPPRESSED_ERROR_MARKER}{}:{error}{suppressed}",
+        error.len()
+    );
+    arena_c_string(&tagged).map_or(std::ptr::null(), |value| value.cast())
 }
 
 /// Reads a caught error's own custom property from the trailing
@@ -565,6 +600,19 @@ mod error_native_tests {
             .into_owned()
     }
 
+    fn call_suppress(error: &str, suppressed: &str, message: &str) -> String {
+        let error = CString::new(error).unwrap();
+        let suppressed = CString::new(suppressed).unwrap();
+        let message = CString::new(message).unwrap();
+        let result = unsafe {
+            thaw_error_suppress(error.as_ptr(), suppressed.as_ptr(), message.as_ptr())
+        };
+        assert!(!result.is_null());
+        unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn a_suppressed_error_keeps_its_sub_errors_separate_from_its_message() {
         let tagged = "\u{1}SuppressedError\u{1}both\u{6}\u{1}Error\u{1}first\u{7}\u{1}TypeError\u{1}second";
@@ -575,6 +623,21 @@ mod error_native_tests {
         // A plain error has neither segment.
         assert_eq!(call_suppressed_error("boom"), "");
         assert_eq!(call_suppressed("\u{1}Error\u{1}x"), "");
+    }
+
+    #[test]
+    fn nested_suppressed_errors_round_trip_without_delimiter_collisions() {
+        let inner = call_suppress(
+            "\u{1}Error\u{1}first",
+            "\u{1}TypeError\u{1}second",
+            "inner",
+        );
+        let outer = call_suppress(&inner, "\u{1}RangeError\u{1}third", "outer");
+        assert_eq!(call_message(&outer), "outer");
+        assert_eq!(call_suppressed_error(&outer), inner);
+        assert_eq!(call_suppressed(&outer), "\u{1}RangeError\u{1}third");
+        assert_eq!(call_suppressed_error(&inner), "\u{1}Error\u{1}first");
+        assert_eq!(call_suppressed(&inner), "\u{1}TypeError\u{1}second");
     }
 
     #[test]
