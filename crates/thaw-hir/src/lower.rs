@@ -136,11 +136,16 @@ struct FnSignature {
     generic_return_pattern: Option<GenericTypePattern>,
 }
 
-fn expression_is_statically_sparse_array(expression: &Expr) -> bool {
+fn expression_is_statically_sparse_array(
+    expression: &Expr,
+    sparse_bindings: &HashSet<String>,
+) -> bool {
     match expression {
+        Expr::Ident(identifier) => sparse_bindings.contains(identifier.sym.as_ref()),
         Expr::Array(array) => array.elems.iter().any(|element| {
             element.as_ref().is_none_or(|element| {
-                element.spread.is_some() && expression_is_statically_sparse_array(&element.expr)
+                element.spread.is_some()
+                    && expression_is_statically_sparse_array(&element.expr, sparse_bindings)
             })
         }),
         Expr::Call(call) => match call.callee.as_expr().map(Box::as_ref) {
@@ -151,42 +156,59 @@ fn expression_is_statically_sparse_array(expression: &Expr) -> bool {
                         if matches!(property.sym.as_ref(), "slice" | "concat" | "map")
                 ) =>
             {
-                expression_is_statically_sparse_array(&member.obj)
+                expression_is_statically_sparse_array(&member.obj, sparse_bindings)
             }
             _ => false,
         },
         Expr::Cond(conditional) => {
-            expression_is_statically_sparse_array(&conditional.cons)
-                || expression_is_statically_sparse_array(&conditional.alt)
+            expression_is_statically_sparse_array(&conditional.cons, sparse_bindings)
+                || expression_is_statically_sparse_array(&conditional.alt, sparse_bindings)
         }
-        Expr::Paren(paren) => expression_is_statically_sparse_array(&paren.expr),
-        Expr::TsAs(assertion) => expression_is_statically_sparse_array(&assertion.expr),
-        Expr::TsSatisfies(assertion) => expression_is_statically_sparse_array(&assertion.expr),
-        Expr::TsNonNull(assertion) => expression_is_statically_sparse_array(&assertion.expr),
+        Expr::Paren(paren) => expression_is_statically_sparse_array(&paren.expr, sparse_bindings),
+        Expr::TsAs(assertion) => {
+            expression_is_statically_sparse_array(&assertion.expr, sparse_bindings)
+        }
+        Expr::TsSatisfies(assertion) => {
+            expression_is_statically_sparse_array(&assertion.expr, sparse_bindings)
+        }
+        Expr::TsNonNull(assertion) => {
+            expression_is_statically_sparse_array(&assertion.expr, sparse_bindings)
+        }
         _ => false,
     }
 }
 
 fn function_returns_sparse_array(function: &swc_ecma_ast::Function) -> bool {
-    struct SparseReturnVisitor(bool);
+    #[derive(Default)]
+    struct SparseReturnVisitor {
+        found: bool,
+        sparse_bindings: HashSet<String>,
+    }
 
     impl Visit for SparseReturnVisitor {
+        fn visit_var_declarator(&mut self, declarator: &swc_ecma_ast::VarDeclarator) {
+            if let (Pat::Ident(binding), Some(initializer)) = (&declarator.name, &declarator.init) {
+                if expression_is_statically_sparse_array(initializer, &self.sparse_bindings) {
+                    self.sparse_bindings.insert(binding.id.sym.to_string());
+                }
+            }
+        }
+
         fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
-            self.0 |= statement
-                .arg
-                .as_deref()
-                .is_some_and(expression_is_statically_sparse_array);
+            self.found |= statement.arg.as_deref().is_some_and(|expression| {
+                expression_is_statically_sparse_array(expression, &self.sparse_bindings)
+            });
         }
 
         fn visit_function(&mut self, _: &swc_ecma_ast::Function) {}
         fn visit_arrow_expr(&mut self, _: &swc_ecma_ast::ArrowExpr) {}
     }
 
-    let mut visitor = SparseReturnVisitor(false);
+    let mut visitor = SparseReturnVisitor::default();
     if let Some(body) = &function.body {
         body.visit_with(&mut visitor);
     }
-    visitor.0
+    visitor.found
 }
 
 #[derive(Clone)]
