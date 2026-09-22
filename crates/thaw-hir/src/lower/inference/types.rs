@@ -1100,6 +1100,8 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_zoned_start_of_day"
                     | "__thaw_temporal_zoned_hours_in_day"
                     | "__thaw_temporal_zoned_transition"
+                    | "__thaw_temporal_plain_to_zoned"
+                    | "__thaw_temporal_with_fields"
                     | "__thaw_temporal_plain_date_field"
                     | "__thaw_temporal_calendar_field" => return Ok(HirType::F64),
                     "__thaw_temporal_calendar_valid" => return Ok(HirType::Bool),

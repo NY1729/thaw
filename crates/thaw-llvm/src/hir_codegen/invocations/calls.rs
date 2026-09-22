@@ -400,6 +400,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal time zone transition returned no value".into());
             }
+            "__thaw_temporal_with_fields" => {
+                if args.len() != 12 {
+                    return Err(format!("{name} expects twelve operands"));
+                }
+                let values = args
+                    .iter()
+                    .map(|value| self.compile_expr(value).map(Into::into))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_temporal_with_fields").unwrap(),
+                        &values,
+                        "temporal_with_fields",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal field replacement returned no value".into());
+            }
             "__thaw_temporal_zoned_to_string" | "__thaw_temporal_zoned_offset" => {
                 let [milliseconds, nanoseconds, zone] = args else {
                     return Err(format!("{name} expects three operands"));
@@ -421,7 +441,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal zoned string conversion returned no value".into());
             }
-            "__thaw_temporal_zoned_field" | "__thaw_temporal_zoned_plain_timestamp" => {
+            "__thaw_temporal_zoned_field"
+            | "__thaw_temporal_zoned_plain_timestamp"
+            | "__thaw_temporal_plain_to_zoned" => {
                 let [milliseconds, nanoseconds, zone, field] = args else {
                     return Err(format!("{name} expects four operands"));
                 };
