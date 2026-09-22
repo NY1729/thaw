@@ -1144,7 +1144,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_temporal_with_fields",
-            f64_type.fn_type(&vec![f64_type.into(); 12], false),
+            f64_type.fn_type(&[f64_type.into(); 12], false),
             Some(Linkage::External),
         );
         for name in [
