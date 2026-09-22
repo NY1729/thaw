@@ -1137,11 +1137,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 if args.len() != 3 {
                     return Err("array search expects three operands".to_string());
                 }
-                let mut arguments = Vec::with_capacity(3);
+                let mut arguments = Vec::with_capacity(4);
                 for (index, argument) in args.iter().enumerate() {
                     let mut value = self.compile_expr(argument)?;
                     if index == 0 {
-                        value = self.compile_array_data(value.into_pointer_value())?.into();
+                        let handle = value.into_pointer_value();
+                        value = self.compile_array_data(handle)?.into();
+                        arguments.push(value.into());
+                        arguments.push(self.compile_array_presence(handle)?.into());
+                        continue;
                     }
                     if index == 1 && name.starts_with("__thaw_bool_array_") {
                         value = self
