@@ -213,7 +213,7 @@ fn with_compiled_regex<T>(
 }
 
 /// Wraps a freshly built native `[length][elem...]` array/tuple `buffer` in
-/// a one-word "handle" cell, matching thaw-llvm's `compile_array_wrap` --
+/// a two-word handle cell, matching thaw-llvm's `compile_array_wrap` --
 /// every `Array`/`Tuple` value is a handle now, including one built
 /// entirely in Rust like `matchAll`'s per-match capture array, since it
 /// becomes an *element* of the outer matches array and gets indexed back
@@ -223,11 +223,14 @@ fn wrap_array_handle(buffer: *mut u8) -> *mut u8 {
     if buffer.is_null() {
         return std::ptr::null_mut();
     }
-    let handle = thaw_arena::thaw_arena_alloc(8, 8);
+    let handle = thaw_arena::thaw_arena_alloc(16, 8);
     if handle.is_null() {
         return std::ptr::null_mut();
     }
-    unsafe { handle.cast::<*mut u8>().write_unaligned(buffer) };
+    unsafe {
+        handle.cast::<*mut u8>().write_unaligned(buffer);
+        handle.add(8).cast::<*mut u8>().write_unaligned(std::ptr::null_mut());
+    }
     handle
 }
 
