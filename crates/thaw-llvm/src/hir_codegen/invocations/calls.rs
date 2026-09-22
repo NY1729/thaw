@@ -889,6 +889,17 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string());
             }
+            "__thaw_exception_object_present" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let value = self.compile_expr(value)?.into_pointer_value();
+                return self
+                    .builder
+                    .build_is_not_null(value, "exception_object_present")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_pending_exception_tag"
             | "__thaw_pending_exception_f64"
             | "__thaw_pending_exception_i64"

@@ -4444,6 +4444,41 @@ fn catch_preserves_arbitrary_object_identity_through_typed_assertions() {
 }
 
 #[test]
+fn invalid_catch_object_assertions_throw_instead_of_dereferencing_null() {
+    let source = r#"
+        interface Failure { code: number; }
+
+        function checkSync(): void {
+            try {
+                try {
+                    throw "plain string";
+                } catch (error) {
+                    console.log((error as Failure).code);
+                }
+            } catch (error) {
+                console.log(error);
+            }
+        }
+
+        async function main(): Promise<void> {
+            checkSync();
+            try {
+                await Promise.reject<number>("plain string").catch(error => {
+                    console.log((error as Failure).code);
+                    return 0;
+                });
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "invalid_catch_object_assertion"),
+        "caught value is not an object\ncaught value is not an object\n"
+    );
+}
+
+#[test]
 fn catch_preserves_typed_primitive_values() {
     let source = r#"
         function throwNumber(): void { throw 42; }
@@ -4669,6 +4704,51 @@ fn promise_reject_preserves_typed_values() {
     assert_eq!(
         compile_and_run(source, "promise_reject_preserves_typed_values"),
         "number 42\nobject true 42\nstring later\nstring constructor\n"
+    );
+}
+
+#[test]
+fn named_promise_rejection_callbacks_preserve_typed_values() {
+    let source = r#"
+        interface Failure { code: number; }
+        let failure: Failure = { code: 41 };
+        function recoverNumber(error: unknown): number {
+            console.log(typeof error, (error as number) + 1);
+            return 42;
+        }
+        function recoverObject(error: unknown): number {
+            const caught = error as Failure;
+            console.log(typeof error, caught === failure, caught.code + 1);
+            return 43;
+        }
+        function rethrow(error: unknown): number {
+            throw error;
+            return 0;
+        }
+        async function failObject(): Promise<number> {
+            throw failure;
+        }
+        async function main(): Promise<void> {
+            console.log(await Promise.reject<number>(41).catch(recoverNumber));
+            console.log(await Promise.reject<number>(failure).then(undefined, recoverObject));
+            console.log(await Promise.all([Promise.reject<number>(41)])
+                .then(values => values[0])
+                .catch(recoverNumber));
+            console.log(await failObject().catch(recoverObject));
+            try {
+                await Promise.reject<number>(failure).catch(rethrow);
+            } catch (error) {
+                const caught = error as Failure;
+                console.log(typeof error, caught === failure, caught.code + 1);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(
+            source,
+            "named_promise_rejection_callbacks_preserve_typed_values"
+        ),
+        "number 42\n42\nobject true 42\n43\nnumber 42\n42\nobject true 42\n43\nobject true 42\n"
     );
 }
 
