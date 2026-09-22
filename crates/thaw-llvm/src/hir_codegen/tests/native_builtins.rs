@@ -3383,11 +3383,15 @@ fn compiles_temporal_duration_components() {
             console.log(neg.minutes, neg.abs().minutes);
             console.log(un.add({ minutes: 30 }).minutes);
             console.log(un.add({ minutes: 30 }).hours);
+            console.log(un.toString());
+            console.log(un.add({ minutes: 30 }).toString());
+            console.log(Temporal.Duration.from("PT90M").minutes, Temporal.Duration.from("PT90M").toString());
+            console.log(Temporal.Duration.from("PT1.5S").toString());
         }
     "#;
     assert_eq!(
         compile_and_run(source, "temporal_duration_components"),
-        "2 30 0\n90 0\n1 2 3 4\n-90 0\n90\n-90 90\n120\n0\n"
+        "2 30 0\n90 0\n1 2 3 4\n-90 0\n90\n-90 90\n120\n0\nPT90M\nPT120M\n90 PT90M\nPT1.5S\n"
     );
 }
 

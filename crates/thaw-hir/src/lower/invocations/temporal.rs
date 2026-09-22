@@ -459,14 +459,28 @@ impl<'a> FnLowerer<'a> {
                     let [value] = arguments.as_slice() else {
                         return Err(format!("`{label}` expects exactly one argument"));
                     };
+                    let value_type = self.infer_expr_type(value)?;
                     let (milliseconds, nanoseconds) =
                         self.temporal_duration_operand(value.clone())?;
-                    // An object-literal input keeps its own component
-                    // breakdown (so `{ minutes: 90 }` reports 90); a string
-                    // or a native duration is normalized from its total.
-                    let components = match value {
+                    // An object-literal or ISO-string input keeps its own
+                    // component breakdown (so `{ minutes: 90 }` and
+                    // `"PT90M"` report 90); a native duration is normalized
+                    // from its total.
+                    let components = match &value {
                         HirExpr::ObjectLit(fields) => {
                             self.duration_components_from_fields(fields)?
+                        }
+                        _ if value_type == HirType::Str => {
+                            let text = self.coerce_primitive_to_string(value.clone())?;
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("JSON.parse".into())),
+                                vec![HirExpr::Call(
+                                    Box::new(HirExpr::Var(
+                                        "__thaw_temporal_duration_components_json".into(),
+                                    )),
+                                    vec![text],
+                                )],
+                            )
                         }
                         _ => self.duration_components_from_ms(&milliseconds, &nanoseconds)?,
                     };
@@ -667,6 +681,16 @@ impl<'a> FnLowerer<'a> {
             "toString" | "toJSON" => {
                 if !arguments.is_empty() {
                     return Err(format!("`{label}` expects no arguments"));
+                }
+                if kind == "duration" {
+                    // Format from the stored components, so an unnormalized
+                    // duration prints unnormalized.
+                    return Ok(Some(HirExpr::Call(
+                        Box::new(HirExpr::Var(
+                            "__thaw_temporal_duration_to_string_components".into(),
+                        )),
+                        vec![Self::temporal_components(receiver, &receiver_type)],
+                    )));
                 }
                 match &time_zone {
                     Some(zone) => HirExpr::Call(
