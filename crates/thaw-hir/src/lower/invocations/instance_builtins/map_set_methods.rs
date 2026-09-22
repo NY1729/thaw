@@ -465,13 +465,7 @@ impl<'a> FnLowerer<'a> {
                             ))
                         }
                     };
-                    return Ok(HirExpr::TypedClosure(
-                        HirType::Array(Box::new(key_type)),
-                        Box::new(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_map_snapshot_keys".to_string())),
-                            vec![receiver],
-                        )),
-                    ));
+                    return self.lower_map_iterator(receiver, receiver_type, key_type, 0.0);
                 }
                 if property.sym == *"values" {
                     let receiver = self.lower_expr(&member.obj)?;
@@ -486,14 +480,12 @@ impl<'a> FnLowerer<'a> {
                             element_type.as_ref().clone(),
                         );
                     }
-                    let (value_type, intrinsic) = match &receiver_type {
-                        HirType::Map(_, value_type) => {
-                            (value_type.as_ref().clone(), "__thaw_map_snapshot_values")
-                        }
+                    let (value_type, mode) = match &receiver_type {
+                        HirType::Map(_, value_type) => (value_type.as_ref().clone(), 1.0),
                         // A Set's elements ARE its "values" -- it has no
                         // separate value to snapshot.
                         HirType::Set(element_type) => {
-                            (element_type.as_ref().clone(), "__thaw_map_snapshot_keys")
+                            (element_type.as_ref().clone(), 0.0)
                         }
                         other => {
                             return Err(format!(
@@ -501,13 +493,7 @@ impl<'a> FnLowerer<'a> {
                             ))
                         }
                     };
-                    return Ok(HirExpr::TypedClosure(
-                        HirType::Array(Box::new(value_type)),
-                        Box::new(HirExpr::Call(
-                            Box::new(HirExpr::Var(intrinsic.to_string())),
-                            vec![receiver],
-                        )),
-                    ));
+                    return self.lower_map_iterator(receiver, receiver_type, value_type, mode);
                 }
                 if property.sym == *"entries" {
                     let receiver = self.lower_expr(&member.obj)?;
@@ -519,14 +505,14 @@ impl<'a> FnLowerer<'a> {
                         let element_type = element_type.as_ref().clone();
                         return self.lower_array_entries(receiver, receiver_type, element_type);
                     }
-                    let (pair_type, intrinsic) = match &receiver_type {
+                    let (pair_type, mode) = match &receiver_type {
                         HirType::Map(key_type, value_type) => (
                             HirType::Tuple(vec![key_type.as_ref().clone(), value_type.as_ref().clone()]),
-                            "__thaw_map_snapshot_entries",
+                            2.0,
                         ),
                         HirType::Set(element_type) => (
                             HirType::Tuple(vec![element_type.as_ref().clone(), element_type.as_ref().clone()]),
-                            "__thaw_set_snapshot_entries",
+                            3.0,
                         ),
                         other => {
                             return Err(format!(
@@ -534,14 +520,140 @@ impl<'a> FnLowerer<'a> {
                             ))
                         }
                     };
-                    return Ok(HirExpr::TypedClosure(
-                        HirType::Array(Box::new(pair_type)),
-                        Box::new(HirExpr::Call(
-                            Box::new(HirExpr::Var(intrinsic.to_string())),
-                            vec![receiver],
-                        )),
-                    ));
+                    return self.lower_map_iterator(receiver, receiver_type, pair_type, mode);
                 }
         unreachable!("instance builtin category was checked before lowering")
+    }
+
+    fn lower_map_iterator(
+        &mut self,
+        receiver: HirExpr,
+        receiver_type: HirType,
+        yielded_type: HirType,
+        mode: f64,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_map_iterator_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let cursor_name = format!("__thaw_map_iterator_cursor_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_name = format!("__thaw_map_iterator_result_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_type = HirType::Tuple(vec![HirType::F64, yielded_type.clone()]);
+        let generated_type = HirType::Array(Box::new(yielded_type.clone()));
+        let producer_type = generator_function_type(
+            false,
+            yielded_type.clone(),
+            HirType::Undefined,
+            HirType::Undefined,
+        );
+        let params = [HirType::I64, HirType::Str, HirType::Undefined]
+            .into_iter()
+            .chain(std::iter::repeat_n(
+                HirType::Array(Box::new(HirType::Undefined)),
+                3,
+            ))
+            .enumerate()
+            .map(|(index, ty)| HirParam {
+                name: format!("__thaw_map_iterator_arg_{index}_{}", self.next_binding),
+                ty,
+            })
+            .collect::<Vec<_>>();
+        self.next_binding += 1;
+        let control_name = params[0].name.clone();
+        let var = |name: &str| HirExpr::Var(name.into());
+        let done = || HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())));
+        let producer = HirExpr::Lambda(
+            vec![
+                HirParam {
+                    name: receiver_name.clone(),
+                    ty: receiver_type.clone(),
+                },
+                HirParam {
+                    name: cursor_name.clone(),
+                    ty: HirType::F64,
+                },
+            ],
+            params,
+            generated_type,
+            Box::new(HirExpr::Block(vec![
+                HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(var(&control_name)),
+                        Box::new(HirExpr::Lit(HirLit::I64(0))),
+                    ),
+                    Vec::new(),
+                    vec![done()],
+                ),
+                HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::Lt,
+                        Box::new(var(&cursor_name)),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    ),
+                    vec![done()],
+                    Vec::new(),
+                ),
+                HirStmt::Let(
+                    result_name.clone(),
+                    result_type.clone(),
+                    HirExpr::TypedClosure(
+                        result_type,
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_map_iterator_next".into())),
+                            vec![
+                                var(&receiver_name),
+                                var(&cursor_name),
+                                HirExpr::Lit(HirLit::F64(mode)),
+                            ],
+                        )),
+                    ),
+                ),
+                HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::ArrayLen(Box::new(var(&result_name)))),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    ),
+                    vec![
+                        HirStmt::Expr(HirExpr::Assign(
+                            cursor_name.clone(),
+                            Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+                        )),
+                        done(),
+                    ],
+                    Vec::new(),
+                ),
+                HirStmt::Expr(HirExpr::Assign(
+                    cursor_name.clone(),
+                    Box::new(HirExpr::TypedIndex(
+                        Box::new(var(&result_name)),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        HirType::F64,
+                    )),
+                )),
+                HirStmt::Return(Some(HirExpr::ArrayLit(vec![HirExpr::TypedIndex(
+                    Box::new(var(&result_name)),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    yielded_type,
+                )]))),
+            ])),
+        );
+        let iterator = HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                vec![HirParam {
+                    name: receiver_name.clone(),
+                    ty: receiver_type.clone(),
+                }],
+                Vec::new(),
+                producer_type,
+                Box::new(HirExpr::Block(vec![
+                    HirStmt::Let(cursor_name, HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+                    HirStmt::Return(Some(producer)),
+                ])),
+            )),
+            Vec::new(),
+        );
+        self.wrap_call_argument_bindings(iterator, &[(receiver_name, receiver_type, receiver)])
     }
 }

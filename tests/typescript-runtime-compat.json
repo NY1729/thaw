@@ -864,6 +864,11 @@
       "name": "array iterators are lazy and retain sparse holes",
       "expect": "matched",
       "source": "function main(): void { const source: number[] = [1, , 3]; const values = source.values(); let step = values.next(); console.log(step.value, step.done); source.push(4); step = values.next(); console.log(step.value, step.done); step = values.next(); console.log(step.value, step.done); step = values.next(); console.log(step.value, step.done); step = values.next(); console.log(step.value, step.done); source.push(5); step = values.next(); console.log(step.value, step.done); const entries = source.entries(); const first = entries.next().value!; console.log(first[0], first[1]); const second = entries.next().value!; console.log(second[0], second[1]); const keys = source.keys(); console.log(keys.next().value, keys.next().value); }"
+    },
+    {
+      "name": "map and set iterators are lazy across mutations",
+      "expect": "matched",
+      "source": "function main(): void { const map = new Map<string, number>([['a', 1], ['b', 2], ['c', 3]]); const keys = map.keys(); console.log(keys.next().value); map.delete('b'); console.log(keys.next().value); map.set('d', 4); console.log(keys.next().value); map.clear(); map.set('e', 5); console.log(keys.next().value); console.log(keys.next().done); map.set('f', 6); console.log(keys.next().done); const set = new Set<number>([7]); const entries = set.entries(); const entry = entries.next().value!; console.log(entry[0], entry[1]); set.add(8); console.log(entries.next().value![0]); }"
     }
   ]
 }

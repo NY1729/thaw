@@ -1189,6 +1189,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
             }
+            "__thaw_map_iterator_next" => {
+                let [map, cursor, mode] = args else {
+                    return Err("map iterator next expects three operands".into());
+                };
+                let map = self.compile_expr(map)?;
+                let cursor = self.compile_expr(cursor)?;
+                let mode = self.compile_expr(mode)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_map_iterator_next").unwrap(),
+                        &[map.into(), cursor.into(), mode.into()],
+                        "map_iterator_next",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("map iterator next returned no value")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
             "__thaw_map_size" => {
                 let [map] = args else {
                     return Err("Map/Set size expects one operand".into());
