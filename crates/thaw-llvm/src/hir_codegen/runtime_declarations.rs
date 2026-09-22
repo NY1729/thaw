@@ -38,6 +38,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .add_function(name, unary_f64_type, Some(Linkage::External));
         }
         self.module.add_function(
+            "thaw_error_suppress",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_i64_to_string",
             i8_ptr.fn_type(&[i64_type.into()], false),
             Some(Linkage::External),

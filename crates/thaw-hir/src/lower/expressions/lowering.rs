@@ -1972,10 +1972,8 @@ impl<'a> FnLowerer<'a> {
                     }
                     if class.sym == *"SuppressedError" {
                         // `new SuppressedError(error, suppressed, message?)`.
-                        // The exception channel is a single tagged string, so
-                        // both sub-errors are appended after the message
-                        // (`\u{6}<error>\u{7}<suppressed>`) for `.error`/
-                        // `.suppressed` to recover.
+                        // The runtime owns the length-prefixed representation
+                        // so nested SuppressedErrors remain unambiguous.
                         let args = new_expr.args.clone().unwrap_or_default();
                         if args.iter().any(|argument| argument.spread.is_some()) {
                             return Err(
@@ -1999,24 +1997,10 @@ impl<'a> FnLowerer<'a> {
                             }
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
-                        let concat = |left: HirExpr, right: HirExpr| {
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                                vec![left, right],
-                            )
-                        };
-                        let tag = HirExpr::Lit(HirLit::Str("\u{1}SuppressedError\u{1}".to_string()));
-                        let head = concat(tag, message);
-                        let head = concat(
-                            head,
-                            HirExpr::Lit(HirLit::Str("\u{6}".to_string())),
-                        );
-                        let head = concat(head, error);
-                        let head = concat(
-                            head,
-                            HirExpr::Lit(HirLit::Str("\u{7}".to_string())),
-                        );
-                        return Ok(concat(head, suppressed));
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_suppress".to_string())),
+                            vec![error, suppressed, message],
+                        ));
                     }
                     if class.sym == *"AggregateError" {
                         // `new AggregateError(errors, message?, options?)`.
