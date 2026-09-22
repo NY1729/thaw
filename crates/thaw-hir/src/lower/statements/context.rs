@@ -181,7 +181,16 @@ impl<'a> FnLowerer<'a> {
                     if matches!(
                         &member.prop,
                         MemberProp::Ident(property)
-                            if matches!(property.sym.as_ref(), "slice" | "concat" | "map")
+                            if matches!(
+                                property.sym.as_ref(),
+                                "slice"
+                                    | "concat"
+                                    | "map"
+                                    | "toReversed"
+                                    | "toSorted"
+                                    | "toSpliced"
+                                    | "with"
+                            )
                     ) => self.expression_may_be_sparse_array(&member.obj),
                 Some(Expr::Member(member)) => member_property_name(&member.prop).is_some_and(|method| {
                     let instance_symbol = || {
