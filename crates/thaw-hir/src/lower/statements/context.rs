@@ -47,6 +47,7 @@ impl<'a> FnLowerer<'a> {
             nullable_narrowings: HashMap::new(),
             nullish_narrowings: HashMap::new(),
             json_narrowings: HashMap::new(),
+            exception_object_narrowings: HashMap::new(),
             union_narrowings: HashMap::new(),
             union_discriminants: HashMap::new(),
             array_element_discriminants: HashMap::new(),

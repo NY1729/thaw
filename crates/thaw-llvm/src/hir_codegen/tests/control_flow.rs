@@ -1100,7 +1100,7 @@ fn explicit_this_name_assignment_overrides_the_default_and_is_observable_when_ca
 }
 
 #[test]
-fn as_cast_reads_a_caught_errors_field_after_instanceof_narrowing() {
+fn instanceof_narrows_a_caught_error_to_its_object_type() {
     let source = r#"
         class MyError extends Error {
             code: number;
@@ -1114,7 +1114,7 @@ fn as_cast_reads_a_caught_errors_field_after_instanceof_narrowing() {
                 throw new MyError("bad thing", 42);
             } catch (e) {
                 if (e instanceof MyError) {
-                    console.log((e as MyError).code);
+                    console.log(e.code);
                 }
                 console.log(e.message);
             }
@@ -1127,7 +1127,7 @@ fn as_cast_reads_a_caught_errors_field_after_instanceof_narrowing() {
 }
 
 #[test]
-fn instanceof_guard_skips_the_as_cast_for_an_unrelated_thrown_value() {
+fn instanceof_guard_skips_object_access_for_an_unrelated_thrown_value() {
     let source = r#"
         class MyError extends Error {
             code: number;
@@ -1141,7 +1141,7 @@ fn instanceof_guard_skips_the_as_cast_for_an_unrelated_thrown_value() {
                 throw "plain string";
             } catch (e) {
                 if (e instanceof MyError) {
-                    console.log((e as MyError).code);
+                    console.log(e.code);
                 } else {
                     console.log("not a MyError");
                 }
