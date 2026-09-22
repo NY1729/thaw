@@ -190,6 +190,11 @@ impl<'a> FnLowerer<'a> {
                                     | "toSorted"
                                     | "toSpliced"
                                     | "with"
+                                    | "reverse"
+                                    | "sort"
+                                    | "copyWithin"
+                                    | "fill"
+                                    | "splice"
                             )
                     ) => self.expression_may_be_sparse_array(&member.obj),
                 Some(Expr::Member(member)) => member_property_name(&member.prop).is_some_and(|method| {
