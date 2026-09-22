@@ -839,6 +839,11 @@
       "name": "sparse array callback returns preserve holes across iteration",
       "expect": "matched",
       "source": "function inspect(factory: () => number[]): void { const source = factory(); for (const value of source.values()) console.log('value', value, typeof value); for (const [index, value] of source.entries()) console.log('entry', index, value, typeof value); } function main(): void { inspect((): number[] => [1, , 3]); }"
+    },
+    {
+      "name": "awaited sparse array returns preserve holes across iteration",
+      "expect": "matched",
+      "source": "async function makeValues(): Promise<number[]> { return [1, , 3]; } async function main(): Promise<void> { const pending = makeValues(); const source = await pending; for (const value of source.values()) console.log('value', value, typeof value); for (const [index, value] of source.entries()) console.log('entry', index, value, typeof value); }"
     }
   ]
 }

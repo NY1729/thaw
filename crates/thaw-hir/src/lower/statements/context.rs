@@ -169,6 +169,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 _ => false,
             },
+            Expr::Await(awaited) => self.expression_may_be_sparse_array(&awaited.arg),
             Expr::Paren(paren) => self.expression_may_be_sparse_array(&paren.expr),
             Expr::TsAs(assertion) => self.expression_may_be_sparse_array(&assertion.expr),
             Expr::TsSatisfies(assertion) => self.expression_may_be_sparse_array(&assertion.expr),
