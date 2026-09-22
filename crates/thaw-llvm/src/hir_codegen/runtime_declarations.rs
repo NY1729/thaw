@@ -492,7 +492,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let parse_int_type = f64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false);
         self.module
             .add_function("thaw_parse_int", parse_int_type, Some(Linkage::External));
-        let array_to_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        let array_to_string_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         for name in [
             "thaw_number_array_to_string",
             "thaw_string_array_to_string",
@@ -502,7 +502,8 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, array_to_string_type, Some(Linkage::External));
         }
-        let array_join_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        let array_join_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false);
         for name in [
             "thaw_number_array_join",
             "thaw_string_array_join",

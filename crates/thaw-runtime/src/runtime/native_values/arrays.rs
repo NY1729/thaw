@@ -1345,8 +1345,11 @@ pub unsafe extern "C" fn thaw_jit_array_with(
 /// # Safety
 ///
 /// `array` must point to a Thaw array containing `f64` element slots.
-pub unsafe extern "C" fn thaw_number_array_to_string(array: *const u8) -> *const c_char {
-    unsafe { thaw_number_array_join(array, c",".as_ptr()) }
+pub unsafe extern "C" fn thaw_number_array_to_string(
+    array: *const u8,
+    presence: *const u8,
+) -> *const c_char {
+    unsafe { thaw_number_array_join(array, presence, c",".as_ptr()) }
 }
 
 #[no_mangle]
@@ -1356,6 +1359,7 @@ pub unsafe extern "C" fn thaw_number_array_to_string(array: *const u8) -> *const
 /// `separator` must point to a valid NUL-terminated C string.
 pub unsafe extern "C" fn thaw_number_array_join(
     array: *const u8,
+    presence: *const u8,
     separator: *const c_char,
 ) -> *const c_char {
     let Some(length) = (unsafe { native_array_length(array) }) else {
@@ -1370,6 +1374,9 @@ pub unsafe extern "C" fn thaw_number_array_join(
         if index != 0 {
             result.push_str(&separator);
         }
+        if !unsafe { array_index_present(presence, index) } {
+            continue;
+        }
         let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
         result.push_str(&javascript_number_string(slot));
     }
@@ -1380,8 +1387,11 @@ pub unsafe extern "C" fn thaw_number_array_join(
 /// # Safety
 ///
 /// `array` must point to a Thaw array containing C-string pointer slots.
-pub unsafe extern "C" fn thaw_string_array_to_string(array: *const u8) -> *const c_char {
-    unsafe { thaw_string_array_join(array, c",".as_ptr()) }
+pub unsafe extern "C" fn thaw_string_array_to_string(
+    array: *const u8,
+    presence: *const u8,
+) -> *const c_char {
+    unsafe { thaw_string_array_join(array, presence, c",".as_ptr()) }
 }
 
 #[no_mangle]
@@ -1391,6 +1401,7 @@ pub unsafe extern "C" fn thaw_string_array_to_string(array: *const u8) -> *const
 /// `separator` must point to a valid NUL-terminated C string.
 pub unsafe extern "C" fn thaw_string_array_join(
     array: *const u8,
+    presence: *const u8,
     separator: *const c_char,
 ) -> *const c_char {
     let Some(length) = (unsafe { native_array_length(array) }) else {
@@ -1404,6 +1415,9 @@ pub unsafe extern "C" fn thaw_string_array_join(
     for index in 0..length {
         if index != 0 {
             result.push_str(&separator);
+        }
+        if !unsafe { array_index_present(presence, index) } {
+            continue;
         }
         let slot = unsafe {
             array
@@ -1422,8 +1436,11 @@ pub unsafe extern "C" fn thaw_string_array_join(
 /// # Safety
 ///
 /// `array` must point to a Thaw array containing boolean element slots.
-pub unsafe extern "C" fn thaw_bool_array_to_string(array: *const u8) -> *const c_char {
-    unsafe { thaw_bool_array_join(array, c",".as_ptr()) }
+pub unsafe extern "C" fn thaw_bool_array_to_string(
+    array: *const u8,
+    presence: *const u8,
+) -> *const c_char {
+    unsafe { thaw_bool_array_join(array, presence, c",".as_ptr()) }
 }
 
 #[no_mangle]
@@ -1433,6 +1450,7 @@ pub unsafe extern "C" fn thaw_bool_array_to_string(array: *const u8) -> *const c
 /// `separator` must point to a valid NUL-terminated C string.
 pub unsafe extern "C" fn thaw_bool_array_join(
     array: *const u8,
+    presence: *const u8,
     separator: *const c_char,
 ) -> *const c_char {
     let Some(length) = (unsafe { native_array_length(array) }) else {
@@ -1446,6 +1464,9 @@ pub unsafe extern "C" fn thaw_bool_array_join(
     for index in 0..length {
         if index != 0 {
             result.push_str(&separator);
+        }
+        if !unsafe { array_index_present(presence, index) } {
+            continue;
         }
         let slot = unsafe { array.add(8 + index * 8).read() };
         result.push_str(if slot == 0 { "false" } else { "true" });
@@ -1465,9 +1486,9 @@ pub unsafe extern "C" fn thaw_jit_array_format(
     separator: *const c_char,
 ) -> *const c_char {
     match operation {
-        0 => unsafe { thaw_number_array_join(array, separator) },
-        1 => unsafe { thaw_string_array_join(array, separator) },
-        2 => unsafe { thaw_bool_array_join(array, separator) },
+        0 => unsafe { thaw_number_array_join(array, std::ptr::null(), separator) },
+        1 => unsafe { thaw_string_array_join(array, std::ptr::null(), separator) },
+        2 => unsafe { thaw_bool_array_join(array, std::ptr::null(), separator) },
         _ => std::ptr::null(),
     }
 }
@@ -1476,8 +1497,11 @@ pub unsafe extern "C" fn thaw_jit_array_format(
 /// # Safety
 ///
 /// `array` must point to any valid Thaw array. Elements are fixed objects.
-pub unsafe extern "C" fn thaw_object_array_to_string(array: *const u8) -> *const c_char {
-    unsafe { thaw_object_array_join(array, c",".as_ptr()) }
+pub unsafe extern "C" fn thaw_object_array_to_string(
+    array: *const u8,
+    presence: *const u8,
+) -> *const c_char {
+    unsafe { thaw_object_array_join(array, presence, c",".as_ptr()) }
 }
 
 #[no_mangle]
@@ -1487,6 +1511,7 @@ pub unsafe extern "C" fn thaw_object_array_to_string(array: *const u8) -> *const
 /// and `separator` must point to a valid NUL-terminated C string.
 pub unsafe extern "C" fn thaw_object_array_join(
     array: *const u8,
+    presence: *const u8,
     separator: *const c_char,
 ) -> *const c_char {
     let Some(length) = (unsafe { native_array_length(array) }) else {
@@ -1496,7 +1521,14 @@ pub unsafe extern "C" fn thaw_object_array_join(
         return std::ptr::null();
     }
     let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let result = std::iter::repeat_n("[object Object]", length)
+    let result = (0..length)
+        .map(|index| {
+            if unsafe { array_index_present(presence, index) } {
+                "[object Object]"
+            } else {
+                ""
+            }
+        })
         .collect::<Vec<_>>()
         .join(&separator);
     arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())

@@ -37,11 +37,16 @@ fn compiles_native_array_join() {
             console.log(empty.join("ignored"));
             console.log((await delayed()).join("+"));
             console.log(orderedValues().join(await delayedSeparator()));
+            const sparseNumbers: number[] = [1, , 3];
+            const sparseFlags: boolean[] = [true, , false];
+            console.log(sparseNumbers.join("-"));
+            console.log(sparseFlags.join("|"));
+            console.log(String(sparseNumbers));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_join"),
-        "1,0,2.5\na--c\ntruefalse\n[object Object] / [object Object]\nreceiver-evaluated\nseparator-evaluated\n7 | x | false | 8,9\n\narray-awaited\n4+5+6\njoin-receiver\njoin-separator\n1|2\n"
+        "1,0,2.5\na--c\ntruefalse\n[object Object] / [object Object]\nreceiver-evaluated\nseparator-evaluated\n7 | x | false | 8,9\n\narray-awaited\n4+5+6\njoin-receiver\njoin-separator\n1|2\n1--3\ntrue||false\n1,,3\n"
     );
 }
 
