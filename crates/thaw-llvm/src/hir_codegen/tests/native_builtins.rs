@@ -3566,6 +3566,8 @@ fn compiles_arraybuffer_and_atomics() {
             resizable.resize(12);
             console.log(resizable.byteLength);
             const shared = new SharedArrayBuffer(8, { maxByteLength: 16 });
+            const sharedBytes = new Uint8Array(shared);
+            console.log(sharedBytes[0], sharedBytes[7]);
             console.log(shared.growable);
             shared.grow(12);
             console.log(shared.byteLength);
@@ -3576,7 +3578,7 @@ fn compiles_arraybuffer_and_atomics() {
     "#;
     assert_eq!(
         compile_and_run(source, "arraybuffer_atomics"),
-        "8 false\n16 true\n4\ntrue 16\n12\ntrue\n12\nfalse not-equal\n"
+        "8 false\n16 true\n4\ntrue 16\n12\n0 0\ntrue\n12\nfalse not-equal\n"
     );
 }
 

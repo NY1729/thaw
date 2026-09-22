@@ -23,27 +23,41 @@ fn cli_script(arguments: &[String]) -> Option<(usize, &str)> {
 /// Configures QuickJS's growable-`SharedArrayBuffer` allocator hooks,
 /// which quickjs-ng leaves unset by default (so `sab.grow(...)` throws
 /// "growable SharedArrayBuffer requires SAB allocator hooks"). thaw's
-/// runtime is single-threaded, so a refcounted allocation is enough.
+/// runtime can hand this storage to worker agents, so the allocation is
+/// zeroed and its ownership count is atomic.
 fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
-    use std::ffi::c_void;
+    use std::{
+        ffi::c_void,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     #[repr(C)]
     struct Header {
-        refcount: usize,
+        refcount: AtomicUsize,
         size: usize,
     }
 
     unsafe extern "C" fn allocate(_opaque: *mut c_void, size: u64) -> *mut c_void {
-        let size = size as usize;
-        let header = std::mem::size_of::<Header>();
-        let Ok(layout) = std::alloc::Layout::from_size_align(header + size, 16) else {
+        let Ok(size) = usize::try_from(size) else {
             return std::ptr::null_mut();
         };
-        let base = unsafe { std::alloc::alloc(layout) };
+        let header = std::mem::size_of::<Header>();
+        let Some(allocation_size) = header.checked_add(size) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(layout) = std::alloc::Layout::from_size_align(allocation_size, 16) else {
+            return std::ptr::null_mut();
+        };
+        let base = unsafe { std::alloc::alloc_zeroed(layout) };
         if base.is_null() {
             return std::ptr::null_mut();
         }
-        unsafe { (base as *mut Header).write(Header { refcount: 1, size }) };
+        unsafe {
+            (base as *mut Header).write(Header {
+                refcount: AtomicUsize::new(1),
+                size,
+            })
+        };
         unsafe { base.add(header).cast() }
     }
 
@@ -54,11 +68,12 @@ fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
         let header = std::mem::size_of::<Header>();
         let base = unsafe { (pointer as *mut u8).sub(header) };
         let entry = base as *mut Header;
-        unsafe { (*entry).refcount -= 1 };
-        if unsafe { (*entry).refcount } == 0 {
+        if unsafe { (*entry).refcount.fetch_sub(1, Ordering::AcqRel) } == 1 {
             let size = unsafe { (*entry).size };
-            if let Ok(layout) = std::alloc::Layout::from_size_align(header + size, 16) {
-                unsafe { std::alloc::dealloc(base, layout) };
+            if let Some(allocation_size) = header.checked_add(size) {
+                if let Ok(layout) = std::alloc::Layout::from_size_align(allocation_size, 16) {
+                    unsafe { std::alloc::dealloc(base, layout) };
+                }
             }
         }
     }
@@ -68,7 +83,11 @@ fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
             return;
         }
         let base = unsafe { (pointer as *mut u8).sub(std::mem::size_of::<Header>()) };
-        unsafe { (*(base as *mut Header)).refcount += 1 };
+        unsafe {
+            (*(base as *mut Header))
+                .refcount
+                .fetch_add(1, Ordering::Relaxed)
+        };
     }
 
     let functions = rquickjs::qjs::JSSharedArrayBufferFunctions {
