@@ -1238,6 +1238,61 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<Option<HirExpr>, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
+        if rhs_type == HirType::Undefined {
+            if let HirExpr::TypedIndex(array, index, _) = &lhs {
+                if let HirType::Array(element) = self.infer_expr_type(array)? {
+                    let array_expr = array.as_ref().clone();
+                    let index_expr = index.as_ref().clone();
+                    let array_name = format!("__thaw_index_array_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let index_name = format!("__thaw_index_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let array_type = HirType::Array(element);
+                    self.scope.insert(array_name.clone(), array_type.clone());
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    let array = HirExpr::Var(array_name.clone());
+                    let index = HirExpr::Var(index_name.clone());
+                    let in_bounds = self.lower_logical_expr(
+                        HirExpr::BinOp(
+                            BinOp::GtEq,
+                            Box::new(index.clone()),
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        ),
+                        HirExpr::BinOp(
+                            BinOp::Lt,
+                            Box::new(index.clone()),
+                            Box::new(HirExpr::ArrayLen(Box::new(array.clone()))),
+                        ),
+                        true,
+                    )?;
+                    let present = self.lower_logical_expr(
+                        in_bounds,
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                            vec![array, index],
+                        ),
+                        true,
+                    )?;
+                    let missing = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(present),
+                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                    );
+                    return self
+                        .wrap_call_argument_bindings(
+                            missing,
+                            &[
+                                (array_name, array_type, array_expr),
+                                (index_name, HirType::F64, index_expr),
+                            ],
+                        )
+                        .map(Some);
+                }
+            }
+        }
+        if lhs_type == HirType::Undefined && matches!(rhs, HirExpr::TypedIndex(_, _, _)) {
+            return self.lower_optional_undefined_equality(rhs, lhs);
+        }
         let result =
             match (&lhs_type, &rhs_type) {
                 (HirType::Optional(payload), HirType::Undefined) => Some(HirExpr::OptionalIsNone(

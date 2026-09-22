@@ -1373,13 +1373,12 @@ fn compiles_array_keys_values_entries() {
                 console.log(value);
             }
             const values = letters.values();
-            values[0] = "z";
-            console.log(values[0], letters[0]);
+            console.log(values.next().value, letters[0]);
             for (const [index, value] of letters.entries()) {
                 console.log(index + ":" + value);
             }
             const empty: number[] = [];
-            console.log(empty.keys().length);
+            console.log(empty.keys().next().done);
             // Chaining onto another array method's result.
             for (const [index, value] of letters.filter((s: string) => s !== "b").entries()) {
                 console.log(index + "=" + value);
@@ -1388,7 +1387,7 @@ fn compiles_array_keys_values_entries() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_keys_values_entries"),
-        "0\n1\n2\na\nb\nc\nz a\n0:a\n1:b\n2:c\n0\n0=a\n1=c\n"
+        "0\n1\n2\na\nb\nc\na a\n0:a\n1:b\n2:c\ntrue\n0=a\n1=c\n"
     );
 }
 

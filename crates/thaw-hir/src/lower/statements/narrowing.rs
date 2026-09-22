@@ -816,8 +816,14 @@ impl<'a> FnLowerer<'a> {
             .or_else(|| property_target(&binary.right).zip(literal_value(&binary.left)));
         if let Some(((identifier, property), literal)) = property_comparison {
             let name = self.resolve_binding(&identifier);
-            let HirType::Union(elements) = self.scope.get(&name)? else {
-                return None;
+            let ty = self.scope.get(&name)?;
+            let elements = match ty {
+                HirType::Union(elements) => elements,
+                HirType::Optional(payload) => match payload.as_ref() {
+                    HirType::Union(elements) => elements,
+                    _ => return None,
+                },
+                _ => return None,
             };
             let values = self.union_discriminants.get(&name)?.get(&property)?;
             if values.len() != elements.len() {
@@ -915,8 +921,13 @@ impl<'a> FnLowerer<'a> {
                 .collect::<Vec<_>>();
             return (!targets.is_empty()).then_some((targets, equal_when_true, true));
         }
-        let HirType::Union(elements) = self.scope.get(&name)? else {
-            return None;
+        let elements = match self.scope.get(&name)? {
+            HirType::Union(elements) => elements,
+            HirType::Optional(payload) => match payload.as_ref() {
+                HirType::Union(elements) => elements,
+                _ => return None,
+            },
+            _ => return None,
         };
         let allowed = self
             .union_narrowings
