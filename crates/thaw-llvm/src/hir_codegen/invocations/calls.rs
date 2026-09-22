@@ -707,6 +707,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("error property access returned no value".into());
             }
+            "__thaw_error_suppress" => {
+                let [error, suppressed, message] = args else {
+                    return Err(format!("{name} expects three operands"));
+                };
+                let values = [
+                    self.compile_expr(error)?.into(),
+                    self.compile_expr(suppressed)?.into(),
+                    self.compile_expr(message)?.into(),
+                ];
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_error_suppress").unwrap(),
+                        &values,
+                        "suppressed_error",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("SuppressedError construction returned no value".into());
+            }
             "__thaw_error_property" => {
                 let [receiver, key] = args else {
                     return Err("__thaw_error_property expects a receiver and a property name".into());

@@ -213,28 +213,17 @@ impl<'a> FnLowerer<'a> {
         Ok(lowered)
     }
 
-    /// A `SuppressedError` tag combining a new `error` with the `suppressed`
-    /// pending error: `\u{1}SuppressedError\u{1}<message>\u{6}<error>\u{7}
-    /// <suppressed>`, matching `new SuppressedError(error, suppressed)`.
+    /// A nesting-safe `SuppressedError` combining a new `error` with the
+    /// pending error, matching `new SuppressedError(error, suppressed)`.
     fn suppressed_error_expr(&self, error: HirExpr, suppressed: HirExpr) -> HirExpr {
-        let concat = |left: HirExpr, right: HirExpr| {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                vec![left, right],
-            )
-        };
         let message = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_error_message".to_string())),
             vec![error.clone()],
         );
-        let head = concat(
-            HirExpr::Lit(HirLit::Str("\u{1}SuppressedError\u{1}".to_string())),
-            message,
-        );
-        let head = concat(head, HirExpr::Lit(HirLit::Str("\u{6}".to_string())));
-        let head = concat(head, error);
-        let head = concat(head, HirExpr::Lit(HirLit::Str("\u{7}".to_string())));
-        concat(head, suppressed)
+        HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_suppress".to_string())),
+            vec![error, suppressed, message],
+        )
     }
 
     /// Dispose every resource even if an earlier disposer throws. When an
