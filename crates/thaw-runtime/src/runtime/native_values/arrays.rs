@@ -145,6 +145,24 @@ pub unsafe extern "C" fn thaw_array_reverse(array: *mut u8, element_width: usize
     array
 }
 
+#[no_mangle]
+/// Reverses an array presence mask in place.
+///
+/// # Safety
+/// `presence` must be null or point to a writable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_reverse(presence: *mut u8) -> *mut u8 {
+    if presence.is_null() {
+        return presence;
+    }
+    let length = unsafe { presence.cast::<u64>().read() as usize };
+    for left in 0..length / 2 {
+        unsafe {
+            std::ptr::swap(presence.add(8 + left), presence.add(8 + length - left - 1));
+        }
+    }
+    presence
+}
+
 fn relative_array_index(index: f64, length: usize) -> usize {
     if index.is_nan() || index == f64::NEG_INFINITY {
         return 0;
@@ -194,6 +212,31 @@ pub unsafe extern "C" fn thaw_array_copy_within(
         }
     }
     array
+}
+
+#[no_mangle]
+/// Applies `copyWithin` to an array presence mask.
+///
+/// # Safety
+/// `presence` must be null or point to a writable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_copy_within(
+    presence: *mut u8,
+    target: f64,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    if presence.is_null() {
+        return presence;
+    }
+    let length = unsafe { presence.cast::<u64>().read() as usize };
+    let target = relative_array_index(target, length);
+    let start = relative_array_index(start, length);
+    let end = relative_array_index(end, length);
+    let count = end.saturating_sub(start).min(length - target);
+    if count != 0 {
+        unsafe { std::ptr::copy(presence.add(8 + start), presence.add(8 + target), count) };
+    }
+    presence
 }
 
 unsafe fn fill_array_slots<T: Copy>(array: *mut u8, value: T, start: f64, end: f64) -> *mut u8 {
@@ -842,6 +885,66 @@ pub unsafe extern "C" fn thaw_array_splice(
                 tail_len * element_width,
             );
         }
+    }
+    output
+}
+
+#[no_mangle]
+/// Rebuilds the receiver and removed-value presence masks for `splice`.
+///
+/// # Safety
+/// `presence` must be null or point to a readable Thaw presence mask and
+/// `out_removed` must be writable for one pointer.
+pub unsafe extern "C" fn thaw_array_presence_splice(
+    presence: *const u8,
+    old_len: usize,
+    start: f64,
+    delete_count: f64,
+    insert_count: usize,
+    out_removed: *mut *mut u8,
+) -> *mut u8 {
+    if presence.is_null() {
+        unsafe { out_removed.write(std::ptr::null_mut()) };
+        return std::ptr::null_mut();
+    }
+    let mask_len = unsafe { presence.cast::<u64>().read() as usize };
+    let start = relative_array_index(start, old_len);
+    let delete_count = if delete_count.is_nan() {
+        0
+    } else {
+        (delete_count.max(0.0) as usize).min(old_len - start)
+    };
+    let new_len = old_len - delete_count + insert_count;
+    let removed = thaw_arena::thaw_arena_alloc(8 + delete_count, 1);
+    let output = thaw_arena::thaw_arena_alloc(8 + new_len, 1);
+    if removed.is_null() || output.is_null() {
+        unsafe { out_removed.write(std::ptr::null_mut()) };
+        return std::ptr::null_mut();
+    }
+    let present = |index: usize| unsafe {
+        if index < mask_len {
+            presence.add(8 + index).read()
+        } else {
+            1
+        }
+    };
+    unsafe {
+        removed.cast::<u64>().write(delete_count as u64);
+        for index in 0..delete_count {
+            removed.add(8 + index).write(present(start + index));
+        }
+        output.cast::<u64>().write(new_len as u64);
+        for index in 0..start {
+            output.add(8 + index).write(present(index));
+        }
+        std::ptr::write_bytes(output.add(8 + start), 1, insert_count);
+        let tail_start = start + delete_count;
+        for index in tail_start..old_len {
+            output
+                .add(8 + start + insert_count + index - tail_start)
+                .write(present(index));
+        }
+        out_removed.write(removed);
     }
     output
 }

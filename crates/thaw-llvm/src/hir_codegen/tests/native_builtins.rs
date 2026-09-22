@@ -3695,12 +3695,30 @@ fn compiles_array_holes() {
             let slicedVisited = 0;
             sliced.forEach(() => { slicedVisited += 1; });
             console.log(sliced.length, slicedVisited, sliced[1]);
+            const negativeSlice = spread.slice(-5, -1);
+            let negativeVisited = 0;
+            negativeSlice.forEach(() => { negativeVisited += 1; });
+            console.log(negativeSlice.length, negativeVisited, negativeSlice[1]);
+            const tail = [5, , ...[6]];
+            const combined = spread.concat(tail);
+            let combinedVisited = 0;
+            combined.forEach(() => { combinedVisited += 1; });
+            console.log(combined.length, combinedVisited, JSON.stringify(combined));
+            const reversed = combined.slice();
+            reversed.reverse();
+            console.log(JSON.stringify(reversed));
+            const copied = combined.slice();
+            copied.copyWithin(0, 6, 9);
+            console.log(JSON.stringify(copied));
+            const spliced = combined.slice();
+            const removed = spliced.splice(1, 3, 7);
+            console.log(JSON.stringify(spliced), JSON.stringify(removed));
             console.log(JSON.stringify(spread));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_holes"),
-        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n[0,null,1,2,null,4]\n"
+        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n4 2 1\n9 6 [0,null,1,2,null,4,5,null,6]\n[6,null,5,4,null,2,1,null,0]\n[5,null,6,2,null,4,5,null,6]\n[0,7,null,4,5,null,6] [null,1,2]\n[0,null,1,2,null,4]\n"
     );
 }
 

@@ -95,6 +95,27 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(BasicValueEnum::into_pointer_value)
     }
 
+    fn compile_array_set_presence(
+        &mut self,
+        handle: PointerValue<'ctx>,
+        presence: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    handle,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "array_presence_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(slot, presence)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     fn compile_array_has_index(
         &mut self,
         handle: PointerValue<'ctx>,

@@ -518,6 +518,11 @@ impl<'ctx> HirCompiler<'ctx> {
             array_reverse_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_array_presence_reverse",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         let array_copy_within_type = i8_ptr.fn_type(
             &[
                 i8_ptr.into(),
@@ -531,6 +536,19 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_array_copy_within",
             array_copy_within_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_copy_within",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
             Some(Linkage::External),
         );
         for (name, value_type) in [
@@ -620,6 +638,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_array_splice",
             array_splice_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_splice",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    i64_type.into(),
+                    i8_ptr.into(),
+                ],
+                false,
+            ),
             Some(Linkage::External),
         );
         let array_sort_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
