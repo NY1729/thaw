@@ -1097,12 +1097,14 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_zoned_nanos_from_string"
                     | "__thaw_temporal_zoned_field"
                     | "__thaw_temporal_zoned_plain_timestamp"
+                    | "__thaw_temporal_zoned_start_of_day"
                     | "__thaw_temporal_plain_date_field"
                     | "__thaw_temporal_calendar_field" => return Ok(HirType::F64),
                     "__thaw_temporal_calendar_valid" => return Ok(HirType::Bool),
                     "__thaw_temporal_calendar_month_code"
                     | "__thaw_temporal_calendar_era"
                     | "__thaw_temporal_calendar_from_string"
+                    | "__thaw_temporal_duration_balance"
                     | "__thaw_temporal_date_difference" => return Ok(HirType::Str),
                     "__thaw_temporal_month_code" => return Ok(HirType::Str),
                     "__thaw_temporal_zoned_to_string"
@@ -1110,8 +1112,9 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_zoned_zone_from_string" => return Ok(HirType::Str),
                     "__thaw_temporal_now"
                     | "__thaw_temporal_now_nanos"
-                    | "__thaw_temporal_instant_from_string"
+                    |                     "__thaw_temporal_instant_from_string"
                     | "__thaw_temporal_instant_nanos_from_string"
+                    | "__thaw_temporal_plain_month_day_from_string"
                     | "__thaw_temporal_plain_time_from_string"
                     | "__thaw_temporal_plain_time_nanos_from_string"
                     | "__thaw_temporal_shift"

@@ -191,6 +191,7 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_temporal_instant_nanos_from_string"
             | "__thaw_temporal_plain_time_from_string"
             | "__thaw_temporal_plain_time_nanos_from_string"
+            | "__thaw_temporal_plain_month_day_from_string"
             | "__thaw_temporal_duration_from_string"
             | "__thaw_temporal_duration_nanos_from_string" => {
                 let [value] = args else {
@@ -339,6 +340,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal zoned zone parse returned no value".into());
             }
+            "__thaw_temporal_zoned_start_of_day" => {
+                let [milliseconds, nanoseconds, zone] = args else {
+                    return Err(format!("{name} expects three operands"));
+                };
+                let milliseconds = self.compile_expr(milliseconds)?;
+                let nanoseconds = self.compile_expr(nanoseconds)?;
+                let zone = self.compile_expr(zone)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_temporal_zoned_start_of_day")
+                            .unwrap(),
+                        &[milliseconds.into(), nanoseconds.into(), zone.into()],
+                        "temporal_zoned_start_of_day",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Temporal start of day returned no value".into());
+            }
             "__thaw_temporal_zoned_to_string" | "__thaw_temporal_zoned_offset" => {
                 let [milliseconds, nanoseconds, zone] = args else {
                     return Err(format!("{name} expects three operands"));
@@ -466,26 +488,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Temporal calendar field returned no value".into());
             }
-            "__thaw_temporal_date_difference" => {
-                let [from, to, largest_unit] = args else {
+            "__thaw_temporal_date_difference" | "__thaw_temporal_duration_balance" => {
+                let [first, second, unit] = args else {
                     return Err(format!("{name} expects three operands"));
                 };
-                let from = self.compile_expr(from)?;
-                let to = self.compile_expr(to)?;
-                let largest_unit = self.compile_expr(largest_unit)?;
+                let first = self.compile_expr(first)?;
+                let second = self.compile_expr(second)?;
+                let unit = self.compile_expr(unit)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
                 return self
                     .builder
                     .build_call(
-                        self.module
-                            .get_function("thaw_temporal_date_difference")
-                            .unwrap(),
-                        &[from.into(), to.into(), largest_unit.into()],
-                        "temporal_date_difference",
+                        self.module.get_function(&runtime).unwrap(),
+                        &[first.into(), second.into(), unit.into()],
+                        "temporal_three_arg",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("Temporal date difference returned no value".into());
+                    .ok_or("Temporal operation returned no value".into());
             }
             "__thaw_temporal_calendar_month_code" | "__thaw_temporal_calendar_era" => {
                 let [milliseconds, calendar] = args else {
