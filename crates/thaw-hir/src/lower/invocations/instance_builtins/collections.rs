@@ -86,7 +86,13 @@ impl<'a> FnLowerer<'a> {
                     return None;
                 }
                 let receiver_type = self.peek_type_without_lowering(&member.obj)?;
-                matches!(receiver_type, HirType::Map(_, _) | HirType::Set(_))
+                matches!(
+                    receiver_type,
+                    HirType::Map(_, _)
+                        | HirType::WeakMap(_, _)
+                        | HirType::Set(_)
+                        | HirType::WeakSet(_)
+                )
                     .then_some(receiver_type)
             }
             _ => None,
@@ -96,7 +102,12 @@ impl<'a> FnLowerer<'a> {
     fn receiver_is_map_or_set(&self, expr: &Expr) -> bool {
         matches!(
             self.peek_type_without_lowering(expr),
-            Some(HirType::Map(_, _) | HirType::Set(_))
+            Some(
+                HirType::Map(_, _)
+                    | HirType::WeakMap(_, _)
+                    | HirType::Set(_)
+                    | HirType::WeakSet(_)
+            )
         )
     }
 

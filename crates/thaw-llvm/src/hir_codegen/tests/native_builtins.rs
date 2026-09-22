@@ -1341,6 +1341,8 @@ fn compiles_weak_map_and_weak_set() {
             cache.set(s1, "alice");
             printString(cache.get(s1));
             printString(cache.get(s2));
+            console.log(cache.getOrInsert(s2, "bob"));
+            console.log(cache.getOrInsertComputed(s2, (_key: Session) => "ignored"));
             console.log(cache.has(s1));
             cache.delete(s1);
             console.log(cache.has(s1));
@@ -1355,7 +1357,7 @@ fn compiles_weak_map_and_weak_set() {
     "#;
     assert_eq!(
         compile_and_run(source, "weak_map_and_weak_set"),
-        "alice\nundefined\ntrue\nfalse\ntrue\ntrue\nfalse\n"
+        "alice\nundefined\nbob\nbob\ntrue\nfalse\ntrue\ntrue\nfalse\n"
     );
 }
 
@@ -3784,6 +3786,282 @@ fn compiles_array_group_and_object_define_property() {
     );
 }
 
+/// Descriptor accessors and prototype identity remain in the JS realm for
+/// opaque object handles.
+#[test]
+fn compiles_dynamic_object_descriptors_and_prototypes() {
+    let source = r#"
+        function main(): void {
+            const object = Proxy.revocable({}, {}).proxy;
+            Object.defineProperty(object, "answer", {
+                get: () => 42,
+                configurable: true,
+            });
+            console.log(object.answer);
+
+            const prototype = Proxy.revocable({ inherited: 7 }, {}).proxy;
+            Object.setPrototypeOf(object, prototype);
+            console.log(object.inherited);
+            console.log(Object.getPrototypeOf(object) === prototype);
+            console.log(Reflect.defineProperty(object, "value", { value: 9 }));
+            console.log(object.value);
+            Object.defineProperties(object, {
+                doubled: { get: () => object.value * 2 },
+                text: { value: "ok" },
+            });
+            console.log(object.doubled);
+            console.log(object.text);
+            const answer = Object.getOwnPropertyDescriptor(object, "answer")!;
+            console.log(typeof answer.get);
+            console.log(Object.getOwnPropertyDescriptor(object, "missing") === undefined);
+            const value = Reflect.getOwnPropertyDescriptor(object, "value")!;
+            console.log(value.value);
+            const descriptors = Object.getOwnPropertyDescriptors(object);
+            console.log(descriptors.text.value);
+            const other = Proxy.revocable({}, {}).proxy;
+            console.log(Reflect.setPrototypeOf(other, prototype));
+            console.log(other.inherited);
+            const created = Object.create(prototype, {
+                own: { value: 5, enumerable: true },
+                total: { get: () => 12 },
+            });
+            console.log(created.own);
+            console.log(created.inherited);
+            console.log(created.total);
+            console.log(Object.getPrototypeOf(created) === prototype);
+
+            const frozen = Proxy.revocable({ a: 1 }, {}).proxy;
+            console.log(Object.freeze(frozen) === frozen);
+            console.log(Object.isFrozen(frozen));
+            console.log(Object.isSealed(frozen));
+            console.log(Object.isExtensible(frozen));
+            const sealed = Proxy.revocable({ a: 1 }, {}).proxy;
+            console.log(Object.seal(sealed) === sealed);
+            console.log(Object.isSealed(sealed));
+            console.log(Object.isFrozen(sealed));
+            const prevented = Proxy.revocable({}, {}).proxy;
+            console.log(Object.preventExtensions(prevented) === prevented);
+            console.log(Object.isExtensible(prevented));
+            const reflected = Proxy.revocable({}, {}).proxy;
+            console.log(Reflect.isExtensible(reflected));
+            console.log(Reflect.preventExtensions(reflected));
+            console.log(Reflect.isExtensible(reflected));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_descriptors_prototypes"),
+        "42\n7\ntrue\ntrue\n9\n18\nok\nfunction\ntrue\n9\nok\ntrue\n7\n5\n7\n12\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\n"
+    );
+}
+
+/// Dynamic integrity and prototype operations preserve Proxy trap return
+/// values and exceptions instead of using thaw's fixed-object state model.
+#[test]
+fn compiles_dynamic_object_proxy_traps() {
+    let source = r#"
+        function main(): void {
+            const integrity = Proxy.revocable({}, {
+                preventExtensions: (_target: any) => false,
+            }).proxy;
+            console.log(Reflect.preventExtensions(integrity));
+            try {
+                Object.preventExtensions(integrity);
+            } catch (error) {
+                console.log((error as Error).name);
+            }
+
+            const prototype = Proxy.revocable({}, {
+                setPrototypeOf: (_target: any, _prototype: any) => false,
+            }).proxy;
+            console.log(Reflect.setPrototypeOf(prototype, null));
+            try {
+                Object.setPrototypeOf(prototype, null);
+            } catch (error) {
+                console.log((error as Error).name);
+            }
+
+            const revoked = Proxy.revocable({}, {});
+            revoked.revoke();
+            try {
+                Object.isExtensible(revoked.proxy);
+            } catch (error) {
+                console.log((error as Error).name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_proxy_traps"),
+        "false\nTypeError\nfalse\nTypeError\nTypeError\n"
+    );
+}
+
+/// Object enumeration over opaque handles observes real descriptors and
+/// keeps the result in the JS realm so symbol keys remain representable.
+#[test]
+fn compiles_dynamic_object_enumeration() {
+    let source = r#"
+        function main(): void {
+            const object = Proxy.revocable({ visible: 1 }, {}).proxy;
+            Object.defineProperty(object, "hidden", { value: 2, enumerable: false });
+            console.log(JSON.stringify(Object.keys(object)));
+            console.log(JSON.stringify(Object.values(object)));
+            console.log(JSON.stringify(Object.entries(object)));
+            console.log(JSON.stringify(Object.getOwnPropertyNames(object)));
+            console.log(Object.getOwnPropertySymbols(object).length);
+            console.log(JSON.stringify(Reflect.ownKeys(object)));
+
+            const symbolic = Proxy.revocable({ plain: 1 }, {}).proxy;
+            Object.defineProperty(symbolic, Symbol.iterator, { value: 9 });
+            console.log(Object.getOwnPropertySymbols(symbolic).length);
+            console.log(typeof Reflect.ownKeys(symbolic)[1]);
+            console.log(Object.hasOwn(symbolic, "plain"));
+            console.log(Object.hasOwn(symbolic, Symbol.iterator));
+            console.log(Object.hasOwn(symbolic, "toString"));
+
+            const reordered = Proxy.revocable({ a: 1, b: 2 }, {
+                ownKeys: (_target: any) => ["b", "a"],
+            }).proxy;
+            console.log(JSON.stringify(Reflect.ownKeys(reordered)));
+            console.log(JSON.stringify(Object.keys(reordered)));
+            const invalid = Proxy.revocable({ a: 1 }, {
+                ownKeys: (_target: any) => ["a", "a"],
+            }).proxy;
+            try {
+                Reflect.ownKeys(invalid);
+            } catch (error) {
+                console.log((error as Error).name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_enumeration"),
+        "[\"visible\"]\n[1]\n[[\"visible\",1]]\n[\"visible\",\"hidden\"]\n0\n[\"visible\",\"hidden\"]\n1\nsymbol\ntrue\ntrue\nfalse\n[\"b\",\"a\"]\n[\"b\",\"a\"]\nTypeError\n"
+    );
+}
+
+/// Reflect property operations preserve symbol keys, optional receivers,
+/// Proxy trap results, and thrown errors for opaque handles.
+#[test]
+fn compiles_dynamic_reflect_properties() {
+    let source = r#"
+        function main(): void {
+            const object = Proxy.revocable({ value: 1 }, {}).proxy;
+            Object.defineProperty(object, Symbol.iterator, { value: 9, configurable: true });
+            console.log(Reflect.has(object, "value"));
+            console.log(Reflect.get(object, "value"));
+            console.log(Reflect.has(object, Symbol.iterator));
+            console.log(Reflect.get(object, Symbol.iterator));
+            console.log(Reflect.set(object, "value", 2));
+            console.log(Reflect.get(object, "value"));
+            console.log(Reflect.deleteProperty(object, Symbol.iterator));
+            console.log(Reflect.has(object, Symbol.iterator));
+
+            const receiver = Proxy.revocable({ marker: 7 }, {}).proxy;
+            const trapped = Proxy.revocable({}, {
+                get: (_target: any, _key: any, actualReceiver: any) => actualReceiver.marker,
+                set: (_target: any, _key: any, _value: any, actualReceiver: any) => actualReceiver.marker === 7,
+            }).proxy;
+            console.log(Reflect.get(trapped, "anything", receiver));
+            console.log(Reflect.set(trapped, "anything", 3, receiver));
+
+            const throwing = Proxy.revocable({}, {
+                has: (_target: any, _key: any) => { throw new RangeError("bad trap"); },
+            }).proxy;
+            try {
+                Reflect.has(throwing, "x");
+            } catch (error) {
+                console.log((error as Error).name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_reflect_properties"),
+        "true\n1\ntrue\n9\ntrue\n2\ntrue\nfalse\n7\ntrue\nRangeError\n"
+    );
+}
+
+/// Dynamic Object.assign keeps target identity and JavaScript's source order,
+/// enumerable symbol keys, getter evaluation, and thrown exceptions.
+#[test]
+fn compiles_dynamic_object_assign() {
+    let source = r#"
+        function main(): void {
+            const order: string[] = [];
+            const first = Object.create(null, {
+                a: { enumerable: true, get: () => { order.push("a"); return 1; } },
+            });
+            const second = Object.create(null, {
+                b: { enumerable: true, get: () => { order.push("b"); return 2; } },
+            });
+            Object.defineProperty(second, Symbol.iterator, {
+                value: 9,
+                enumerable: true,
+            });
+            const target = Proxy.revocable({}, {}).proxy;
+            const result = Object.assign(target, first, second, { c: 3 });
+            console.log(result === target);
+            console.log(order.join(","));
+            console.log(result.a, result.b, result.c);
+            console.log(Reflect.get(result, Symbol.iterator));
+
+            const throwing = Object.create(null, {
+                value: { enumerable: true, get: () => { throw new RangeError("bad getter"); } },
+            });
+            try {
+                Object.assign(target, throwing);
+            } catch (error) {
+                console.log((error as Error).name);
+            }
+
+            const traps: string[] = [];
+            const trapped = Proxy.revocable({}, {
+                set: (_target: any, key: any, _value: any) => {
+                    traps.push(String(key));
+                    return true;
+                },
+            }).proxy;
+            Object.assign(trapped, { x: 1 }, { y: 2 });
+            console.log(traps.join(","));
+            const rejecting = Proxy.revocable({}, {
+                set: (_target: any, _key: any, _value: any) => { throw new TypeError("no write"); },
+            }).proxy;
+            try {
+                Object.assign(rejecting, { x: 1 });
+            } catch (error) {
+                console.log((error as Error).name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_assign"),
+        "true\na,b\n1 2 3\n9\nRangeError\nx,y\nTypeError\n"
+    );
+}
+
+/// Dynamic Object.fromEntries accepts a live iterable and preserves duplicate
+/// key order and symbol keys in the resulting JS object.
+#[test]
+fn compiles_dynamic_object_from_entries() {
+    let source = r#"
+        function main(): void {
+            const entries = Proxy.revocable([
+                ["a", 1],
+                ["a", 2],
+                ["b", 3],
+                [Symbol.iterator, 9],
+            ], {}).proxy;
+            const object = Object.fromEntries(entries);
+            console.log(object.a, object.b);
+            console.log(Reflect.get(object, Symbol.iterator));
+            console.log(JSON.stringify(Object.keys(object)));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_from_entries"),
+        "2 3\n9\n[\"a\",\"b\"]\n"
+    );
+}
+
 /// `Object.create` (an empty dictionary), `Object.getPrototypeOf`
 /// (approximated as `null`), and `Object.prototype.propertyIsEnumerable`.
 #[test]
@@ -4387,6 +4665,40 @@ fn compiles_json_reviver_and_suppressed_error() {
     assert_eq!(
         compile_and_run(source, "json_reviver_suppressed_error"),
         "{\"a\":1,\"b\":[2,3]}\n{\"a\":1,\"b\":99}\nSuppressedError\ntrue\ntrue\nboth\n"
+    );
+}
+
+#[test]
+fn compiles_json_raw_json_values() {
+    let source = r#"
+        function main(): void {
+            const raw = JSON.rawJSON("9007199254740993");
+            console.log(JSON.isRawJSON(raw));
+            console.log(JSON.isRawJSON({ rawJSON: "1" }));
+            console.log(raw.rawJSON);
+            console.log(JSON.stringify({ value: raw }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_raw_json"),
+        "true\nfalse\n9007199254740993\n{\"value\":9007199254740993}\n"
+    );
+}
+
+#[test]
+fn json_parse_reviver_receives_source_context() {
+    let source = r#"
+        function main(): void {
+            const source = JSON.parse(
+                "9007199254740993",
+                (_key: string, value: Json, context: Json) => context.source ?? value,
+            );
+            console.log(source);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_parse_source_context"),
+        "9007199254740993\n"
     );
 }
 

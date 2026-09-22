@@ -74,10 +74,11 @@ fn erase_dynamic_ty(ty: &mut HirType) {
         | HirType::Promise(inner)
         | HirType::Dictionary(inner)
         | HirType::Set(inner)
+        | HirType::WeakSet(inner)
         | HirType::Optional(inner)
         | HirType::Nullable(inner)
         | HirType::Nullish(inner) => erase_dynamic_ty(inner),
-        HirType::Map(key, value) => {
+        HirType::Map(key, value) | HirType::WeakMap(key, value) => {
             erase_dynamic_ty(key);
             erase_dynamic_ty(value);
         }
@@ -117,10 +118,11 @@ fn erase_ty(ty: &mut HirType) {
         | HirType::Promise(inner)
         | HirType::Dictionary(inner)
         | HirType::Set(inner)
+        | HirType::WeakSet(inner)
         | HirType::Optional(inner)
         | HirType::Nullable(inner)
         | HirType::Nullish(inner) => erase_ty(inner),
-        HirType::Map(key, value) => {
+        HirType::Map(key, value) | HirType::WeakMap(key, value) => {
             erase_ty(key);
             erase_ty(value);
         }

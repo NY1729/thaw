@@ -144,9 +144,15 @@ pub enum HirType {
     /// no reference-identity hashing for object/array keys, since nothing
     /// in the runtime gives heap values a stable identity token to hash.
     Map(Box<HirType>, Box<HirType>),
+    /// A non-enumerable weak-keyed map. It shares the native table layout
+    /// with `Map`, but remains distinct so WeakMap-only API restrictions are
+    /// enforced during lowering.
+    WeakMap(Box<HirType>, Box<HirType>),
     /// A native hash-table-backed `Set<T>`, sharing the same `K`
     /// restriction as `Map` (`F64` or `Str`).
     Set(Box<HirType>),
+    /// A non-enumerable weak-keyed set; see `WeakMap`.
+    WeakSet(Box<HirType>),
     Tuple(Vec<HirType>),
     Object(Vec<(Symbol, HirType)>),
     Function(Vec<HirType>, Box<HirType>),

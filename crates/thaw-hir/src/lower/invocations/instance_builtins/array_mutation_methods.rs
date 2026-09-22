@@ -405,6 +405,9 @@ impl<'a> FnLowerer<'a> {
                             let element_type = element_type.as_ref().clone();
                             (element_type.clone(), element_type, true)
                         }
+                        HirType::WeakMap(_, _) | HirType::WeakSet(_) => {
+                            return Err("WeakMap/WeakSet are not enumerable and do not support `.forEach()`".into())
+                        }
                         _ => unreachable!("receiver_is_map_or_set confirmed this above"),
                     };
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
