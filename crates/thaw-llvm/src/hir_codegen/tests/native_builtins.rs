@@ -4250,6 +4250,52 @@ fn compiles_using_disposal_in_loops() {
     );
 }
 
+#[test]
+fn compiles_using_bindings_in_for_of() {
+    let source = r#"
+        function make(name: string) {
+            return {
+                name,
+                [Symbol.dispose]() { console.log("dispose " + name); }
+            };
+        }
+        function main(): void {
+            for (using resource of [make("a"), make("b"), make("c")]) {
+                if (resource.name === "b") continue;
+                console.log("body " + resource.name);
+                if (resource.name === "c") break;
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_for_of"),
+        "body a\ndispose a\ndispose b\nbody c\ndispose c\n"
+    );
+}
+
+#[test]
+fn compiles_await_using_bindings_in_for_await_of() {
+    let source = r#"
+        function make(name: string) {
+            return {
+                name,
+                async [Symbol.asyncDispose](): Promise<void> {
+                    console.log("dispose " + name);
+                }
+            };
+        }
+        async function main(): Promise<void> {
+            for await (await using resource of [make("a"), make("b")]) {
+                console.log("body " + resource.name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "await_using_for_await_of"),
+        "body a\ndispose a\nbody b\ndispose b\n"
+    );
+}
+
 /// `await using` disposes through `Symbol.asyncDispose` and awaits it.
 #[test]
 fn compiles_await_using_declarations() {

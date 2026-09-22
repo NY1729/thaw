@@ -1400,6 +1400,7 @@ impl<'a> FnLowerer<'a> {
                             indexed
                         }
                     };
+                    let mut iteration_disposals = Vec::new();
                     let item_stmts = match &for_of.left {
                         ForHead::VarDecl(decl) => {
                             let [declarator] = decl.decls.as_slice() else {
@@ -1533,8 +1534,46 @@ impl<'a> FnLowerer<'a> {
                                 return Err("unsupported `for...of` assignment pattern".into());
                             }
                         }
-                        ForHead::UsingDecl(_) => {
-                            return Err("`using` bindings in `for...of` are not supported".into())
+                        ForHead::UsingDecl(using_decl) => {
+                            let [declarator] = using_decl.decls.as_slice() else {
+                                return Err("`for...of` requires exactly one `using` binding".into());
+                            };
+                            if declarator.init.is_some() {
+                                return Err("`for...of` `using` bindings cannot have an initializer".into());
+                            }
+                            let Pat::Ident(binding) = &declarator.name else {
+                                return Err("`for...of` `using` requires an identifier binding".into());
+                            };
+                            let item_ty = match &binding.type_ann {
+                                Some(annotation) => {
+                                    let declared = lower_ts_type(
+                                        &annotation.type_ann,
+                                        self.interfaces,
+                                        self.generic_interfaces,
+                                    )?;
+                                    if declared != item_type {
+                                        return Err(format!(
+                                            "`for...of` `using` binding has type {declared:?}, expected {:?}",
+                                            item_type
+                                        ));
+                                    }
+                                    declared
+                                }
+                                None => item_type.clone(),
+                            };
+                            let source_name = binding.id.sym.to_string();
+                            let item_name = format!("{source_name}__thaw_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(item_name.clone(), item_ty.clone());
+                            self.bindings
+                                .entry(source_name.clone())
+                                .or_default()
+                                .push(item_name.clone());
+                            iteration_disposals.push(self.lower_using_disposal(
+                                &source_name,
+                                using_decl.is_await,
+                            )?);
+                            vec![HirStmt::Let(item_name, item_ty, item_value())]
                         }
                     };
                     let resume_generator = |control| -> Result<HirExpr, String> {
@@ -1599,6 +1638,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     body.extend(item_stmts);
                     body.extend(self.lower_loop_body(&for_of.body)?);
+                    body = self.lower_using_scope(body, iteration_disposals)?;
                     if generator_producer.is_none() {
                         let update = HirExpr::Assign(
                             index_name.clone(),
