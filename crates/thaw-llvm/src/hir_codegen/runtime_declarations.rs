@@ -1279,6 +1279,16 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.bool_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        for name in ["thaw_object_set_state", "thaw_object_state"] {
+            self.module.add_function(
+                name,
+                self.context.bool_type().fn_type(
+                    &[i8_ptr.into(), self.context.i8_type().into()],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_date_set_full_year",
             f64_type.fn_type(

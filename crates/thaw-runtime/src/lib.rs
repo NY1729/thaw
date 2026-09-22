@@ -17,7 +17,7 @@
 //! chunked transfer-encoding, one request per TCP connection.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -38,6 +38,7 @@ include!("runtime/native_values/date.rs");
 include!("runtime/native_values/temporal.rs");
 include!("runtime/native_values/maps.rs");
 include!("runtime/native_values/errors.rs");
+include!("runtime/native_values/objects.rs");
 include!("runtime/native_values/bytes.rs");
 include!("runtime/abi.rs");
 

@@ -3658,6 +3658,10 @@ fn compiles_array_holes() {
 #[test]
 fn compiles_object_freeze_state() {
     let source = r#"
+        function sealThroughCall(value: { z: number }): void {
+            Object.seal(value);
+        }
+
         function main(): void {
             const o: { a: number } = { a: 1 };
             console.log(Object.isFrozen(o), Object.isSealed(o), Object.isExtensible(o));
@@ -3675,12 +3679,20 @@ fn compiles_object_freeze_state() {
             console.log(Reflect.isExtensible(o), Reflect.preventExtensions(o));
             console.log(Reflect.setPrototypeOf(o, null));
             console.log(Object.isFrozen(1), Object.isSealed("x"), Object.isExtensible(null));
+            const q: { y: number } = { y: 1 };
+            const alias = q;
+            if (alias.y === 1) Object.freeze(alias);
+            console.log(Object.isFrozen(q));
+            console.log(Reflect.set(q, "y", 2), q.y);
+            const throughCall: { z: number } = { z: 2 };
+            sealThroughCall(throughCall);
+            console.log(Object.isSealed(throughCall));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_freeze_state"),
         "false false true\ntrue true false\ntrue false false\nfalse false\ntrue\n\
-         true\nfalse true\ntrue\ntrue true false\n"
+         true\nfalse true\ntrue\ntrue true false\ntrue\nfalse 1\ntrue\n"
     );
 }
 

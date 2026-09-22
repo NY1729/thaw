@@ -13,6 +13,7 @@ impl Drop for InvocationArenaReset {
         // registered would let a timer or fd event fire during a later
         // invocation and resume a pointer into since-reused memory.
         purge_pending_async_state();
+        clear_object_states();
         thaw_arena::thaw_arena_reset();
     }
 }
@@ -207,4 +208,3 @@ fn http_request(
 
     Ok(response)
 }
-
