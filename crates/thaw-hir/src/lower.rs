@@ -103,6 +103,7 @@ struct FnSignature {
     abstract_class_constructor: bool,
     ret: HirType,
     is_async: bool,
+    returns_sparse_array: bool,
     /// Whether a native class method observes its call-site `this` value.
     /// This distinguishes safely extractable methods from methods that need
     /// the dedicated unbound-method ABI rather than an ordinary closure.
@@ -133,6 +134,59 @@ struct FnSignature {
     /// declaration's, for now) -- inference simply never gets this extra
     /// source there, same as before this existed.
     generic_return_pattern: Option<GenericTypePattern>,
+}
+
+fn expression_is_statically_sparse_array(expression: &Expr) -> bool {
+    match expression {
+        Expr::Array(array) => array.elems.iter().any(|element| {
+            element.as_ref().is_none_or(|element| {
+                element.spread.is_some() && expression_is_statically_sparse_array(&element.expr)
+            })
+        }),
+        Expr::Call(call) => match call.callee.as_expr().map(Box::as_ref) {
+            Some(Expr::Member(member))
+                if matches!(
+                    &member.prop,
+                    MemberProp::Ident(property)
+                        if matches!(property.sym.as_ref(), "slice" | "concat" | "map")
+                ) =>
+            {
+                expression_is_statically_sparse_array(&member.obj)
+            }
+            _ => false,
+        },
+        Expr::Cond(conditional) => {
+            expression_is_statically_sparse_array(&conditional.cons)
+                || expression_is_statically_sparse_array(&conditional.alt)
+        }
+        Expr::Paren(paren) => expression_is_statically_sparse_array(&paren.expr),
+        Expr::TsAs(assertion) => expression_is_statically_sparse_array(&assertion.expr),
+        Expr::TsSatisfies(assertion) => expression_is_statically_sparse_array(&assertion.expr),
+        Expr::TsNonNull(assertion) => expression_is_statically_sparse_array(&assertion.expr),
+        _ => false,
+    }
+}
+
+fn function_returns_sparse_array(function: &swc_ecma_ast::Function) -> bool {
+    struct SparseReturnVisitor(bool);
+
+    impl Visit for SparseReturnVisitor {
+        fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
+            self.0 |= statement
+                .arg
+                .as_deref()
+                .is_some_and(expression_is_statically_sparse_array);
+        }
+
+        fn visit_function(&mut self, _: &swc_ecma_ast::Function) {}
+        fn visit_arrow_expr(&mut self, _: &swc_ecma_ast::ArrowExpr) {}
+    }
+
+    let mut visitor = SparseReturnVisitor(false);
+    if let Some(body) = &function.body {
+        body.visit_with(&mut visitor);
+    }
+    visitor.0
 }
 
 #[derive(Clone)]
