@@ -204,7 +204,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Lit(HirLit::I64(_)) => Ok(HirType::I64),
             HirExpr::Lit(HirLit::Str(_)) => Ok(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Ok(HirType::Bool),
-            HirExpr::Lit(HirLit::Undefined) => Ok(HirType::Undefined),
+            HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Ok(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Ok(HirType::Null),
             HirExpr::Var(name) => self
                 .scope
@@ -440,6 +440,16 @@ impl<'a> FnLowerer<'a> {
                     return Ok(*ret);
                 };
                 match name.as_str() {
+                    "__thaw_array_has_index" => {
+                        let [array, index] = args.as_slice() else {
+                            return Err("array presence check expects two operands".into());
+                        };
+                        if !matches!(self.infer_expr_type(array)?, HirType::Array(_) | HirType::Tuple(_)) {
+                            return Err("array presence check requires an array".into());
+                        }
+                        self.expect_type(&HirType::F64, index, "array presence index")?;
+                        return Ok(HirType::Bool);
+                    }
                     "console.log" | "console.info" | "console.debug" | "console.warn"
                     | "console.error" | "console.assert" => return Ok(HirType::Void),
                     "__thaw_string_concat" => {

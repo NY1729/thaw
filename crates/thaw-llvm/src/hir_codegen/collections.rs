@@ -11,16 +11,17 @@ impl<'ctx> HirCompiler<'ctx> {
     /// `compile_array_data` unwraps one to the buffer a specific operation
     /// actually needs to read/write, and `compile_array_wrap` allocates a
     /// fresh handle around a freshly built buffer.
-    fn compile_array_wrap(
+    fn compile_array_wrap_with_presence(
         &mut self,
         buffer: PointerValue<'ctx>,
+        presence: PointerValue<'ctx>,
     ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let handle = self
             .builder
             .build_call(
                 self.module.get_function("thaw_arena_alloc").unwrap(),
-                &[i64_type.const_int(8, false).into(), i64_type.const_int(8, false).into()],
+                &[i64_type.const_int(16, false).into(), i64_type.const_int(8, false).into()],
                 "array_handle",
             )
             .map_err(|error| error.to_string())?
@@ -31,7 +32,30 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(handle, buffer)
             .map_err(|error| error.to_string())?;
+        let presence_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    handle,
+                    &[i64_type.const_int(8, false)],
+                    "array_presence_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(presence_slot, presence)
+            .map_err(|error| error.to_string())?;
         Ok(handle)
+    }
+
+    fn compile_array_wrap(
+        &mut self,
+        buffer: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        self.compile_array_wrap_with_presence(
+            buffer,
+            self.context.ptr_type(AddressSpace::default()).const_null(),
+        )
     }
 
     /// Loads the current raw `[length][elem...]` buffer pointer out of an
@@ -45,6 +69,114 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_load(ptr_type, handle, "array_data")
             .map_err(|error| error.to_string())
             .map(BasicValueEnum::into_pointer_value)
+    }
+
+    fn compile_array_has_index(
+        &mut self,
+        handle: PointerValue<'ctx>,
+        index: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    handle,
+                    &[i64_type.const_int(8, false)],
+                    "array_presence_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let presence = self
+            .builder
+            .build_load(ptr_type, slot, "array_presence")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let function = self.current_function();
+        let dense = self.context.append_basic_block(function, "array_dense");
+        let sparse = self.context.append_basic_block(function, "array_sparse");
+        let sparse_present = self.context.append_basic_block(function, "array_sparse_present");
+        let beyond_mask = self.context.append_basic_block(function, "array_beyond_presence_mask");
+        let done = self.context.append_basic_block(function, "array_presence_done");
+        let is_dense = self
+            .builder
+            .build_is_null(presence, "array_is_dense")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(is_dense, dense, sparse)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(dense);
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(sparse);
+        let mask_length = self
+            .builder
+            .build_load(i64_type, presence, "array_presence_length")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let in_mask = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, index, mask_length, "array_index_in_presence_mask")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(in_mask, sparse_present, beyond_mask)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(sparse_present);
+        let element = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    presence,
+                    &[index],
+                    "array_presence_element",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let element = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    element,
+                    &[i64_type.const_int(8, false)],
+                    "array_presence_payload",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let present = self
+            .builder
+            .build_load(self.context.i8_type(), element, "array_element_present")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let present = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                present,
+                self.context.i8_type().const_zero(),
+                "array_has_index",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(beyond_mask);
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        let phi = self
+            .builder
+            .build_phi(self.context.bool_type(), "array_index_present")
+            .map_err(|error| error.to_string())?;
+        let present_by_default = self.context.bool_type().const_int(1, false);
+        phi.add_incoming(&[
+            (&present_by_default, dense),
+            (&present, sparse_present),
+            (&present_by_default, beyond_mask),
+        ]);
+        Ok(phi.as_basic_value().into_int_value())
     }
 
     /// Like `compile_array_wrap`, but for a runtime call that signals
@@ -117,7 +249,52 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
         }
 
-        Ok(self.compile_array_wrap(base_ptr)?.into())
+        let holes = elems
+            .iter()
+            .map(|element| matches!(element, HirExpr::Lit(HirLit::ArrayHole)))
+            .collect::<Vec<_>>();
+        if !holes.iter().any(|hole| *hole) {
+            return Ok(self.compile_array_wrap(base_ptr)?.into());
+        }
+        let presence = self
+            .builder
+            .build_call(
+                alloc_fn,
+                &[
+                    i64_type.const_int(elems.len() as u64 + 8, false).into(),
+                    i64_type.const_int(1, false).into(),
+                ],
+                "array_presence",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return an array presence mask")?
+            .into_pointer_value();
+        self.builder
+            .build_store(presence, i64_type.const_int(elems.len() as u64, false))
+            .map_err(|error| error.to_string())?;
+        for (index, hole) in holes.into_iter().enumerate() {
+            let slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        presence,
+                        &[i64_type.const_int(index as u64 + 8, false)],
+                        "array_presence_element",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(
+                    slot,
+                    self.context.i8_type().const_int((!hole) as u64, false),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(self
+            .compile_array_wrap_with_presence(base_ptr, presence)?
+            .into())
     }
 
     fn compile_array_alloc(

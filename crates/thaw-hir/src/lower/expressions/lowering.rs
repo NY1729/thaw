@@ -1473,13 +1473,11 @@ impl<'a> FnLowerer<'a> {
                     .iter()
                     .all(|element| element.as_ref().is_none_or(|element| element.spread.is_none()))
                 {
-                    // A hole (`[1, , 3]`) reads as `undefined`; thaw's dense
-                    // arrays represent it as an explicit `undefined` element.
                     let values = array_lit
                         .elems
                         .iter()
                         .map(|element| match element {
-                            None => Ok(HirExpr::Lit(HirLit::Undefined)),
+                            None => Ok(HirExpr::Lit(HirLit::ArrayHole)),
                             Some(element) => self.lower_expr(&element.expr),
                         })
                         .collect::<Result<Vec<_>, _>>()?;
