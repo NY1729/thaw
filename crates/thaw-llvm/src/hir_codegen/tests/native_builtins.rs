@@ -3734,12 +3734,27 @@ fn compiles_array_holes() {
             console.log(JSON.stringify(combined.toSorted((left, right) => right - left)));
             console.log(JSON.stringify(combined.with(1, 8)));
             console.log(JSON.stringify(combined.with(2, 8)));
+            const nested: number[][] = [[1, , 2], , [3, , 4]];
+            console.log(JSON.stringify(nested.flat()));
+            let flatMapCalls = 0;
+            const flatMapped = spread.flatMap(value => {
+                flatMapCalls += 1;
+                const expanded: number[] = [value, , value + 10];
+                return expanded;
+            });
+            console.log(flatMapCalls, JSON.stringify(flatMapped));
+            const sparseZeros: number[] = [, , 0];
+            console.log(sparseZeros.indexOf(0), sparseZeros.lastIndexOf(0), sparseZeros.includes(0));
+            const holesOnly: number[] = [, ,];
+            console.log(holesOnly.indexOf(0), holesOnly.includes(0));
+            const sparseFlags: boolean[] = [, , true];
+            console.log(sparseFlags.indexOf(false), sparseFlags.includes(false));
             console.log(JSON.stringify(spread));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_holes"),
-        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n4 2 1\n9 6 [0,null,1,2,null,4,5,null,6]\n[6,null,5,4,null,2,1,null,0]\n[6,null,5,4,null,2,1,null,0]\n[5,null,6,2,null,4,5,null,6]\n[0,7,null,4,5,null,6] [null,1,2]\n[0,7,null,4,5,null,6]\n[0,8,8,2,null,4,5,null,6]\n[9,null,1,2,null,4,5,null,10]\n[0,1,2,4,5,6,null,null,null]\n[0,1,2,4,5,6,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[0,8,1,2,null,4,5,null,6]\n[0,null,8,2,null,4,5,null,6]\n[0,null,1,2,null,4]\n"
+        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n4 2 1\n9 6 [0,null,1,2,null,4,5,null,6]\n[6,null,5,4,null,2,1,null,0]\n[6,null,5,4,null,2,1,null,0]\n[5,null,6,2,null,4,5,null,6]\n[0,7,null,4,5,null,6] [null,1,2]\n[0,7,null,4,5,null,6]\n[0,8,8,2,null,4,5,null,6]\n[9,null,1,2,null,4,5,null,10]\n[0,1,2,4,5,6,null,null,null]\n[0,1,2,4,5,6,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[0,8,1,2,null,4,5,null,6]\n[0,null,8,2,null,4,5,null,6]\n[1,2,3,4]\n4 [0,10,1,11,2,12,4,14]\n2 2 true\n-1 false\n-1 false\n[0,null,1,2,null,4]\n"
     );
 }
 

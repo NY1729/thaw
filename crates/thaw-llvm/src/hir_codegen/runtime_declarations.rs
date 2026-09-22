@@ -748,10 +748,26 @@ impl<'ctx> HirCompiler<'ctx> {
         ] {
             let function_type = match return_type {
                 BasicTypeEnum::FloatType(return_type) => {
-                    return_type.fn_type(&[i8_ptr.into(), needle_type, f64_type.into()], false)
+                    return_type.fn_type(
+                        &[
+                            i8_ptr.into(),
+                            i8_ptr.into(),
+                            needle_type,
+                            f64_type.into(),
+                        ],
+                        false,
+                    )
                 }
                 BasicTypeEnum::IntType(return_type) => {
-                    return_type.fn_type(&[i8_ptr.into(), needle_type, f64_type.into()], false)
+                    return_type.fn_type(
+                        &[
+                            i8_ptr.into(),
+                            i8_ptr.into(),
+                            needle_type,
+                            f64_type.into(),
+                        ],
+                        false,
+                    )
                 }
                 _ => unreachable!(),
             };
