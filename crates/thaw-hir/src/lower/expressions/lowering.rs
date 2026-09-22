@@ -1647,7 +1647,8 @@ impl<'a> FnLowerer<'a> {
                 let mut element_type: Option<HirType> = None;
                 for element in &array_lit.elems {
                     let Some(element) = element else {
-                        return Err("elisions are not supported in array literals".into());
+                        pending.push(HirExpr::Lit(HirLit::ArrayHole));
+                        continue;
                     };
                     let mut value = self.lower_expr(&element.expr)?;
                     if element.spread.is_some() {
