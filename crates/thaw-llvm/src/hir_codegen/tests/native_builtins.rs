@@ -3677,11 +3677,17 @@ fn compiles_array_holes() {
             let visited = 0;
             spread.forEach(() => { visited += 1; });
             console.log(spread.length, visited);
+            let filteredCalls = 0;
+            const filtered = spread.filter((value) => {
+                filteredCalls += 1;
+                return value > 1;
+            });
+            console.log(filteredCalls, filtered.length, filtered[0], filtered[1]);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_holes"),
-        "3 true\n2\n2 1\n6 4\n"
+        "3 true\n2\n2 1\n6 4\n4 2 2 4\n"
     );
 }
 

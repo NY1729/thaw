@@ -293,24 +293,36 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var(length_name)),
                 ),
                 vec![
-                    HirStmt::Let(
-                        element_name.clone(),
-                        element_type.clone(),
-                        HirExpr::TypedIndex(
-                            Box::new(HirExpr::Var(receiver_name.clone())),
-                            Box::new(HirExpr::Var(index_name.clone())),
-                            element_type.clone(),
-                        ),
-                    ),
                     HirStmt::If(
-                        callback_call,
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                            vec![
+                                HirExpr::Var(receiver_name.clone()),
+                                HirExpr::Var(index_name.clone()),
+                            ],
+                        ),
                         vec![
-                            HirStmt::Expr(HirExpr::IndexAssign(
-                                Box::new(HirExpr::Var(result_name.clone())),
-                                Box::new(HirExpr::Var(output_index_name.clone())),
-                                Box::new(HirExpr::Var(element_name)),
-                            )),
-                            increment(&output_index_name),
+                            HirStmt::Let(
+                                element_name.clone(),
+                                element_type.clone(),
+                                HirExpr::TypedIndex(
+                                    Box::new(HirExpr::Var(receiver_name.clone())),
+                                    Box::new(HirExpr::Var(index_name.clone())),
+                                    element_type.clone(),
+                                ),
+                            ),
+                            HirStmt::If(
+                                callback_call,
+                                vec![
+                                    HirStmt::Expr(HirExpr::IndexAssign(
+                                        Box::new(HirExpr::Var(result_name.clone())),
+                                        Box::new(HirExpr::Var(output_index_name.clone())),
+                                        Box::new(HirExpr::Var(element_name)),
+                                    )),
+                                    increment(&output_index_name),
+                                ],
+                                Vec::new(),
+                            ),
                         ],
                         Vec::new(),
                     ),
