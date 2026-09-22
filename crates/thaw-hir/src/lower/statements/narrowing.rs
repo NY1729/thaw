@@ -148,6 +148,14 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        self.lower_using_scope(out, using_disposals)
+    }
+
+    fn lower_using_scope(
+        &mut self,
+        out: Vec<HirStmt>,
+        mut using_disposals: Vec<HirStmt>,
+    ) -> Result<Vec<HirStmt>, String> {
         if using_disposals.is_empty() {
             return Ok(out);
         }
