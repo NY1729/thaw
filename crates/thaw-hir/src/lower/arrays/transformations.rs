@@ -168,20 +168,32 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var(length_name)),
                 ),
                 vec![
-                    HirStmt::Let(
-                        element_name,
-                        element_type.clone(),
-                        HirExpr::TypedIndex(
-                            Box::new(HirExpr::Var(receiver_name.clone())),
-                            Box::new(HirExpr::Var(index_name.clone())),
-                            element_type,
+                    HirStmt::If(
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                            vec![
+                                HirExpr::Var(receiver_name.clone()),
+                                HirExpr::Var(index_name.clone()),
+                            ],
                         ),
+                        vec![
+                            HirStmt::Let(
+                                element_name,
+                                element_type.clone(),
+                                HirExpr::TypedIndex(
+                                    Box::new(HirExpr::Var(receiver_name.clone())),
+                                    Box::new(HirExpr::Var(index_name.clone())),
+                                    element_type,
+                                ),
+                            ),
+                            HirStmt::Expr(HirExpr::IndexAssign(
+                                Box::new(HirExpr::Var(result_name.clone())),
+                                Box::new(HirExpr::Var(index_name.clone())),
+                                Box::new(callback_call),
+                            )),
+                        ],
+                        Vec::new(),
                     ),
-                    HirStmt::Expr(HirExpr::IndexAssign(
-                        Box::new(HirExpr::Var(result_name.clone())),
-                        Box::new(HirExpr::Var(index_name.clone())),
-                        Box::new(callback_call),
-                    )),
                     HirStmt::Expr(HirExpr::Assign(
                         index_name.clone(),
                         Box::new(HirExpr::BinOp(
@@ -192,7 +204,13 @@ impl<'a> FnLowerer<'a> {
                     )),
                 ],
             ),
-            HirStmt::Return(Some(HirExpr::Var(result_name))),
+            HirStmt::Return(Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_copy_presence".into())),
+                vec![
+                    HirExpr::Var(result_name),
+                    HirExpr::Var(receiver_name.clone()),
+                ],
+            ))),
         ]);
         let mut bindings = vec![
             (receiver_name, array_type, receiver),

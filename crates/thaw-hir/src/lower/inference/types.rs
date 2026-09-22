@@ -462,6 +462,19 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "array presence index")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_array_copy_presence" => {
+                        let [target, source] = args.as_slice() else {
+                            return Err("array presence copy expects two operands".into());
+                        };
+                        let target_type = self.infer_expr_type(target)?;
+                        if !matches!(target_type, HirType::Array(_)) {
+                            return Err("array presence copy requires an array target".into());
+                        }
+                        if !matches!(self.infer_expr_type(source)?, HirType::Array(_) | HirType::Tuple(_)) {
+                            return Err("array presence copy requires an array source".into());
+                        }
+                        return Ok(target_type);
+                    }
                     "console.log" | "console.info" | "console.debug" | "console.warn"
                     | "console.error" | "console.assert" => return Ok(HirType::Void),
                     "__thaw_string_concat" => {
