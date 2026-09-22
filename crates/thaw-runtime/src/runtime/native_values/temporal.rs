@@ -972,6 +972,62 @@ fn split_duration_nanoseconds(milliseconds: f64) -> (f64, f64) {
 }
 
 #[no_mangle]
+/// `PlainDate.prototype.since`/`until`: the calendar difference from
+/// `from` to `to` as a components JSON object, in the requested
+/// `largest_unit` (`"year"`/`"month"`/`"week"`/`"day"`; day default).
+///
+/// # Safety
+/// `largest_unit` must be null or a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_temporal_date_difference(
+    from: f64,
+    to: f64,
+    largest_unit: *const c_char,
+) -> *const c_char {
+    let unit = if largest_unit.is_null() {
+        "day".to_string()
+    } else {
+        unsafe { CStr::from_ptr(largest_unit) }
+            .to_string_lossy()
+            .to_ascii_lowercase()
+    };
+    let date = |milliseconds: f64| -> Option<jiff::civil::Date> {
+        let fields = civil_from_timestamp(milliseconds)?;
+        jiff::civil::Date::new(
+            fields.year as i16,
+            fields.month as i8,
+            fields.day as i8,
+        )
+        .ok()
+    };
+    let (Some(from_date), Some(to_date)) = (date(from), date(to)) else {
+        return std::ptr::null();
+    };
+    let largest = match unit.as_str() {
+        "year" | "years" => jiff::Unit::Year,
+        "month" | "months" => jiff::Unit::Month,
+        "week" | "weeks" => jiff::Unit::Week,
+        _ => jiff::Unit::Day,
+    };
+    let Ok(span) = from_date.until(jiff::civil::DateDifference::new(to_date).largest(largest))
+    else {
+        return std::ptr::null();
+    };
+    let value = serde_json::json!({
+        "years": span.get_years(),
+        "months": span.get_months(),
+        "weeks": span.get_weeks(),
+        "days": span.get_days(),
+        "hours": 0,
+        "minutes": 0,
+        "seconds": 0,
+        "milliseconds": 0,
+        "microseconds": 0,
+        "nanoseconds": 0,
+    });
+    arena_c_string(&value.to_string()).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
 /// The components of an ISO 8601 duration as a JSON object, so
 /// `Duration.from(string)` preserves unnormalized components the same way
 /// its object-literal form does. All-zero on an unparsable input.

@@ -1143,6 +1143,14 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_temporal_date_difference",
+            i8_ptr.fn_type(
+                &[f64_type.into(), f64_type.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         for name in [
             "thaw_temporal_calendar_month_code",
             "thaw_temporal_calendar_era",

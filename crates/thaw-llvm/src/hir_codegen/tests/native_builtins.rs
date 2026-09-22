@@ -3418,6 +3418,27 @@ fn compiles_temporal_duration_sign_and_normalization() {
     );
 }
 
+/// `Temporal.PlainDate.prototype.since`/`until` as a calendar-aware
+/// difference, honoring `largestUnit` (day default, plus month/year/week).
+#[test]
+fn compiles_temporal_plain_date_difference() {
+    let source = r#"
+        function main(): void {
+            const a = Temporal.PlainDate.from("2021-03-15");
+            const b = Temporal.PlainDate.from("2023-05-20");
+            console.log(a.until(b).toString());
+            console.log(a.until(b, { largestUnit: "month" }).toString());
+            console.log(a.until(b, { largestUnit: "year" }).toString());
+            console.log(b.since(a).toString());
+            console.log(a.until(b, { largestUnit: "month" }).months);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "temporal_plain_date_difference"),
+        "P796D\nP26M5D\nP2Y2M5D\nP796D\n26\n"
+    );
+}
+
 /// Non-ISO calendars (via ICU4X): a `[u-ca=...]` annotation,
 /// `withCalendar`, `calendarId`, and the calendar-aware date fields
 /// (`year`/`month`/`day`/`monthCode`/`era`/`eraYear`).
