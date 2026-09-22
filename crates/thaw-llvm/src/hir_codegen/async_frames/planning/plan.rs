@@ -713,29 +713,6 @@ impl<'ctx> HirCompiler<'ctx> {
                     .cloned()
                     .collect::<std::collections::HashSet<_>>();
                 if Self::stmt_awaits_frame_source(stmt, &frame_names) {
-                    match stmt {
-                        HirStmt::If(_, then_body, else_body)
-                            if then_body.iter().chain(else_body).any(|nested| {
-                                Self::stmt_awaits_frame_source(nested, &frame_names)
-                            }) =>
-                        {
-                            return Err(
-                                "frame-split `await` inside an if branch is not supported yet"
-                                    .to_string(),
-                            );
-                        }
-                        HirStmt::While(..) => {
-                            return Err("frame-split `await` inside a loop is not supported yet"
-                                .to_string());
-                        }
-                        HirStmt::Try(..) => {
-                            return Err(
-                                "frame-split `await` inside try/catch is not supported yet"
-                                    .to_string(),
-                            );
-                        }
-                        _ => {}
-                    }
                     let mut rewritten = stmt.clone();
                     loop {
                         let temporary = format!("__thaw_await_{next_temporary}");
