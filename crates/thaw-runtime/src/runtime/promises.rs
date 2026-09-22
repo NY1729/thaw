@@ -100,7 +100,11 @@ pub extern "C" fn thaw_promise_reject(promise: *mut ThawPromise, error: *const u
 }
 
 #[no_mangle]
-pub extern "C" fn thaw_promise_reject_typed(
+/// Rejects a live promise and attaches typed exception metadata.
+///
+/// # Safety
+/// `promise` must be null or point to a live `ThawPromise` allocated by this runtime.
+pub unsafe extern "C" fn thaw_promise_reject_typed(
     promise: *mut ThawPromise,
     error: *const u8,
     tag: u64,
@@ -124,6 +128,10 @@ pub extern "C" fn thaw_promise_reject_typed(
 macro_rules! promise_exception_getter {
     ($name:ident, $field:ident, $ty:ty, $default:expr) => {
         #[no_mangle]
+        #[doc = "Returns typed exception metadata from a live promise."]
+        #[doc = ""]
+        #[doc = "# Safety"]
+        #[doc = "`promise` must be null or point to a live `ThawPromise` allocated by this runtime."]
         pub unsafe extern "C" fn $name(promise: *const ThawPromise) -> $ty {
             unsafe { promise.as_ref() }.map_or($default, |promise| promise.$field)
         }
@@ -149,7 +157,7 @@ fn forward_promise_rejection(
     let Some(input) = (unsafe { input.as_ref() }) else {
         return thaw_promise_reject(output, error);
     };
-    thaw_promise_reject_typed(
+    unsafe { thaw_promise_reject_typed(
         output,
         error,
         input.exception_tag,
@@ -157,7 +165,7 @@ fn forward_promise_rejection(
         input.exception_i64,
         input.exception_bool,
         input.exception_object,
-    )
+    ) }
 }
 
 struct DetachedPromise {
@@ -357,7 +365,7 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
     if unsafe { thaw_promise_state(state.input) } == 2 {
         forward_promise_rejection(state.output, state.input, result);
     } else if state.original_rejected {
-        thaw_promise_reject_typed(
+        unsafe { thaw_promise_reject_typed(
             state.output,
             state.original,
             state.original_tag,
@@ -365,7 +373,7 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
             state.original_i64,
             state.original_bool,
             state.original_object,
-        );
+        ) };
     } else {
         thaw_promise_resolve(state.output, state.original);
     }

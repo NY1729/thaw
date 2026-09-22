@@ -535,7 +535,7 @@ fn rejected_promise_preserves_typed_exception_metadata() {
     let error = 1u8;
     let object = 2u8;
     assert_eq!(
-        thaw_promise_reject_typed(promise, &error, 1, 42.5, 43, true, &object),
+        unsafe { thaw_promise_reject_typed(promise, &error, 1, 42.5, 43, true, &object) },
         1
     );
     unsafe {
@@ -553,7 +553,7 @@ fn promise_forwarders_preserve_typed_exception_metadata() {
     fn rejected(error: &u8, object: &u8) -> *mut ThawPromise {
         let promise = thaw_promise_new();
         assert_eq!(
-            thaw_promise_reject_typed(promise, error, 1, 42.5, 43, true, object),
+            unsafe { thaw_promise_reject_typed(promise, error, 1, 42.5, 43, true, object) },
             1
         );
         promise
