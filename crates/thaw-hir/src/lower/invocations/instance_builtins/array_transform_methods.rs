@@ -590,14 +590,21 @@ impl<'a> FnLowerer<'a> {
                         flattened = true;
                     }
                     if !flattened {
-                        result = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_array_slice".into())),
-                            vec![
-                                result,
-                                HirExpr::Lit(HirLit::F64(0.0)),
-                                HirExpr::Lit(HirLit::F64(f64::INFINITY)),
-                            ],
-                        );
+                        let HirType::Array(element) = &current_type else {
+                            unreachable!()
+                        };
+                        result = self.lower_array_filter(
+                            result,
+                            current_type.clone(),
+                            element.as_ref().clone(),
+                            HirExpr::Lambda(
+                                Vec::new(),
+                                Vec::new(),
+                                HirType::Bool,
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                            ),
+                            None,
+                        )?;
                     }
                     let mut bindings = vec![(source_name, source_type, receiver)];
                     bindings.extend(spread_bindings);
@@ -834,4 +841,3 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 }
-
