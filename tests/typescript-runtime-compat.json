@@ -854,6 +854,11 @@
       "name": "sparse array transforms follow hole rules",
       "expect": "matched",
       "source": "function print(label: string, values: number[]): void { for (const [index, value] of values.entries()) console.log(label, index, value, typeof value); } function main(): void { const source: number[] = [3, , 1]; print('filter', source.filter((): boolean => true)); print('flat', source.flat(0)); print('flatMap', source.flatMap((value: number): number[] => [value, , value + 10])); print('reversed', source.toReversed()); print('sorted', source.toSorted((left: number, right: number): number => left - right)); print('spliced', source.toSpliced(1, 0, 2)); print('with', source.with(1, 2)); }"
+    },
+    {
+      "name": "sparse array mutations preserve hole positions",
+      "expect": "matched",
+      "source": "function print(label: string, values: number[]): void { for (const value of values) console.log(label, value, typeof value); } function main(): void { const reversed: number[] = [1, , 3]; print('reverse', reversed.reverse()); const copied: number[] = [1, , 3, 4]; print('copyWithin', copied.copyWithin(0, 1, 3)); const sorted: number[] = [3, , 1]; print('sort', sorted.sort((left: number, right: number): number => left - right)); const filled: number[] = [1, , 3]; print('fill', filled.fill(2, 0, 1)); const spliced: number[] = [1, , 3]; print('splice', spliced.splice(0, 2)); }"
     }
   ]
 }
