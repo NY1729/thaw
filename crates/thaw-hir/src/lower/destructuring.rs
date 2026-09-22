@@ -8,6 +8,10 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<(), String> {
         if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             if let HirType::Optional(payload) = ty {
+                let discriminants = match &value {
+                    HirExpr::Var(name) => self.union_discriminants.get(name).cloned(),
+                    _ => None,
+                };
                 statements.push(HirStmt::If(
                     HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
                     vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
@@ -15,9 +19,22 @@ impl<'a> FnLowerer<'a> {
                     )))],
                     Vec::new(),
                 ));
+                let unwrapped = format!("__thaw_destructure_optional_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope
+                    .insert(unwrapped.clone(), payload.as_ref().clone());
+                if let Some(discriminants) = discriminants {
+                    self.union_discriminants
+                        .insert(unwrapped.clone(), discriminants);
+                }
+                statements.push(HirStmt::Let(
+                    unwrapped.clone(),
+                    payload.as_ref().clone(),
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
+                ));
                 return self.lower_binding_pattern(
                     pattern,
-                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
+                    HirExpr::Var(unwrapped),
                     payload,
                     statements,
                 );
