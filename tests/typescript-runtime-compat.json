@@ -829,6 +829,11 @@
       "name": "sparse array class method returns preserve holes across iteration",
       "expect": "matched",
       "source": "class Values { make(): number[] { const values = [1, , 3]; return values; } static makeStatic(): number[] { return [4, , 6]; } } function main(): void { const instanceValues = new Values().make(); for (const value of instanceValues.values()) console.log('instance', value, typeof value); const staticValues = Values.makeStatic(); for (const [index, value] of staticValues.entries()) console.log('static', index, value, typeof value); }"
+    },
+    {
+      "name": "sparse array arrow returns preserve holes across iteration",
+      "expect": "matched",
+      "source": "function main(): void { const makeValues = (): number[] => { const values = [1, , 3]; return values; }; const alias = makeValues; const source = alias(); for (const value of source) console.log('direct', value, typeof value); for (const [index, value] of source.entries()) console.log('entry', index, value, typeof value); }"
     }
   ]
 }

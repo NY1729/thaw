@@ -178,7 +178,7 @@ fn expression_is_statically_sparse_array(
     }
 }
 
-fn function_returns_sparse_array(function: &swc_ecma_ast::Function) -> bool {
+fn statements_return_sparse_array(statements: &[Stmt]) -> bool {
     #[derive(Default)]
     struct SparseReturnVisitor {
         found: bool,
@@ -205,10 +205,24 @@ fn function_returns_sparse_array(function: &swc_ecma_ast::Function) -> bool {
     }
 
     let mut visitor = SparseReturnVisitor::default();
-    if let Some(body) = &function.body {
-        body.visit_with(&mut visitor);
-    }
+    statements.visit_with(&mut visitor);
     visitor.found
+}
+
+fn function_returns_sparse_array(function: &swc_ecma_ast::Function) -> bool {
+    function
+        .body
+        .as_ref()
+        .is_some_and(|body| statements_return_sparse_array(&body.stmts))
+}
+
+fn arrow_returns_sparse_array(arrow: &swc_ecma_ast::ArrowExpr) -> bool {
+    match arrow.body.as_ref() {
+        ArrowFunctionBody::Expr(expression) => {
+            expression_is_statically_sparse_array(expression, &HashSet::new())
+        }
+        ArrowFunctionBody::FunctionBody(body) => statements_return_sparse_array(&body.stmts),
+    }
 }
 
 #[derive(Clone)]
