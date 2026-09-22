@@ -3672,11 +3672,16 @@ fn compiles_array_holes() {
             let explicit = 0;
             [undefined].forEach(() => { explicit += 1; });
             console.log(holes, explicit);
+            const dense = [1, 2];
+            const spread = [0, , ...dense, , 4];
+            let visited = 0;
+            spread.forEach(() => { visited += 1; });
+            console.log(spread.length, visited);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_holes"),
-        "3 true\n2\n2 1\n"
+        "3 true\n2\n2 1\n6 4\n"
     );
 }
 
