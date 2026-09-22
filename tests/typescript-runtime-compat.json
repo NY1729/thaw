@@ -848,7 +848,7 @@
     {
       "name": "promise sparse array results preserve holes across iteration",
       "expect": "matched",
-      "source": "async function main(): Promise<void> { const resolved = await Promise.resolve([1, , 3]); for (const value of resolved.values()) console.log('resolved', value, typeof value); const chained = await Promise.resolve(0).then((): number[] => [4, , 6]); for (const [index, value] of chained.entries()) console.log('chained', index, value, typeof value); }"
+      "source": "async function main(): Promise<void> { const resolved = await Promise.resolve([1, , 3]).finally((): void => {}); for (const value of resolved.values()) console.log('resolved', value, typeof value); const chained = await Promise.resolve(0).then((): number[] => [4, , 6]); for (const [index, value] of chained.entries()) console.log('chained', index, value, typeof value); const recovered = await new Promise<number[]>((resolve, reject) => reject('no')).catch((): number[] => [7, , 9]); for (const value of recovered.values()) console.log('recovered', value, typeof value); }"
     }
   ]
 }
