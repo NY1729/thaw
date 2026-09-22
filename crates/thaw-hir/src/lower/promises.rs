@@ -1,4 +1,24 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_promise_rejection_callback(
+        &mut self,
+        expr: &Expr,
+        expected_return: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        let parameter = match expr {
+            Expr::Arrow(arrow) => arrow.params.first(),
+            Expr::Fn(function) => function.function.params.first().map(|param| &param.pat),
+            _ => None,
+        }
+        .and_then(|param| match param {
+            Pat::Ident(binding) => Some(binding.id.sym.to_string()),
+            _ => None,
+        });
+        let saved = std::mem::replace(&mut self.promise_catch_parameter, parameter);
+        let result = self.lower_promise_callback(expr, &[HirType::Str], expected_return);
+        self.promise_catch_parameter = saved;
+        result
+    }
+
     fn lower_promise_callback(
         &mut self,
         expr: &Expr,
@@ -278,6 +298,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(executor),
             resolved,
             assimilates,
+            false,
         );
         self.wrap_call_argument_bindings(result, &spread_bindings)
     }

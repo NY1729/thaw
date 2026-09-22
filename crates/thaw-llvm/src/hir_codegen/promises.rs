@@ -4,6 +4,7 @@ impl<'ctx> HirCompiler<'ctx> {
         resolved: &HirType,
         reject: bool,
         assimilates: bool,
+        typed_rejection: bool,
     ) -> Result<FunctionValue<'ctx>, String> {
         let name = format!(
             "__thaw_promise_{}_{}",
@@ -65,20 +66,41 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             slot
         };
-        let settle = if reject {
-            "thaw_promise_reject"
-        } else if assimilates {
+        let settle = if assimilates {
             "thaw_promise_adopt"
         } else {
             "thaw_promise_resolve"
         };
-        self.builder
-            .build_call(
-                self.module.get_function(settle).unwrap(),
-                &[promise.into(), payload.into()],
+        if reject {
+            if !typed_rejection {
+                self.builder
+                    .build_store(
+                        self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
+                            .as_pointer_value(),
+                        self.context.i64_type().const_int(4, false),
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(
+                        self.pending_exception_object().as_pointer_value(),
+                        self.context.ptr_type(AddressSpace::default()).const_null(),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            self.reject_promise_with_pending_exception(
+                promise.into_pointer_value(),
+                payload,
                 "settle_promise",
-            )
-            .map_err(|error| error.to_string())?;
+            )?;
+        } else {
+            self.builder
+                .build_call(
+                    self.module.get_function(settle).unwrap(),
+                    &[promise.into(), payload.into()],
+                    "settle_promise",
+                )
+                .map_err(|error| error.to_string())?;
+        }
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(return_block);
         Ok(function)
@@ -89,6 +111,7 @@ impl<'ctx> HirCompiler<'ctx> {
         executor: &HirExpr,
         resolved: &HirType,
         assimilates: bool,
+        typed_rejection: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let promise = self
             .builder
@@ -103,8 +126,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .unwrap()
             .into_pointer_value();
         let executor = self.compile_expr(executor)?.into_pointer_value();
-        let resolve_fn = self.compile_promise_resolver(resolved, false, assimilates)?;
-        let reject_fn = self.compile_promise_resolver(resolved, true, false)?;
+        let resolve_fn = self.compile_promise_resolver(resolved, false, assimilates, false)?;
+        let reject_fn =
+            self.compile_promise_resolver(resolved, true, false, typed_rejection)?;
         let resolve = self.allocate_special_closure(resolve_fn, promise, "resolve_closure")?;
         let reject = self.allocate_special_closure(reject_fn, promise, "reject_closure")?;
         let code = self
@@ -201,7 +225,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let adapter_type = self
             .context
             .void_type()
-            .fn_type(&[ptr.into(), ptr.into(), ptr.into()], false);
+            .fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false);
         let adapter =
             self.module
                 .add_function(&adapter_name, adapter_type, Some(Linkage::Internal));
@@ -210,7 +234,31 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(entry);
         let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
         let promise = adapter.get_nth_param(1).unwrap();
-        let result = adapter.get_nth_param(2).unwrap().into_pointer_value();
+        let source_promise = adapter.get_nth_param(2).unwrap().into_pointer_value();
+        let result = adapter.get_nth_param(3).unwrap().into_pointer_value();
+        if on_rejected {
+            for (getter, target) in [
+                ("thaw_promise_exception_tag", self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)),
+                ("thaw_promise_exception_f64", self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL)),
+                ("thaw_promise_exception_i64", self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL)),
+                ("thaw_promise_exception_bool", self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL)),
+                ("thaw_promise_exception_object", self.pending_exception_object()),
+            ] {
+                let value = self.builder
+                    .build_call(
+                        self.module.get_function(getter).unwrap(),
+                        &[source_promise.into()],
+                        "catch_exception_value",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("{getter} returned no value"))?;
+                self.builder
+                    .build_store(target.as_pointer_value(), value)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let callback_input = if on_rejected { &HirType::Str } else { input };
         let value = if !on_rejected && callback_input == &HirType::Void {
             None
@@ -270,13 +318,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_conditional_branch(has_error, failed, succeeded)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(failed);
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_promise_reject").unwrap(),
-                &[promise.into(), pending.into()],
-                "reject_chain",
-            )
-            .map_err(|error| error.to_string())?;
+        self.reject_promise_with_pending_exception(
+            promise.into_pointer_value(),
+            pending,
+            "reject_chain",
+        )?;
         self.builder
             .build_store(pending_slot, ptr.const_null())
             .map_err(|error| error.to_string())?;
@@ -341,7 +387,7 @@ impl<'ctx> HirCompiler<'ctx> {
         _input: &HirType,
         callback_return: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let source = self.compile_expr(source)?.into_pointer_value();
+        let source_promise = self.compile_expr(source)?.into_pointer_value();
         let closure = self.compile_expr(callback)?.into_pointer_value();
         let name = format!("__thaw_promise_finally_{}", self.next_lambda);
         self.next_lambda += 1;
@@ -350,7 +396,16 @@ impl<'ctx> HirCompiler<'ctx> {
         let adapter_type = self
             .context
             .void_type()
-            .fn_type(&[ptr.into(), ptr.into(), ptr.into(), i8_type.into()], false);
+            .fn_type(
+                &[
+                    ptr.into(),
+                    ptr.into(),
+                    ptr.into(),
+                    ptr.into(),
+                    i8_type.into(),
+                ],
+                false,
+            );
         let adapter = self
             .module
             .add_function(&name, adapter_type, Some(Linkage::Internal));
@@ -359,8 +414,9 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(entry);
         let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
         let output = adapter.get_nth_param(1).unwrap();
-        let original = adapter.get_nth_param(2).unwrap();
-        let original_rejected = adapter.get_nth_param(3).unwrap().into_int_value();
+        let source = adapter.get_nth_param(2).unwrap().into_pointer_value();
+        let original = adapter.get_nth_param(3).unwrap();
+        let original_rejected = adapter.get_nth_param(4).unwrap().into_int_value();
         let code = self
             .builder
             .build_load(ptr, context, "finally_code")
@@ -390,13 +446,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_conditional_branch(has_error, failed, succeeded)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(failed);
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_promise_reject").unwrap(),
-                &[output.into(), pending.into()],
-                "reject_finally",
-            )
-            .map_err(|error| error.to_string())?;
+        self.reject_promise_with_pending_exception(
+            output.into_pointer_value(),
+            pending,
+            "reject_finally",
+        )?;
         self.builder
             .build_store(pending_slot, ptr.const_null())
             .map_err(|error| error.to_string())?;
@@ -406,17 +460,39 @@ impl<'ctx> HirCompiler<'ctx> {
             let returned = returned
                 .ok_or("Promise-returning finally callback produced no value")?
                 .into_pointer_value();
+            let mut args: Vec<BasicMetadataValueEnum<'ctx>> = vec![
+                output.into(),
+                returned.into(),
+                original.into(),
+                original_rejected.into(),
+            ];
+            for getter in [
+                "thaw_promise_exception_tag",
+                "thaw_promise_exception_f64",
+                "thaw_promise_exception_i64",
+                "thaw_promise_exception_bool",
+                "thaw_promise_exception_object",
+            ] {
+                args.push(
+                    self.builder
+                        .build_call(
+                            self.module.get_function(getter).unwrap(),
+                            &[source.into()],
+                            "finally_exception_value",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| format!("{getter} returned no value"))?
+                        .into(),
+                );
+            }
             self.builder
                 .build_call(
                     self.module
                         .get_function("thaw_promise_finally_adopt")
                         .unwrap(),
-                    &[
-                        output.into(),
-                        returned.into(),
-                        original.into(),
-                        original_rejected.into(),
-                    ],
+                    &args,
                     "wait_finally_promise",
                 )
                 .map_err(|error| error.to_string())?;
@@ -441,13 +517,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_conditional_branch(rejected, reject, resolve)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(reject);
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_promise_reject").unwrap(),
-                    &[output.into(), original.into()],
-                    "forward_finally_rejection",
-                )
-                .map_err(|error| error.to_string())?;
+            self.reject_promise_with_source_exception(
+                output.into_pointer_value(),
+                original.into_pointer_value(),
+                source,
+                "forward_finally_rejection",
+            )?;
             self.builder.build_return(None).map_err(|e| e.to_string())?;
             self.builder.position_at_end(resolve);
             self.builder
@@ -464,7 +539,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_call(
                 self.module.get_function("thaw_promise_finally").unwrap(),
                 &[
-                    source.into(),
+                    source_promise.into(),
                     adapter.as_global_value().as_pointer_value().into(),
                     closure.into(),
                 ],

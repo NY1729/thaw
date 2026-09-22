@@ -1098,6 +1098,7 @@ impl<'a> FnLowerer<'a> {
                 )),
                 HirType::Void,
                 false,
+                false,
             );
             let pending = HirExpr::PromiseThen(
                 Box::new(source),
@@ -1166,6 +1167,7 @@ impl<'a> FnLowerer<'a> {
                     Box::new(executor),
                     HirType::Void,
                     false,
+                    false,
                 ));
             }
             let [argument] = call.args.as_slice() else {
@@ -1175,7 +1177,8 @@ impl<'a> FnLowerer<'a> {
                 return Err(format!("`{callee_name}` does not support a spread argument"));
             }
             let value = self.lower_expr(&argument.expr)?;
-            let (resolved, assimilates, settled_value) = if is_reject {
+            let value_type = self.infer_expr_type(&value)?;
+            let (resolved, assimilates) = if is_reject {
                 let resolved = match &call.type_args {
                     Some(type_args) => {
                         let [resolved] = type_args.params.as_slice() else {
@@ -1187,11 +1190,11 @@ impl<'a> FnLowerer<'a> {
                     }
                     None => HirType::Void,
                 };
-                (resolved, false, self.coerce_primitive_to_string(value)?)
+                (resolved, false)
             } else {
-                match self.infer_expr_type(&value)? {
-                    HirType::Promise(inner) => (*inner, true, value),
-                    other => (other, false, value),
+                match &value_type {
+                    HirType::Promise(inner) => (inner.as_ref().clone(), true),
+                    other => (other.clone(), false),
                 }
             };
             let resolve_params = if assimilates {
@@ -1205,7 +1208,7 @@ impl<'a> FnLowerer<'a> {
             let reject_ty = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
 
             let mut referenced = BTreeSet::new();
-            collect_referenced_bindings(&settled_value, &mut referenced);
+            collect_referenced_bindings(&value, &mut referenced);
             let captures = referenced
                 .into_iter()
                 .filter_map(|name| {
@@ -1239,9 +1242,74 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_promise_resolve",
                 )
             };
-            let body = HirExpr::Call(Box::new(HirExpr::Var(callee.to_string())), vec![settled_value]);
+            let body = if is_reject {
+                let value_name = format!("__thaw_rejected_value_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(value_name.clone(), value_type.clone());
+                let value_var = HirExpr::Var(value_name.clone());
+                let setter = match &value_type {
+                    HirType::Object(_) => HirExpr::Call(
+                        Box::new(HirExpr::Var(
+                            "__thaw_set_pending_exception_object".to_string(),
+                        )),
+                        vec![value_var.clone()],
+                    ),
+                    HirType::F64 => HirExpr::Call(
+                        Box::new(HirExpr::Var(
+                            "__thaw_set_pending_exception_f64".to_string(),
+                        )),
+                        vec![value_var.clone()],
+                    ),
+                    HirType::I64 => HirExpr::Call(
+                        Box::new(HirExpr::Var(
+                            "__thaw_set_pending_exception_i64".to_string(),
+                        )),
+                        vec![value_var.clone()],
+                    ),
+                    HirType::Bool => HirExpr::Call(
+                        Box::new(HirExpr::Var(
+                            "__thaw_set_pending_exception_bool".to_string(),
+                        )),
+                        vec![value_var.clone()],
+                    ),
+                    HirType::Str | HirType::StrLiteral(_) => HirExpr::Call(
+                        Box::new(HirExpr::Var(
+                            "__thaw_set_pending_exception_tag".to_string(),
+                        )),
+                        vec![HirExpr::Lit(HirLit::I64(4))],
+                    ),
+                    HirType::Undefined | HirType::Void => HirExpr::Call(
+                        Box::new(HirExpr::Var(
+                            "__thaw_set_pending_exception_tag".to_string(),
+                        )),
+                        vec![HirExpr::Lit(HirLit::I64(5))],
+                    ),
+                    _ => HirExpr::Call(
+                        Box::new(HirExpr::Var(
+                            "__thaw_set_pending_exception_tag".to_string(),
+                        )),
+                        vec![HirExpr::Lit(HirLit::I64(0))],
+                    ),
+                };
+                let message = self.coerce_primitive_to_string(value_var)?;
+                HirExpr::Block(vec![
+                    HirStmt::Let(value_name, value_type, value),
+                    HirStmt::Expr(setter),
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var(callee.to_string())),
+                        vec![message],
+                    )),
+                ])
+            } else {
+                HirExpr::Call(Box::new(HirExpr::Var(callee.to_string())), vec![value])
+            };
             let executor = HirExpr::Lambda(captures, params, HirType::Void, Box::new(body));
-            return Ok(HirExpr::PromiseNew(Box::new(executor), resolved, assimilates));
+            return Ok(HirExpr::PromiseNew(
+                Box::new(executor),
+                resolved,
+                assimilates,
+                is_reject,
+            ));
         }
 
         // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete

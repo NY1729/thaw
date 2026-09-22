@@ -14,8 +14,18 @@
   普通に読み書きでき、throw後は`.message`/`.name`/`instanceof`(多段継承の
   祖先も含めて)が正しく動く。
   **V2(3.1〜3.2節)も実装済み**: `__thaw_pending_exception_object`という並行
-  チャンネルを追加し、`(e as MyError).code`という**明示的なasキャスト**で
-  catch後にフィールドへアクセスできる。ただし3.2節で提案した「`instanceof`
+  チャンネルを追加し、Error派生型に限らず任意の固定レイアウトオブジェクトを
+  `(e as T)`で元の同一性のまま復元できる。再throwでもこのチャンネルを引き継ぐ。
+  `number`/`bigint`/`boolean`も型タグ付きスロットで保持し、明示的な`as`と
+  `typeof`で元の型を復元する。`string`/`undefined`/`null`の`typeof`も保持する。
+  これらは関数伝播・再throwと、async関数間のPromise rejectionをまたぐcatchに
+  対応する。Promiseの既存文字列payload ABIは維持し、型タグと値を付随メタデータ
+  として運ぶ。拒否をそのまま転送する`then`/adopt/`Promise.all`/`Promise.race`/
+  `Promise.prototype.finally`もメタデータを引き継ぐ。インラインの`.catch(error =>
+  ...)`でも`typeof`・明示的な`as`・再throwから同じメタデータを利用できる。
+  `Promise.reject(value)`も同じメタデータを生成するため、直接rejectした
+  primitiveと固定レイアウトオブジェクトもawait先で復元できる。
+  ただし3.2節で提案した「`instanceof`
   ナローイングだけで自動的に読める」形ではなく、`as`キャストを明示的に書く
   必要がある(ナローイング機構との統合は見送った、5節参照)。この`as`は
   実際に対応するオブジェクトが投げられていない場合はチェックされず、
@@ -96,13 +106,12 @@ __thaw_pending_exception_object : i8*   (新規、nullable)
   `Error`系**(ビルトイン、またはフィールドなしでユーザー定義された
   `class MyError extends Error {}`)のときは、今まで通り
   `__thaw_pending_exception`だけをセットする。`_object`は`null`のまま。
-- `throw`されたのが**フィールドを持つ、`Error`系を継承したユーザークラスの
-  インスタンス**のときは、
+- `throw`されたのが固定レイアウトのオブジェクトのときは、
   1. `__thaw_pending_exception_object`にそのオブジェクトの生ポインタを
      セットする
-  2. `__thaw_pending_exception`にも**同時に**、そのクラス名と`message`
-     フィールドから組み立てたタグ付き文字列(`\u{1}<Name>\u{1}<message>`)
-     をセットする(オブジェクトから文字列表現を都度導出するだけで、
+  2. `__thaw_pending_exception`にも**同時に**、その値の文字列表現をセットする。
+     Error系ではクラス名と`message`からタグ付き文字列
+     (`\u{1}<Name>\u{1}<message>`)を組み立てる(オブジェクトから文字列表現を都度導出するだけで、
      既存の`split_error_tag`系ヘルパーは一切変更不要)
 
 この二重化により、**既存の全ての読み手(console.log・N-API・Lambdaエラー
@@ -170,7 +179,8 @@ try {
   `__thaw_pending_exception_object`グローバルの追加宣言
 - [thaw-llvm/src/hir_codegen/statements.rs](../../crates/thaw-llvm/src/hir_codegen/statements.rs):
   `compile_try`のcatch分岐で`_object`退避値も読む
-- N-API境界・Lambdaエラー報告・`Promise.reject`は**変更不要**(3.1節参照)
+- N-API境界・Lambdaエラー報告は**変更不要**(3.1節参照)。`Promise.reject`は
+  既存文字列payloadを維持したまま付随メタデータを設定する
 
 ## 5. 未解決の問題・リスク
 
@@ -191,10 +201,6 @@ try {
   `undefined`を返すのと違い、より危険側に倒れている。将来的には、
   アクセス時にnullチェックを挟んで安全なThaw例外に倒す(または既定値を
   返す)実装に強化する余地がある。
-- **クロスファンクション伝播**: `_object`もグローバル変数なので、文字列版と
-  同じ「単一のpending state」方式で伝播自体は動くはずだが、非同期
-  (`async`関数のフレーム分割)との相互作用は未検証。フレーム分割済みの
-  関数がまたぐ場合に`_object`の生存期間(アリーナ)が正しいか要確認。
 - **N-API側でユーザークラスをどう見せるか**: 現状はスコープ外にしている
   (3.1節)が、将来ネイティブアドオン側にユーザー定義Errorを渡したい場合は
   別途設計が要る。

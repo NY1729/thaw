@@ -121,7 +121,7 @@ pub fn set_ffi_error_abi(
             HirExpr::RecursiveClosure(_, _, closure) => visit_expr(closure, symbol, abi, found),
             HirExpr::TypedClosure(_, closure) => visit_expr(closure, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
-            HirExpr::PromiseNew(executor, _, _) => visit_expr(executor, symbol, abi, found),
+            HirExpr::PromiseNew(executor, _, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
                 visit_expr(source, symbol, abi, found);
                 visit_expr(callback, symbol, abi, found);
@@ -342,7 +342,7 @@ pub fn set_ffi_ownership(
                 update_expr(closure, symbol, returns, errors, found)
             }
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
-            HirExpr::PromiseNew(executor, _, _) => {
+            HirExpr::PromiseNew(executor, _, _, _) => {
                 update_expr(executor, symbol, returns, errors, found)
             }
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
@@ -732,7 +732,7 @@ pub fn set_ffi_string_abi(
                 aggregate_return_abi,
                 found,
             ),
-            HirExpr::PromiseNew(executor, _, _) => update_expr(
+            HirExpr::PromiseNew(executor, _, _, _) => update_expr(
                 executor,
                 symbol,
                 params,

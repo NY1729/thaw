@@ -94,6 +94,10 @@ const PENDING_REJECTION_SYMBOL: &str = "__thaw_pending_rejection";
 /// `Promise.reject`) only ever looks at the string channel and stays
 /// completely unaware this one exists.
 const PENDING_EXCEPTION_OBJECT_SYMBOL: &str = "__thaw_pending_exception_object";
+const PENDING_EXCEPTION_VALUE_TAG_SYMBOL: &str = "__thaw_pending_exception_value_tag";
+const PENDING_EXCEPTION_F64_SYMBOL: &str = "__thaw_pending_exception_f64";
+const PENDING_EXCEPTION_I64_SYMBOL: &str = "__thaw_pending_exception_i64";
+const PENDING_EXCEPTION_BOOL_SYMBOL: &str = "__thaw_pending_exception_bool";
 
 /// Byte size of an array's length header (a single `i64`) that precedes its
 /// elements in the arena-allocated buffer. See the module doc for the layout.
@@ -323,6 +327,29 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_global(ptr_ty, None, PENDING_EXCEPTION_OBJECT_SYMBOL);
         pending_object.set_linkage(Linkage::Internal);
         pending_object.set_initializer(&ptr_ty.const_null());
+        let typed_slots: [(&str, BasicTypeEnum); 4] = [
+            (
+                PENDING_EXCEPTION_VALUE_TAG_SYMBOL,
+                BasicTypeEnum::from(self.context.i64_type()),
+            ),
+            (
+                PENDING_EXCEPTION_F64_SYMBOL,
+                BasicTypeEnum::from(self.context.f64_type()),
+            ),
+            (
+                PENDING_EXCEPTION_I64_SYMBOL,
+                BasicTypeEnum::from(self.context.i64_type()),
+            ),
+            (
+                PENDING_EXCEPTION_BOOL_SYMBOL,
+                BasicTypeEnum::from(self.context.bool_type()),
+            ),
+        ];
+        for (name, ty) in typed_slots {
+            let value = self.module.add_global(ty, None, name);
+            value.set_linkage(Linkage::Internal);
+            value.set_initializer(&ty.const_zero());
+        }
     }
 
     fn declare_globals(&mut self, program: &HirProgram) -> Result<(), String> {
@@ -482,7 +509,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Await(inner) => {
                 matches!(
                     inner.as_ref(),
-                    HirExpr::PromiseNew(_, _, _)
+                    HirExpr::PromiseNew(_, _, _, _)
                         | HirExpr::PromiseThen(_, _, _, _, _, _)
                         | HirExpr::PromiseFinally(_, _, _, _)
                         | HirExpr::PromiseAll(_, _)
@@ -570,6 +597,100 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .get_global(PENDING_EXCEPTION_OBJECT_SYMBOL)
             .expect("exception state is declared before code generation")
+    }
+
+    fn pending_exception_value(&self, name: &str) -> inkwell::values::GlobalValue<'ctx> {
+        self.module
+            .get_global(name)
+            .expect("typed exception state is declared before code generation")
+    }
+
+    fn reject_promise_with_pending_exception(
+        &mut self,
+        promise: PointerValue<'ctx>,
+        error: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<(), String> {
+        let mut args: Vec<BasicMetadataValueEnum<'ctx>> = vec![promise.into(), error.into()];
+        for (symbol, ty) in [
+            (
+                PENDING_EXCEPTION_VALUE_TAG_SYMBOL,
+                self.context.i64_type().into(),
+            ),
+            (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
+            (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
+            (
+                PENDING_EXCEPTION_BOOL_SYMBOL,
+                self.context.bool_type().into(),
+            ),
+            (
+                PENDING_EXCEPTION_OBJECT_SYMBOL,
+                BasicTypeEnum::from(self.context.ptr_type(AddressSpace::default())),
+            ),
+        ] {
+            let global = if symbol == PENDING_EXCEPTION_OBJECT_SYMBOL {
+                self.pending_exception_object()
+            } else {
+                self.pending_exception_value(symbol)
+            };
+            args.push(
+                self.builder
+                    .build_load(ty, global.as_pointer_value(), "promise_exception_value")
+                    .map_err(|error| error.to_string())?
+                    .into(),
+            );
+        }
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_promise_reject_typed")
+                    .unwrap(),
+                &args,
+                name,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn reject_promise_with_source_exception(
+        &mut self,
+        promise: PointerValue<'ctx>,
+        error: PointerValue<'ctx>,
+        source: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<(), String> {
+        let mut args: Vec<BasicMetadataValueEnum<'ctx>> = vec![promise.into(), error.into()];
+        for getter in [
+            "thaw_promise_exception_tag",
+            "thaw_promise_exception_f64",
+            "thaw_promise_exception_i64",
+            "thaw_promise_exception_bool",
+            "thaw_promise_exception_object",
+        ] {
+            args.push(
+                self.builder
+                    .build_call(
+                        self.module.get_function(getter).unwrap(),
+                        &[source.into()],
+                        "promise_exception_value",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("{getter} returned no value"))?
+                    .into(),
+            );
+        }
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_promise_reject_typed")
+                    .unwrap(),
+                &args,
+                name,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     fn build_default_return(&self) -> Result<(), String> {

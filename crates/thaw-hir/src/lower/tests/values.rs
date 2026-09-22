@@ -1270,8 +1270,8 @@ fn lowers_calls_through_function_typed_object_properties() {
     ));
 }
 
-/// `typeof e` for a `catch (e)` binding lowers to the literal `"object"`
-/// (real JavaScript throws an `Error` object), and a custom property read
+/// `typeof e` for a `catch (e)` binding reads the preserved exception tag,
+/// and a custom property read
 /// (`e.status`) routes through `__thaw_error_property` rather than a
 /// string operation -- real trigger: koa's `onerror` reading an
 /// `http-errors` error's `status`. `e.name`/`e.message` keep using the
@@ -1290,10 +1290,7 @@ fn typeof_and_custom_properties_on_a_caught_error() {
         "#,
     );
     let source = format!("{:?}", program.functions);
-    assert!(
-        source.contains("\"object\"") || source.contains("object"),
-        "typeof a caught error should be `object`:\n{source}"
-    );
+    assert!(source.contains("__thaw_exception_typeof"), "{source}");
     assert!(
         source.contains("__thaw_error_property"),
         "`e.status` should route to `__thaw_error_property`:\n{source}"

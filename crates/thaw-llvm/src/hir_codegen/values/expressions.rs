@@ -313,8 +313,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::AwaitPromise(inner, resolved) => {
                 self.compile_typed_blocking_await(inner, resolved)
             }
-            HirExpr::PromiseNew(executor, resolved, assimilates) => {
-                self.compile_promise_new(executor, resolved, *assimilates)
+            HirExpr::PromiseNew(executor, resolved, assimilates, typed_rejection) => {
+                self.compile_promise_new(executor, resolved, *assimilates, *typed_rejection)
             }
             HirExpr::PromiseThen(source, callback, input, output, on_rejected, flatten) => {
                 self.compile_promise_then(source, callback, input, output, *on_rejected, *flatten)

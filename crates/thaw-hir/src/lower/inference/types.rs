@@ -1005,6 +1005,42 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Void);
                     }
+                    "__thaw_set_pending_exception_f64"
+                    | "__thaw_set_pending_exception_i64"
+                    | "__thaw_set_pending_exception_bool" => {
+                        let [value] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        let expected = match name.as_str() {
+                            "__thaw_set_pending_exception_f64" => HirType::F64,
+                            "__thaw_set_pending_exception_i64" => HirType::I64,
+                            _ => HirType::Bool,
+                        };
+                        self.expect_type(&expected, value, name)?;
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_exception_typeof" => {
+                        let [tag] = args.as_slice() else {
+                            return Err("exception typeof expects one tag".into());
+                        };
+                        self.expect_type(&HirType::I64, tag, "exception typeof tag")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_pending_exception_object" => {
+                        return Ok(HirType::Object(Vec::new()));
+                    }
+                    "__thaw_pending_exception_tag" | "__thaw_pending_exception_i64" => {
+                        return Ok(HirType::I64);
+                    }
+                    "__thaw_pending_exception_f64" => return Ok(HirType::F64),
+                    "__thaw_pending_exception_bool" => return Ok(HirType::Bool),
+                    "__thaw_set_pending_exception_tag" => {
+                        let [tag] = args.as_slice() else {
+                            return Err("exception tag setter expects one tag".into());
+                        };
+                        self.expect_type(&HirType::I64, tag, "exception tag")?;
+                        return Ok(HirType::Void);
+                    }
                     "__thaw_detach_promise" | "__thaw_detach_rejection" => {
                         let [promise] = args.as_slice() else {
                             return Err("detach Promise expects one operand".into());
@@ -1858,7 +1894,9 @@ impl<'a> FnLowerer<'a> {
             | HirExpr::PromiseAllSettledArray(_, element) => Ok(HirType::Promise(Box::new(
                 HirType::Array(Box::new(promise_settled_result_type(element.clone()))),
             ))),
-            HirExpr::PromiseNew(_, resolved, _) => Ok(HirType::Promise(Box::new(resolved.clone()))),
+            HirExpr::PromiseNew(_, resolved, _, _) => {
+                Ok(HirType::Promise(Box::new(resolved.clone())))
+            }
             HirExpr::PromiseThen(_, _, _, output, _, _) => {
                 Ok(HirType::Promise(Box::new(output.clone())))
             }

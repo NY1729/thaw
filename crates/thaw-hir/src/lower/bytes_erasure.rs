@@ -317,7 +317,7 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_expr(len);
             erase_ty(ty);
         }
-        HirExpr::PromiseNew(value, ty, _) => {
+        HirExpr::PromiseNew(value, ty, _, _) => {
             erase_expr(value);
             erase_ty(ty);
         }
