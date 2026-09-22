@@ -568,12 +568,19 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"forEach" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
-                    let HirType::Array(element) = &array_type else {
-                        return Err(format!(
-                            "`.forEach()` requires a homogeneous array, got {array_type:?}"
-                        ));
+                    let element_type = match &array_type {
+                        HirType::Array(element) => element.as_ref().clone(),
+                        HirType::Tuple(elements) => elements
+                            .iter()
+                            .find(|element| **element != HirType::Undefined)
+                            .cloned()
+                            .unwrap_or(HirType::Undefined),
+                        _ => {
+                            return Err(format!(
+                                "`.forEach()` requires an array, got {array_type:?}"
+                            ));
+                        }
                     };
-                    let element_type = element.as_ref().clone();
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
                         let source_name = format!("__thaw_for_each_source_{}", self.next_binding);
                         self.next_binding += 1;

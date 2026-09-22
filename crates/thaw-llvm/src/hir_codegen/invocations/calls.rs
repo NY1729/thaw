@@ -22,6 +22,18 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         match name.as_str() {
+            "__thaw_array_has_index" => {
+                let [array, index] = args else {
+                    return Err("array presence check expects two operands".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let index = self.compile_expr(index)?.into_float_value();
+                let index = self
+                    .builder
+                    .build_float_to_unsigned_int(index, self.context.i64_type(), "array_presence_index")
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.compile_array_has_index(handle, index)?.into());
+            }
             "console.log" | "console.info" | "console.debug" => {
                 return self.compile_console_log(args, false)
             }

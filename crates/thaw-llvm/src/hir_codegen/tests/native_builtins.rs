@@ -3628,9 +3628,8 @@ fn compiles_bytes_base64_hex() {
     );
 }
 
-/// A sparse array literal (`[1, , 3]`) compiles: thaw's dense arrays
-/// represent a hole as an explicit `undefined` element, so `length` and an
-/// indexed read match a real hole's observable behavior.
+/// Sparse array holes remain absent for callback iteration, while an explicit
+/// `undefined` element remains present.
 #[test]
 fn compiles_array_holes() {
     let source = r#"
@@ -3639,11 +3638,16 @@ fn compiles_array_holes() {
             console.log(a.length, a[1] === undefined);
             const b = [, ,];
             console.log(b.length);
+            let holes = 0;
+            a.forEach(() => { holes += 1; });
+            let explicit = 0;
+            [undefined].forEach(() => { explicit += 1; });
+            console.log(holes, explicit);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_holes"),
-        "3 true\n2\n"
+        "3 true\n2\n2 1\n"
     );
 }
 
