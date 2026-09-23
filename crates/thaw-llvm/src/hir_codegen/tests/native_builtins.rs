@@ -6516,6 +6516,44 @@ fn compiles_bigint_from_number_range_errors() {
     );
 }
 
+/// `BigInt(string)` for a *non-literal* string -- unlike a literal
+/// argument, whether it's small, needs real arbitrary precision, or is
+/// outright invalid can't be known until runtime, so this always goes
+/// through the real QuickJS `BigInt` constructor now (previously a
+/// native `i64` parser silently truncated at the first non-digit and
+/// saturated out-of-range values instead of a real `SyntaxError`/exact
+/// value). Also pins that `console.log` of the resulting (or any other)
+/// real `bigint` handle still gets its `n` suffix -- a real bug this fix's
+/// own investigation found: the shared `String(x)`-coercion path
+/// `console.log` used to reuse for a `JsValue` doesn't add one (correctly
+/// -- real `String(5n)` is `"5"`, no `n`), so `console.log` needs (and now
+/// has) its own bigint-aware formatting, confirmed not to leak into
+/// `String()`/template-literal/`+`-concatenation coercion of the same
+/// value.
+#[test]
+fn compiles_bigint_from_non_literal_string() {
+    let source = r#"
+        function main(): void {
+            const small = "42";
+            console.log(BigInt(small));
+            const huge = "999999999999999999999999999999";
+            console.log(BigInt(huge));
+            console.log(BigInt(huge).toString());
+            const invalid = "123abc";
+            try { BigInt(invalid); } catch (error) { console.log((error as Error).name); }
+            const a = 123456789012345678901234567890n;
+            console.log(a);
+            console.log(String(a));
+            console.log(`${a}`);
+            console.log(a + "");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bigint_from_non_literal_string"),
+        "42n\n999999999999999999999999999999n\n999999999999999999999999999999\nSyntaxError\n123456789012345678901234567890n\n123456789012345678901234567890\n123456789012345678901234567890\n123456789012345678901234567890\n"
+    );
+}
+
 /// A `bigint` literal (or a literal `BigInt("...")` argument) beyond
 /// Thaw's fixed-width `i64` is kept as the real QuickJS BigInt, so
 /// `.toString()`/radix conversion stay exact. Comparing (`>`, `==`,

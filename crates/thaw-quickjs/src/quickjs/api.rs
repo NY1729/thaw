@@ -730,6 +730,29 @@ pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
     CString::new(text).unwrap_or_default().into_raw()
 }
 
+/// Like `thaw_js_handle_to_string`, but for `console.log` specifically --
+/// real `console.log`/`util.inspect` formatting appends `n` to a `bigint`
+/// (`123n`), unlike plain `String(x)` coercion (`"123"`, no suffix, used
+/// by every other caller of `thaw_js_handle_to_string`: real `String()`,
+/// template-literal interpolation, string concatenation -- none of which
+/// should gain a stray `n`). A dedicated function so fixing `console.log`
+/// couldn't silently break any of those.
+#[no_mangle]
+pub extern "C" fn thaw_js_handle_to_console_string(handle: u64) -> *const c_char {
+    let text = with_active_or_context(|ctx| -> Result<String, String> {
+        let value = value_for_handle(&ctx, handle)?;
+        let format: Function = ctx
+            .eval("(value) => typeof value === 'bigint' ? String(value) + 'n' : String(value)")
+            .map_err(|error| error.to_string())?;
+        format.call((value,)).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => error.to_string(),
+        })
+    })
+    .unwrap_or_else(|_| "[invalid JsValue]".to_string());
+    CString::new(text).unwrap_or_default().into_raw()
+}
+
 /// The residual JIT's `dynamic_object_query` host ABI: operation `0`
 /// snapshots a Set-like opaque handle's keys into a JSON object (validating
 /// the `size`/`has`/`keys` protocol in the JS realm).

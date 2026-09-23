@@ -1460,25 +1460,30 @@ impl<'a> FnLowerer<'a> {
                 return self.coerce_primitive_to_number(value);
             }
             if callee_name == "BigInt" {
-                // A literal string beyond Thaw's fixed-width `i64` is kept
-                // as the real QuickJS BigInt (exact `.toString()`/radix);
-                // a non-literal string still goes through the saturating
-                // native parser.
-                if let HirExpr::Lit(HirLit::Str(text)) = &value {
-                    if text.trim().parse::<i64>().is_err() {
-                        let constructor = HirExpr::Call(
-                            Box::new(HirExpr::Var("getDynamicValue".into())),
-                            vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
-                        );
-                        let arguments = self.coerce_to_declared(
-                            &HirType::Json,
-                            HirExpr::ArrayLit(vec![value.clone()]),
-                        )?;
-                        return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
-                            vec![constructor, arguments],
-                        ));
-                    }
+                // `BigInt(string)` always goes through the real QuickJS
+                // BigInt constructor, string arg or not -- a native `i64`
+                // parse can't tell, at compile time, whether a runtime
+                // string is a small in-range integer, one requiring real
+                // arbitrary precision (`BigInt("999...999")`, far beyond
+                // `i64`), or outright invalid (`BigInt("123abc")`, a real
+                // `SyntaxError`); the previous native fast path silently
+                // truncated/saturated/accepted-with-trailing-garbage all
+                // three instead. `.toString()`/radix conversion on the
+                // resulting value stays exact either way (same as a large
+                // `bigint` literal, which already takes this same path).
+                if ty == HirType::Str {
+                    let constructor = HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                    );
+                    let arguments = self.coerce_to_declared(
+                        &HirType::Json,
+                        HirExpr::ArrayLit(vec![value.clone()]),
+                    )?;
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+                        vec![constructor, arguments],
+                    ));
                 }
                 return match ty {
                     HirType::I64 => Ok(value),
@@ -1515,10 +1520,6 @@ impl<'a> FnLowerer<'a> {
                             &[(value_name, HirType::F64, value)],
                         );
                     }
-                    HirType::Str => Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_i64_from_string".to_string())),
-                        vec![value],
-                    )),
                     HirType::Bool => Ok(HirExpr::Conditional(
                         Box::new(value),
                         Box::new(HirExpr::Lit(HirLit::I64(1))),
