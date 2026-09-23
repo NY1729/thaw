@@ -4209,6 +4209,41 @@ fn native_array_length_assignment_resizes_and_preserves_state() {
     assert_eq!(compile_and_run(source, "native_array_resize_length"), "1 1 false\n4 4 false true\n,,,9 true\n0 0 0\n1 a\n3 3 false\n1 a\nfalse false 1,,,\nRangeError\nRangeError\nRangeError\n2 LR 2 false\n");
 }
 
+/// `array.length ||= n` / `&&= n` / `??= n` -- previously rejected outright
+/// ("unsupported array length assignment operator"). `.length` is always a
+/// plain number, so `??=` can never actually assign (its RHS must not even
+/// be evaluated, matching real ECMAScript's short-circuit); `||=`/`&&=`
+/// resize only when the current length is falsy/truthy, and likewise never
+/// evaluate their RHS on the branch that doesn't assign.
+#[test]
+fn native_array_length_logical_assignments() {
+    let source = r#"
+        function main(): void {
+            const a: number[] = [1, 2, 3];
+            console.log(a.length ||= 5, a.length);
+            const b: number[] = [];
+            console.log(b.length ||= 3, b.length, b.join(","));
+            const c: number[] = [1, 2];
+            console.log(c.length &&= 1, c.length, c.join(","));
+            const d: number[] = [];
+            console.log(d.length &&= 5, d.length);
+            const e: number[] = [1, 2, 3];
+            console.log(e.length ??= 9, e.length);
+            let called = false;
+            const rhs = (): number => { called = true; return 99; };
+            const empty: number[] = [];
+            a.length ||= rhs();
+            empty.length &&= rhs();
+            e.length ??= rhs();
+            console.log(called);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_array_length_logical_assignments"),
+        "3 3\n3 3 ,,\n1 1 1\n0 0\n3 3\nfalse\n"
+    );
+}
+
 #[test]
 fn native_array_membership_respects_length_and_holes_after_growth() {
     let source = r#"
