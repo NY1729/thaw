@@ -7262,6 +7262,33 @@ fn compiles_map_get_or_insert() {
     );
 }
 
+/// `Map<K, any>`'s `.set()`/`.getOrInsert()`/`.getOrInsertComputed()`
+/// value used to reject a plain literal argument outright ("Map.set value
+/// has type F64, expected Json") -- the value only got a strict type
+/// *check* against the declared `any` (`Json`) slot, not the same
+/// declared-type *coercion* an ordinary call argument gets (matching how
+/// the key side already works via `coerce_map_key`).
+#[test]
+fn compiles_map_any_value_accepts_literals() {
+    let source = r#"
+        function main(): void {
+            const m = new Map<string, any>();
+            m.set("x", 42);
+            m.set("y", "hello");
+            m.set("z", true);
+            console.log(m.get("x"), m.get("y"), m.get("z"));
+            const m2 = new Map<string, any>();
+            console.log(m2.getOrInsert("k", 99));
+            console.log(m2.get("k"));
+            console.log(m2.getOrInsertComputed("k2", (key: string) => key.length));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_any_value_accepts_literals"),
+        "42 hello true\n99\n99\n2\n"
+    );
+}
+
 /// `Math.sumPrecise` and the deprecated `Date.getYear`/`setYear`.
 #[test]
 fn compiles_math_sum_precise_and_date_year() {
