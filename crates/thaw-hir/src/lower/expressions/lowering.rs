@@ -268,6 +268,17 @@ impl<'a> FnLowerer<'a> {
                             elements.clone(),
                         ));
                     }
+                    // Dropping the trailing `undefined` member preserves every
+                    // surviving tag and the union's native two-word layout.
+                    if elements.last() == Some(&HirType::Undefined)
+                        && allowed.len() + 1 == elements.len()
+                        && allowed.iter().copied().eq(0..allowed.len())
+                    {
+                        return Ok(HirExpr::TypedClosure(
+                            HirType::Union(elements[..allowed.len()].to_vec()),
+                            Box::new(HirExpr::Var(name)),
+                        ));
+                    }
                 }
                 if let Some(narrowed) = self.json_narrowings.get(&name) {
                     let value = Box::new(HirExpr::Var(name));
@@ -811,6 +822,14 @@ impl<'a> FnLowerer<'a> {
                         rhs_union_narrowing.as_deref(),
                         rhs_narrowing.as_ref(),
                     )?;
+                if matches!(bin.op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                    | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Exp
+                    | BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq
+                    | BinaryOp::EqEqEq | BinaryOp::NotEqEq | BinaryOp::EqEq | BinaryOp::NotEq)
+                {
+                    lhs = self.lower_primitive_array_operand(lhs)?;
+                    rhs = self.lower_primitive_array_operand(rhs)?;
+                }
                 let mut bindings = Vec::new();
                 if !matches!(
                     bin.op,
@@ -866,6 +885,65 @@ impl<'a> FnLowerer<'a> {
                                     (right_name, right_type, rhs),
                                 ],
                             )?
+                        } else if matches!(&right_type, HirType::Array(_)) {
+                            let mut key_type = self.infer_expr_type(&lhs)?;
+                            if matches!(key_type, HirType::Bool | HirType::I64) {
+                                lhs = self.coerce_primitive_to_string(lhs)?;
+                                key_type = HirType::Str;
+                            }
+                            if matches!(key_type, HirType::Null | HirType::Undefined) {
+                                let key_name = format!("__thaw_in_array_key_{}", self.next_binding);
+                                self.next_binding += 1;
+                                let array_name = format!("__thaw_in_array_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(key_name.clone(), key_type.clone());
+                                self.scope.insert(array_name.clone(), right_type.clone());
+                                return self.wrap_call_argument_bindings(
+                                    HirExpr::Lit(HirLit::Bool(false)),
+                                    &[(key_name, key_type, lhs), (array_name, right_type, rhs)],
+                                );
+                            }
+                            if !matches!(key_type, HirType::F64 | HirType::Str | HirType::Symbol) {
+                                return Err("`in` on a native array requires a numeric, string, or symbol key".into());
+                            }
+                            let key_name = format!("__thaw_in_array_key_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let array_name = format!("__thaw_in_array_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(key_name.clone(), key_type.clone());
+                            self.scope.insert(array_name.clone(), right_type.clone());
+                            let key = HirExpr::Var(key_name.clone());
+                            let array = HirExpr::Var(array_name.clone());
+                            let result = if matches!(key_type, HirType::Str | HirType::Symbol) {
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_has_property".into())),
+                                    vec![array, key],
+                                )
+                            } else {
+                                let valid = self.lower_logical_expr(
+                                    HirExpr::BinOp(BinOp::GtEq, Box::new(key.clone()), Box::new(HirExpr::Lit(HirLit::F64(0.0)))),
+                                    HirExpr::BinOp(BinOp::Lt, Box::new(key.clone()), Box::new(HirExpr::ArrayLen(Box::new(array.clone())))),
+                                    true,
+                                )?;
+                                let valid = self.lower_logical_expr(
+                                    valid,
+                                    HirExpr::BinOp(
+                                        BinOp::EqEqEq,
+                                        Box::new(key.clone()),
+                                        Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_math_trunc".into())), vec![key.clone()])),
+                                    ),
+                                    true,
+                                )?;
+                                self.lower_logical_expr(
+                                    valid,
+                                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_array_has_index".into())), vec![array, key]),
+                                    true,
+                                )?
+                            };
+                            self.wrap_call_argument_bindings(result, &[
+                                (key_name, key_type, lhs),
+                                (array_name, right_type, rhs),
+                            ])?
                         } else if let HirType::Union(elements) = &right_type {
                             let HirExpr::Lit(HirLit::Str(property)) = lhs else {
                                 return Err(
@@ -1087,7 +1165,9 @@ impl<'a> FnLowerer<'a> {
                     }
                     other
                         if matches!(self.infer_expr_type(&lhs)?, HirType::Optional(_))
-                            || matches!(self.infer_expr_type(&rhs)?, HirType::Optional(_)) =>
+                            || matches!(self.infer_expr_type(&rhs)?, HirType::Optional(_))
+                            || matches!(self.infer_expr_type(&lhs)?, HirType::Nullable(_) | HirType::Nullish(_))
+                            || matches!(self.infer_expr_type(&rhs)?, HirType::Nullable(_) | HirType::Nullish(_)) =>
                     {
                         HirExpr::BinOp(
                             lower_bin_op(other)?,
@@ -1147,6 +1227,11 @@ impl<'a> FnLowerer<'a> {
                     return Ok(HirExpr::JsonDelete(Box::new(object), Box::new(key)));
                 }
                 let value = self.lower_expr(&unary.arg)?;
+                let value = if matches!(unary.op, UnaryOp::TypeOf | UnaryOp::Bang | UnaryOp::Plus | UnaryOp::Minus) {
+                    self.lower_primitive_array_operand(value)?
+                } else {
+                    value
+                };
                 let lowered = match unary.op {
                     UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::I64 => {
                         // No dedicated native negation for `I64` -- `0n -
@@ -1186,15 +1271,24 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     UnaryOp::Minus => {
-                        self.expect_type(&HirType::F64, &value, "unary minus")?;
+                        let value = if matches!(self.infer_expr_type(&value)?, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)) {
+                            self.coerce_primitive_to_number(value)?
+                        } else {
+                            self.expect_type(&HirType::F64, &value, "unary minus")?;
+                            value
+                        };
                         HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_number_neg".to_string())),
                             vec![value],
                         )
                     }
                     UnaryOp::Plus => {
-                        self.expect_type(&HirType::F64, &value, "unary plus")?;
-                        value
+                        if matches!(self.infer_expr_type(&value)?, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)) {
+                            self.coerce_primitive_to_number(value)?
+                        } else {
+                            self.expect_type(&HirType::F64, &value, "unary plus")?;
+                            value
+                        }
                     }
                     UnaryOp::Bang => {
                         // Same truthiness coercion `if`/`while`/`do`/`for`
@@ -1681,9 +1775,6 @@ impl<'a> FnLowerer<'a> {
                     };
                     let mut value = self.lower_expr(&element.expr)?;
                     if element.spread.is_some() {
-                        if !pending.is_empty() {
-                            parts.push(HirExpr::ArrayLit(std::mem::take(&mut pending)));
-                        }
                         // A string/`Map`/`Set` spread source iterates the
                         // same way `for...of` already does for each --
                         // snapshot to an array up front via the exact same
@@ -1727,19 +1818,47 @@ impl<'a> FnLowerer<'a> {
                         };
                         if let Some(expected) = &element_type {
                             if expected != spread_element.as_ref() {
-                                return Err(format!(
-                                    "array spread element type {:?} does not match {expected:?}",
-                                    spread_element
-                                ));
+                                if expected == &HirType::Optional(spread_element.clone()) {
+                                    element_type = Some(spread_element.as_ref().clone());
+                                } else {
+                                    return Err(format!(
+                                        "array spread element type {:?} does not match {expected:?}",
+                                        spread_element
+                                    ));
+                                }
                             }
                         } else {
                             element_type = Some(spread_element.as_ref().clone());
                         }
+                        if !pending.is_empty() {
+                            let values = std::mem::take(&mut pending).into_iter()
+                                .map(|item| if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
+                                    Ok(item)
+                                } else {
+                                    self.coerce_array_insert_value(item, spread_element.as_ref())
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            parts.push(self.lower_native_array_literal(values, spread_element.as_ref().clone())?);
+                        }
+                        // Array spread iterates values: unlike concat, a source hole
+                        // becomes an own `undefined` entry in the new array.
+                        value = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_densify".into())),
+                            vec![HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                                vec![
+                                    value,
+                                    HirExpr::Lit(HirLit::F64(0.0)),
+                                    HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                                ],
+                            )],
+                        );
                         parts.push(value);
                     } else {
                         let actual = self.infer_expr_type(&value)?;
                         if let Some(expected) = &element_type {
-                            if expected != &actual {
+                            if expected != &actual && expected != &HirType::Optional(Box::new(actual.clone()))
+                                && &actual != &HirType::Optional(Box::new(expected.clone())) {
                                 if matches!(expected, HirType::Union(members) if members.contains(&actual))
                                 {
                                     value = self.coerce_to_declared(expected, value)?;
@@ -1756,7 +1875,15 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if !pending.is_empty() {
-                    parts.push(HirExpr::ArrayLit(pending));
+                    let element = element_type.as_ref().expect("nonempty literal segment has an element type");
+                    let values = pending.into_iter()
+                        .map(|item| if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
+                            Ok(item)
+                        } else {
+                            self.coerce_array_insert_value(item, element)
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    parts.push(self.lower_native_array_literal(values, element.clone())?);
                 }
                 let element_type = element_type.unwrap_or(HirType::F64);
                 if !parts.iter().any(contains_await) {
@@ -2108,9 +2235,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         let timestamp = if args.len() >= 2 {
                             // `new Date(year, month, date?, hours?, minutes?,
-                            // seconds?, ms?)`: identical to `Date.UTC` since
-                            // "local" time is UTC here too, just wrapped as
-                            // a `Date` instead of returned as a bare number.
+                            // seconds?, ms?)` uses host-local time.
                             const DEFAULTS: [f64; 7] = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
                             let mut call_args = Vec::with_capacity(7);
                             for (index, default) in DEFAULTS.iter().enumerate() {
@@ -2123,7 +2248,7 @@ impl<'a> FnLowerer<'a> {
                                 call_args.push(value);
                             }
                             HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_date_utc".to_string())),
+                                Box::new(HirExpr::Var("__thaw_date_local".to_string())),
                                 call_args,
                             )
                         } else if let Some(argument) = args.first() {
@@ -2134,7 +2259,10 @@ impl<'a> FnLowerer<'a> {
                                     vec![value],
                                 )
                             } else {
-                                self.coerce_primitive_to_number(value)?
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_date_time_clip".to_string())),
+                                    vec![self.coerce_primitive_to_number(value)?],
+                                )
                             }
                         } else {
                             HirExpr::Call(
@@ -2188,11 +2316,6 @@ impl<'a> FnLowerer<'a> {
                     }
                     if class.sym == *"AggregateError" {
                         // `new AggregateError(errors, message?, options?)`.
-                        // The exception channel is a single tagged string
-                        // (see the branch below), so only the message
-                        // survives: the `errors` iterable and the resulting
-                        // `.errors` array are not modeled, and a caller can
-                        // recover only `.name`/`.message`.
                         let args = new_expr.args.clone().unwrap_or_default();
                         if args.iter().any(|argument| argument.spread.is_some()) {
                             return Err(
@@ -2204,18 +2327,84 @@ impl<'a> FnLowerer<'a> {
                                 "`new AggregateError()` expects an errors argument and at most a message and options".into()
                             );
                         }
-                        let message = match args.get(1) {
-                            Some(argument) => {
-                                let message = self.lower_expr(&argument.expr)?;
-                                self.coerce_primitive_to_string(message)?
+                        let errors = self.lower_expr(&args[0].expr)?;
+                        let errors_type = self.infer_expr_type(&errors)?;
+                        if !matches!(errors_type, HirType::Array(_) | HirType::Tuple(_)) {
+                            return Err(
+                                "`AggregateError` errors must be a statically typed array or tuple"
+                                    .into(),
+                            );
+                        }
+                        let errors_name = format!("__thaw_aggregate_errors_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(errors_name.clone(), errors_type.clone());
+                        let mut bindings = vec![(errors_name.clone(), errors_type, errors)];
+
+                        let message = if let Some(argument) = args.get(1) {
+                            let message = self.lower_expr(&argument.expr)?;
+                            let message_type = self.infer_expr_type(&message)?;
+                            let message_name =
+                                format!("__thaw_aggregate_message_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope
+                                .insert(message_name.clone(), message_type.clone());
+                            bindings.push((message_name.clone(), message_type, message));
+                            Some(message_name)
+                        } else {
+                            None
+                        };
+                        let options = if let Some(argument) = args.get(2) {
+                            let options = self.lower_expr(&argument.expr)?;
+                            let options_type = self.infer_expr_type(&options)?;
+                            if !matches!(options_type, HirType::Object(_)) {
+                                return Err("`AggregateError` options must be an object".into());
+                            }
+                            let options_name =
+                                format!("__thaw_aggregate_options_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope
+                                .insert(options_name.clone(), options_type.clone());
+                            bindings.push((options_name.clone(), options_type.clone(), options));
+                            Some((options_name, options_type))
+                        } else {
+                            None
+                        };
+                        let message = match message {
+                            Some(name) => {
+                                self.coerce_primitive_to_string(HirExpr::Var(name))?
                             }
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
-                        let tag = HirExpr::Lit(HirLit::Str("\u{1}AggregateError\u{1}".to_string()));
-                        return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                            vec![tag, message],
-                        ));
+                        let mut fields = vec![
+                            (
+                                "__thaw_class_identity_AggregateError$Error".to_string(),
+                                HirExpr::Lit(HirLit::Bool(true)),
+                            ),
+                            ("message".to_string(), message),
+                            (
+                                "name".to_string(),
+                                HirExpr::Lit(HirLit::Str("AggregateError".to_string())),
+                            ),
+                            ("errors".to_string(), HirExpr::Var(errors_name)),
+                        ];
+                        if let Some((name, HirType::Object(option_fields))) = options {
+                            if option_fields.iter().any(|(field, _)| field == "cause") {
+                                let options_type = HirType::Object(option_fields);
+                                fields.push((
+                                    "cause".to_string(),
+                                    HirExpr::PropAccess(
+                                        Box::new(HirExpr::Var(name)),
+                                        options_type,
+                                        "cause".to_string(),
+                                    ),
+                                ));
+                            }
+                        }
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::ObjectLit(fields),
+                            &bindings,
+                        );
                     }
                     if matches!(
                         class.sym.as_ref(),

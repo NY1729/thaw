@@ -9,7 +9,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.getTime()` expects no arguments".into());
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(&date_type, &receiver, "Date.getTime receiver")?;
                     return Ok(HirExpr::PropAccess(
@@ -19,7 +19,7 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if property.sym == *"setTime" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(&date_type, &receiver, "Date.setTime receiver")?;
                     let (arguments, spread_bindings) =
@@ -39,7 +39,10 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var(receiver_name.clone())),
                         date_type.clone(),
                         "timestamp".to_string(),
-                        Box::new(HirExpr::Var(value_name.clone())),
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_date_time_clip".to_string())),
+                            vec![HirExpr::Var(value_name.clone())],
+                        )),
                     );
                     let mut bindings = vec![(receiver_name, date_type, receiver)];
                     bindings.extend(spread_bindings);
@@ -49,7 +52,7 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"setYear" {
                     // Deprecated Annex B setter: a two-digit year (0..=99)
                     // means 1900 + year; the month/day are preserved.
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(&date_type, &receiver, "Date.setYear receiver")?;
                     let (arguments, spread_bindings) =
@@ -95,15 +98,19 @@ impl<'a> FnLowerer<'a> {
                         "timestamp".to_string(),
                     );
                     let month = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_date_get_month".to_string())),
+                        Box::new(HirExpr::Var(
+                            "__thaw_date_get_local_month_for_full_year".to_string(),
+                        )),
                         vec![timestamp.clone()],
                     );
                     let date = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_date_get_date".to_string())),
+                        Box::new(HirExpr::Var(
+                            "__thaw_date_get_local_date_for_full_year".to_string(),
+                        )),
                         vec![timestamp.clone()],
                     );
                     let new_timestamp = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_date_set_full_year".to_string())),
+                        Box::new(HirExpr::Var("__thaw_date_set_local_full_year".to_string())),
                         vec![timestamp, normalized, month, date],
                     );
                     let result = HirExpr::PropAssign(
@@ -122,16 +129,42 @@ impl<'a> FnLowerer<'a> {
                 // that position's default when the caller omits it -- `None`
                 // marks the one leading parameter every setter requires.
                 let date_setter = match property.sym.as_ref() {
-                    "setFullYear" | "setUTCFullYear" => Some((
-                        "__thaw_date_set_full_year",
-                        vec![None, Some("__thaw_date_get_month"), Some("__thaw_date_get_date")],
+                    "setFullYear" => Some((
+                        "__thaw_date_set_local_full_year",
+                        vec![
+                            None,
+                            Some("__thaw_date_get_local_month_for_full_year"),
+                            Some("__thaw_date_get_local_date_for_full_year"),
+                        ],
                     )),
-                    "setMonth" | "setUTCMonth" => Some((
+                    "setUTCFullYear" => Some((
+                        "__thaw_date_set_full_year",
+                        vec![
+                            None,
+                            Some("__thaw_date_get_month_for_full_year"),
+                            Some("__thaw_date_get_date_for_full_year"),
+                        ],
+                    )),
+                    "setMonth" => Some((
+                        "__thaw_date_set_local_month",
+                        vec![None, Some("__thaw_date_get_local_date")],
+                    )),
+                    "setUTCMonth" => Some((
                         "__thaw_date_set_month",
                         vec![None, Some("__thaw_date_get_date")],
                     )),
-                    "setDate" | "setUTCDate" => Some(("__thaw_date_set_date", vec![None])),
-                    "setHours" | "setUTCHours" => Some((
+                    "setDate" => Some(("__thaw_date_set_local_date", vec![None])),
+                    "setUTCDate" => Some(("__thaw_date_set_date", vec![None])),
+                    "setHours" => Some((
+                        "__thaw_date_set_local_hours",
+                        vec![
+                            None,
+                            Some("__thaw_date_get_local_minutes"),
+                            Some("__thaw_date_get_local_seconds"),
+                            Some("__thaw_date_get_local_milliseconds"),
+                        ],
+                    )),
+                    "setUTCHours" => Some((
                         "__thaw_date_set_hours",
                         vec![
                             None,
@@ -140,7 +173,15 @@ impl<'a> FnLowerer<'a> {
                             Some("__thaw_date_get_milliseconds"),
                         ],
                     )),
-                    "setMinutes" | "setUTCMinutes" => Some((
+                    "setMinutes" => Some((
+                        "__thaw_date_set_local_minutes",
+                        vec![
+                            None,
+                            Some("__thaw_date_get_local_seconds"),
+                            Some("__thaw_date_get_local_milliseconds"),
+                        ],
+                    )),
+                    "setUTCMinutes" => Some((
                         "__thaw_date_set_minutes",
                         vec![
                             None,
@@ -148,17 +189,20 @@ impl<'a> FnLowerer<'a> {
                             Some("__thaw_date_get_milliseconds"),
                         ],
                     )),
-                    "setSeconds" | "setUTCSeconds" => Some((
+                    "setSeconds" => Some((
+                        "__thaw_date_set_local_seconds",
+                        vec![None, Some("__thaw_date_get_local_milliseconds")],
+                    )),
+                    "setUTCSeconds" => Some((
                         "__thaw_date_set_seconds",
                         vec![None, Some("__thaw_date_get_milliseconds")],
                     )),
-                    "setMilliseconds" | "setUTCMilliseconds" => {
-                        Some(("__thaw_date_set_milliseconds", vec![None]))
-                    }
+                    "setMilliseconds" => Some(("__thaw_date_set_local_milliseconds", vec![None])),
+                    "setUTCMilliseconds" => Some(("__thaw_date_set_milliseconds", vec![None])),
                     _ => None,
                 };
                 if let Some((intrinsic, param_defaults)) = date_setter {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(
                         &date_type,
@@ -228,7 +272,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.getYear()` expects no arguments".into());
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(&date_type, &receiver, "Date.getYear receiver")?;
                     let timestamp = HirExpr::PropAccess(
@@ -239,30 +283,39 @@ impl<'a> FnLowerer<'a> {
                     return Ok(HirExpr::BinOp(
                         BinOp::Sub,
                         Box::new(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_date_get_full_year".to_string())),
+                            Box::new(HirExpr::Var(
+                                "__thaw_date_get_local_full_year".to_string(),
+                            )),
                             vec![timestamp],
                         )),
                         Box::new(HirExpr::Lit(HirLit::F64(1900.0))),
                     ));
                 }
                 let date_getter_intrinsic = match property.sym.as_ref() {
-                    "getFullYear" | "getUTCFullYear" => Some("__thaw_date_get_full_year"),
-                    "getMonth" | "getUTCMonth" => Some("__thaw_date_get_month"),
-                    "getDate" | "getUTCDate" => Some("__thaw_date_get_date"),
-                    "getDay" | "getUTCDay" => Some("__thaw_date_get_day"),
-                    "getHours" | "getUTCHours" => Some("__thaw_date_get_hours"),
-                    "getMinutes" | "getUTCMinutes" => Some("__thaw_date_get_minutes"),
-                    "getSeconds" | "getUTCSeconds" => Some("__thaw_date_get_seconds"),
-                    "getMilliseconds" | "getUTCMilliseconds" => {
-                        Some("__thaw_date_get_milliseconds")
-                    }
+                    "getFullYear" => Some("__thaw_date_get_local_full_year"),
+                    "getMonth" => Some("__thaw_date_get_local_month"),
+                    "getDate" => Some("__thaw_date_get_local_date"),
+                    "getDay" => Some("__thaw_date_get_local_day"),
+                    "getHours" => Some("__thaw_date_get_local_hours"),
+                    "getMinutes" => Some("__thaw_date_get_local_minutes"),
+                    "getSeconds" => Some("__thaw_date_get_local_seconds"),
+                    "getMilliseconds" => Some("__thaw_date_get_local_milliseconds"),
+                    "getTimezoneOffset" => Some("__thaw_date_get_timezone_offset"),
+                    "getUTCFullYear" => Some("__thaw_date_get_full_year"),
+                    "getUTCMonth" => Some("__thaw_date_get_month"),
+                    "getUTCDate" => Some("__thaw_date_get_date"),
+                    "getUTCDay" => Some("__thaw_date_get_day"),
+                    "getUTCHours" => Some("__thaw_date_get_hours"),
+                    "getUTCMinutes" => Some("__thaw_date_get_minutes"),
+                    "getUTCSeconds" => Some("__thaw_date_get_seconds"),
+                    "getUTCMilliseconds" => Some("__thaw_date_get_milliseconds"),
                     _ => None,
                 };
                 if let Some(intrinsic) = date_getter_intrinsic {
                     if !call.args.is_empty() {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(
                         &date_type,
@@ -283,7 +336,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.toISOString()` expects no arguments".into());
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(&date_type, &receiver, "Date.toISOString receiver")?;
                     let receiver_name =
@@ -346,4 +399,3 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 }
-

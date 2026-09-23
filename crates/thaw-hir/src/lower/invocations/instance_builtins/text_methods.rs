@@ -6,7 +6,7 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                 if property.sym == *"charAt" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "charAt receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.charAt")?;
@@ -108,7 +108,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"charCodeAt" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "charCodeAt receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.charCodeAt")?;
@@ -142,7 +142,7 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"localeCompare" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "localeCompare receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.localeCompare")?;
@@ -170,7 +170,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"normalize" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "normalize receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.normalize")?;
@@ -240,7 +240,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"split" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "split receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.split")?;
@@ -266,7 +266,7 @@ impl<'a> FnLowerer<'a> {
                             Some(argument) => {
                                 self.coerce_primitive_to_number(argument.clone())?
                             }
-                            None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                            None => HirExpr::Lit(HirLit::F64(-1.0)),
                         };
                         let receiver_name =
                             format!("__thaw_regex_split_receiver_{}", self.next_binding);
@@ -349,7 +349,7 @@ impl<'a> FnLowerer<'a> {
                     let separator = self.coerce_primitive_to_string(arguments[0].clone())?;
                     let limit = match arguments.get(1) {
                         Some(argument) => self.coerce_primitive_to_number(argument.clone())?,
-                        None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                        None => HirExpr::Lit(HirLit::F64(-1.0)),
                     };
                     let receiver_name = format!("__thaw_split_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -378,4 +378,3 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 }
-

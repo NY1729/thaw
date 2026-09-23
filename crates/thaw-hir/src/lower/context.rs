@@ -25,6 +25,7 @@ struct FnLowerer<'a> {
     bindings: HashMap<Symbol, Vec<Symbol>>,
     used_hir_bindings: HashSet<Symbol>,
     sparse_arrays: HashSet<Symbol>,
+    conservative_sparse_arrays: HashSet<Symbol>,
     sparse_array_functions: HashSet<Symbol>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
@@ -74,6 +75,7 @@ struct FnLowerer<'a> {
     /// place a callback's *unannotated* return is still known to need to
     /// stay a live `JsValue`.
     expected_arrow_return_hint: Option<HirType>,
+    sparse_mapping_result: bool,
     generator_yields: Option<(Symbol, HirType, Symbol, HirType, Symbol, HirType)>,
     generator_finalizers: HashMap<Symbol, Vec<HirStmt>>,
 }

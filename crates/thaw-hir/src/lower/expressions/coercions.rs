@@ -736,6 +736,17 @@ impl<'a> FnLowerer<'a> {
                     HirType::Str => "__thaw_string_array_to_string",
                     HirType::Bool => "__thaw_bool_array_to_string",
                     HirType::Object(_) => "__thaw_object_array_to_string",
+                    HirType::Optional(_)
+                    | HirType::Nullable(_)
+                    | HirType::Nullish(_)
+                    | HirType::Undefined
+                    | HirType::Null
+                    | HirType::Union(_) => {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_tagged_array_join".into())),
+                            vec![value, HirExpr::Lit(HirLit::Str(",".into()))],
+                        ));
+                    }
                     other => {
                         return Err(format!(
                             "array string conversion does not support element type {other:?}"
@@ -974,6 +985,59 @@ impl<'a> FnLowerer<'a> {
                 &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
             );
         }
+        let union = match (&lhs_type, &rhs_type) {
+            (HirType::Union(members), HirType::Null | HirType::Undefined) => {
+                Some((members.clone(), true))
+            }
+            (HirType::Null | HirType::Undefined, HirType::Union(members)) => {
+                Some((members.clone(), false))
+            }
+            _ => None,
+        };
+        if let Some((members, union_left)) = union {
+            let left_name = format!("__thaw_loose_union_left_{}", self.next_binding);
+            self.next_binding += 1;
+            let right_name = format!("__thaw_loose_union_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(left_name.clone(), lhs_type.clone());
+            self.scope.insert(right_name.clone(), rhs_type.clone());
+            let union_name = if union_left { &left_name } else { &right_name };
+            let mut result = HirExpr::Lit(HirLit::Bool(false));
+            for (index, member) in members.iter().enumerate() {
+                if matches!(member, HirType::Null | HirType::Undefined) {
+                    result = self.lower_logical_expr(
+                        result,
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(
+                                Box::new(HirExpr::Var(union_name.clone())),
+                                members.clone(),
+                            )),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
+                        false,
+                    )?;
+                }
+            }
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
+            );
+        }
+        if matches!(lhs_type, HirType::Null | HirType::Undefined)
+            || matches!(rhs_type, HirType::Null | HirType::Undefined)
+        {
+            let left_name = format!("__thaw_loose_non_nullish_left_{}", self.next_binding);
+            self.next_binding += 1;
+            let right_name = format!("__thaw_loose_non_nullish_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(left_name.clone(), lhs_type.clone());
+            self.scope.insert(right_name.clone(), rhs_type.clone());
+            return self.wrap_call_argument_bindings(
+                HirExpr::Lit(HirLit::Bool(false)),
+                &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
+            );
+        }
         lhs = self.coerce_primitive_to_number(lhs)?;
         rhs = self.coerce_primitive_to_number(rhs)?;
         Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
@@ -1048,6 +1112,45 @@ impl<'a> FnLowerer<'a> {
                     vec![HirStmt::Return(Some(present))],
                 )]);
                 self.wrap_call_argument_bindings(result, &[(name, optional_type, value)])
+            }
+            HirType::Nullable(payload) => {
+                let ty = HirType::Nullable(payload.clone());
+                let name = format!("__thaw_number_nullable_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let bound = HirExpr::Var(name.clone());
+                let present = self.coerce_primitive_to_number(HirExpr::NullableValue(
+                    Box::new(bound.clone()), payload.as_ref().clone(),
+                ))?;
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone()),
+                    vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(0.0))))],
+                    vec![HirStmt::Return(Some(present))],
+                )]);
+                self.wrap_call_argument_bindings(result, &[(name, ty, value)])
+            }
+            HirType::Nullish(payload) => {
+                let ty = HirType::Nullish(payload.clone());
+                let name = format!("__thaw_number_nullish_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let bound = HirExpr::Var(name.clone());
+                let present = self.coerce_primitive_to_number(HirExpr::NullishValue(
+                    Box::new(bound.clone()), payload.as_ref().clone(),
+                ))?;
+                let result = HirExpr::Block(vec![
+                    HirStmt::If(
+                        HirExpr::NullishIsNull(Box::new(bound.clone()), payload.as_ref().clone()),
+                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(0.0))))],
+                        Vec::new(),
+                    ),
+                    HirStmt::If(
+                        HirExpr::NullishIsUndefined(Box::new(bound), payload.as_ref().clone()),
+                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(f64::NAN))))],
+                        vec![HirStmt::Return(Some(present))],
+                    ),
+                ]);
+                self.wrap_call_argument_bindings(result, &[(name, ty, value)])
             }
             other => Err(format!(
                 "numeric conversion is not defined for native type {other:?}"
@@ -1241,6 +1344,9 @@ impl<'a> FnLowerer<'a> {
         if rhs_type == HirType::Undefined {
             if let HirExpr::TypedIndex(array, index, _) = &lhs {
                 if let HirType::Array(element) = self.infer_expr_type(array)? {
+                    if !matches!(element.as_ref(), HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined)
+                        && !matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined))
+                    {
                     let array_expr = array.as_ref().clone();
                     let index_expr = index.as_ref().clone();
                     let array_name = format!("__thaw_index_array_{}", self.next_binding);
@@ -1265,11 +1371,27 @@ impl<'a> FnLowerer<'a> {
                         ),
                         true,
                     )?;
-                    let present = self.lower_logical_expr(
+                    let integer_index = self.lower_logical_expr(
                         in_bounds,
-                        HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
-                            vec![array, index],
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(index.clone()),
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                                vec![index.clone()],
+                            )),
+                        ),
+                        true,
+                    )?;
+                    let present = self.lower_logical_expr(
+                        integer_index,
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                                vec![array, index],
+                            )),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
                         ),
                         true,
                     )?;
@@ -1287,6 +1409,7 @@ impl<'a> FnLowerer<'a> {
                             ],
                         )
                         .map(Some);
+                    }
                 }
             }
         }

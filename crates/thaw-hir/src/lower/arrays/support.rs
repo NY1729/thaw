@@ -77,11 +77,6 @@ impl<'a> FnLowerer<'a> {
                 })
             }
             HirType::Tuple(elements) => {
-                if elements.is_empty() && matches!(combinator, "race" | "any") {
-                    return Err(format!(
-                        "`Promise.{combinator}` requires at least one promise"
-                    ));
-                }
                 let mut resolved = Vec::with_capacity(elements.len());
                 let mut promises = Vec::with_capacity(elements.len());
                 for (index, element) in elements.into_iter().enumerate() {
@@ -162,6 +157,66 @@ impl<'a> FnLowerer<'a> {
             lowered,
         );
         self.wrap_call_argument_bindings(call, &bindings)
+    }
+
+    fn lower_array_sort_default(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        copy: bool,
+    ) -> Result<HirExpr, String> {
+        if matches!(element_type, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Undefined | HirType::Null | HirType::Union(_)) {
+            return self.lower_array_sort_default_tagged(receiver, array_type, element_type, copy);
+        }
+        let prefix = match element_type {
+            HirType::F64 => "number",
+            HirType::Str => "string",
+            HirType::Bool => "bool",
+            HirType::Object(_) => "object",
+            other => return Err(format!("default array sort does not support element type {other:?}")),
+        };
+        let suffix = if copy { "to_sorted" } else { "sort" };
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var(format!("__thaw_{prefix}_array_{suffix}"))),
+            vec![receiver],
+        ))
+    }
+
+    // ponytail: reuses the existing O(n²) comparator sort; add a native tagged sorter if large arrays matter.
+    fn lower_array_sort_default_tagged(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        copy: bool,
+    ) -> Result<HirExpr, String> {
+        let left = format!("__thaw_sort_default_left_{}", self.next_binding);
+        self.next_binding += 1;
+        let right = format!("__thaw_sort_default_right_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(left.clone(), element_type.clone());
+        self.scope.insert(right.clone(), element_type.clone());
+        let left_string = self.coerce_primitive_to_string(HirExpr::Var(left.clone()))?;
+        let right_string = self.coerce_primitive_to_string(HirExpr::Var(right.clone()))?;
+        let comparator = HirExpr::Lambda(
+            Vec::new(),
+            vec![
+                HirParam { name: left, ty: element_type.clone() },
+                HirParam { name: right, ty: element_type.clone() },
+            ],
+            HirType::F64,
+            Box::new(HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_gt".into())),
+                    vec![left_string, right_string],
+                )),
+                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                HirType::F64,
+            )),
+        );
+        self.lower_array_sort_comparator(receiver, array_type, element_type, comparator, copy)
     }
 
     fn lower_array_sort_comparator(
@@ -247,6 +302,14 @@ impl<'a> FnLowerer<'a> {
             Box::new(variable(&outer_name)),
             Box::new(variable(&length_name)),
         );
+        let result = if copy {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_densify".into())),
+                vec![variable(&array_name)],
+            )
+        } else {
+            variable(&array_name)
+        };
         let body = HirExpr::Block(vec![
             HirStmt::Let(array_name.clone(), array_type.clone(), working_source),
             HirStmt::Let(
@@ -295,7 +358,7 @@ impl<'a> FnLowerer<'a> {
                     )),
                 ],
             ),
-            HirStmt::Return(Some(variable(&array_name))),
+            HirStmt::Return(Some(result)),
         ]);
         self.wrap_call_argument_bindings(
             body,
@@ -311,7 +374,7 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         element_type: &HirType,
         array_type: &HirType,
-        expected_return: &HirType,
+        expected_return: Option<&HirType>,
     ) -> Result<HirExpr, String> {
         let arity = match expr {
             Expr::Arrow(arrow) => arrow.params.len(),
@@ -350,7 +413,44 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let available = [element_type.clone(), HirType::F64, array_type.clone()];
-        self.lower_promise_callback(expr, &available[..arity], Some(expected_return))
+        self.lower_promise_callback(expr, &available[..arity], expected_return)
+    }
+
+    fn array_callback_truthy(&mut self, callback: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&callback)?;
+        if ty == HirType::Void {
+            let mut referenced = BTreeSet::new();
+            collect_referenced_bindings(&callback, &mut referenced);
+            let captures = referenced.into_iter().filter_map(|name| {
+                self.scope.get(&name).cloned().map(|ty| HirParam { name, ty })
+            }).collect();
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    captures,
+                    Vec::new(),
+                    HirType::Bool,
+                    Box::new(HirExpr::Block(vec![
+                        HirStmt::Expr(callback),
+                        HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false)))),
+                    ])),
+                )),
+                Vec::new(),
+            ));
+        }
+        let name = format!("__thaw_array_predicate_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let truthy = self.truthiness_expr(HirExpr::Var(name.clone()), &ty)?;
+        self.wrap_call_argument_bindings(truthy, &[(name, ty, callback)])
+    }
+
+    fn array_void_to_undefined(&mut self, callback: HirExpr) -> Result<HirExpr, String> {
+        Ok(HirExpr::Conditional(
+            Box::new(self.array_callback_truthy(callback)?),
+            Box::new(HirExpr::Lit(HirLit::Undefined)),
+            Box::new(HirExpr::Lit(HirLit::Undefined)),
+            HirType::Undefined,
+        ))
     }
 
     fn lower_array_reducer_callback(
@@ -448,7 +548,10 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let available = [element_type.clone(), HirType::F64, array_type.clone()];
-        self.lower_promise_callback(expr, &available[..arity], None)
+        self.sparse_mapping_result = true;
+        let result = self.lower_promise_callback(expr, &available[..arity], None);
+        self.sparse_mapping_result = false;
+        result
     }
 
     fn lower_array_from_callback(
@@ -493,7 +596,10 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let available = [element_type.clone(), HirType::F64];
-        self.lower_promise_callback(expr, &available[..arity], None)
+        self.sparse_mapping_result = true;
+        let result = self.lower_promise_callback(expr, &available[..arity], None);
+        self.sparse_mapping_result = false;
+        result
     }
 
 }

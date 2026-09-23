@@ -6,7 +6,7 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                 if property.sym == *"get" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let (key_type, value_type) = match &receiver_type {
                         HirType::Map(key_type, value_type)
@@ -88,7 +88,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"set" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let (key_type, value_type) = match &receiver_type {
                         HirType::Map(key_type, value_type)
@@ -134,7 +134,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"getOrInsert" || property.sym == *"getOrInsertComputed" {
                     let label = format!("Map.{}", property.sym);
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let (key_type, value_type) = match &receiver_type {
                         HirType::Map(key_type, value_type)
@@ -249,7 +249,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"add" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let element_type = match &receiver_type {
                         HirType::Set(element_type) | HirType::WeakSet(element_type) => element_type,
@@ -287,7 +287,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if matches!(property.sym.as_ref(), "has" | "delete") {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let key_type = match &receiver_type {
                         HirType::Map(key_type, _) => key_type.as_ref().clone(),
@@ -338,7 +338,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"clear" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !matches!(receiver_type, HirType::Map(_, _) | HirType::Set(_)) {
                         return Err(format!(
@@ -357,7 +357,7 @@ impl<'a> FnLowerer<'a> {
                     property.sym.as_ref(),
                     "union" | "intersection" | "difference" | "symmetricDifference"
                 ) {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Set(element_type) = &receiver_type else {
                         return Err(format!(
@@ -398,7 +398,7 @@ impl<'a> FnLowerer<'a> {
                     property.sym.as_ref(),
                     "isSubsetOf" | "isSupersetOf" | "isDisjointFrom"
                 ) {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Set(element_type) = &receiver_type else {
                         return Err(format!(
@@ -448,7 +448,7 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"keys" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !call.args.is_empty() {
                         return Err("native `.keys()` expects no arguments".into());
@@ -468,7 +468,7 @@ impl<'a> FnLowerer<'a> {
                     return self.lower_map_iterator(receiver, receiver_type, key_type, 0.0);
                 }
                 if property.sym == *"values" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !call.args.is_empty() {
                         return Err("native `.values()` expects no arguments".into());
@@ -496,7 +496,7 @@ impl<'a> FnLowerer<'a> {
                     return self.lower_map_iterator(receiver, receiver_type, value_type, mode);
                 }
                 if property.sym == *"entries" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !call.args.is_empty() {
                         return Err("native `.entries()` expects no arguments".into());

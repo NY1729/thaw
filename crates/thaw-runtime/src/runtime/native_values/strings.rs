@@ -41,6 +41,56 @@ pub unsafe extern "C" fn thaw_string_to_upper_case(value: *const c_char) -> *con
     arena_c_string(&value.to_uppercase()).map_or(std::ptr::null(), |value| value.cast())
 }
 
+unsafe fn thaw_string_to_locale_case(
+    value: *const c_char,
+    locale: *const c_char,
+    upper: bool,
+) -> *const c_char {
+    if value.is_null() || locale.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let locale = unsafe { CStr::from_ptr(locale) }.to_string_lossy();
+    let language = locale.split('-').next().unwrap_or("").to_ascii_lowercase();
+    let turkic = matches!(language.as_str(), "tr" | "az");
+    let result: String = value
+        .chars()
+        .flat_map(|character| {
+            if turkic {
+                match (upper, character) {
+                    (false, 'I') => return "ı".chars().collect::<Vec<_>>(),
+                    (false, 'İ') => return "i".chars().collect::<Vec<_>>(),
+                    (true, 'i') => return "İ".chars().collect::<Vec<_>>(),
+                    (true, 'ı') => return "I".chars().collect::<Vec<_>>(),
+                    _ => {}
+                }
+            }
+            if upper {
+                character.to_uppercase().collect()
+            } else {
+                character.to_lowercase().collect()
+            }
+        })
+        .collect();
+    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_string_to_locale_lower_case(
+    value: *const c_char,
+    locale: *const c_char,
+) -> *const c_char {
+    unsafe { thaw_string_to_locale_case(value, locale, false) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_string_to_locale_upper_case(
+    value: *const c_char,
+    locale: *const c_char,
+) -> *const c_char {
+    unsafe { thaw_string_to_locale_case(value, locale, true) }
+}
+
 #[no_mangle]
 /// Percent-encodes every byte of `value`'s UTF-8 representation other than
 /// the ASCII letters, digits and `- _ . ! ~ * ' ( )`, matching
@@ -197,6 +247,85 @@ pub unsafe extern "C" fn thaw_string_repeat(value: *const c_char, count: f64) ->
     arena_c_string(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
+fn expand_replacement(
+    replacement: &str,
+    matched: &str,
+    prefix: &str,
+    suffix: &str,
+    captures: &[Option<String>],
+    named_captures: &[(String, Option<String>)],
+) -> String {
+    let mut output = String::new();
+    let mut chars = replacement.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if character != '$' {
+            output.push(character);
+            continue;
+        }
+        let Some(&(next_index, next)) = chars.peek() else {
+            output.push('$');
+            break;
+        };
+        match next {
+            '$' => {
+                chars.next();
+                output.push('$');
+            }
+            '&' => {
+                chars.next();
+                output.push_str(matched);
+            }
+            '`' => {
+                chars.next();
+                output.push_str(prefix);
+            }
+            '\'' => {
+                chars.next();
+                output.push_str(suffix);
+            }
+            '1'..='9' if !captures.is_empty() => {
+                chars.next();
+                let first = next.to_digit(10).unwrap() as usize;
+                let mut capture = first;
+                if let Some(&(_, second @ '0'..='9')) = chars.peek() {
+                    let two_digits = first * 10 + second.to_digit(10).unwrap() as usize;
+                    if two_digits <= captures.len() {
+                        chars.next();
+                        capture = two_digits;
+                    }
+                }
+                if capture <= captures.len() {
+                    if let Some(value) = captures[capture - 1].as_deref() {
+                        output.push_str(value);
+                    }
+                } else {
+                    output.push_str(&replacement[index..next_index + next.len_utf8()]);
+                }
+            }
+            '<' if !named_captures.is_empty() => {
+                let name_start = next_index + 1;
+                if let Some(relative_end) = replacement[name_start..].find('>') {
+                    chars.next();
+                    let name_end = name_start + relative_end;
+                    while chars.peek().is_some_and(|(index, _)| *index <= name_end) {
+                        chars.next();
+                    }
+                    if let Some((_, Some(value))) = named_captures
+                        .iter()
+                        .find(|(name, _)| name == &replacement[name_start..name_end])
+                    {
+                        output.push_str(value);
+                    }
+                } else {
+                    output.push('$');
+                }
+            }
+            _ => output.push('$'),
+        }
+    }
+    output
+}
+
 /// # Safety
 /// `value`, `search` and `replacement` must point to valid NUL-terminated
 /// UTF-8 strings.
@@ -212,11 +341,25 @@ unsafe fn thaw_string_replace_impl(
     let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let search = unsafe { CStr::from_ptr(search) }.to_string_lossy();
     let replacement = unsafe { CStr::from_ptr(replacement) }.to_string_lossy();
-    let replaced = if all {
-        value.replace(search.as_ref(), &replacement)
-    } else {
-        value.replacen(search.as_ref(), &replacement, 1)
-    };
+    let mut replaced = String::new();
+    let mut cursor = 0;
+    for (start, matched) in value.match_indices(search.as_ref()) {
+        replaced.push_str(&value[cursor..start]);
+        let end = start + matched.len();
+        replaced.push_str(&expand_replacement(
+            &replacement,
+            matched,
+            &value[..start],
+            &value[end..],
+            &[],
+            &[],
+        ));
+        cursor = end;
+        if !all {
+            break;
+        }
+    }
+    replaced.push_str(&value[cursor..]);
     arena_c_string(&replaced).map_or(std::ptr::null(), |value| value.cast())
 }
 

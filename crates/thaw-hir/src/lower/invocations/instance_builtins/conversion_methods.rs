@@ -9,7 +9,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.toJSON()` expects no arguments".into());
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(&date_type, &receiver, "Date.toJSON receiver")?;
                     let receiver_name = format!("__thaw_date_json_receiver_{}", self.next_binding);
@@ -77,7 +77,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let date_type = date_object_type();
                     self.expect_type(
                         &date_type,
@@ -104,7 +104,7 @@ impl<'a> FnLowerer<'a> {
                     // `a.equals(b)` -- byte-for-byte equality, Buffer only
                     // (a plain array uses `===` / a loop). Both sides are
                     // read as raw byte arrays in the runtime.
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
                         return Err(
                             "`.equals()` is only supported on a Buffer / Uint8Array".into(),
@@ -128,7 +128,7 @@ impl<'a> FnLowerer<'a> {
                     property.sym.as_ref(),
                     "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString"
                 ) {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if receiver_type == date_object_type() {
                         let timestamp = HirExpr::PropAccess(
@@ -161,7 +161,7 @@ impl<'a> FnLowerer<'a> {
                     return self.coerce_primitive_to_string(receiver);
                 }
                 if property.sym == *"toString" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     // A byte buffer decodes (`buf.toString("hex")`, default
                     // `utf8`) instead of comma-joining like a plain number
                     // array. `infer_expr_type` normalizes `Bytes` away, so
@@ -387,7 +387,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.valueOf()` expects no arguments".into());
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if receiver_type == date_object_type() {
                         return Ok(HirExpr::PropAccess(
@@ -421,8 +421,17 @@ impl<'a> FnLowerer<'a> {
         let [key_value] = arguments.as_slice() else {
             return Err("`hasOwnProperty` expects exactly one argument".into());
         };
-        let receiver = self.lower_expr(&member.obj)?;
-        let result = self.lower_has_own_value(receiver, key_value.clone())?;
+        let receiver = self.lower_required_member_receiver(&member.obj, "hasOwnProperty")?;
+        let result = if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "propertyIsEnumerable")
+            && matches!(self.infer_expr_type(&receiver)?, HirType::Array(_))
+        {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_property_is_enumerable".into())),
+                vec![receiver, self.coerce_primitive_to_string(key_value.clone())?],
+            )
+        } else {
+            self.lower_has_own_value(receiver, key_value.clone())?
+        };
         self.wrap_call_argument_bindings(result, &bindings)
     }
 
@@ -438,6 +447,12 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let key_value = self.coerce_primitive_to_string(key_value)?;
         let receiver_type = self.infer_expr_type(&receiver)?;
+        if matches!(receiver_type, HirType::Array(_)) {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_has_own".into())),
+                vec![receiver, key_value],
+            ));
+        }
         if matches!(receiver_type, HirType::Json | HirType::Dictionary(_)) {
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_json_has_own".to_string())),

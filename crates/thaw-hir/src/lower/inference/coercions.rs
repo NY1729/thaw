@@ -9,6 +9,12 @@ impl<'a> FnLowerer<'a> {
                 return Ok(value);
             }
         }
+        if *declared == HirType::Str {
+            let actual = self.infer_expr_type(&value)?;
+            if object_type_is_error_family(&actual) {
+                return self.coerce_primitive_to_string(value);
+            }
+        }
         // The symmetric case to the `HirType::Json` branch just below --
         // a dynamic method call with no `JsValue` hint (`lower_dynamic_
         // value_method_call`'s own default) always comes back `Json`-
@@ -642,11 +648,11 @@ impl<'a> FnLowerer<'a> {
                     if matches!(value, HirExpr::Lit(HirLit::ArrayHole)) {
                         return Ok(value.clone());
                     }
-                    self.coerce_to_declared(element, value.clone())
+                    self.coerce_array_insert_value(value.clone(), element)
                         .map_err(|error| format!("array element {index}: {error}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(HirExpr::ArrayLit(values));
+            return self.lower_native_array_literal(values, element.as_ref().clone());
         }
         if let (HirType::Tuple(expected), HirExpr::ArrayLit(values)) = (declared, &value) {
             let required = expected

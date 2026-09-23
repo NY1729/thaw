@@ -741,10 +741,19 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(body);
-        let present = self.compile_array_has_index(
+        let state = self.compile_array_index_state(
             array_handle,
             index.as_basic_value().into_int_value(),
         )?;
+        let present = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                state,
+                self.context.i8_type().const_int(1, false),
+                "console_array_has_value",
+            )
+            .map_err(|error| error.to_string())?;
         let present_block = self.context.append_basic_block(function, "console_array_present");
         let hole_block = self.context.append_basic_block(function, "console_array_hole");
         let pushed = self.context.append_basic_block(function, "console_array_pushed");

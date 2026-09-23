@@ -265,9 +265,32 @@ fn compiles_array_push_pop_shift_unshift_with_reference_sharing() {
             console.log(empty.pop(), empty.shift(), empty.length);
             const nested: number[][] = [];
             const poppedNested = nested.pop();
-            console.log(poppedNested.length);
+            console.log(poppedNested === undefined);
+            const leadingHole: number[] = [, 7];
+            console.log(leadingHole.shift(), leadingHole.length, 0 in leadingHole);
+            const trailingHole: number[] = [7, ,];
+            console.log(trailingHole.pop(), trailingHole.pop(), trailingHole.length, 0 in trailingHole);
             const single: number[] = [42];
             console.log(single.push());
+            const tagged: (number | undefined)[] = [undefined, 2];
+            console.log(tagged.shift() === undefined, tagged.pop() === 2, tagged.pop() === undefined);
+            const taggedSingle: (number | undefined)[] = [undefined];
+            console.log(taggedSingle.pop() === undefined);
+            const nullish: (number | null | undefined)[] = [null, undefined, 3];
+            console.log(nullish.shift() === null, nullish.shift() === undefined, nullish.pop(), nullish.pop() === undefined);
+            const onlyUndefined = [undefined];
+            console.log(onlyUndefined.pop() === undefined, onlyUndefined.pop() === undefined);
+            const union: (number | string | undefined)[] = [undefined, 3];
+            console.log(union.shift() === undefined, union.pop(), union.pop() === undefined);
+            const taggedSource: (number | undefined)[] = [, 1];
+            const copiedTagged = taggedSource.toReversed();
+            console.log(copiedTagged.pop() === undefined, copiedTagged.shift() === 1);
+            const nullable: (number | null)[] = [null, 3];
+            console.log(nullable.shift() === null, nullable.pop(), nullable.pop() === undefined);
+            const unionNull: (number | string | null)[] = [null];
+            console.log(unionNull.pop() === null, unionNull.pop() === undefined);
+            const onlyNull = [null];
+            console.log(onlyNull.pop() === null, onlyNull.pop() === undefined);
         }
     "#;
     assert_eq!(
@@ -282,9 +305,20 @@ fn compiles_array_push_pop_shift_unshift_with_reference_sharing() {
             "wxyz wxyz\n",
             "w\n",
             "xyz xyz\n",
-            "0 0 0\n",
-            "0\n",
+            "undefined undefined 0\n",
+            "true\n",
+            "undefined 1 true\n",
+            "undefined 7 0 false\n",
             "1\n",
+            "true true true\n",
+            "true\n",
+            "true true 3 true\n",
+            "true true\n",
+            "true 3 true\n",
+            "true true\n",
+            "true 3 true\n",
+            "true true\n",
+            "true true\n",
         )
     );
 }
@@ -399,4 +433,3 @@ fn compiles_union_array_sorting_with_a_comparator() {
         "11\nmiddle!\nlast!\nlast!\n11\nmiddle!\n11\nmiddle!\nlast!\n"
     );
 }
-

@@ -1,4 +1,22 @@
 impl<'a> FnLowerer<'a> {
+    fn array_from_source_may_be_sparse(&self, args: &[swc_ecma_ast::ExprOrSpread]) -> bool {
+        let Some(first) = args.first() else {
+            return false;
+        };
+        let source = if first.spread.is_some() {
+            let Expr::Array(elements) = first.expr.as_ref() else {
+                return false;
+            };
+            let Some(Some(first)) = elements.elems.first() else {
+                return false;
+            };
+            first.expr.as_ref()
+        } else {
+            first.expr.as_ref()
+        };
+        self.expression_may_be_sparse_array(source)
+    }
+
     fn expression_never_returns(&self, expr: &Expr) -> bool {
         let Expr::Call(call) = expr else {
             return false;
@@ -64,6 +82,7 @@ impl<'a> FnLowerer<'a> {
             bindings: HashMap::new(),
             used_hir_bindings: HashSet::new(),
             sparse_arrays: HashSet::new(),
+            conservative_sparse_arrays: HashSet::new(),
             sparse_array_functions: HashSet::new(),
             next_binding: 0,
             signatures,
@@ -92,6 +111,7 @@ impl<'a> FnLowerer<'a> {
             unbound_this_context: false,
             expected_return_hint: None,
             expected_arrow_return_hint: None,
+            sparse_mapping_result: false,
             generator_yields: None,
             generator_finalizers: HashMap::new(),
         }
@@ -105,9 +125,18 @@ impl<'a> FnLowerer<'a> {
             .unwrap_or_else(|| source_name.to_string())
     }
 
+    fn is_primitive_array_index(&self, expr: &Expr, element: &HirType) -> bool {
+        let Expr::Member(member) = expr else { return false };
+        matches!(element, HirType::F64 | HirType::Str)
+            && matches!(member.prop, MemberProp::Computed(_))
+            && self.infer_member_receiver_type(&member.obj)
+                == Some(HirType::Array(Box::new(element.clone())))
+    }
+
     fn mark_array_parameter(&mut self, name: &str, ty: &HirType) {
         if matches!(ty, HirType::Array(_)) {
             self.sparse_arrays.insert(name.to_string());
+            self.conservative_sparse_arrays.insert(name.to_string());
         }
         if matches!(
             ty,
@@ -120,7 +149,10 @@ impl<'a> FnLowerer<'a> {
 
     fn callable_may_return_sparse_array(&self, expression: &Expr) -> bool {
         match expression {
-            Expr::Arrow(arrow) => arrow_returns_sparse_array(arrow),
+            Expr::Arrow(arrow) => match arrow.body.as_ref() {
+                ArrowFunctionBody::Expr(body) => self.expression_may_be_sparse_array(body),
+                ArrowFunctionBody::FunctionBody(_) => arrow_returns_sparse_array(arrow),
+            },
             Expr::Fn(function) => function_returns_sparse_array(&function.function),
             Expr::Ident(identifier) => {
                 let resolved = self.resolve_binding(identifier.sym.as_ref());
@@ -147,6 +179,12 @@ impl<'a> FnLowerer<'a> {
                 self.sparse_arrays.contains(&resolved)
             }
             Expr::Call(call) => match call.callee.as_expr().map(Box::as_ref) {
+                Some(Expr::Member(member))
+                    if matches!(
+                        (member.obj.as_ref(), &member.prop),
+                        (Expr::Ident(object), MemberProp::Ident(property))
+                            if object.sym == "Array" && property.sym == "from"
+                    ) && call.args.len() == 1 => self.array_from_source_may_be_sparse(&call.args),
                 Some(Expr::Member(member))
                     if matches!(
                         (member.obj.as_ref(), &member.prop),
@@ -178,6 +216,15 @@ impl<'a> FnLowerer<'a> {
                         MemberProp::Ident(property) if property.sym == "finally"
                     ) => self.expression_may_be_sparse_array(&member.obj),
                 Some(Expr::Member(member))
+                    if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "flat") => true,
+                Some(Expr::Member(member))
+                    if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "flatMap") =>
+                {
+                    call.args.first().is_some_and(|argument| {
+                        self.callable_may_return_sparse_array(&argument.expr)
+                    })
+                }
+                Some(Expr::Member(member))
                     if matches!(
                         &member.prop,
                         MemberProp::Ident(property)
@@ -186,6 +233,7 @@ impl<'a> FnLowerer<'a> {
                                 "slice"
                                     | "concat"
                                     | "map"
+                                    | "filter"
                                     | "toReversed"
                                     | "toSorted"
                                     | "toSpliced"

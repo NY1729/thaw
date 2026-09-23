@@ -611,6 +611,27 @@ fn compiles_native_string_split() {
 }
 
 #[test]
+fn compiles_utf16_empty_string_split() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const parts: string[] = "A😀B".split("");
+            console.log(parts.length);
+            console.log(parts.join("|"));
+            console.log("😀".split("", 1).length);
+            console.log("😀".split("", 2).length);
+            console.log("😀".length);
+            console.log("😀".charCodeAt(0));
+            console.log("😀".charCodeAt(1));
+            console.log("😀x".slice(2));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "utf16_empty_string_split"),
+        "4\nA|�|�|B\n1\n2\n2\n55357\n56832\nx\n"
+    );
+}
+
+#[test]
 fn compiles_native_string_replace() {
     let source = r#"
         function value(): string {
@@ -644,6 +665,24 @@ fn compiles_native_string_replace() {
     assert_eq!(
         compile_and_run(source, "native_string_replace"),
         "Xbc abc\nXbc Xbc\nabc\nabc\nXabc\nXaXbXcX\nreceiver\nsearch\nreplacement\nXbc abc\nawaited receiver\nXbc Xbc\n"
+    );
+}
+
+#[test]
+fn compiles_ecmascript_replacement_tokens() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log("abc".replace("b", "$$|$&|$`|$'|$1"));
+            console.log("aba".replaceAll("a", "[$&:$`:$']"));
+            console.log("abc123def".replace(/([a-z]+)(\d+)([a-z]+)/, "$3-$2-$1-$$-$&-$`-$'"));
+            console.log("a1b2".replaceAll(/([a-z])(\d)/g, "$2$1:$&"));
+            console.log("b".replace(/(a)?b/, "<$1>"));
+            console.log("abcdefghij".replace(/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)/, "$10-$1"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "ecmascript_replacement_tokens"),
+        "a$|b|a|c|$1c\n[a::ba]b[a:ab:]\ndef-123-abc-$-abc123def--\n1a:a12b:b2\n<>\nj-a\n"
     );
 }
 
@@ -792,8 +831,36 @@ fn compiles_date_getters_and_iso_string() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "date_getters"),
+        compile_and_run_with_env(source, "date_getters", &[("TZ", "UTC0")]),
         "1704067200500\n1704067200500\n2024\n0\n1\n1\n0\n0\n0\n500\n2024\n2024-01-01T00:00:00.500Z\nfixed\n2024-01-01T00:00:00.500Z\n1970-01-01T00:00:00.000Z\ntrue\nInvalid time value\n"
+    );
+}
+
+#[test]
+fn date_local_getters_follow_the_host_timezone() {
+    let source = r#"
+        function main(): void {
+            const winter = new Date("2024-01-01T00:00:00.500Z");
+            console.log(winter.getFullYear(), winter.getMonth(), winter.getDate());
+            console.log(winter.getDay(), winter.getHours(), winter.getMinutes());
+            console.log(winter.getSeconds(), winter.getMilliseconds());
+            console.log(winter.getYear(), winter.getTimezoneOffset());
+            console.log(winter.getUTCFullYear(), winter.getUTCMonth(), winter.getUTCDate());
+
+            const summer = new Date("2024-07-01T00:00:00.000Z");
+            console.log(summer.getHours(), summer.getTimezoneOffset());
+
+            const invalid = new Date(NaN);
+            console.log(invalid.getFullYear(), invalid.getTimezoneOffset());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run_with_env(
+            source,
+            "date_local_getters",
+            &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
+        ),
+        "2023 11 31\n0 19 0\n0 500\n123 300\n2024 0 1\n20 240\nNaN NaN\n"
     );
 }
 
@@ -850,8 +917,62 @@ fn compiles_date_setters() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "date_setters"),
+        compile_and_run_with_env(source, "date_setters", &[("TZ", "UTC0")]),
         "1705276800500\n2024-01-15T00:00:00.500Z\n2024-12-01T00:00:00.500Z\n2025-01-01T00:00:00.500Z\n2000-06-01T00:00:00.500Z\n2023-12-31T00:00:00.500Z\n2024-01-02T01:00:00.500Z\n2024-01-01T00:01:30.500Z\nNaN\n"
+    );
+}
+
+#[test]
+fn compiles_date_local_setters_across_dst_transitions() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const gap: Date = new Date("2024-03-10T06:30:00.000Z");
+            gap.setHours(2, 30);
+            console.log(gap.toISOString());
+            const fold: Date = new Date("2024-11-03T04:30:00.000Z");
+            fold.setHours(1, 30);
+            console.log(fold.toISOString());
+            const utc: Date = new Date("2024-03-10T06:30:00.000Z");
+            utc.setUTCHours(2, 30);
+            console.log(utc.toISOString());
+            const invalid: Date = new Date(NaN);
+            console.log(invalid.setMonth(1));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run_with_env(
+            source,
+            "date_local_setters_dst",
+            &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
+        ),
+        "2024-03-10T07:30:00.000Z\n2024-11-03T05:30:00.000Z\n2024-03-10T02:30:00.000Z\nNaN\n"
+    );
+}
+
+#[test]
+fn compiles_full_year_setters_on_invalid_dates() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const local: Date = new Date(NaN);
+            console.log(local.setFullYear(2000));
+            console.log(local.toISOString());
+            const utc: Date = new Date(NaN);
+            console.log(utc.setUTCFullYear(2000));
+            console.log(utc.toISOString());
+            const legacy: Date = new Date(NaN);
+            legacy.setYear(99);
+            console.log(legacy.toISOString());
+            const explicitNan: Date = new Date(NaN);
+            console.log(explicitNan.setFullYear(2000, NaN));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run_with_env(
+            source,
+            "full_year_setters_invalid_dates",
+            &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
+        ),
+        "946702800000\n2000-01-01T05:00:00.000Z\n946684800000\n2000-01-01T00:00:00.000Z\n1999-01-01T05:00:00.000Z\nNaN\n"
     );
 }
 
@@ -882,6 +1003,51 @@ fn compiles_date_utc_and_parse() {
 }
 
 #[test]
+fn compiles_date_parse_local_date_times() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(new Date("2024-01-01").toISOString());
+            console.log(new Date("2024-01-01T00:00:00.000").toISOString());
+            console.log(new Date("2024-07-01T00:00:00.000").toISOString());
+            console.log(new Date("2024-03-10T02:30:00.000").toISOString());
+            console.log(new Date("2024-11-03T01:30:00.000").toISOString());
+            console.log(new Date("2024-01-01T00:00:00.000Z").toISOString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run_with_env(
+            source,
+            "date_parse_local_date_times",
+            &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
+        ),
+        "2024-01-01T00:00:00.000Z\n2024-01-01T05:00:00.000Z\n2024-07-01T04:00:00.000Z\n2024-03-10T07:30:00.000Z\n2024-11-03T05:30:00.000Z\n2024-01-01T00:00:00.000Z\n"
+    );
+}
+
+#[test]
+fn compiles_date_parse_end_of_day_and_offset_bounds() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(new Date("2024-01-01T24:00:00.000").toISOString());
+            console.log(new Date("2024-01-01T24:00:00.000Z").toISOString());
+            console.log(new Date("2024-01-01T24:00:00.000+05:00").toISOString());
+            console.log(Date.parse("2024-01-01T24:01:00.000Z"));
+            console.log(Date.parse("2024-01-01T24:00:00.001Z"));
+            console.log(Date.parse("2024-01-01T00:00:00.000+24:00"));
+            console.log(Date.parse("2024-01-01T00:00:00.000+01:60"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run_with_env(
+            source,
+            "date_parse_end_of_day",
+            &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
+        ),
+        "2024-01-02T05:00:00.000Z\n2024-01-02T00:00:00.000Z\n2024-01-01T19:00:00.000Z\nNaN\nNaN\nNaN\nNaN\n"
+    );
+}
+
+#[test]
 fn compiles_date_multi_arg_constructor() {
     let source = r#"
         async function main(): Promise<void> {
@@ -898,8 +1064,70 @@ fn compiles_date_multi_arg_constructor() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "date_multi_arg_constructor"),
+        compile_and_run_with_env(source, "date_multi_arg_constructor", &[("TZ", "UTC0")]),
         "2024-01-01T00:00:00.500Z\n2024-01-01T00:00:00.000Z\n2025-01-01T00:00:00.000Z\n0\n"
+    );
+}
+
+#[test]
+fn compiles_date_time_clip_boundaries() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(new Date(1.9).getTime());
+            console.log(new Date(-1.9).getTime());
+            console.log(new Date(8640000000000000).getTime());
+            console.log(new Date(8640000000000001).getTime());
+            console.log(new Date(Infinity).getTime());
+            const d: Date = new Date(0);
+            console.log(d.setTime(2.9));
+            console.log(d.setTime(-8640000000000001));
+            console.log(Date.UTC(275760, 8, 13));
+            console.log(Date.UTC(275760, 8, 14));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_time_clip_boundaries"),
+        "1\n-1\n8640000000000000\nNaN\nNaN\n2\nNaN\n8640000000000000\nNaN\n"
+    );
+}
+
+#[test]
+fn compiles_date_expanded_year_round_trips() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const maximum: Date = new Date(8640000000000000);
+            const minimum: Date = new Date(-8640000000000000);
+            console.log(maximum.toISOString());
+            console.log(minimum.toISOString());
+            console.log(Date.parse(maximum.toISOString()));
+            console.log(Date.parse(minimum.toISOString()));
+            console.log(new Date("+000000-01-01T00:00:00.000Z").toISOString());
+            console.log(Date.parse("-000000-01-01T00:00:00.000Z"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_expanded_year_round_trips"),
+        "+275760-09-13T00:00:00.000Z\n-271821-04-20T00:00:00.000Z\n8640000000000000\n-8640000000000000\n0000-01-01T00:00:00.000Z\nNaN\n"
+    );
+}
+
+#[test]
+fn compiles_date_local_constructor_dst_transitions() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(new Date(2024, 0, 1).toISOString());
+            console.log(new Date(2024, 6, 1).toISOString());
+            console.log(new Date(2024, 2, 10, 2, 30).toISOString());
+            console.log(new Date(2024, 10, 3, 1, 30).toISOString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run_with_env(
+            source,
+            "date_local_constructor_dst",
+            &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
+        ),
+        "2024-01-01T05:00:00.000Z\n2024-07-01T04:00:00.000Z\n2024-03-10T07:30:00.000Z\n2024-11-03T05:30:00.000Z\n"
     );
 }
 
@@ -1431,8 +1659,31 @@ fn compiles_date_string_formatting() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "date_string_formatting"),
+        compile_and_run_with_env(source, "date_string_formatting", &[("TZ", "UTC0")]),
         "Mon Jan 01 2024\n00:00:00 GMT+0000 (Coordinated Universal Time)\nMon Jan 01 2024 00:00:00 GMT+0000 (Coordinated Universal Time)\nMon, 01 Jan 2024 00:00:00 GMT\nInvalid Date\nInvalid Date\nInvalid Date\nInvalid Date\n"
+    );
+}
+
+#[test]
+fn compiles_local_date_string_formatting() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const winter: Date = new Date("2024-01-01T00:00:00.000Z");
+            console.log(winter.toDateString());
+            console.log(winter.toTimeString());
+            console.log(winter.toString());
+            const summer: Date = new Date("2024-07-01T00:00:00.000Z");
+            console.log(summer.toTimeString());
+            console.log(summer.toUTCString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run_with_env(
+            source,
+            "local_date_string_formatting",
+            &[("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")],
+        ),
+        "Sun Dec 31 2023\n19:00:00 GMT-0500 (EST)\nSun Dec 31 2023 19:00:00 GMT-0500 (EST)\n20:00:00 GMT-0400 (EDT)\nMon, 01 Jul 2024 00:00:00 GMT\n"
     );
 }
 
@@ -2988,6 +3239,59 @@ fn compiles_regex_split_with_limit() {
 }
 
 #[test]
+fn compiles_regex_split_captures_and_named_replacements() {
+    let source = r#"
+        function printAll(parts: string[]): void {
+            console.log(parts.length);
+            for (const part of parts) {
+                console.log(part);
+            }
+        }
+        async function main(): Promise<void> {
+            printAll("a1b2c".split(/(\d)/));
+            printAll("a b  c".split(/(\s+)/, 4));
+            printAll("ab".split(/(?:)/));
+            console.log("2024-09-23".replace(
+                /(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})/,
+                "$<day>/$<month>/$<year>"
+            ));
+            console.log("a1 b2".replaceAll(
+                /(?<letter>[a-z])(?<digit>\d)/g,
+                "$<digit>$<letter>"
+            ));
+            console.log("x".replace(/(?<known>x)/, "$<missing>-$<known>"));
+            console.log("x".replace(/x/, "$<known>"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_split_captures_named_replace"),
+        "5\na\n1\nb\n2\nc\n4\na\n \nb\n  \n2\na\nb\n23/09/2024\n1a 2b\n-x\n$<known>\n"
+    );
+}
+
+#[test]
+fn compiles_split_limit_to_uint32_coercion() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log("a,b".split(",").length);
+            console.log("a,b".split(",", NaN).length);
+            console.log("a,b".split(",", Infinity).length);
+            console.log("a,b".split(",", 4294967296).length);
+            console.log("a,b".split(",", -2).length);
+            console.log("a,b".split(/,/).length);
+            console.log("a,b".split(/,/, NaN).length);
+            console.log("a,b".split(/,/, Infinity).length);
+            console.log("a,b".split(/,/, 4294967296).length);
+            console.log("a,b".split(/,/, -2).length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "split_limit_to_uint32"),
+        "2\n0\n0\n0\n2\n2\n0\n0\n0\n2\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {
@@ -3736,12 +4040,38 @@ fn compiles_array_holes() {
             console.log(JSON.stringify(combined.toSorted((left, right) => right - left)));
             console.log(JSON.stringify(combined.with(1, 8)));
             console.log(JSON.stringify(combined.with(2, 8)));
+            let changeByCopyVisits = 0;
+            combined.toReversed().forEach(() => { changeByCopyVisits += 1; });
+            combined.toSpliced(1, 3, 7).forEach(() => { changeByCopyVisits += 1; });
+            combined.toSorted().forEach(() => { changeByCopyVisits += 1; });
+            combined.with(2, 8).forEach(() => { changeByCopyVisits += 1; });
+            let changeByCopyUndefined = 0;
+            combined.with(2, 8).forEach(value => {
+                if (value === undefined) changeByCopyUndefined += 1;
+            });
+            console.log(changeByCopyVisits, changeByCopyUndefined);
+            const changedCopy = combined.with(2, 8);
+            const copiedFirst = changedCopy.at(0);
+            const copiedSecond = changedCopy.at(1);
+            console.log(copiedFirst, copiedSecond);
+            let changedPredicateCalls = 0;
+            console.log(changedCopy.some(value => {
+                changedPredicateCalls += 1;
+                return value === undefined;
+            }), changedPredicateCalls);
+            changedPredicateCalls = 0;
+            console.log(changedCopy.every(() => {
+                changedPredicateCalls += 1;
+                return true;
+            }), changedPredicateCalls);
+            const mappedUndefined = changedCopy.map(value => value === undefined);
+            console.log(mappedUndefined.join(","), mappedUndefined.length);
             const nested: number[][] = [[1, , 2], , [3, , 4]];
             console.log(JSON.stringify(nested.flat()));
             let flatMapCalls = 0;
             const flatMapped = spread.flatMap(value => {
                 flatMapCalls += 1;
-                const expanded: number[] = [value, , value + 10];
+                const expanded: (number | undefined)[] = [value, , value + 10];
                 return expanded;
             });
             console.log(flatMapCalls, JSON.stringify(flatMapped));
@@ -3766,7 +4096,1448 @@ fn compiles_array_holes() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_holes"),
-        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n4 2 1\n9 6 [0,null,1,2,null,4,5,null,6]\n[6,null,5,4,null,2,1,null,0]\n[6,null,5,4,null,2,1,null,0]\n[5,null,6,2,null,4,5,null,6]\n[0,7,null,4,5,null,6] [null,1,2]\n[0,7,null,4,5,null,6]\n[0,8,8,2,null,4,5,null,6]\n[9,null,1,2,null,4,5,null,10]\n[0,1,2,4,5,6,null,null,null]\n[0,1,2,4,5,6,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[0,8,1,2,null,4,5,null,6]\n[0,null,8,2,null,4,5,null,6]\n[1,2,3,4]\n4 [0,10,1,11,2,12,4,14]\n2 2 true\n-1 false\n-1 false\ntrue 4\ntrue 4\n[0,null,1,2,null,4]\n"
+        "3 true\n2\n2 1\n6 4\n4 2 2 4\n4 6 4 2\n4 2 1\n4 2 1\n9 6 [0,null,1,2,null,4,5,null,6]\n[6,null,5,4,null,2,1,null,0]\n[6,null,5,4,null,2,1,null,0]\n[5,null,6,2,null,4,5,null,6]\n[0,7,null,4,5,null,6] [null,1,2]\n[0,7,null,4,5,null,6]\n[0,8,8,2,null,4,5,null,6]\n[9,null,1,2,null,4,5,null,10]\n[0,1,2,4,5,6,null,null,null]\n[0,1,2,4,5,6,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[6,5,4,2,1,0,null,null,null]\n[0,8,1,2,null,4,5,null,6]\n[0,null,8,2,null,4,5,null,6]\n34 3\n0 undefined\ntrue 2\ntrue 9\nfalse,true,false,false,true,false,false,true,false 9\n[1,2,3,4]\n4 [0,10,1,11,2,12,4,14]\n2 2 true\n-1 false\n-1 false\ntrue 4\ntrue 4\n[0,null,1,2,null,4]\n"
+    );
+}
+
+#[test]
+fn array_key_enumeration_distinguishes_holes_and_length() {
+    let source = r#"
+        function source(): number[] { console.log("source"); return [, 2]; }
+        function main(): void {
+            const sparse: number[] = [, 7];
+            const copied = sparse.toReversed();
+            console.log(Object.keys(sparse).join(","), Object.getOwnPropertyNames(sparse).join(","));
+            console.log(Object.keys(copied).join(","), Reflect.ownKeys(copied).join(","));
+            const empty: number[] = [];
+            console.log(Object.getOwnPropertyNames(empty).join(","));
+            console.log(JSON.stringify(Object.values(sparse)), JSON.stringify(Object.entries(sparse)));
+            console.log(JSON.stringify(Object.values(copied)), JSON.stringify(Object.entries(copied)));
+            const tagged: (number | null | undefined)[] = [null, , undefined, 2];
+            console.log(JSON.stringify(Object.values(tagged)), JSON.stringify(Object.entries(tagged)));
+            console.log(JSON.stringify(Object.entries(source())));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_key_enumeration"),
+        "1 1,length\n0,1 0,1,length\nlength\n[7] [[\"1\",7]]\n[7,null] [[\"0\",7],[\"1\",null]]\n[null,null,2] [[\"0\",null],[\"2\",null],[\"3\",2]]\nsource\n[[\"1\",2]]\n"
+    );
+}
+
+#[test]
+fn array_own_properties_exclude_holes_and_prototype_methods() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 7];
+            const copied = sparse.toReversed();
+            console.log(Object.hasOwn(sparse, 0), Object.hasOwn(sparse, 1), Object.hasOwn(copied, 1), Object.hasOwn(copied, "length"));
+            console.log(Object.hasOwn(copied, "push"), copied.hasOwnProperty("push"), Reflect.has(copied, "push"), Reflect.has(copied, 1));
+            console.log(Object.hasOwn(copied, Symbol.iterator), Reflect.has(copied, Symbol.iterator));
+            console.log(sparse.propertyIsEnumerable(0), sparse.propertyIsEnumerable(1), sparse.propertyIsEnumerable("length"));
+            console.log(copied.propertyIsEnumerable(1), copied.propertyIsEnumerable("push"), Object.hasOwn(copied, 1));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_own_properties"),
+        "false true true true\nfalse false true true\nfalse true\nfalse true false\ntrue false true\n"
+    );
+}
+
+#[test]
+fn sparse_buffer_element_method_throws_before_access() {
+    let source = r#"
+        function main(): void {
+            const buffers: Buffer[] = [, Buffer.from("hi")];
+            console.log(buffers[1].readUInt8(0));
+            try { console.log(buffers[0].readUInt8(0)); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "sparse_buffer_element_method"), "104\nTypeError true\n");
+}
+
+#[test]
+fn native_array_length_compound_and_update_assignments() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [1, 2, 3];
+            console.log(values.length += 2, values.length, 3 in values);
+            console.log(values.length -= 3, values.length, 2 in values);
+            console.log(values.length++, values.length, ++values.length, values.length);
+            console.log(values.length--, values.length, --values.length, values.length);
+            console.log(typeof (values.length += "1"), values.length);
+            try { values.length -= 99; } catch (error) { console.log(error.name, values.length); }
+            const empty: number[] = [];
+            try { empty.length--; } catch (error) { console.log(error.name, empty.length); }
+            const ordered: number[] = [1];
+            const rhs = (): number => { ordered.push(9); return 2; };
+            console.log(ordered.length += rhs(), ordered.length, ordered.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_array_length_updates"), "5 5 false\n2 2 false\n2 3 4 4\n4 3 2 2\nstring 21\nRangeError 21\nRangeError 0\n3 3 1,9,\n");
+}
+
+#[test]
+fn native_array_length_assignment_resizes_and_preserves_state() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [, 2, 3];
+            const alias = values;
+            console.log(values.length = 1, values.length, Object.hasOwn(values, 0));
+            console.log(values.length = 4, alias.length, 1 in alias, alias.includes(undefined));
+            values[3] = 9;
+            console.log(alias.join(","), Object.hasOwn(alias, 3));
+            console.log(values.length = 0, values.length, Object.keys(alias).length);
+            const words: string[] = ["a", "b"];
+            console.log(words.length = 1, words.join("|"));
+            console.log(words.length = "3", words.length, Object.hasOwn(words, 2));
+            words["length"] = 1;
+            console.log(words.length, words.join("|"));
+            const sparse: number[] = [1, , 3];
+            sparse.length = 2;
+            sparse.length = 4;
+            console.log(1 in sparse, 2 in sparse, sparse.join(","));
+            try { values.length = -1; } catch (error) { console.log(error.name); }
+            try { values.length = 1.5; } catch (error) { console.log(error.name); }
+            try { values.length = 0 / 0; } catch (error) { console.log(error.name); }
+            let order = "";
+            const receiver = (): number[] => { order += "L"; return values; };
+            const amount = (): number => { order += "R"; return 2; };
+            console.log(receiver().length = amount(), order, values.length, 1 in values);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_array_resize_length"), "1 1 false\n4 4 false true\n,,,9 true\n0 0 0\n1 a\n3 3 false\n1 a\nfalse false 1,,,\nRangeError\nRangeError\nRangeError\n2 LR 2 false\n");
+}
+
+#[test]
+fn native_array_membership_respects_length_and_holes_after_growth() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [1];
+            values[3] = 5;
+            console.log(0 in values, 1 in values, 3 in values, 4 in values, 100 in values);
+            console.log(Object.hasOwn(values, 1), Object.hasOwn(values, 3), Object.hasOwn(values, 100));
+            console.log(Reflect.has(values, "1"), Reflect.has(values, "3"), Reflect.has(values, "100"));
+            console.log(values.hasOwnProperty("1"), values.propertyIsEnumerable("3"), values.propertyIsEnumerable("length"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_growth_membership"), "true false true false false\nfalse true false\nfalse true false\nfalse true false\n");
+}
+
+#[test]
+fn indexed_assignment_grows_native_arrays_with_holes() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [1];
+            const alias = values;
+            console.log(values[3] = 5, values.length, Object.hasOwn(values, 1), 2 in values, Object.hasOwn(values, 3), alias.join(","));
+            const sparse: number[] = [, 4];
+            console.log(values[6] = sparse[0], values.length, alias.includes(undefined), Object.hasOwn(alias, 6), 5 in alias, alias.join(","));
+            values[9] = 8;
+            console.log(alias.length, Object.hasOwn(alias, 6), Object.hasOwn(alias, 8), alias.join(","));
+            const dates: Date[] = [new Date(0)];
+            const sourceDates: Date[] = [, new Date(1)];
+            dates[2] = sourceDates[0];
+            console.log(dates.length, 1 in dates, Object.hasOwn(dates, 2), dates.includes(undefined));
+            const flags: boolean[] = [true];
+            flags[3] = false;
+            console.log(flags.length, Object.hasOwn(flags, 1), Object.hasOwn(flags, 3), flags.includes(undefined));
+            const words: string[] = ["a"];
+            words[2] = "z";
+            console.log(words.length, Object.hasOwn(words, 1), words.join("|"));
+            const ordered: number[] = [1];
+            let before = 0;
+            const rhs = (): number => { before = ordered.length; return 2; };
+            ordered[3] = rhs();
+            console.log(before, ordered.length, ordered.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_array_index_growth"), "5 4 false false true 1,,,5\nundefined 7 true true false 1,,,5,,,\n10 true false 1,,,5,,,,,,8\n3 false true true\n4 false true true\n3 false a||z\n1 4 1,,,2\n");
+}
+
+#[test]
+fn inferred_array_literals_preserve_sparse_reads() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 2];
+            const build = (from: number[]): void => {
+                const inferred = [from[0], from[1]];
+                const gapped = [, from[0]];
+                const spread = [from[0], ...from, from[0]];
+                const produce = () => [from[0]];
+                const pair = () => [from[0], 9];
+                const typed = (): number[] => [from[0]];
+                console.log(inferred.includes(undefined), Object.hasOwn(inferred, 0), inferred.join(","));
+                console.log(Object.hasOwn(gapped, 0), Object.hasOwn(gapped, 1), gapped.indexOf(undefined));
+                console.log(spread.indexOf(undefined), spread.lastIndexOf(undefined), Object.hasOwn(spread, 1));
+                console.log(produce().includes(undefined), Object.hasOwn(produce(), 0));
+                console.log(pair().includes(undefined), pair()[1], typed().includes(undefined));
+            };
+            build(sparse);
+            const words: string[] = [, "hi"];
+            const text = (from: string[]) => [from[0], from[1]];
+            console.log(text(words).includes(undefined), text(words).join("|"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "inferred_array_sparse_reads"), "true true ,2\nfalse true 1\n0 3 true\ntrue true\ntrue 9 true\ntrue |hi\n");
+}
+
+#[test]
+fn array_factory_and_concat_keep_sparse_states() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 2];
+            const created = Array.of<number>(sparse[0], sparse[1]);
+            const spread = Array.of<number>(1, ...sparse, sparse[0]);
+            const copied = Array.from(sparse);
+            const combined = sparse.concat([, 3], sparse[0]);
+            console.log(created.includes(undefined), Object.hasOwn(created, 0), created.join(","));
+            console.log(spread.lastIndexOf(undefined), Object.hasOwn(spread, 2), spread.join(","));
+            console.log(copied.includes(undefined), Object.hasOwn(copied, 0), copied.join(","));
+            console.log(Object.hasOwn(combined, 0), Object.hasOwn(combined, 2), Object.hasOwn(combined, 4), combined.indexOf(undefined));
+            const append = (from: number[]): void => {
+                const values = Array.of<number>(from[0]);
+                console.log(values.includes(undefined), Object.hasOwn(values, 0));
+                const inferred = Array.of(from[0], 2);
+                const combined = from.concat(...[[5]], from[0]);
+                console.log(inferred.includes(undefined), combined.lastIndexOf(undefined), Object.hasOwn(combined, 3));
+            };
+            append(sparse);
+            const words: string[] = [, "hi"];
+            const text = Array.of<string>(words[0], "ok");
+            console.log(text.includes(undefined), text.join("|"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_factory_sparse_values"), "true true ,2\n3 true 1,,2,\ntrue true ,2\nfalse false true 4\ntrue true\ntrue 3 true\ntrue |ok\n");
+}
+
+#[test]
+fn array_literals_store_sparse_reads_as_present_undefined() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 2];
+            const literal: number[] = [sparse[0], sparse[1]];
+            console.log(literal.includes(undefined), Object.hasOwn(literal, 0), literal.join(","));
+            const expanded: number[] = [1, ...sparse];
+            console.log(expanded.includes(undefined), Object.hasOwn(expanded, 1), expanded.join(","));
+            const mixed: number[] = [sparse[0], ...sparse];
+            console.log(mixed.indexOf(undefined), mixed.lastIndexOf(undefined), Object.hasOwn(mixed, 1));
+            const trailing: number[] = [...sparse, sparse[0]];
+            console.log(trailing.indexOf(undefined), trailing.lastIndexOf(undefined), Object.hasOwn(trailing, 2));
+            const gapped: number[] = [, sparse[0]];
+            console.log(Object.hasOwn(gapped, 0), Object.hasOwn(gapped, 1), gapped.indexOf(undefined));
+            const explicit: number[] = [undefined];
+            console.log(explicit.includes(undefined), Object.hasOwn(explicit, 0));
+            const apply = (from: number[]): void => {
+                const values: number[] = [from[0], from[1]];
+                console.log(values.includes(undefined), Object.hasOwn(values, 0), values.join(","));
+            };
+            apply(sparse);
+            const words: string[] = [, "hi"];
+            const text: string[] = [words[0], words[1]];
+            console.log(text.includes(undefined), text.join("|"));
+            const dates: Date[] = [, new Date(0)];
+            const copied: Date[] = [dates[0], dates[1]];
+            console.log(copied.includes(undefined), Object.hasOwn(copied, 0));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_literals_sparse_reads"), "true true ,2\ntrue true 1,,2\n0 1 true\n0 2 true\nfalse true 1\ntrue true\ntrue true ,2\ntrue |hi\ntrue true\n");
+}
+
+#[test]
+fn array_mapping_callbacks_return_sparse_values_as_present_undefined() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 2];
+            const dense: number[] = [4, 5];
+            const mapped = dense.map((_, index) => sparse[index]);
+            const flattened = dense.flatMap((_, index) => sparse[index]);
+            const fromLength = Array.from({ length: 2 }, (_, index) => sparse[index]);
+            const fromArray = Array.from(dense, (_, index) => sparse[index]);
+            console.log(mapped.includes(undefined), Object.hasOwn(mapped, 0), mapped.join(","));
+            console.log(flattened.includes(undefined), Object.hasOwn(flattened, 0), flattened.join(","));
+            console.log(fromLength.includes(undefined), Object.hasOwn(fromLength, 0), fromLength.join(","));
+            console.log(fromArray.includes(undefined), Object.hasOwn(fromArray, 0), fromArray.join(","));
+            const apply = (from: number[]): void => {
+                const result = dense.map((_, index) => from[index]);
+                console.log(result.includes(undefined), Object.hasOwn(result, 0));
+                const block = dense.flatMap((_, index) => { return from[index]; });
+                const built = Array.from({ length: 2 }, (_, index) => { return from[index]; });
+                console.log(block.includes(undefined), built.includes(undefined));
+                const conditional = dense.map((_, index) => {
+                    if (index === 0) return from[index];
+                    return from[index];
+                });
+                console.log(conditional.includes(undefined), conditional[1]);
+            };
+            apply(sparse);
+            const words: string[] = [, "hi"];
+            const applyWords = (from: string[]): void => {
+                const mapped = dense.map((_, index) => from[index]);
+                const flattened = dense.flatMap((_, index) => from[index]);
+                console.log(mapped.includes(undefined), flattened.includes(undefined), mapped.join("|"));
+            };
+            applyWords(words);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_mapping_sparse_results"), "true true ,2\ntrue true ,2\ntrue true ,2\ntrue true ,2\ntrue true\ntrue true\ntrue 2\ntrue true |hi\n");
+}
+
+#[test]
+fn array_methods_preserve_sparse_values_after_spread_arguments() {
+    let source = r#"
+        function main(): void {
+            const source: number[] = [, 2];
+            const target: number[] = [7];
+            const apply = (from: number[], to: number[]): void => {
+                to.push(...[1], from[0]);
+                to.unshift(...[3], from[0]);
+                to.splice(1, 0, ...[4], from[0]);
+            };
+            apply(source, target);
+            console.log(target.indexOf(undefined), target.lastIndexOf(undefined), Object.hasOwn(target, 3), target.join(","));
+            const filled: number[] = [1, 2];
+            filled.fill(...[source[0], 1]);
+            console.log(filled.includes(undefined), Object.hasOwn(filled, 1));
+            const copied = target.with(...[0, source[0]]);
+            const inserted = target.toSpliced(...[0, 0, source[0]]);
+            console.log(copied.indexOf(undefined), inserted.indexOf(undefined), Object.hasOwn(inserted, 0));
+            const explicit: number[] = [];
+            explicit.push(undefined);
+            explicit.unshift(undefined);
+            explicit.splice(1, 0, undefined);
+            console.log(explicit.length, explicit.lastIndexOf(undefined), Object.hasOwn(explicit, 1));
+            explicit.fill(undefined, 0, 1);
+            console.log(explicit.with(0, undefined).includes(undefined), explicit.toSpliced(0, 0, undefined).length);
+            let evaluations = "";
+            const receiver = (): number[] => { evaluations += "R"; return target; };
+            const value = (): number => { evaluations += "V"; return 2; };
+            receiver().push(...[1], value());
+            console.log(evaluations);
+            const fromHole: number[] = [];
+            fromHole.push(...[,]);
+            console.log(fromHole.includes(undefined), Object.hasOwn(fromHole, 0));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_spread_sparse_arguments"), "2 6 true 3,4,,,7,1,\ntrue true\n0 0 true\n3 2 true\ntrue 4\nRV\ntrue true\n");
+}
+
+#[test]
+fn array_fill_and_copy_by_change_accept_sparse_values() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 2];
+            const filled: number[] = [, 3, 4];
+            filled.fill(sparse[0], 1);
+            console.log(Object.hasOwn(filled, 0), Object.hasOwn(filled, 1), filled.includes(undefined), filled.indexOf(undefined));
+            const replaced = sparse.with(1, sparse[0]);
+            console.log(Object.hasOwn(replaced, 0), Object.hasOwn(replaced, 1), replaced.includes(undefined), sparse[1]);
+            const inserted = sparse.toSpliced(1, 0, sparse[0], sparse[1]);
+            console.log(Object.hasOwn(inserted, 0), Object.hasOwn(inserted, 1), inserted.lastIndexOf(undefined), inserted.join(","));
+            const words: string[] = [, "hi"];
+            const text: string[] = ["old", "ok"];
+            text.fill(words[0], 0, 1);
+            const changed = text.with(1, words[0]);
+            console.log(text.includes(undefined), changed.lastIndexOf(undefined), Object.hasOwn(changed, 1), changed[1] === undefined, changed.join("|"));
+            console.log(text.toSpliced(1, 0, words[0]).lastIndexOf(undefined));
+            const apply = (from: number[], to: number[]): void => { to.fill(from[0]); };
+            const passed: number[] = [1, 2];
+            apply(sparse, passed);
+            console.log(passed.indexOf(undefined), Object.hasOwn(passed, 0));
+            const copy = (from: number[], to: number[]): void => {
+                const replaced = to.with(0, from[0]);
+                const inserted = to.toSpliced(1, 0, from[0]);
+                console.log(replaced.indexOf(undefined), inserted.indexOf(undefined));
+            };
+            copy(sparse, [7, 8]);
+            const dates: Date[] = [, new Date(0)];
+            const stored: Date[] = [new Date(1)];
+            stored.fill(dates[0]);
+            console.log(stored.includes(undefined), Object.hasOwn(stored, 0));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_sparse_fill_copy"), "false true true 1\ntrue true true 2\ntrue true 1 ,,2,2\ntrue 1 true true |\n1\n0 true\n0 1\ntrue true\n");
+}
+
+#[test]
+fn array_mutators_insert_sparse_elements_as_present_undefined() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 2];
+            const push: number[] = [7];
+            console.log(push.push(sparse[0], sparse[1]), push.includes(undefined), Object.hasOwn(push, 1), push.join(","));
+            const unshift: number[] = [7];
+            console.log(unshift.unshift(sparse[0], sparse[1]), unshift.indexOf(undefined), Object.hasOwn(unshift, 0), unshift.join(","));
+            const splice: number[] = [5, 6];
+            const removed = splice.splice(-1, 1, sparse[0], sparse[1]);
+            console.log(removed.join(","), splice.indexOf(undefined), Object.hasOwn(splice, 1), splice.join(","));
+            const words: string[] = [, "hi"];
+            const text: string[] = ["old"];
+            text.push(words[0]);
+            text.unshift(words[0]);
+            text.splice(1, 0, words[0]);
+            console.log(text.includes(undefined), text.lastIndexOf(undefined), text.join("|"));
+            const append = (from: number[], to: number[]): void => { to.push(from[0]); };
+            const passed: number[] = [];
+            append(sparse, passed);
+            console.log(passed.includes(undefined), Object.hasOwn(passed, 0));
+            const existing: number[] = [, 5];
+            existing.unshift(sparse[0]);
+            console.log(Object.hasOwn(existing, 0), Object.hasOwn(existing, 1), existing.indexOf(undefined), existing.includes(undefined));
+            const dates: Date[] = [, new Date(0)];
+            const stored: Date[] = [new Date(1)];
+            stored.splice(1, 0, dates[0]);
+            console.log(stored.includes(undefined), Object.hasOwn(stored, 1));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_mutators_sparse_arguments"), "3 true true 7,,2\n3 0 true ,2,7\n6 1 true 5,,2\ntrue 3 ||old|\ntrue true\ntrue false 0 true\ntrue true\n");
+}
+
+#[test]
+fn logical_assignment_reads_sparse_array_holes_as_undefined() {
+    let source = r#"
+        function main(): void {
+            const numbers: number[] = [, 2, 0];
+            console.log(numbers[0] &&= 5, Object.hasOwn(numbers, 0));
+            console.log(numbers[0] ||= 3, Object.hasOwn(numbers, 0));
+            console.log(numbers[1] &&= 4, numbers[2] ||= 7, numbers.join(","));
+            const words: string[] = [, "yes"];
+            console.log(words[0] &&= "no", Object.hasOwn(words, 0));
+            console.log(words[0] ||= "new", words[1] &&= "done", words.join(","));
+            const source: number[] = [, 6];
+            const target: number[] = [1, 0];
+            console.log(target[0] &&= source[0], target[1] ||= source[0]);
+            console.log(target.indexOf(undefined), target.lastIndexOf(undefined), Object.hasOwn(target, 0));
+            const copy = (from: number[], to: number[]): void => { to[0] &&= from[0]; };
+            const passed: number[] = [1];
+            copy(source, passed);
+            console.log(passed.includes(undefined), Object.hasOwn(passed, 0));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "logical_sparse_array_element"), "undefined false\n3 true\n4 7 3,4,7\nundefined false\nnew done new,done\nundefined undefined\n0 1 true\ntrue true\n");
+}
+
+#[test]
+fn nullish_assignment_reads_sparse_array_holes_as_undefined() {
+    let source = r#"
+        function main(): void {
+            const numbers: number[] = [, 2];
+            console.log(numbers[0] ??= 3, numbers[1] ??= 4, numbers.join(","));
+            const words: string[] = [, "ok"];
+            console.log(words[0] ??= "new", words[1] ??= "other", words.join(","));
+            let evaluations = 0;
+            const receiver = (): number[] => { evaluations++; return numbers; };
+            const index = (): number => { evaluations++; return 0; };
+            const fallback = (): number => { evaluations++; return 9; };
+            console.log(receiver()[index()] ??= fallback(), evaluations);
+            const source: number[] = [, 2];
+            const target: number[] = [, 9];
+            console.log(target[0] ??= source[0], target[1] ??= source[0]);
+            console.log(target.includes(undefined), Object.hasOwn(target, 0), target[1]);
+            const copy = (from: number[], to: number[]): void => { to[0] ??= from[0]; };
+            const passed: number[] = [, 7];
+            copy(source, passed);
+            console.log(passed.includes(undefined), Object.hasOwn(passed, 0));
+            let reads = 0;
+            const load = (): number[] => { reads++; return source; };
+            const occupied: number[] = [8];
+            console.log(occupied[0] ??= load()[0], reads);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nullish_sparse_array_element"), "3 2 3,2\nnew ok new,ok\n3 2\nundefined 9\ntrue true 9\ntrue true\n8 0\n");
+}
+
+#[test]
+fn compound_assignment_reads_sparse_array_holes_as_undefined() {
+    let source = r#"
+        function main(): void {
+            const numbers: number[] = [, 2];
+            console.log(Number.isNaN(numbers[0]), Number.isFinite(numbers[0]), Number.isInteger(numbers[1]));
+            console.log(numbers[0] += 3, Object.hasOwn(numbers, 0), Number.isNaN(numbers[0]));
+            console.log(numbers[1] += 3, numbers[1]);
+            const words: string[] = [, "a"];
+            console.log(words[0] += "!", words[1] += "!", Object.hasOwn(words, 0));
+            const mixed: string[] = [, "a"];
+            console.log(mixed[0] += 1, mixed[1] += 1);
+            const numericTarget: number[] = [1];
+            const add = (from: number[], to: number[]): void => { to[0] += from[0]; };
+            add(numbers, numericTarget);
+            const sparseSource: number[] = [, 3];
+            add(sparseSource, numericTarget);
+            console.log(Number.isNaN(numericTarget[0]));
+            const stringTarget: string[] = ["value"];
+            const join = (from: string[], to: string[]): void => { to[0] += from[0]; };
+            const sparseWords: string[] = [, "ok"];
+            join(sparseWords, stringTarget);
+            console.log(stringTarget[0]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "compound_sparse_array_element"), "false false true\nNaN true true\n5 5\nundefined! a! true\nundefined1 a1\ntrue\nvalueundefined\n");
+}
+
+#[test]
+fn updates_read_sparse_array_holes_as_undefined() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [, 2];
+            console.log(values[0]++, Number.isNaN(values[0]), values[1]++, values[1]);
+            const other: number[] = [, 2];
+            console.log(++other[0], Number.isNaN(other[0]));
+            let evaluations = 0;
+            const receiver = (): number[] => { evaluations++; return other; };
+            const index = (): number => { evaluations++; return 1; };
+            console.log(++receiver()[index()], evaluations);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "update_sparse_array_element"), "NaN true 2 3\nNaN true\n3 2\n");
+}
+
+#[test]
+fn assigning_sparse_array_values_creates_present_undefined_elements() {
+    let source = r#"
+        function main(): void {
+            const source: number[] = [, 2];
+            const target: number[] = [9, 9];
+            console.log(target[0] = source[0], target[1] = source[1]);
+            console.log(0 in target, 1 in target, target.indexOf(undefined), target.join(","));
+            const copied = source.toReversed();
+            console.log(target[1] = copied[1], target.indexOf(undefined), target.lastIndexOf(undefined), target.join(","));
+            const words: string[] = [, "ok"];
+            const text: string[] = ["old", "old"];
+            console.log(text[0] = words[0], text[1] = words[1], Object.hasOwn(text, 0), text.includes(undefined));
+            let evaluations = 0;
+            const receiver = (): number[] => { evaluations++; return target; };
+            const index = (): number => { evaluations++; return 0; };
+            const operand = (): number[] => { evaluations++; return source; };
+            console.log(receiver()[index()] = operand()[0], evaluations);
+            const dates: Date[] = [, new Date(0)];
+            const storedDates: Date[] = [new Date(1)];
+            const copyDate = (from: Date[], to: Date[]): void => { to[0] = from[0]; };
+            copyDate(dates, storedDates);
+            console.log(storedDates.includes(undefined), Object.hasOwn(storedDates, 0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "assign_sparse_array_elements"),
+        "undefined 2\ntrue true 0 ,2\nundefined 0 1 ,\nundefined ok true true\nundefined 3\ntrue true\n"
+    );
+}
+
+#[test]
+fn annotated_primitive_locals_accept_sparse_array_index_values() {
+    let source = r#"
+        function main(): void {
+            const numbers: number[] = [, 2];
+            const strings: string[] = [, "hi"];
+            const numberValue: number = numbers[0];
+            const stringValue: string = strings[0];
+            console.log(Number.isNaN(numberValue + 1), stringValue + "!");
+            let assignedNumber: number = 1;
+            let assignedString: string = "ready";
+            assignedNumber = numbers[0];
+            assignedString = strings[0];
+            console.log(Number.isNaN(assignedNumber + 1), assignedString + "!");
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "annotated_sparse_primitive_locals"), "true undefined!\ntrue undefined!\n");
+}
+
+#[test]
+fn sparse_primitive_array_arguments_preserve_undefined_coercion() {
+    let source = r#"
+        function plusOne(value: number): number { return value + 1; }
+        function decorate(value: string): string { return value + "!"; }
+        function identity<T>(value: T): T { return value; }
+        class Consumer { add(value: number): number { return value + 1; } }
+        class GenericConsumer { convert<T>(value: T): T { return value; } }
+        function main(): void {
+            const numbers: number[] = [, 2];
+            const strings: string[] = [, "hi"];
+            console.log(Number.isNaN(plusOne(numbers[0])), plusOne(numbers[1]));
+            console.log(decorate(strings[0]), decorate(strings[1]));
+            console.log(Number.isNaN(identity<number>(numbers[0])), Number.isNaN(new Consumer().add(numbers[0])));
+            console.log(Number.isNaN(new GenericConsumer().convert<number>(numbers[0])));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_primitive_array_arguments"),
+        "true 3\nundefined! hi!\ntrue true\ntrue\n"
+    );
+}
+
+#[test]
+fn union_array_elements_loose_equal_nullish_values() {
+    let source = r#"
+        function main(): void {
+            const values: (number | string | null | undefined)[] = [null, undefined, 1];
+            console.log(values[0] == null, values[1] == null, values[2] == null);
+            console.log(null == values[0], undefined == values[1], values[2] != null);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_loose_nullish_equality"),
+        "true true false\ntrue true true\n"
+    );
+}
+
+#[test]
+fn sparse_reference_element_property_reads_throw_type_error() {
+    let source = r#"
+        interface Item { value: number; }
+        function replacement(): number { console.log("replacement"); return 4; }
+        function main(): void {
+            const objects: Item[] = [, { value: 2 }];
+            const nested: number[][] = [, [3]];
+            console.log(objects[1].value, nested[1].length);
+            try { console.log(objects[0].value); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            try { console.log(nested[0].length); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            try { console.log(nested[0].join(",")); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            try { nested[0].push(replacement()); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            try { console.log(nested[0].map(value => value + 1).join(",")); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            try { console.log(nested[0].sort().join(",")); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            try { console.log(nested[0].at(0)); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            console.log(nested[1].push(4), nested[1].map(value => value + 1).join(","));
+            const texts: string[] = [, "ok"];
+            console.log(texts[1].trim());
+            try { console.log(texts[0].charAt(0)); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            try { console.log(texts[0].split(",").length); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            try { console.log(objects[0].toString()); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            const dates: Date[] = [, new Date(0)];
+            console.log(dates[1].getTime());
+            try { console.log(dates[0].getTime()); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            const regexes: RegExp[] = [, new RegExp("a")];
+            console.log(regexes[1].test("a"));
+            try { console.log(regexes[0].test("a")); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            const maps: Map<string, number>[] = [, new Map<string, number>()];
+            maps[1].set("a", 3);
+            console.log(maps[1].get("a"));
+            try { console.log(maps[0].get("a")); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_reference_property_reads"),
+        "2 1\nTypeError true\nTypeError true\nTypeError true\nTypeError true\nTypeError true\nTypeError true\nTypeError true\n2 4,5\nok\nTypeError true\nTypeError true\nTypeError true\n0\nTypeError true\ntrue\nTypeError true\n3\nTypeError true\n"
+    );
+}
+
+#[test]
+fn explicit_sparse_number_index_coerces_undefined_in_expressions() {
+    let source = r#"
+        function addFirst(values: number[]): number { return values[0] + 1; }
+        function prefixFirst(values: string[]): string { return values[0] + "!"; }
+        function lessFirst(values: number[]): boolean { return values[0] < 1; }
+        function zeroFirst(values: number[]): boolean { return values[0] === 0; }
+        function nullishFirst(values: number[]): boolean { return values[0] == null; }
+        function looseZeroFirst(values: number[]): boolean { return values[0] == 0; }
+        function hasFirst(values: string[]): boolean { return values[0] ? true : false; }
+        function inspect(values: number[]): void {
+            console.log(typeof values[0], String(values[0]), Number.isNaN(Number(values[0])));
+            console.log(Number.isNaN(+values[0]), Number.isNaN(-values[0]), +values[1], -values[1]);
+        }
+        function main(): void {
+            const sparse: number[] = [, 2];
+            const copied = sparse.toReversed();
+            console.log(Number.isNaN(sparse[0] + 1), sparse[1] + 1);
+            console.log(Number.isNaN(copied[1] + 1), String(copied[1]));
+            const strings: string[] = [, "hi"];
+            const flags: boolean[] = [, true];
+            console.log(String(strings[0]), strings[1].toUpperCase(), String(flags[0]), Boolean(flags[0]));
+            try { console.log(strings[0].toUpperCase()); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            console.log(Number.isNaN(addFirst(sparse)), addFirst([2]), prefixFirst(strings));
+            console.log(lessFirst(sparse), lessFirst([0]), zeroFirst(sparse), zeroFirst([0]));
+            console.log(nullishFirst(sparse), nullishFirst([0]), looseZeroFirst(sparse), looseZeroFirst([0]));
+            inspect(sparse);
+            console.log(typeof strings[0], String(strings[0]));
+            console.log(hasFirst(strings), hasFirst(["yes"]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "explicit_sparse_number_index"),
+        "true 3\ntrue undefined\nundefined HI undefined false\nTypeError true\ntrue 3 undefined!\nfalse true false true\ntrue false false true\nundefined undefined true\ntrue true 2 -2\nundefined undefined\nfalse true\n"
+    );
+}
+
+#[test]
+fn native_array_in_checks_holes_and_present_undefined() {
+    let source = r#"
+        function key(): number { console.log("key"); return 1; }
+        function stringKey(): string { console.log("string-key"); return "1"; }
+        function absentKey(): undefined { console.log("undefined-key"); return undefined; }
+        function receiver(): number[] { console.log("receiver"); return [, 7]; }
+        function main(): void {
+            const sparse: number[] = [, 7];
+            const copied = sparse.toReversed();
+            console.log(0 in sparse, 1 in sparse, 2 in sparse, -1 in sparse, 1.2 in sparse);
+            console.log(0 in copied, 1 in copied, 2 in copied, "length" in copied);
+            console.log("0" in sparse, "1" in sparse, "1" in copied);
+            console.log("01" in sparse, "nope" in sparse, "push" in sparse, "toString" in sparse, "constructor" in sparse, "map" in sparse);
+            const iterator = Symbol.iterator;
+            console.log(iterator in sparse, Symbol.unscopables in sparse, Symbol.toStringTag in sparse, Symbol.for("iterator") in sparse);
+            console.log(true in sparse, false in sparse, 1n in sparse, 0n in sparse);
+            console.log(null in sparse, undefined in sparse);
+            console.log(key() in receiver());
+            console.log(stringKey() in receiver());
+            console.log(absentKey() in receiver());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_array_in_checks"),
+        "false true false false false\ntrue true false true\nfalse true true\nfalse false true true true true\ntrue true false false\nfalse false true false\nfalse false\nkey\nreceiver\ntrue\nstring-key\nreceiver\ntrue\nundefined-key\nreceiver\nfalse\n"
+    );
+}
+
+#[test]
+fn map_and_flat_map_keep_void_callback_results_as_undefined() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [1, , 2];
+            let mapCalls = 0;
+            let flatMapCalls = 0;
+            const mapped = sparse.map(() => { mapCalls += 1; });
+            const flattened = sparse.flatMap(() => { flatMapCalls += 1; });
+            let visits = 0;
+            mapped.forEach(() => { visits += 1; });
+            console.log(mapCalls, mapped.length, visits, mapped.indexOf(undefined), mapped.lastIndexOf(undefined));
+            console.log(flatMapCalls, flattened.length, flattened.indexOf(undefined), flattened.lastIndexOf(undefined));
+            let fromCalls = 0;
+            const fromLength = Array.from({ length: 2 }, (_value, index) => { fromCalls += index + 1; });
+            const fromValues = Array.from([1, 2], () => { fromCalls += 1; });
+            console.log(fromCalls, fromLength.length, fromLength.indexOf(undefined), fromValues.indexOf(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_and_flat_map_void_callbacks"),
+        "2 3 2 0 2\n2 2 0 1\n5 2 0 0\n"
+    );
+}
+
+#[test]
+fn array_predicates_coerce_callback_results_once() {
+    let source = r#"
+        let namedCalls = 0;
+        function visit(value: number): void { namedCalls += 1; }
+        function main(): void {
+            const values: number[] = [0, 1, 2];
+            let filterCalls = 0;
+            let someCalls = 0;
+            let everyCalls = 0;
+            const filtered = values.filter(value => { filterCalls += 1; return value; });
+            const some = values.some(value => { someCalls += 1; return value; });
+            const every = values.every(value => { everyCalls += 1; return value; });
+            console.log(filtered.join(","), filterCalls, some, someCalls, every, everyCalls);
+            console.log(values.find(value => value), values.findIndex(value => value), values.findLast(value => value));
+            const sparse: number[] = [0, , 2];
+            console.log(sparse.filter(value => "yes").join(","));
+            let objectCalls = 0;
+            console.log(values.some(value => { objectCalls += 1; return { value }; }), objectCalls);
+            console.log(values.every(() => undefined), values.filter(() => null).length);
+            let voidCalls = 0;
+            console.log(values.some(() => { voidCalls += 1; }), voidCalls);
+            console.log(values.every(() => { voidCalls += 1; }), voidCalls, values.filter(() => {}).length);
+            console.log(values.some(visit), namedCalls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_predicates_truthiness"),
+        "1,2 3 true 2 false 1\n1 1 2\n0,2\ntrue 1\nfalse 0\nfalse 3\nfalse 4 0\nfalse 3\n"
+    );
+}
+
+#[test]
+fn mutation_and_copy_methods_accept_tagged_undefined_inserts() {
+    let source = r#"
+        function main(): void {
+            const values: (number | undefined)[] = [1, 2, 3];
+            const removed = values.splice(1, 1, undefined);
+            const copied = values.toSpliced("0", 0, undefined);
+            const replaced = values.with("2", undefined);
+            console.log(values.join(","), values.indexOf(undefined), removed.join(","));
+            console.log(copied.join(","), copied.indexOf(undefined), copied.lastIndexOf(undefined));
+            console.log(replaced.join(","), replaced.indexOf(undefined), replaced.lastIndexOf(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tagged_undefined_inserts"),
+        "1,,3 1 2\n,1,,3 0 2\n1,, 1 2\n"
+    );
+}
+
+#[test]
+fn fill_accepts_tagged_null_and_undefined_values() {
+    let source = r#"
+        function main(): void {
+            const source: (number | undefined)[] = [, 1];
+            const values = source.toReversed();
+            values.fill(undefined, 0, 1);
+            let visits = 0;
+            values.forEach(() => { visits += 1; });
+            console.log(values.join(","), values.indexOf(undefined), values.lastIndexOf(undefined), visits);
+            values.fill(7, 1);
+            console.log(values.join(","), values.indexOf(undefined));
+            const nullable: (number | null)[] = [1, 2];
+            nullable.fill(null, 0, 1);
+            console.log(nullable.join(","), nullable.indexOf(null));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "fill_tagged_nullish_values"),
+        ", 0 1 2\n,7 0\n,2 0\n"
+    );
+}
+
+#[test]
+fn mutators_move_present_undefined_with_its_index_state() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [1, , 2].toReversed();
+            values.copyWithin(0, 1, 2);
+            console.log(values.join(","), values.indexOf(undefined), values.lastIndexOf(undefined));
+            values.reverse();
+            console.log(values.join(","), values.indexOf(undefined), values.lastIndexOf(undefined));
+            const spliced: number[] = [3, , 4].toReversed();
+            const removed = spliced.splice(0, 2, 9);
+            console.log(spliced.join(","), spliced.indexOf(undefined), removed.join(","), removed.indexOf(undefined));
+            const tagged: (number | undefined)[] = [undefined, 2, 1];
+            tagged.sort();
+            tagged.push(4);
+            tagged.unshift(0);
+            const taggedRemoved = tagged.splice(3, 1);
+            console.log(tagged.join(","), tagged.indexOf(undefined), taggedRemoved.join(","), taggedRemoved.indexOf(undefined), tagged.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "mutators_move_present_undefined"),
+        ",,1 0 1\n1,, 1 2\n9,3 -1 4, 1\n0,1,2,4 -1  0 4\n"
+    );
+}
+
+#[test]
+fn serializes_union_array_undefined_and_null_after_sorting() {
+    let source = r#"
+        function main(): void {
+            const values: (number | string | null | undefined)[] = [undefined, 1, "x", null, , 2];
+            console.log(JSON.stringify(values), JSON.stringify(values.toSorted()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "serializes_union_array_undefined"),
+        "[null,1,\"x\",null,null,2] [1,2,null,\"x\",null,null]\n"
+    );
+}
+
+#[test]
+fn undefined_sort_comparator_uses_default_order_after_evaluation() {
+    let source = r#"
+        const values: number[] = [3, 1, 2];
+        function receiver(): number[] { console.log("receiver"); return values; }
+        function absent(): undefined { console.log("argument"); return undefined; }
+        function main(): void {
+            console.log(receiver().sort(absent()).join(","));
+            console.log(values.toSorted(undefined).join(","));
+            const tagged: (number | undefined)[] = [undefined, 3, 1];
+            console.log(tagged.toSorted(undefined).join(","));
+            console.log(values.toSorted(...[undefined]).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "undefined_sort_comparator"),
+        "receiver\nargument\n1,2,3\n1,2,3\n1,3,\n1,2,3\n"
+    );
+}
+
+#[test]
+fn union_sort_orders_tagged_undefined_before_holes() {
+    let source = r#"
+        function main(): void {
+            const values: (number | string | undefined | null)[] = [undefined, 2, "10", , null];
+            const sorted = values.slice().sort();
+            const copied = values.toSorted();
+            let sortedVisits = 0;
+            let copiedVisits = 0;
+            sorted.forEach(() => { sortedVisits += 1; });
+            copied.forEach(() => { copiedVisits += 1; });
+            console.log(sorted.join(","), sortedVisits, sorted.indexOf(undefined));
+            console.log(copied.join(","), copiedVisits, copied.lastIndexOf(undefined), copied.at(2) === null);
+            const stable = values.toSorted((left, right) => {
+                if (left === undefined || right === undefined) throw new Error("undefined comparator argument");
+                return 0;
+            });
+            console.log(stable.join(","), stable.lastIndexOf(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_sort_tagged_undefined"),
+        "10,2,,, 4 3\n10,2,,, 5 4 true\n2,10,,, 4\n"
+    );
+}
+
+#[test]
+fn default_tagged_sort_orders_values_before_undefined_and_holes() {
+    let source = r#"
+        function main(): void {
+            const source: (number | undefined)[] = [undefined, 10, , 2];
+            const sorted = source.slice().sort();
+            const copied = source.toSorted();
+            let visits = 0;
+            let copiedVisits = 0;
+            sorted.forEach(() => { visits += 1; });
+            copied.forEach(() => { copiedVisits += 1; });
+            console.log(sorted.join(","), visits, sorted.indexOf(undefined));
+            console.log(copied.join(","), copiedVisits, copied.lastIndexOf(undefined));
+            const nullish: (number | null | undefined)[] = [null, undefined, 3, 1];
+            const sortedNullish = nullish.toSorted();
+            console.log(sortedNullish.join(","), sortedNullish.at(2) === null, sortedNullish.at(3) === undefined);
+            const strings: (string | undefined)[] = [undefined, "b", "a"];
+            const booleans: (boolean | undefined)[] = [undefined, true, false];
+            console.log(strings.toSorted().join(","), booleans.toSorted().join(","));
+            const onlyUndefined = [undefined, undefined];
+            let undefinedComparisons = 0;
+            onlyUndefined.sort(() => { undefinedComparisons += 1; return 0; });
+            const undefinedSource = [undefined, ,];
+            const undefinedCopy = undefinedSource.toSorted();
+            let undefinedVisits = 0;
+            undefinedCopy.forEach(() => { undefinedVisits += 1; });
+            console.log(undefinedComparisons, onlyUndefined.indexOf(undefined), undefinedVisits, undefinedCopy.indexOf(undefined), undefinedCopy.lastIndexOf(undefined));
+            console.log([null, null].toSorted().join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "default_tagged_sort_order"),
+        "10,2,, 3 2\n10,2,, 4 3\n1,3,, true true\na,b, false,true,\n0 0 2 0 1\n,\n"
+    );
+}
+
+#[test]
+fn tagged_sort_skips_undefined_comparator_values_and_preserves_holes() {
+    let source = r#"
+        function main(): void {
+            const values: (number | undefined)[] = [undefined, 3, , 1];
+            const sorted = values.slice();
+            let comparisons = 0;
+            sorted.sort((left, right) => { comparisons += 1; return right - left; });
+            const copied = values.toSorted((left, right) => { comparisons += 1; return right - left; });
+            let sortedVisits = 0;
+            let copiedVisits = 0;
+            sorted.forEach(() => { sortedVisits += 1; });
+            copied.forEach(() => { copiedVisits += 1; });
+            console.log(sorted.join(","), sortedVisits, sorted.indexOf(undefined));
+            console.log(copied.join(","), copiedVisits, copied.lastIndexOf(undefined), comparisons);
+            const nullish: (number | null | undefined)[] = [null, undefined, 3];
+            let nullComparisons = 0;
+            const nullishCopy = nullish.toSorted((left, right) => {
+                nullComparisons += 1;
+                return left - right;
+            });
+            console.log(nullishCopy.join(","), nullishCopy.at(0) === null, nullishCopy.at(2) === undefined, nullComparisons);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tagged_sort_skips_undefined"),
+        "3,1,, 3 2\n3,1,, 4 3 2\n,3, true true 1\n"
+    );
+}
+
+#[test]
+fn reduces_tagged_sparse_arrays_without_an_initial_value() {
+    let source = r#"
+        function main(): void {
+            const nullable: (number | null)[] = [null, , 2];
+            const first: (number | null)[] = [, null];
+            const union: (number | string)[] = [, "x"];
+            const a = nullable.toReversed();
+            const b = first.toReversed();
+            const c = union.toReversed();
+            console.log(a.reduce((acc, value) => value) === null, a.reduceRight((acc, value) => value));
+            console.log(b.reduce((acc, value) => value) === undefined, b.reduceRight((acc, value) => value) === null);
+            console.log(c.reduce((acc, value) => value) === undefined, c.reduceRight((acc, value) => value));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "reduces_tagged_sparse_arrays"),
+        "true 2\ntrue true\ntrue x\n"
+    );
+}
+
+#[test]
+fn reads_union_undefined_without_nested_optional_values() {
+    let source = r#"
+        function main(): void {
+            const values: (number | string | undefined)[] = [undefined, , 1];
+            const copied = values.toReversed();
+            console.log(copied.at(1) === undefined, copied.at(2) === undefined);
+            console.log(copied[1] === undefined, copied[2] === undefined);
+            let undefinedVisits = 0;
+            copied.forEach(value => { if (value === undefined) undefinedVisits += 1; });
+            console.log(undefinedVisits, copied.find(value => value === undefined) === undefined);
+            const maybe: (number | string | undefined)[] | undefined = copied;
+            const missing: (number | string | undefined)[] | undefined = undefined;
+            console.log(maybe?.[1] === undefined, maybe?.[2] === undefined, missing?.[0] === undefined);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "reads_union_undefined"), "true true\ntrue true\n2 true\ntrue true true\n");
+}
+
+#[test]
+fn reads_nullish_and_nullable_array_elements() {
+    let source = r#"
+        function main(): void {
+            const nullish: (number | null | undefined)[] = [null, undefined, 1];
+            const nullable: (number | null)[] = [null, 1];
+            console.log(nullish.at(0) === null, nullish.at(1) === undefined, nullish.at(3) === undefined);
+            console.log(nullable.at(0) === null, nullable.at(2) === undefined);
+            console.log(nullable[0] + 1, nullish[0] + 1, Number.isNaN(nullish[1] + 1));
+            const maybe: (number | null)[] | undefined = nullable;
+            const missing: (number | null)[] | undefined = undefined;
+            console.log(maybe?.[0] === null, missing?.[0] === undefined);
+            const nullableSparse: (number | null)[] = [null, , 1];
+            const copied = nullableSparse.toReversed();
+            let undefinedVisits = 0;
+            let nullVisits = 0;
+            copied.forEach(value => {
+                if (value === undefined) undefinedVisits += 1;
+                if (value === null) nullVisits += 1;
+            });
+            console.log(undefinedVisits, nullVisits, copied.map(value => value === undefined).join(","));
+            console.log(copied.find(value => value === null) === null);
+            console.log(copied[1] === undefined, copied.at(2) === null);
+            let forOfNulls = 0;
+            for (const value of copied) {
+                if (value === null) forOfNulls += 1;
+            }
+            console.log(forOfNulls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "reads_nullish_array_elements"), "true true true\ntrue true\n1 1 true\ntrue true\n1 1 false,true,false\ntrue\ntrue true\n1\n");
+}
+
+#[test]
+fn reads_tagged_undefined_without_nested_optional_values() {
+    let source = r#"
+        function main(): void {
+            const values: (number | undefined)[] = [undefined, 1];
+            console.log(values.at(0) === undefined, values.at(1), values.at(3) === undefined);
+            const sparse: (number | undefined)[] = [, 1];
+            console.log(sparse.at(0) === undefined, sparse.at(1));
+            let undefinedVisits = 0;
+            for (const value of sparse) {
+                if (value === undefined) undefinedVisits += 1;
+            }
+            console.log(undefinedVisits);
+            const entries = sparse.entries();
+            console.log(entries.next().value[1] === undefined);
+            const mixed: (number | undefined)[] = [undefined, , 1];
+            let callbackUndefined = 0;
+            mixed.toReversed().forEach(value => {
+                if (value === undefined) callbackUndefined += 1;
+            });
+            console.log(callbackUndefined);
+            const copied = mixed.toReversed();
+            console.log(copied.find(value => value === undefined) === undefined, copied.findIndex(value => value === undefined));
+            console.log(mixed.map(value => value === undefined).join(","));
+            console.log(copied.filter(value => value === undefined).length);
+            console.log(copied.reduce((count, value) => count + Number(value === undefined), 0));
+            console.log(copied.flatMap(value => [value === undefined]).join(","));
+            console.log(Array.from(mixed, value => value === undefined).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "reads_tagged_undefined"),
+        "true 1 true\ntrue 1\n1\ntrue\n2\ntrue 1\ntrue,,false\n2\n2\nfalse,true,true\ntrue,true,false\n"
+    );
+}
+
+#[test]
+fn flat_map_flattens_array_members_of_mixed_results() {
+    let source = r#"
+        function main(): void {
+            console.log(JSON.stringify([0, 1, 2].flatMap(value => value === 1 ? [value, value + 10] : value)));
+            console.log(JSON.stringify([0, 1, 2].flatMap(value => value === 1 ? value : [value, value + 10])));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "flat_map_mixed_results"), "[0,1,11,2]\n[0,10,1,2,12]\n");
+}
+
+#[test]
+fn flat_map_accepts_scalar_results_and_skips_source_holes() {
+    let source = r#"
+        function triple(value: number): number { return value * 3; }
+        function main(): void {
+            const sparse: number[] = [, 1];
+            let sparseCalls = 0;
+            let denseCalls = 0;
+            const sparseResult = sparse.flatMap(value => {
+                sparseCalls += 1;
+                return value + 1;
+            });
+            const denseResult = sparse.toReversed().flatMap(value => {
+                denseCalls += 1;
+                return value === undefined ? 9 : value + 1;
+            });
+            console.log(sparseResult.join(","), sparseCalls, denseResult.join(","), denseCalls);
+            console.log([1, 2].flatMap(...[triple]).join(","));
+            const undefinedResult = sparse.flatMap(() => undefined);
+            let undefinedVisits = 0;
+            undefinedResult.forEach(() => { undefinedVisits += 1; });
+            console.log(undefinedResult.length, undefinedVisits, undefinedResult.indexOf(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "flat_map_scalar_results"),
+        "2 1 2,9 2\n3,6\n1 1 0\n"
+    );
+}
+
+#[test]
+fn sorting_keeps_present_undefined_after_concrete_values() {
+    let source = r#"
+        function main(): void {
+            const sorted: number[] = [, 3, 2].toReversed();
+            sorted.sort();
+            const copied = [, 3, 2].toReversed().toSorted((left, right) => right - left);
+            console.log(sorted.join(","), sorted.indexOf(undefined));
+            console.log(copied.join(","), copied.indexOf(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sorting_keeps_present_undefined"),
+        "2,3, 2\n3,2, 2\n"
+    );
+}
+
+#[test]
+fn concat_keeps_holes_distinct_from_present_undefined() {
+    let source = r#"
+        function main(): void {
+            const original: number[] = [, 1].toReversed();
+            const appended = original.concat([2]);
+            const combined = ([, 3] as number[]).concat(original);
+            let appendedVisits = 0;
+            let combinedVisits = 0;
+            appended.forEach(() => { appendedVisits += 1; });
+            combined.forEach(() => { combinedVisits += 1; });
+            console.log(appendedVisits, appended.indexOf(undefined), appended.join(","));
+            console.log(combinedVisits, combined.indexOf(undefined), combined.lastIndexOf(undefined), combined.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "concat_keeps_undefined_state"),
+        "3 1 1,,2\n3 3 3 ,3,1,\n"
+    );
+}
+
+#[test]
+fn searches_undefined_and_null_in_heterogeneous_union_arrays() {
+    let source = r#"
+        interface Item { value: number; }
+        function main(): void {
+            const values: (number | string | undefined | null)[] = [, 1, "x", undefined, null];
+            const item: Item = { value: 1 };
+            const other: (boolean | Item | string)[] = [true, item, "x"];
+            const booleans: (boolean | string)[] = [true, "x", false];
+            console.log(values.indexOf(undefined), values.lastIndexOf(undefined), values.includes(undefined));
+            console.log(values.indexOf(null), values.includes(null), values.indexOf(null, 0));
+            console.log(values.join("|"), values.toString());
+            console.log(other.join(","));
+            console.log(values.indexOf(1), values.includes("x"));
+            console.log(booleans.indexOf(true), booleans.lastIndexOf(false), booleans.includes(true));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "searches_union_absent_values"),
+        "3 3 true\n4 true 4\n|1|x|| ,1,x,,\ntrue,[object Object],x\n1 true\n0 2 true\n"
+    );
+}
+
+#[test]
+fn joins_tagged_nullish_array_elements() {
+    let source = r#"
+        function main(): void {
+            const numbers: (number | undefined | null)[] = [undefined, 1, null, 3];
+            const strings: (string | undefined | null)[] = [undefined, "a", null, "b"];
+            const flags: (boolean | undefined)[] = [undefined, false, true];
+            const nullable: (number | null)[] = [null, 4];
+            console.log(numbers.join("|"));
+            console.log(strings.join("|"));
+            console.log(flags.join("|"));
+            console.log(nullable.join("|"));
+            console.log([undefined, undefined].join("="));
+            console.log([null, null].join("="));
+            console.log(numbers.toString(), String(numbers));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "joins_tagged_nullish_arrays"),
+        "|1||3\n|a||b\n|false|true\n|4\n=\n=\n,1,,3 ,1,,3\n"
+    );
+}
+
+#[test]
+fn searches_concrete_values_in_tagged_arrays() {
+    let source = r#"
+        interface Item { value: number; }
+        function main(): void {
+            const item: Item = { value: 1 };
+            const objects: (Item | undefined)[] = [undefined, item];
+            const numbers: (number | undefined)[] = [undefined, 1, NaN, 1];
+            const strings: (string | undefined)[] = [undefined, "a", "a"];
+            const flags: (boolean | undefined)[] = [undefined, false, true];
+            const nullish: (number | null | undefined)[] = [null, undefined, 4];
+            const nullable: (number | null)[] = [null, 3, null];
+            const onlyNull = [null, null];
+            console.log(numbers.indexOf(1), numbers.lastIndexOf(1), numbers.includes(NaN), numbers.indexOf(NaN));
+            console.log(strings.indexOf("a"), strings.lastIndexOf("a"), strings.includes("a", 2));
+            console.log(flags.indexOf(false), flags.lastIndexOf(true), flags.includes(false));
+            console.log(nullish.indexOf(4), nullish.includes(4));
+            console.log(nullable.indexOf(null), nullable.lastIndexOf(null), nullable.includes(null));
+            console.log(nullish.indexOf(null), nullish.includes(null));
+            console.log(onlyNull.indexOf(null), onlyNull.includes(null));
+            console.log(objects.indexOf(item), objects.includes(item));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "searches_concrete_tagged_values"),
+        "1 3 true -1\n1 2 true\n1 2 true\n2 true\n0 2 true\n0 true\n0 true\n1 true\n"
+    );
+}
+
+#[test]
+fn searches_undefined_in_tagged_and_sparse_arrays() {
+    let source = r#"
+        function main(): void {
+            const only = [undefined];
+            const optional: (number | undefined)[] = [undefined, 1, undefined];
+            const nullish: (number | null | undefined)[] = [null, undefined, 2];
+            const sparse: (number | undefined)[] = [, undefined];
+            console.log(only.indexOf(undefined), only.includes(undefined));
+            console.log(optional.indexOf(undefined), optional.lastIndexOf(undefined), optional.indexOf(undefined, 1), optional.lastIndexOf(undefined, 1));
+            console.log(nullish.indexOf(undefined), nullish.includes(undefined));
+            console.log(sparse.indexOf(undefined), sparse.includes(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "searches_undefined_in_tagged_arrays"),
+        "0 true\n0 2 2 0\n1 true\n1 true\n"
+    );
+}
+
+#[test]
+fn array_of_spread_densifies_holes() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 1];
+            const copied = Array.of(...sparse);
+            let visits = 0;
+            copied.forEach(() => { visits += 1; });
+            console.log(visits, copied.indexOf(undefined), copied.join(","), sparse.indexOf(undefined));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_of_spread_densifies_holes"), "2 0 ,1 -1\n");
+}
+
+#[test]
+fn optional_array_index_reads_sparse_states() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 1].toReversed();
+            const maybe: number[] | undefined = sparse;
+            const missing: number[] | undefined = undefined;
+            console.log(maybe?.[0], maybe?.[1], maybe?.[3], missing?.[0]);
+            const tagged: (number | undefined)[] = [1, undefined];
+            const optionalTagged: (number | undefined)[] | undefined = tagged;
+            console.log(optionalTagged?.[0], optionalTagged?.[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "optional_array_index_sparse"), "1 undefined undefined undefined\n1 undefined\n");
+}
+
+#[test]
+fn array_from_densifies_holes_and_visits_them_with_mapper() {
+    let source = r#"
+        function isUndefined(value: number | undefined): boolean { return value === undefined; }
+        function main(): void {
+            const sparse: number[] = [, 1];
+            const copied = Array.from(sparse);
+            const mapped = Array.from(sparse, value => value === undefined);
+            let visits = 0;
+            copied.forEach(() => { visits += 1; });
+            console.log(visits, copied.indexOf(undefined), sparse.indexOf(undefined), copied.join(","));
+            let undefinedVisits = 0;
+            copied.forEach(value => {
+                if (value === undefined) undefinedVisits += 1;
+            });
+            console.log(undefinedVisits);
+            console.log(mapped.join(","), mapped.length);
+            const spreadCopy = Array.from(...[sparse]);
+            const spreadMapped = Array.from(...[sparse, isUndefined]);
+            let spreadUndefined = 0;
+            spreadCopy.forEach(value => {
+                if (value === undefined) spreadUndefined += 1;
+            });
+            console.log(spreadCopy.indexOf(undefined), spreadUndefined, spreadMapped.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_densifies_holes"),
+        "2 0 -1 ,1\n1\ntrue,false 2\n0 1 true,false\n"
+    );
+}
+
+#[test]
+fn change_by_copy_preserves_existing_undefined_elements() {
+    let source = r#"
+        function main(): void {
+            const source: number[] = [, 1].toReversed();
+            const changed = source.with(0, 9);
+            const spliced = source.toSpliced(0, 0, 7);
+            console.log(changed.indexOf(undefined), changed.at(1), changed.join(","));
+            console.log(spliced.indexOf(undefined), spliced.at(2), spliced.join(","));
+            console.log(source.toReversed().indexOf(undefined), source.toSorted().indexOf(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "change_by_copy_preserves_undefined"),
+        "1 undefined 9,\n2 undefined 7,1,\n0 1\n"
+    );
+}
+
+#[test]
+fn flat_keeps_present_undefined_at_outer_and_inner_levels() {
+    let source = r#"
+        function main(): void {
+            const nested: number[][] = [[1, , 3].toReversed(), , [4]].toReversed();
+            const flattened = nested.flat();
+            let visits = 0;
+            flattened.forEach(() => { visits += 1; });
+            console.log(flattened.length, visits, flattened.indexOf(undefined), flattened.lastIndexOf(undefined));
+            console.log(JSON.stringify(flattened));
+            console.log(flattened.findIndex(value => value === undefined), flattened.map(value => value === undefined).join(","));
+            const inner: number[] = [1, , 2];
+            const flattenedMap = [3].flatMap(() => inner.toReversed());
+            console.log(flattenedMap.findIndex(value => value === undefined), flattenedMap.map(value => value === undefined).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "flat_keeps_present_undefined"),
+        "5 5 1 3\n[4,null,3,null,1]\n1 false,true,false,true,false\n1 false,true,false\n"
+    );
+}
+
+#[test]
+fn array_spread_densifies_source_holes_without_changing_literal_holes() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [, 1];
+            const spread: number[] = [0, ...sparse, , 2];
+            let sourceVisits = 0;
+            let spreadVisits = 0;
+            sparse.forEach(() => { sourceVisits += 1; });
+            spread.forEach(() => { spreadVisits += 1; });
+            console.log(sourceVisits, spreadVisits, spread.length);
+            console.log(spread.indexOf(undefined), spread.lastIndexOf(undefined), spread.includes(undefined), spread.join(","));
+            console.log(JSON.stringify([...[3, , 5].toReversed()]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_spread_densifies_holes"),
+        "1 4 5\n1 1 true 0,,1,,2\n[5,null,3]\n"
+    );
+}
+
+#[test]
+fn filters_present_undefined_without_losing_its_state() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [1, , 3].toReversed();
+            console.log(values[0], values[1], values[99], values[-1], values[0.5]);
+            console.log(values.indexOf(undefined), values.lastIndexOf(undefined), values.includes(undefined));
+            const sparse: number[] = [1, , 3];
+            console.log(sparse.indexOf(undefined), sparse.includes(undefined));
+            const selected = values.filter(value => value === undefined);
+            console.log(selected.length, selected.at(0), selected.join(","));
+            let visits = 0;
+            selected.forEach(value => {
+                if (value === undefined) visits += 1;
+            });
+            console.log(visits, JSON.stringify(selected));
+            console.log(values.reduce((count, value) => count + Number(value === undefined), 0));
+            console.log(values.reduceRight((count, value) => count + Number(value === undefined), 0));
+            console.log(values.flatMap(value => [value === undefined]).join(","));
+            console.log(JSON.stringify(values.flatMap(value => [value])));
+            const onlyUndefined: number[] = [,].toReversed();
+            console.log(onlyUndefined.reduce((acc, value) => value) === undefined);
+            console.log(onlyUndefined.reduceRight((acc, value) => value) === undefined);
+            console.log(values.reduce((acc, value) => acc + value));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "filters_present_undefined"), "3 undefined undefined undefined undefined\n1 1 true\n-1 true\n1 undefined \n1 [null]\n1\n1\nfalse,true,false\n[3,null,1]\ntrue\ntrue\nNaN\n");
+}
+
+#[test]
+fn compiles_sparse_array_find_methods_with_undefined_holes() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const sparse: number[] = [1, , 3, ,];
+            console.log(sparse.findIndex((value, index) => {
+                console.log(index);
+                console.log(value === undefined);
+                return value === undefined;
+            }));
+            console.log(sparse.findLastIndex((value) => value === undefined));
+            const firstHole: number | undefined = sparse.find((value) => value === undefined);
+            const lastHole: number | undefined = sparse.findLast((value) => value === undefined);
+            console.log(firstHole === undefined);
+            console.log(lastHole === undefined);
+            const dense: number[] = [2, 4];
+            console.log(dense.find((value) => value * 2 === 8));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_array_find_undefined_holes"),
+        "0\nfalse\n1\ntrue\n1\n3\ntrue\ntrue\n4\n"
+    );
+}
+
+#[test]
+fn compiles_sparse_array_search_and_iterators() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const sparse: number[] = [, 0, , 2];
+            console.log(sparse.includes(undefined));
+            console.log(sparse.includes(undefined, 1));
+            console.log(sparse.includes(undefined, 3));
+            console.log(sparse.includes(undefined, -2));
+            console.log(sparse.includes(0));
+            console.log(sparse.indexOf(0));
+            console.log(sparse.lastIndexOf(0));
+            console.log(sparse.indexOf(2, -1));
+            for (const key of sparse.keys()) {
+                console.log(key);
+            }
+            for (const value of sparse.values()) {
+                console.log(value === undefined);
+            }
+            for (const [index, value] of sparse.entries()) {
+                console.log(index + ":" + (value === undefined));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_array_search_iterators"),
+        "true\ntrue\nfalse\ntrue\ntrue\n1\n1\n3\n0\n1\n2\n3\ntrue\nfalse\ntrue\nfalse\n0:true\n1:false\n2:true\n3:false\n"
     );
 }
 
@@ -4459,10 +6230,35 @@ fn compiles_locale_string_methods() {
     );
 }
 
-/// `AggregateError` joins the built-in error family: usable as a type
-/// annotation and constructible as `new AggregateError(errors, message?)`.
-/// The `errors` iterable isn't modeled (the exception channel is a single
-/// tagged string), so only `.name`/`.message` survive a `throw`.
+#[test]
+fn compiles_turkish_and_azeri_string_casing() {
+    let source = r#"
+        function text(): string {
+            console.log("receiver");
+            return "Iİ iı";
+        }
+        function locale(): string {
+            console.log("locale");
+            return "tr-TR";
+        }
+        function main(): void {
+            console.log("Iİ iı".toLocaleLowerCase("tr"));
+            console.log("Iİ iı".toLocaleUpperCase("tr-TR"));
+            console.log("Iİ iı".toLocaleLowerCase("az"));
+            console.log("Iİ iı".toLocaleUpperCase("az-Latn-AZ"));
+            console.log("Iİ iı".toLocaleLowerCase("en-US"));
+            console.log(text().toLocaleLowerCase(locale()));
+            console.log("Straße".toLocaleUpperCase());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "turkish_azeri_string_casing"),
+        "ıi iı\nIİ İI\nıi iı\nIİ İI\nii̇ iı\nreceiver\nlocale\nıi iı\nSTRASSE\n"
+    );
+}
+
+/// `AggregateError` preserves statically typed errors and an arbitrary cause
+/// while retaining the existing tagged exception behavior when thrown.
 #[test]
 fn compiles_aggregate_error() {
     let source = r#"
@@ -4471,6 +6267,11 @@ fn compiles_aggregate_error() {
         }
         function main(): void {
             console.log(make());
+            const cause = { code: 17 };
+            const aggregate = new AggregateError([1, 2, 3], "direct", { cause });
+            console.log(aggregate.errors.join(","));
+            console.log(aggregate.cause.code);
+            console.log(aggregate instanceof Error);
             try {
                 throw new AggregateError([new Error("a")], "all failed");
             } catch (error) {
@@ -4483,7 +6284,7 @@ fn compiles_aggregate_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "\nall failed\ntrue\nAggregateError\nall failed\n"
+        "\n1,2,3\n17\ntrue\nall failed\ntrue\nAggregateError\nall failed\n"
     );
 }
 
@@ -4757,6 +6558,8 @@ fn compiles_escape_and_error_statics() {
             console.log(unescape("a%20b%2Fc"));
             console.log(unescape("%u65E5%u672C"));
             console.log(Error.isError(new Error("x")));
+            console.log(Error.isError(new AggregateError([], "many")));
+            console.log(Error.isError(new SuppressedError(new Error("a"), new Error("b"), "both")));
             console.log(Error.isError("plain"));
             console.log(Error.isError(42));
             try {
@@ -4769,7 +6572,7 @@ fn compiles_escape_and_error_statics() {
     "#;
     assert_eq!(
         compile_and_run(source, "escape_and_error_statics"),
-        "a%20b/c%3Fd%3D1%26x\n%u65E5%u672C\na b/c\n日本\ntrue\nfalse\nfalse\nError\nboom\n"
+        "a%20b/c%3Fd%3D1%26x\n%u65E5%u672C\na b/c\n日本\ntrue\ntrue\ntrue\nfalse\nfalse\nError\nboom\n"
     );
 }
 

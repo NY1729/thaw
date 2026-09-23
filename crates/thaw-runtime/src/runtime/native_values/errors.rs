@@ -355,12 +355,10 @@ pub unsafe extern "C" fn thaw_error_stack(message: *const c_char) -> *const c_ch
     arena_c_string(&rendered).map_or(std::ptr::null(), |value| value.cast())
 }
 
-/// Whether `message`'s tagged (or defaulted) identity chain includes
-/// `class_name`, or `class_name` is `"Error"` -- every tagged/untagged
-/// exception this channel can carry is some kind of `Error`, matching real
-/// JavaScript's error class hierarchy without needing to represent it. A
-/// multi-level chain (`Sub$MyError$Error`) matches any ancestor's name, not
-/// just the most-derived one.
+/// Whether `message`'s tagged identity chain includes `class_name`. Untagged
+/// values are primitive throws, not Error instances. A multi-level chain
+/// (`Sub$MyError$Error`) matches any ancestor's name, not just the most-derived
+/// one.
 ///
 /// # Safety
 /// Both pointers must be null or a valid, NUL-terminated C string.
@@ -374,6 +372,9 @@ pub unsafe extern "C" fn thaw_error_is_instance(
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let class_name = unsafe { CStr::from_ptr(class_name) }.to_string_lossy();
+    if !text.starts_with(ERROR_TAG_MARKER) {
+        return false;
+    }
     let (chain, _) = split_error_tag(&text);
     class_name == "Error" || chain.split('$').any(|name| name == class_name)
 }
@@ -467,7 +468,7 @@ mod error_native_tests {
     fn a_plain_thrown_string_defaults_to_the_error_name() {
         assert_eq!(call_name("boom"), "Error");
         assert_eq!(call_message("boom"), "boom");
-        assert!(call_is_instance("boom", "Error"));
+        assert!(!call_is_instance("boom", "Error"));
         assert!(!call_is_instance("boom", "TypeError"));
     }
 

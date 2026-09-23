@@ -441,6 +441,7 @@ impl<'a> FnLowerer<'a> {
     /// Bool") even though the exact same value printed or compared fine.
     fn lower_condition_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         let cond = self.lower_expr(expr)?;
+        let cond = self.lower_primitive_array_operand(cond)?;
         let ty = self.infer_expr_type(&cond)?;
         self.truthiness_expr(cond, &ty)
     }
@@ -1395,6 +1396,9 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         None
                     };
+                    if let Some(value) = &array_item_value {
+                        item_type = self.infer_expr_type(value)?;
+                    }
                     let item_value = || {
                         let indexed = if let Some(value) = &array_item_value {
                             value.clone()
@@ -1470,7 +1474,12 @@ impl<'a> FnLowerer<'a> {
                                 let discriminants = declared_discriminants
                                     .filter(|metadata| !metadata.is_empty())
                                     .or_else(|| item_discriminants.clone());
-                                if let Some(discriminants) = discriminants {
+                                if let Some(mut discriminants) = discriminants {
+                                    if let HirType::Union(members) = &item_ty {
+                                        for values in discriminants.values_mut() {
+                                            values.resize(members.len(), None);
+                                        }
+                                    }
                                     self.union_discriminants
                                         .insert(item_name.clone(), discriminants);
                                 }
@@ -1494,7 +1503,12 @@ impl<'a> FnLowerer<'a> {
                                 let discriminants = declared_discriminants
                                     .filter(|metadata| !metadata.is_empty())
                                     .or_else(|| item_discriminants.clone());
-                                if let Some(discriminants) = discriminants {
+                                if let Some(mut discriminants) = discriminants {
+                                    if let HirType::Union(members) = &item_type {
+                                        for values in discriminants.values_mut() {
+                                            values.resize(members.len(), None);
+                                        }
+                                    }
                                     self.union_discriminants
                                         .insert(temporary.clone(), discriminants);
                                 }
@@ -1535,7 +1549,12 @@ impl<'a> FnLowerer<'a> {
                                     format!("__thaw_for_of_item_{}", self.next_binding);
                                 self.next_binding += 1;
                                 self.scope.insert(temporary.clone(), item_type.clone());
-                                if let Some(discriminants) = item_discriminants.clone() {
+                                if let Some(mut discriminants) = item_discriminants.clone() {
+                                    if let HirType::Union(members) = &item_type {
+                                        for values in discriminants.values_mut() {
+                                            values.resize(members.len(), None);
+                                        }
+                                    }
                                     self.union_discriminants
                                         .insert(temporary.clone(), discriminants);
                                 }

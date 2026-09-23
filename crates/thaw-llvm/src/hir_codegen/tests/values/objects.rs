@@ -36,7 +36,7 @@ fn compiles_object_keys_for_fixed_objects() {
     "#;
     assert_eq!(
         compile_and_run(source, "object_keys"),
-        "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\nsecond,first\nten,two\nten|two\nten+two\n0|1\n0\n0,1,2\n0|1\n0\n"
+        "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\nsecond,first\nten,two\nten|two\nten+two\n0|1|length\n0\n0,1,2\n0|1|length\n1\n"
     );
 }
 

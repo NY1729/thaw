@@ -684,7 +684,7 @@ impl<'a> FnLowerer<'a> {
                         HirStmt::If(
                             HirExpr::OptionalIsNone(Box::new(bound.clone()), payload.clone()),
                             vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
-                                "Cannot read properties of undefined (reading '{property}')"
+                                "\u{1}TypeError\u{1}Cannot read properties of undefined (reading '{property}')"
                             ))))],
                             Vec::new(),
                         ),
@@ -884,11 +884,30 @@ impl<'a> FnLowerer<'a> {
     /// only acts on a `Call`/`Await`, so every other receiver shape (a
     /// variable, `this`, `new C()`, a literal) is unaffected.
     fn lower_member_receiver(&mut self, expr: &Expr) -> Result<HirExpr, String> {
-        if self.infer_member_receiver_type(expr) == Some(HirType::JsValue) {
-            self.lower_expr_with_expected_type(expr, Some(&HirType::JsValue))
+        let value = if self.infer_member_receiver_type(expr) == Some(HirType::JsValue) {
+            self.lower_expr_with_expected_type(expr, Some(&HirType::JsValue))?
         } else {
-            self.lower_expr(expr)
+            self.lower_expr(expr)?
+        };
+        let (Expr::Member(member), HirExpr::TypedIndex(array, index, element)) = (expr, &value) else {
+            return Ok(value);
+        };
+        if !matches!(member.prop, MemberProp::Computed(_))
+            || !self.expression_may_be_sparse_array(&member.obj)
+        {
+            return Ok(value);
         }
+        let array_type = self.infer_expr_type(array)?;
+        if !matches!(array_type, HirType::Array(_)) {
+            return Ok(value);
+        }
+        self.lower_array_index(array.as_ref().clone(), array_type, element.clone(), index.as_ref().clone())
+    }
+
+    fn lower_required_member_receiver(&mut self, expr: &Expr, property: &str) -> Result<HirExpr, String> {
+        let receiver = self.lower_member_receiver(expr)?;
+        let ty = self.infer_expr_type(&receiver)?;
+        Ok(self.unwrap_required_optional_member(receiver, ty, property).0)
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
@@ -1126,6 +1145,9 @@ impl<'a> FnLowerer<'a> {
 
         match &member.prop {
             MemberProp::Computed(computed) => {
+                let sparse_array = self.expression_may_be_sparse_array(&member.obj);
+                let conservative = matches!(member.obj.as_ref(), Expr::Ident(identifier)
+                    if self.conservative_sparse_arrays.contains(&self.resolve_binding(identifier.sym.as_ref())));
                 let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 let (obj, obj_ty) =
@@ -1134,6 +1156,16 @@ impl<'a> FnLowerer<'a> {
                     HirType::Array(element) => {
                         let index = self.lower_expr(&computed.expr)?;
                         self.expect_type(&HirType::F64, &index, "index expression")?;
+                        // ponytail: object/array slots and conservatively sparse parameters
+                        // keep their declared index ABI; fully tagged T[] reads need wider callers.
+                        let tagged = matches!(element.as_ref(),
+                            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Undefined)
+                            || matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined));
+                        let scalar = matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::Bool);
+                        if sparse_array && (tagged || (scalar && !conservative)) {
+                            let array_type = HirType::Array(element.clone());
+                            return self.lower_array_index(obj, array_type, *element, index);
+                        }
                         Ok(HirExpr::TypedIndex(
                             Box::new(obj),
                             Box::new(index),
@@ -1566,9 +1598,17 @@ impl<'a> FnLowerer<'a> {
                 MemberProp::Computed(computed) => {
                     let index = self.lower_expr(&computed.expr)?;
                     self.expect_type(&HirType::F64, &index, "optional array index")?;
+                    let element_type = element.as_ref().clone();
+                    let access = self.lower_array_index(
+                        unwrapped,
+                        payload.as_ref().clone(),
+                        element_type,
+                        index,
+                    )?;
+                    let ty = self.infer_expr_type(&access)?;
                     (
-                        HirExpr::TypedIndex(Box::new(unwrapped), Box::new(index), *element.clone()),
-                        *element.clone(),
+                        access,
+                        ty,
                     )
                 }
                 _ => return Err("unsupported optional array member".into()),
@@ -1654,13 +1694,32 @@ impl<'a> FnLowerer<'a> {
                 ))
             }
         };
-        let (result_payload, present_value) = match &field_type {
-            HirType::Optional(inner) => (inner.as_ref().clone(), None),
-            other => (other.clone(), Some(other.clone())),
-        };
-        let present_value = match present_value {
-            Some(payload) => HirExpr::OptionalSome(Box::new(access), payload),
-            None => access,
+        let (missing_value, present_value) = match &field_type {
+            HirType::Optional(inner) => (
+                HirExpr::OptionalNone(inner.as_ref().clone()),
+                access,
+            ),
+            HirType::Nullish(inner) => (
+                HirExpr::NullishUndefined(inner.as_ref().clone()),
+                access,
+            ),
+            HirType::Union(members) => {
+                let mut members = members.clone();
+                if !members.contains(&HirType::Undefined) {
+                    members.push(HirType::Undefined);
+                }
+                let index = members.iter().position(|member| member == &HirType::Undefined).unwrap();
+                (
+                    HirExpr::UnionInject(
+                        Box::new(HirExpr::Lit(HirLit::Undefined)), index, members,
+                    ),
+                    access,
+                )
+            }
+            other => (
+                HirExpr::OptionalNone(other.clone()),
+                HirExpr::OptionalSome(Box::new(access), other.clone()),
+            ),
         };
         let is_none = match absence_kind {
             0 => HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
@@ -1670,9 +1729,7 @@ impl<'a> FnLowerer<'a> {
         };
         let result = HirExpr::Block(vec![HirStmt::If(
             is_none,
-            vec![HirStmt::Return(Some(HirExpr::OptionalNone(
-                result_payload.clone(),
-            )))],
+            vec![HirStmt::Return(Some(missing_value))],
             vec![HirStmt::Return(Some(present_value))],
         )]);
         self.wrap_call_argument_bindings(result, &[(name, object_type, object)])

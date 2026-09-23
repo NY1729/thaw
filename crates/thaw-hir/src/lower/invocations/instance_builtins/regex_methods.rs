@@ -6,7 +6,7 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                 if matches!(property.sym.as_ref(), "replace" | "replaceAll") {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "replace receiver")?;
                     let (arguments, spread_bindings) = self.lower_native_spread_values(
                         &call.args,
@@ -161,7 +161,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"test" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let regex_type = regex_object_type();
                     self.expect_type(&regex_type, &receiver, "RegExp.test receiver")?;
                     let (arguments, spread_bindings) =
@@ -311,7 +311,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"exec" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let regex_type = regex_object_type();
                     self.expect_type(&regex_type, &receiver, "RegExp.exec receiver")?;
                     let (arguments, spread_bindings) =
@@ -493,7 +493,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"match" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "match receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.match")?;
@@ -577,7 +577,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"matchAll" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "matchAll receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.matchAll")?;
@@ -658,7 +658,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"search" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "search receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.search")?;
@@ -768,4 +768,3 @@ impl<'a> FnLowerer<'a> {
         self.coerce_to_declared(&HirType::Str, result)
     }
 }
-

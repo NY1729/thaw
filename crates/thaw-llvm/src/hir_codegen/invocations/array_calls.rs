@@ -1,4 +1,58 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_array_insert_values(
+        &mut self,
+        values: &[HirExpr],
+        element: &HirType,
+        width: u64,
+        label: &str,
+    ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>), String> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        if values.is_empty() {
+            return Ok((ptr_type.const_null(), ptr_type.const_null()));
+        }
+        let byte = self.context.i8_type();
+        let i64_type = self.context.i64_type();
+        let bytes = self.builder.build_alloca(
+            byte.array_type((width as u32) * values.len() as u32),
+            &format!("{label}_values"),
+        ).map_err(|error| error.to_string())?;
+        let states = self.builder.build_alloca(
+            byte.array_type(values.len() as u32),
+            &format!("{label}_states"),
+        ).map_err(|error| error.to_string())?;
+        for (index, value) in values.iter().enumerate() {
+            let compiled = self.compile_expr(value)?;
+            let (payload, state) = if self.expr_hir_type(value)
+                == Some(HirType::Optional(Box::new(element.clone())))
+            {
+                let tagged = compiled.into_struct_value();
+                let present = self.builder.build_extract_value(tagged, 0, "insert_present")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let payload = self.builder.build_extract_value(tagged, 1, "insert_payload")
+                    .map_err(|error| error.to_string())?;
+                let state = self.builder.build_select(
+                    present, byte.const_int(1, false), byte.const_int(2, false), "insert_state",
+                ).map_err(|error| error.to_string())?.into_int_value();
+                (payload, state)
+            } else {
+                (compiled, byte.const_int(1, false))
+            };
+            let value_ptr = unsafe {
+                self.builder.build_in_bounds_gep(
+                    byte, bytes, &[i64_type.const_int(width * index as u64, false)], "insert_slot",
+                ).map_err(|error| error.to_string())?
+            };
+            self.builder.build_store(value_ptr, payload).map_err(|error| error.to_string())?;
+            let state_ptr = unsafe {
+                self.builder.build_in_bounds_gep(
+                    byte, states, &[i64_type.const_int(index as u64, false)], "insert_state_slot",
+                ).map_err(|error| error.to_string())?
+            };
+            self.builder.build_store(state_ptr, state).map_err(|error| error.to_string())?;
+        }
+        Ok((bytes, states))
+    }
+
     fn compile_array_named_call(
         &mut self,
         name: &str,
@@ -11,7 +65,8 @@ impl<'ctx> HirCompiler<'ctx> {
             || name.starts_with("__thaw_pointer_array_");
         let generic_array_call = matches!(
             name,
-            "__thaw_array_reverse"
+            "__thaw_tagged_array_join"
+                | "__thaw_array_reverse"
                 | "__thaw_array_copy_within"
                 | "__thaw_array_fill"
                 | "__thaw_array_slice"
@@ -21,6 +76,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_array_unshift"
                 | "__thaw_array_pop"
                 | "__thaw_array_shift"
+                | "__thaw_array_pop_optional"
+                | "__thaw_array_shift_optional"
                 | "__thaw_array_splice"
                 | "__thaw_bytes_to_string"
                 | "__thaw_bytes_from_string"
@@ -307,21 +364,73 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_number_array_join"
             | "__thaw_string_array_join"
             | "__thaw_bool_array_join"
-            | "__thaw_object_array_join" => {
+            | "__thaw_object_array_join"
+            | "__thaw_tagged_array_join" => {
                 let runtime = name.trim_start_matches("__thaw_");
                 let runtime = format!("thaw_{runtime}");
                 let [array, separator] = args else {
                     return Err("array join expects an array and separator".to_string());
                 };
+                let tagged = if name == "__thaw_tagged_array_join" {
+                    let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
+                        return Err("tagged join requires an array".into());
+                    };
+                    let (kind, tag, tags) = if let HirType::Union(members) = element.as_ref() {
+                        let tags = members.iter().map(|member| match member {
+                            HirType::F64 => Ok('n'),
+                            HirType::Str => Ok('s'),
+                            HirType::Bool => Ok('b'),
+                            HirType::Object(_) => Ok('o'),
+                            HirType::Undefined | HirType::Null => Ok('u'),
+                            _ => Err("array join does not support this union member".to_string()),
+                        }).collect::<Result<String, _>>()?;
+                        if members.len() > u8::MAX as usize {
+                            return Err("array join has too many union members".into());
+                        }
+                        (5, 0, Some(tags))
+                    } else {
+                        let (payload, tag) = match element.as_ref() {
+                        HirType::Optional(payload) | HirType::Nullable(payload) => (payload.as_ref(), 1),
+                        HirType::Nullish(payload) => (payload.as_ref(), 0),
+                        HirType::Undefined => (&HirType::Undefined, 0),
+                        HirType::Null => (&HirType::Null, 0),
+                        _ => return Err("tagged join requires tagged elements".into()),
+                        };
+                        let kind = match payload {
+                        HirType::F64 => 0,
+                        HirType::Str => 1,
+                        HirType::Bool => 2,
+                        HirType::Object(_) => 3,
+                        HirType::Undefined | HirType::Null => 4,
+                        _ => return Err("tagged join does not support this payload type".into()),
+                        };
+                        (kind, tag, None)
+                    };
+                    Some((kind, tag, tags))
+                } else {
+                    None
+                };
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let array = self.compile_array_data(handle)?;
                 let presence = self.compile_array_presence(handle)?;
                 let separator = self.compile_expr(separator)?;
+                let mut arguments = vec![array.into(), presence.into(), separator.into()];
+                if let Some((kind, tag, tags)) = tagged {
+                    arguments.push(self.context.i8_type().const_int(kind, false).into());
+                    arguments.push(self.context.i8_type().const_int(tag, false).into());
+                    let tags = if let Some(tags) = tags {
+                        self.builder.build_global_string_ptr(&tags, "array_join_union_tags")
+                            .map_err(|error| error.to_string())?.as_pointer_value()
+                    } else {
+                        self.context.ptr_type(AddressSpace::default()).const_null()
+                    };
+                    arguments.push(tags.into());
+                }
                 return self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
-                        &[array.into(), presence.into(), separator.into()],
+                        &arguments,
                         "array_join",
                     )
                     .map_err(|error| error.to_string())?
@@ -441,10 +550,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 let presence = self.compile_array_presence(handle)?;
+                let length = self.builder.build_load(self.context.i64_type(), buffer, "fill_length")
+                    .map_err(|error| error.to_string())?.into_int_value();
                 self.builder
                     .build_call(
                         self.module.get_function("thaw_array_presence_fill").unwrap(),
-                        &[presence.into(), start.into(), end.into()],
+                        &[presence.into(), length.into(), start.into(), end.into(), self.context.i8_type().const_int(1, false).into()],
                         "array_presence_fill",
                     )
                     .map_err(|error| error.to_string())?;
@@ -460,6 +571,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 let handle = self.compile_expr(&args[0])?.into_pointer_value();
                 let array = self.compile_array_data(handle)?;
                 let value = self.compile_expr(&args[1])?;
+                let (value, state) = if self.expr_hir_type(&args[1])
+                    == Some(HirType::Optional(element.clone()))
+                {
+                    let optional = value.into_struct_value();
+                    let present = self.builder.build_extract_value(optional, 0, "fill_present")
+                        .map_err(|error| error.to_string())?.into_int_value();
+                    let value = self.builder.build_extract_value(optional, 1, "fill_payload")
+                        .map_err(|error| error.to_string())?;
+                    let state = self.builder.build_select(
+                        present, self.context.i8_type().const_int(1, false),
+                        self.context.i8_type().const_int(2, false), "fill_state",
+                    ).map_err(|error| error.to_string())?.into_int_value();
+                    (value, state)
+                } else {
+                    (value, self.context.i8_type().const_int(1, false))
+                };
                 let value_slot = self
                     .builder
                     .build_alloca(value.get_type(), "array_fill_value")
@@ -497,13 +624,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 let presence = self.compile_array_presence(handle)?;
-                self.builder
+                let length = self.builder.build_load(self.context.i64_type(), array, "fill_length")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let presence = self.builder
                     .build_call(
                         self.module.get_function("thaw_array_presence_fill").unwrap(),
-                        &[presence.into(), start.into(), end.into()],
+                        &[presence.into(), length.into(), start.into(), end.into(), state.into()],
                         "array_presence_fill",
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value().basic().ok_or("array presence fill returned no value")?
+                    .into_pointer_value();
+                self.compile_array_set_presence(handle, presence)?;
                 return Ok(handle.into());
             }
             // `__thaw_bytes_slice` is `__thaw_array_slice` with a `Bytes`
@@ -624,6 +756,13 @@ impl<'ctx> HirCompiler<'ctx> {
                         "array_to_reversed_presence_reverse",
                     )
                     .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_array_presence_densify").unwrap(),
+                        &[copied_presence.into()],
+                        "array_to_reversed_presence_densify",
+                    )
+                    .map_err(|error| error.to_string())?;
                 return Ok(self
                     .compile_array_wrap_with_presence(result, copied_presence)?
                     .into());
@@ -644,41 +783,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_load(i64_type, buffer, "array_extend_old_length")
                     .map_err(|error| error.to_string())?
                     .into_int_value();
-                // Build a scratch buffer holding each pushed/unshifted
-                // value's bytes contiguously, matching the raw array
-                // element layout, so a single runtime call can append/
-                // prepend all of them at once.
-                let ptr_type = self.context.ptr_type(AddressSpace::default());
-                let values_ptr = if values.is_empty() {
-                    ptr_type.const_null()
-                } else {
-                    let byte_array_type = self
-                        .context
-                        .i8_type()
-                        .array_type((width as u32) * values.len() as u32);
-                    let slot = self
-                        .builder
-                        .build_alloca(byte_array_type, "array_extend_values")
-                        .map_err(|error| error.to_string())?;
-                    for (index, value) in values.iter().enumerate() {
-                        let compiled = self.compile_expr(value)?;
-                        let offset = i64_type.const_int(width * index as u64, false);
-                        let elem_ptr = unsafe {
-                            self.builder
-                                .build_in_bounds_gep(
-                                    self.context.i8_type(),
-                                    slot,
-                                    &[offset],
-                                    "array_extend_slot",
-                                )
-                                .map_err(|error| error.to_string())?
-                        };
-                        self.builder
-                            .build_store(elem_ptr, compiled)
-                            .map_err(|error| error.to_string())?;
-                    }
-                    slot
-                };
+                let (values_ptr, states_ptr) = self.compile_array_insert_values(
+                    values, &element, width, "array_extend",
+                )?;
                 let runtime = if name == "__thaw_array_push" {
                     "thaw_array_push_values"
                 } else {
@@ -716,6 +823,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             old_length.into(),
                             i64_type.const_int(values.len() as u64, false).into(),
                             self.context.i8_type().const_int(u64::from(name == "__thaw_array_unshift"), false).into(),
+                            states_ptr.into(),
                         ],
                         "array_extend_presence",
                     )
@@ -740,7 +848,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())
                     .map(Into::into);
             }
-            "__thaw_array_pop" | "__thaw_array_shift" => {
+            "__thaw_array_pop"
+            | "__thaw_array_shift"
+            | "__thaw_array_pop_optional"
+            | "__thaw_array_shift_optional" => {
                 let [receiver] = args else {
                     return Err("array pop/shift expects one operand".to_string());
                 };
@@ -765,15 +876,50 @@ impl<'ctx> HirCompiler<'ctx> {
                         "array_remove_is_empty",
                     )
                     .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(handle)?;
+                let is_shift = matches!(name, "__thaw_array_shift" | "__thaw_array_shift_optional");
+                let removed_index = if is_shift {
+                    i64_type.const_zero()
+                } else {
+                    self.builder
+                        .build_int_sub(
+                            old_length,
+                            i64_type.const_int(1, false),
+                            "array_remove_index",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                let index_state = self.compile_array_index_state(handle, removed_index)?;
+                let index_has_value = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        index_state,
+                        self.context.i8_type().const_int(1, false),
+                        "array_remove_has_payload",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let not_empty = self
+                    .builder
+                    .build_not(is_empty, "array_remove_not_empty")
+                    .map_err(|error| error.to_string())?;
+                let has_removed_value = self
+                    .builder
+                    .build_and(
+                        not_empty,
+                        index_has_value,
+                        "array_remove_has_value",
+                    )
+                    .map_err(|error| error.to_string())?;
                 let element_llvm_type = self.basic_type(&element)?;
                 let out_slot = self
                     .builder
                     .build_alloca(element_llvm_type, "array_remove_value")
                     .map_err(|error| error.to_string())?;
-                let runtime = if name == "__thaw_array_pop" {
-                    "thaw_array_pop"
-                } else {
+                let runtime = if is_shift {
                     "thaw_array_shift"
+                } else {
+                    "thaw_array_pop"
                 };
                 let new_buffer = self
                     .builder
@@ -794,7 +940,6 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(handle, new_buffer)
                     .map_err(|error| error.to_string())?;
-                let presence = self.compile_array_presence(handle)?;
                 let new_presence = self
                     .builder
                     .build_call(
@@ -802,7 +947,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         &[
                             presence.into(),
                             old_length.into(),
-                            self.context.i8_type().const_int(u64::from(name == "__thaw_array_shift"), false).into(),
+                            self.context.i8_type().const_int(u64::from(is_shift), false).into(),
                         ],
                         "array_remove_presence",
                     )
@@ -812,24 +957,48 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("array presence remove returned no value")?
                     .into_pointer_value();
                 self.compile_array_set_presence(handle, new_presence)?;
-                // An empty receiver has nothing to remove -- the runtime
-                // zero-fills `out_slot` in that case, which is only a valid
-                // representation for scalar/pointer element types, so branch
-                // to the element type's own zero value (a real empty array/
-                // object, not a null pointer) instead of just reading it back.
+                if matches!(name, "__thaw_array_pop" | "__thaw_array_shift") {
+                    return self
+                        .builder
+                        .build_load(element_llvm_type, out_slot, "array_removed_value")
+                        .map_err(|error| error.to_string());
+                }
                 let function = self.current_function();
-                let empty_block = self.context.append_basic_block(function, "array_remove_empty");
+                let absent_block = self.context.append_basic_block(function, "array_remove_absent");
                 let present_block = self
                     .context
                     .append_basic_block(function, "array_remove_present");
                 let merge_block = self.context.append_basic_block(function, "array_remove_merge");
                 self.builder
-                    .build_conditional_branch(is_empty, empty_block, present_block)
+                    .build_conditional_branch(has_removed_value, present_block, absent_block)
                     .map_err(|error| error.to_string())?;
 
-                self.builder.position_at_end(empty_block);
-                let zero_value = self.compile_zero_value(&element)?;
-                let empty_block = self.builder.get_insert_block().unwrap();
+                self.builder.position_at_end(absent_block);
+                let absent_value = match element.as_ref() {
+                    HirType::Optional(payload) => self.compile_optional_none(payload)?,
+                    HirType::Nullish(payload) => {
+                        self.compile_expr(&HirExpr::NullishUndefined(payload.as_ref().clone()))?
+                    }
+                    HirType::Nullable(payload) => {
+                        self.compile_expr(&HirExpr::NullishUndefined(payload.as_ref().clone()))?
+                    }
+                    HirType::Undefined => self.compile_expr(&HirExpr::Lit(HirLit::Undefined))?,
+                    HirType::Union(members) => {
+                        let mut members = members.clone();
+                        if !members.contains(&HirType::Undefined) {
+                            members.push(HirType::Undefined);
+                        }
+                        let index = members.iter().position(|ty| ty == &HirType::Undefined).unwrap();
+                        self.compile_expr(&HirExpr::UnionInject(
+                            Box::new(HirExpr::Lit(HirLit::Undefined)), index, members,
+                        ))?
+                    }
+                    _ => {
+                        let zero_value = self.compile_zero_value(&element)?;
+                        self.build_optional_value(zero_value, &element, false)?
+                    }
+                };
+                let absent_block = self.builder.get_insert_block().unwrap();
                 self.builder
                     .build_unconditional_branch(merge_block)
                     .map_err(|error| error.to_string())?;
@@ -839,6 +1008,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_load(element_llvm_type, out_slot, "array_removed_value")
                     .map_err(|error| error.to_string())?;
+                let present_value = if let HirType::Nullable(payload) = element.as_ref() {
+                    let nullable = removed_value.into_struct_value();
+                    let has_value = self.builder.build_extract_value(nullable, 0, "removed_nullable_present")
+                        .map_err(|error| error.to_string())?.into_int_value();
+                    let value = self.builder.build_extract_value(nullable, 1, "removed_nullable_value")
+                        .map_err(|error| error.to_string())?;
+                    let tag = self.builder.build_select(
+                        has_value,
+                        self.context.i8_type().const_zero(),
+                        self.context.i8_type().const_int(1, false),
+                        "removed_nullable_tag",
+                    ).map_err(|error| error.to_string())?.into_int_value();
+                    self.build_nullish_tagged_value(value, payload, tag)?
+                } else if matches!(element.as_ref(), HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined | HirType::Union(_)) {
+                    removed_value
+                } else {
+                    self.build_optional_value(removed_value, &element, true)?
+                };
+                let present_block = self.builder.get_insert_block().unwrap();
                 self.builder
                     .build_unconditional_branch(merge_block)
                     .map_err(|error| error.to_string())?;
@@ -846,9 +1034,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.position_at_end(merge_block);
                 let phi = self
                     .builder
-                    .build_phi(element_llvm_type, "array_remove_result")
+                    .build_phi(absent_value.get_type(), "array_remove_result")
                     .map_err(|error| error.to_string())?;
-                phi.add_incoming(&[(&zero_value, empty_block), (&removed_value, present_block)]);
+                phi.add_incoming(&[
+                    (&absent_value, absent_block),
+                    (&present_value, present_block),
+                ]);
                 return Ok(phi.as_basic_value());
             }
             "__thaw_array_splice" => {
@@ -871,36 +1062,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 let delete_count = self.compile_expr(&args[2])?;
                 let items = &args[3..];
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
-                let values_ptr = if items.is_empty() {
-                    ptr_type.const_null()
-                } else {
-                    let byte_array_type = self
-                        .context
-                        .i8_type()
-                        .array_type((width as u32) * items.len() as u32);
-                    let slot = self
-                        .builder
-                        .build_alloca(byte_array_type, "array_splice_values")
-                        .map_err(|error| error.to_string())?;
-                    for (index, item) in items.iter().enumerate() {
-                        let compiled = self.compile_expr(item)?;
-                        let offset = i64_type.const_int(width * index as u64, false);
-                        let elem_ptr = unsafe {
-                            self.builder
-                                .build_in_bounds_gep(
-                                    self.context.i8_type(),
-                                    slot,
-                                    &[offset],
-                                    "array_splice_slot",
-                                )
-                                .map_err(|error| error.to_string())?
-                        };
-                        self.builder
-                            .build_store(elem_ptr, compiled)
-                            .map_err(|error| error.to_string())?;
-                    }
-                    slot
-                };
+                let (values_ptr, states_ptr) = self.compile_array_insert_values(
+                    items, &element, width, "array_splice",
+                )?;
                 let out_removed = self
                     .builder
                     .build_alloca(ptr_type, "array_splice_removed")
@@ -945,6 +1109,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             start.into(),
                             delete_count.into(),
                             i64_type.const_int(items.len() as u64, false).into(),
+                            states_ptr.into(),
                             out_removed_presence.into(),
                         ],
                         "array_splice_presence",
@@ -1112,6 +1277,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(result, old_len)
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_array_presence_densify").unwrap(),
+                        &[copied_presence.into()],
+                        "array_to_sorted_presence_densify",
+                    )
                     .map_err(|error| error.to_string())?;
                 return Ok(self
                     .compile_array_wrap_with_presence(result, copied_presence)?

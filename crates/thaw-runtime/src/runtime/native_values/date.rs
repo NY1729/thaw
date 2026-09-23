@@ -67,15 +67,23 @@ fn time_within_day_ms(fields: &CivilDateTime) -> f64 {
 /// specification (for example `Date.prototype.setMonth` starts from
 /// `LocalTime(this value)`, substituting `+0` when that's `NaN`) --
 /// setting one field of an otherwise-Invalid Date produces a valid one.
-fn civil_for_setter(timestamp: f64) -> CivilDateTime {
+fn civil_for_full_year_setter(timestamp: f64) -> CivilDateTime {
     let effective = if timestamp.is_finite() { timestamp } else { 0.0 };
     civil_from_timestamp(effective).expect("finite timestamp always decomposes")
 }
 
-/// The calendar fields of a JavaScript timestamp, always UTC: there is no
-/// host timezone database, so "local" `Date` methods simply alias their UTC
-/// counterparts. `month` and `day` are 1-based; `weekday` is 0-6 starting
-/// Sunday, matching `Date.prototype.getDay`.
+fn local_civil_for_setter(timestamp: f64, invalid_as_epoch: bool) -> Option<CivilDateTime> {
+    if timestamp.is_finite() {
+        local_civil_from_timestamp(timestamp)
+    } else if invalid_as_epoch {
+        civil_from_timestamp(0.0)
+    } else {
+        None
+    }
+}
+
+/// The calendar fields of a JavaScript timestamp. `month` and `day` are
+/// 1-based; `weekday` is 0-6 starting Sunday.
 #[derive(Debug, PartialEq)]
 struct CivilDateTime {
     year: i64,
@@ -110,14 +118,125 @@ fn civil_from_timestamp(timestamp: f64) -> Option<CivilDateTime> {
     })
 }
 
+fn local_civil_from_timestamp(timestamp: f64) -> Option<CivilDateTime> {
+    if !timestamp.is_finite() {
+        return None;
+    }
+    let millis = timestamp.floor() as i64;
+    let seconds = millis.div_euclid(1000);
+    let time = seconds as libc::time_t;
+    if time as i128 != seconds as i128 {
+        return None;
+    }
+    let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+    if unsafe { libc::localtime_r(&time, local.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let local = unsafe { local.assume_init() };
+    Some(CivilDateTime {
+        year: local.tm_year as i64 + 1900,
+        month: local.tm_mon as u32 + 1,
+        day: local.tm_mday as u32,
+        weekday: local.tm_wday as u32,
+        hours: local.tm_hour as u32,
+        minutes: local.tm_min as u32,
+        seconds: local.tm_sec as u32,
+        milliseconds: millis.rem_euclid(1000) as u32,
+    })
+}
+
+fn time_clip(value: f64) -> f64 {
+    if value.is_finite() && value.abs() <= 8_640_000_000_000_000.0 {
+        value.trunc()
+    } else {
+        f64::NAN
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_time_clip(value: f64) -> f64 {
+    time_clip(value)
+}
+
+fn timestamp_from_local_fields(
+    year: f64,
+    month: f64,
+    date: f64,
+    hours: f64,
+    minutes: f64,
+    seconds: f64,
+    milliseconds: f64,
+) -> f64 {
+    if ![year, month, date, hours, minutes, seconds, milliseconds]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return f64::NAN;
+    }
+    let naive = make_date(
+        make_day(year, month, date),
+        hours.trunc() * 3_600_000.0
+            + minutes.trunc() * 60_000.0
+            + seconds.trunc() * 1_000.0
+            + milliseconds.trunc(),
+    );
+    let Some(fields) = civil_from_timestamp(naive) else {
+        return f64::NAN;
+    };
+    let Ok(tm_year) = i32::try_from(fields.year - 1900) else {
+        return f64::NAN;
+    };
+    let make_tm = |isdst| libc::tm {
+        tm_sec: fields.seconds as libc::c_int,
+        tm_min: fields.minutes as libc::c_int,
+        tm_hour: fields.hours as libc::c_int,
+        tm_mday: fields.day as libc::c_int,
+        tm_mon: fields.month as libc::c_int - 1,
+        tm_year,
+        tm_wday: 0,
+        tm_yday: 0,
+        tm_isdst: isdst,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        tm_gmtoff: 0,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        tm_zone: std::ptr::null(),
+    };
+    let candidate = |isdst| {
+        let mut value = make_tm(isdst);
+        unsafe { libc::mktime(&mut value) }
+    };
+    let matches = |value: libc::time_t| {
+        local_civil_from_timestamp(value as f64 * 1000.0).is_some_and(|local| {
+            local.year == fields.year
+                && local.month == fields.month
+                && local.day == fields.day
+                && local.hours == fields.hours
+                && local.minutes == fields.minutes
+                && local.seconds == fields.seconds
+        })
+    };
+    let automatic = candidate(-1);
+    let standard = candidate(0);
+    let daylight = candidate(1);
+    let seconds = match (matches(standard), matches(daylight)) {
+        (true, true) => standard.min(daylight),
+        (true, false) => standard,
+        (false, true) => daylight,
+        (false, false) => automatic,
+    };
+    time_clip(seconds as f64 * 1000.0 + fields.milliseconds as f64)
+}
+
 #[no_mangle]
 /// The current time as a JavaScript timestamp (milliseconds since the Unix
 /// epoch), matching `Date.now()`.
 pub extern "C" fn thaw_date_now() -> f64 {
-    std::time::SystemTime::now()
+    time_clip(
+        std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs_f64() * 1000.0)
-        .unwrap_or(0.0)
+        .unwrap_or(0.0),
+    )
 }
 
 #[no_mangle]
@@ -146,13 +265,31 @@ pub extern "C" fn thaw_date_utc(
     if !hours.is_finite() || !minutes.is_finite() || !seconds.is_finite() || !milliseconds.is_finite() {
         return f64::NAN;
     }
-    make_date(
+    time_clip(make_date(
         make_day(year, month, date),
         hours.trunc() * 3_600_000.0
             + minutes.trunc() * 60_000.0
             + seconds.trunc() * 1_000.0
             + milliseconds.trunc(),
-    )
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_local(
+    year: f64,
+    month: f64,
+    date: f64,
+    hours: f64,
+    minutes: f64,
+    seconds: f64,
+    milliseconds: f64,
+) -> f64 {
+    let year = if year.is_finite() && (0.0..=99.0).contains(&year.trunc()) {
+        year.trunc() + 1900.0
+    } else {
+        year
+    };
+    timestamp_from_local_fields(year, month, date, hours, minutes, seconds, milliseconds)
 }
 
 fn is_leap_year(year: i64) -> bool {
@@ -187,9 +324,8 @@ fn days_in_month(year: i64, month: u32) -> u32 {
 /// Out-of-range fields (an invalid day for the given month, including
 /// leap years, or an hour/minute/second outside `0-23`/`0-59`) also parse
 /// as `NaN`, since the specification does not roll these over the way
-/// `Date.UTC`/the setters do. A date-only form and a date-time form with
-/// no offset are both interpreted as UTC, since there is no host timezone
-/// database to make "local" time mean anything else.
+/// `Date.UTC`/the setters do. Date-only forms are UTC; date-time forms
+/// without an offset use host-local time.
 ///
 /// # Safety
 /// `text` must be null or point to a valid NUL-terminated UTF-8 string.
@@ -201,7 +337,7 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let pattern = PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{3}))?)?(Z|[+-]\d{2}:\d{2})?)?$",
+            r"^(\d{4}|[+-]\d{6})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{3}))?)?(Z|[+-]\d{2}:\d{2})?)?$",
         )
         .unwrap()
     });
@@ -209,6 +345,10 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
         return f64::NAN;
     };
     let field = |index: usize| -> Option<i64> { captures.get(index)?.as_str().parse().ok() };
+    let year_text = captures.get(1).unwrap().as_str();
+    if year_text == "-000000" {
+        return f64::NAN;
+    }
     let year = field(1).unwrap();
     let month = field(2).unwrap_or(1) as u32;
     let day = field(3).unwrap_or(1) as u32;
@@ -218,11 +358,33 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
     let milliseconds = field(7).unwrap_or(0);
     if !(1..=12).contains(&month)
         || !(1..=days_in_month(year, month) as i64).contains(&(day as i64))
-        || !(0..=23).contains(&hours)
+        || !(0..=24).contains(&hours)
+        || (hours == 24 && (minutes != 0 || seconds != 0 || milliseconds != 0))
         || !(0..=59).contains(&minutes)
         || !(0..=59).contains(&seconds)
     {
         return f64::NAN;
+    }
+    if let Some(offset) = captures.get(8) {
+        let offset = offset.as_str();
+        if offset != "Z" {
+            let offset_hours: i64 = offset[1..3].parse().unwrap();
+            let offset_minutes: i64 = offset[4..6].parse().unwrap();
+            if offset_hours > 23 || offset_minutes > 59 {
+                return f64::NAN;
+            }
+        }
+    }
+    if captures.get(4).is_some() && captures.get(8).is_none() {
+        return timestamp_from_local_fields(
+            year as f64,
+            month as f64 - 1.0,
+            day as f64,
+            hours as f64,
+            minutes as f64,
+            seconds as f64,
+            milliseconds as f64,
+        );
     }
     let day_count = days_from_civil(year, month, day) as f64;
     let mut timestamp = day_count * 86_400_000.0
@@ -239,7 +401,7 @@ pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
             timestamp -= sign * (offset_hours * 3_600_000.0 + offset_minutes * 60_000.0);
         }
     }
-    timestamp
+    time_clip(timestamp)
 }
 
 macro_rules! date_field_getter {
@@ -260,6 +422,24 @@ date_field_getter!(thaw_date_get_minutes, minutes);
 date_field_getter!(thaw_date_get_seconds, seconds);
 date_field_getter!(thaw_date_get_milliseconds, milliseconds);
 
+macro_rules! local_date_field_getter {
+    ($name:ident, $field:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $name(timestamp: f64) -> f64 {
+            local_civil_from_timestamp(timestamp)
+                .map(|fields| fields.$field as f64)
+                .unwrap_or(f64::NAN)
+        }
+    };
+}
+
+local_date_field_getter!(thaw_date_get_local_full_year, year);
+local_date_field_getter!(thaw_date_get_local_day, weekday);
+local_date_field_getter!(thaw_date_get_local_hours, hours);
+local_date_field_getter!(thaw_date_get_local_minutes, minutes);
+local_date_field_getter!(thaw_date_get_local_seconds, seconds);
+local_date_field_getter!(thaw_date_get_local_milliseconds, milliseconds);
+
 #[no_mangle]
 /// `Date.prototype.getMonth`: 0-based, matching JavaScript (January is 0).
 pub extern "C" fn thaw_date_get_month(timestamp: f64) -> f64 {
@@ -277,13 +457,65 @@ pub extern "C" fn thaw_date_get_date(timestamp: f64) -> f64 {
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_date_get_local_month(timestamp: f64) -> f64 {
+    local_civil_from_timestamp(timestamp)
+        .map(|fields| (fields.month - 1) as f64)
+        .unwrap_or(f64::NAN)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_get_local_date(timestamp: f64) -> f64 {
+    local_civil_from_timestamp(timestamp)
+        .map(|fields| fields.day as f64)
+        .unwrap_or(f64::NAN)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_get_month_for_full_year(timestamp: f64) -> f64 {
+    civil_from_timestamp(timestamp)
+        .map(|fields| (fields.month - 1) as f64)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_get_date_for_full_year(timestamp: f64) -> f64 {
+    civil_from_timestamp(timestamp)
+        .map(|fields| fields.day as f64)
+        .unwrap_or(1.0)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_get_local_month_for_full_year(timestamp: f64) -> f64 {
+    local_civil_from_timestamp(timestamp)
+        .map(|fields| (fields.month - 1) as f64)
+        .unwrap_or(0.0)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_get_local_date_for_full_year(timestamp: f64) -> f64 {
+    local_civil_from_timestamp(timestamp)
+        .map(|fields| fields.day as f64)
+        .unwrap_or(1.0)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_get_timezone_offset(timestamp: f64) -> f64 {
+    let Some(fields) = local_civil_from_timestamp(timestamp) else {
+        return f64::NAN;
+    };
+    let utc_seconds = (timestamp.floor() as i64).div_euclid(1000);
+    let local_seconds = days_from_civil(fields.year, fields.month, fields.day) * 86_400
+        + fields.hours as i64 * 3_600
+        + fields.minutes as i64 * 60
+        + fields.seconds as i64;
+    ((utc_seconds - local_seconds) / 60) as f64
+}
+
+#[no_mangle]
 /// Renders `timestamp` as an ISO 8601 / RFC 3339 string with millisecond
 /// precision and a `Z` (UTC) offset, matching `Date.prototype.toISOString`.
 /// Returns a null pointer for a non-finite timestamp (to be reported as a
-/// `RangeError: Invalid time value`, matching the specification), or when
-/// the year falls outside the 4-digit range `toISOString` requires (years
-/// outside `[0, 9999]` need the specification's `+/-YYYYYY` extended
-/// format, which this does not produce).
+/// `RangeError: Invalid time value`, matching the specification).
 ///
 /// # Safety
 /// The returned pointer, if non-null, is arena-allocated and must not be
@@ -292,9 +524,6 @@ pub extern "C" fn thaw_date_to_iso_string(timestamp: f64) -> *const c_char {
     let Some(fields) = civil_from_timestamp(timestamp) else {
         return std::ptr::null();
     };
-    if !(0..=9999).contains(&fields.year) {
-        return std::ptr::null();
-    }
     let CivilDateTime {
         year,
         month,
@@ -305,8 +534,13 @@ pub extern "C" fn thaw_date_to_iso_string(timestamp: f64) -> *const c_char {
         milliseconds,
         ..
     } = fields;
+    let year = if (0..=9999).contains(&year) {
+        format!("{year:04}")
+    } else {
+        format!("{}{:06}", if year < 0 { '-' } else { '+' }, year.abs())
+    };
     let text = format!(
-        "{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}Z"
+        "{year}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}Z"
     );
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
@@ -328,13 +562,47 @@ fn date_string_part(fields: &CivilDateTime) -> String {
     )
 }
 
-/// The time portion shared by `toTimeString` and `toString`. There is no
-/// host timezone database, so the offset is always UTC's, rendered the way
-/// Node.js does when its own timezone is UTC.
-fn time_string_part(fields: &CivilDateTime) -> String {
+/// The local time portion shared by `toTimeString` and `toString`.
+fn time_string_part(timestamp: f64, fields: &CivilDateTime) -> String {
+    let utc_seconds = (timestamp.floor() as i64).div_euclid(1000);
+    let local_seconds = days_from_civil(fields.year, fields.month, fields.day) * 86_400
+        + fields.hours as i64 * 3_600
+        + fields.minutes as i64 * 60
+        + fields.seconds as i64;
+    let offset_minutes = (local_seconds - utc_seconds) / 60;
+    let sign = if offset_minutes < 0 { '-' } else { '+' };
+    let offset_minutes = offset_minutes.abs();
+    let zone = if offset_minutes == 0 {
+        "Coordinated Universal Time"
+    } else {
+        let seconds = utc_seconds as libc::time_t;
+        let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+        let result = unsafe { libc::localtime_r(&seconds, local.as_mut_ptr()) };
+        if result.is_null() {
+            ""
+        } else {
+            let local = unsafe { local.assume_init() };
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                if local.tm_zone.is_null() {
+                    ""
+                } else {
+                    unsafe { CStr::from_ptr(local.tm_zone) }.to_str().unwrap_or("")
+                }
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            {
+                ""
+            }
+        }
+    };
     format!(
-        "{:02}:{:02}:{:02} GMT+0000 (Coordinated Universal Time)",
-        fields.hours, fields.minutes, fields.seconds
+        "{:02}:{:02}:{:02} GMT{sign}{:02}{:02} ({zone})",
+        fields.hours,
+        fields.minutes,
+        fields.seconds,
+        offset_minutes / 60,
+        offset_minutes % 60,
     )
 }
 
@@ -349,7 +617,9 @@ fn arena_c_string_or_invalid_date(text: Option<String>) -> *const c_char {
 /// `toISOString`, this does not signal failure with a null pointer --
 /// there is nothing for the generated code to check and throw on).
 pub extern "C" fn thaw_date_to_date_string(timestamp: f64) -> *const c_char {
-    arena_c_string_or_invalid_date(civil_from_timestamp(timestamp).map(|fields| date_string_part(&fields)))
+    arena_c_string_or_invalid_date(
+        local_civil_from_timestamp(timestamp).map(|fields| date_string_part(&fields)),
+    )
 }
 
 #[no_mangle]
@@ -357,7 +627,9 @@ pub extern "C" fn thaw_date_to_date_string(timestamp: f64) -> *const c_char {
 /// Universal Time)"` (there is no host timezone database, so this is
 /// always UTC's offset and name), or `"Invalid Date"`.
 pub extern "C" fn thaw_date_to_time_string(timestamp: f64) -> *const c_char {
-    arena_c_string_or_invalid_date(civil_from_timestamp(timestamp).map(|fields| time_string_part(&fields)))
+    arena_c_string_or_invalid_date(
+        local_civil_from_timestamp(timestamp).map(|fields| time_string_part(timestamp, &fields)),
+    )
 }
 
 #[no_mangle]
@@ -365,8 +637,13 @@ pub extern "C" fn thaw_date_to_time_string(timestamp: f64) -> *const c_char {
 /// space, or `"Invalid Date"`.
 pub extern "C" fn thaw_date_to_string(timestamp: f64) -> *const c_char {
     arena_c_string_or_invalid_date(
-        civil_from_timestamp(timestamp)
-            .map(|fields| format!("{} {}", date_string_part(&fields), time_string_part(&fields))),
+        local_civil_from_timestamp(timestamp).map(|fields| {
+            format!(
+                "{} {}",
+                date_string_part(&fields),
+                time_string_part(timestamp, &fields)
+            )
+        }),
     )
 }
 
@@ -396,8 +673,8 @@ pub extern "C" fn thaw_date_to_utc_string(timestamp: f64) -> *const c_char {
 /// the specification consults `MonthFromTime`/`DateFromTime`. Returns the
 /// new timestamp, which the caller assigns back into the receiver.
 pub extern "C" fn thaw_date_set_full_year(timestamp: f64, year: f64, month: f64, date: f64) -> f64 {
-    let fields = civil_for_setter(timestamp);
-    make_date(make_day(year, month, date), time_within_day_ms(&fields))
+    let fields = civil_for_full_year_setter(timestamp);
+    time_clip(make_date(make_day(year, month, date), time_within_day_ms(&fields)))
 }
 
 #[no_mangle]
@@ -405,22 +682,26 @@ pub extern "C" fn thaw_date_set_full_year(timestamp: f64, year: f64, month: f64,
 /// from the receiver's current value (there is no `setYear`-style year
 /// override here).
 pub extern "C" fn thaw_date_set_month(timestamp: f64, month: f64, date: f64) -> f64 {
-    let fields = civil_for_setter(timestamp);
-    make_date(
+    let Some(fields) = civil_from_timestamp(timestamp) else {
+        return f64::NAN;
+    };
+    time_clip(make_date(
         make_day(fields.year as f64, month, date),
         time_within_day_ms(&fields),
-    )
+    ))
 }
 
 #[no_mangle]
 /// `Date.prototype.setDate`: the 1-based day of the month, replacing only
 /// that field of the receiver's current value.
 pub extern "C" fn thaw_date_set_date(timestamp: f64, date: f64) -> f64 {
-    let fields = civil_for_setter(timestamp);
-    make_date(
+    let Some(fields) = civil_from_timestamp(timestamp) else {
+        return f64::NAN;
+    };
+    time_clip(make_date(
         make_day(fields.year as f64, (fields.month - 1) as f64, date),
         time_within_day_ms(&fields),
-    )
+    ))
 }
 
 #[no_mangle]
@@ -434,18 +715,20 @@ pub extern "C" fn thaw_date_set_hours(
     seconds: f64,
     milliseconds: f64,
 ) -> f64 {
-    let fields = civil_for_setter(timestamp);
+    let Some(fields) = civil_from_timestamp(timestamp) else {
+        return f64::NAN;
+    };
     let day = days_from_civil(fields.year, fields.month, fields.day) as f64;
     if !hours.is_finite() || !minutes.is_finite() || !seconds.is_finite() || !milliseconds.is_finite() {
         return f64::NAN;
     }
-    make_date(
+    time_clip(make_date(
         day,
         hours.trunc() * 3_600_000.0
             + minutes.trunc() * 60_000.0
             + seconds.trunc() * 1_000.0
             + milliseconds.trunc(),
-    )
+    ))
 }
 
 #[no_mangle]
@@ -457,52 +740,190 @@ pub extern "C" fn thaw_date_set_minutes(
     seconds: f64,
     milliseconds: f64,
 ) -> f64 {
-    let fields = civil_for_setter(timestamp);
+    let Some(fields) = civil_from_timestamp(timestamp) else {
+        return f64::NAN;
+    };
     let day = days_from_civil(fields.year, fields.month, fields.day) as f64;
     if !minutes.is_finite() || !seconds.is_finite() || !milliseconds.is_finite() {
         return f64::NAN;
     }
-    make_date(
+    time_clip(make_date(
         day,
         fields.hours as f64 * 3_600_000.0
             + minutes.trunc() * 60_000.0
             + seconds.trunc() * 1_000.0
             + milliseconds.trunc(),
-    )
+    ))
 }
 
 #[no_mangle]
 /// `Date.prototype.setSeconds`: the receiver's current hour and minute are
 /// kept; `seconds` and `milliseconds` are always explicit here.
 pub extern "C" fn thaw_date_set_seconds(timestamp: f64, seconds: f64, milliseconds: f64) -> f64 {
-    let fields = civil_for_setter(timestamp);
+    let Some(fields) = civil_from_timestamp(timestamp) else {
+        return f64::NAN;
+    };
     let day = days_from_civil(fields.year, fields.month, fields.day) as f64;
     if !seconds.is_finite() || !milliseconds.is_finite() {
         return f64::NAN;
     }
-    make_date(
+    time_clip(make_date(
         day,
         fields.hours as f64 * 3_600_000.0
             + fields.minutes as f64 * 60_000.0
             + seconds.trunc() * 1_000.0
             + milliseconds.trunc(),
-    )
+    ))
 }
 
 #[no_mangle]
 /// `Date.prototype.setMilliseconds`: the receiver's current hour, minute
 /// and second are kept.
 pub extern "C" fn thaw_date_set_milliseconds(timestamp: f64, milliseconds: f64) -> f64 {
-    let fields = civil_for_setter(timestamp);
+    let Some(fields) = civil_from_timestamp(timestamp) else {
+        return f64::NAN;
+    };
     if !milliseconds.is_finite() {
         return f64::NAN;
     }
-    make_date(
+    time_clip(make_date(
         days_from_civil(fields.year, fields.month, fields.day) as f64,
         fields.hours as f64 * 3_600_000.0
             + fields.minutes as f64 * 60_000.0
             + fields.seconds as f64 * 1_000.0
             + milliseconds.trunc(),
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_set_local_full_year(
+    timestamp: f64,
+    year: f64,
+    month: f64,
+    date: f64,
+) -> f64 {
+    let Some(fields) = local_civil_for_setter(timestamp, true) else {
+        return f64::NAN;
+    };
+    timestamp_from_local_fields(
+        year,
+        month,
+        date,
+        fields.hours as f64,
+        fields.minutes as f64,
+        fields.seconds as f64,
+        fields.milliseconds as f64,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_set_local_month(timestamp: f64, month: f64, date: f64) -> f64 {
+    let Some(fields) = local_civil_for_setter(timestamp, false) else {
+        return f64::NAN;
+    };
+    timestamp_from_local_fields(
+        fields.year as f64,
+        month,
+        date,
+        fields.hours as f64,
+        fields.minutes as f64,
+        fields.seconds as f64,
+        fields.milliseconds as f64,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_set_local_date(timestamp: f64, date: f64) -> f64 {
+    let Some(fields) = local_civil_for_setter(timestamp, false) else {
+        return f64::NAN;
+    };
+    timestamp_from_local_fields(
+        fields.year as f64,
+        (fields.month - 1) as f64,
+        date,
+        fields.hours as f64,
+        fields.minutes as f64,
+        fields.seconds as f64,
+        fields.milliseconds as f64,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_set_local_hours(
+    timestamp: f64,
+    hours: f64,
+    minutes: f64,
+    seconds: f64,
+    milliseconds: f64,
+) -> f64 {
+    let Some(fields) = local_civil_for_setter(timestamp, false) else {
+        return f64::NAN;
+    };
+    timestamp_from_local_fields(
+        fields.year as f64,
+        (fields.month - 1) as f64,
+        fields.day as f64,
+        hours,
+        minutes,
+        seconds,
+        milliseconds,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_set_local_minutes(
+    timestamp: f64,
+    minutes: f64,
+    seconds: f64,
+    milliseconds: f64,
+) -> f64 {
+    let Some(fields) = local_civil_for_setter(timestamp, false) else {
+        return f64::NAN;
+    };
+    timestamp_from_local_fields(
+        fields.year as f64,
+        (fields.month - 1) as f64,
+        fields.day as f64,
+        fields.hours as f64,
+        minutes,
+        seconds,
+        milliseconds,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_set_local_seconds(
+    timestamp: f64,
+    seconds: f64,
+    milliseconds: f64,
+) -> f64 {
+    let Some(fields) = local_civil_for_setter(timestamp, false) else {
+        return f64::NAN;
+    };
+    timestamp_from_local_fields(
+        fields.year as f64,
+        (fields.month - 1) as f64,
+        fields.day as f64,
+        fields.hours as f64,
+        fields.minutes as f64,
+        seconds,
+        milliseconds,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_date_set_local_milliseconds(timestamp: f64, milliseconds: f64) -> f64 {
+    let Some(fields) = local_civil_for_setter(timestamp, false) else {
+        return f64::NAN;
+    };
+    timestamp_from_local_fields(
+        fields.year as f64,
+        (fields.month - 1) as f64,
+        fields.day as f64,
+        fields.hours as f64,
+        fields.minutes as f64,
+        fields.seconds as f64,
+        milliseconds,
     )
 }
 
@@ -610,11 +1031,12 @@ mod date_native_tests {
     }
 
     #[test]
-    fn setters_treat_invalid_receiver_as_epoch() {
+    fn only_full_year_setter_recovers_an_invalid_receiver() {
         assert_eq!(
-            thaw_date_set_milliseconds(f64::NAN, 500.0),
-            500.0
+            thaw_date_set_full_year(f64::NAN, 2000.0, 0.0, 1.0),
+            days_from_civil(2000, 1, 1) as f64 * 86_400_000.0
         );
+        assert!(thaw_date_set_milliseconds(f64::NAN, 500.0).is_nan());
     }
 
     #[test]
@@ -637,18 +1059,9 @@ mod date_native_tests {
     }
 
     #[test]
-    fn formats_date_time_and_utc_strings() {
+    fn formats_utc_string() {
         // 2024-01-01T00:00:00.500Z is a Monday.
         let timestamp = 1_704_067_200_500.0;
-        assert_eq!(text_of(thaw_date_to_date_string(timestamp)), "Mon Jan 01 2024");
-        assert_eq!(
-            text_of(thaw_date_to_time_string(timestamp)),
-            "00:00:00 GMT+0000 (Coordinated Universal Time)"
-        );
-        assert_eq!(
-            text_of(thaw_date_to_string(timestamp)),
-            "Mon Jan 01 2024 00:00:00 GMT+0000 (Coordinated Universal Time)"
-        );
         assert_eq!(
             text_of(thaw_date_to_utc_string(timestamp)),
             "Mon, 01 Jan 2024 00:00:00 GMT"
@@ -690,11 +1103,10 @@ mod date_native_tests {
     }
 
     #[test]
-    fn parses_date_only_and_partial_forms() {
+    fn parses_date_only_forms_as_utc() {
         assert_eq!(parse("2024-01-01"), 1_704_067_200_000.0);
         assert_eq!(parse("2024-01"), 1_704_067_200_000.0);
         assert_eq!(parse("2024"), 1_704_067_200_000.0);
-        assert_eq!(parse("2024-01-01T00:00"), 1_704_067_200_000.0);
     }
 
     #[test]
@@ -711,7 +1123,7 @@ mod date_native_tests {
         assert!(parse("2024-02-30").is_nan()); // 2024 is a leap year; Feb has 29 days.
         assert!(parse("2023-02-29").is_nan()); // 2023 is not a leap year.
         assert!(parse("2024-13-01").is_nan());
-        assert!(parse("2024-01-01T24:00:00").is_nan());
+        assert!(parse("2024-01-01T24:00:01").is_nan());
     }
 
     #[test]

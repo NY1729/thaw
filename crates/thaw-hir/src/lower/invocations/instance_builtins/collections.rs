@@ -44,6 +44,12 @@ impl<'a> FnLowerer<'a> {
                 self.scope.get(&resolved).cloned()
             }
             Expr::Member(member) => {
+                if let MemberProp::Computed(_) = &member.prop {
+                    let HirType::Array(element) = self.peek_type_without_lowering(&member.obj)? else {
+                        return None;
+                    };
+                    return Some(*element);
+                }
                 let MemberProp::Ident(field) = &member.prop else {
                     return None;
                 };
@@ -664,7 +670,7 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
         let object_result = property.sym == *"group";
-        let items = self.lower_expr(&member.obj)?;
+        let items = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
         let items_type = self.infer_expr_type(&items)?;
         let HirType::Array(item_type) = &items_type else {
             return Err(format!(

@@ -513,6 +513,17 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, array_join_type, Some(Linkage::External));
         }
+        self.module.add_function(
+            "thaw_tagged_array_join",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), i8_ptr.into(),
+                    i8_type.into(), i8_type.into(), i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         let array_reverse_type = i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false);
         self.module.add_function(
             "thaw_array_reverse",
@@ -525,11 +536,31 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_array_has_property",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_densify",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_mapped",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_array_presence_compact",
             i64_type.fn_type(
                 &[i8_ptr.into(), i8_ptr.into(), i64_type.into()],
                 false,
             ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_tagged_sort",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_type.into(), i8_type.into()], false),
             Some(Linkage::External),
         );
         let array_copy_within_type = i8_ptr.fn_type(
@@ -563,7 +594,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_array_presence_fill",
             i8_ptr.fn_type(
-                &[i8_ptr.into(), f64_type.into(), f64_type.into()],
+                &[i8_ptr.into(), i64_type.into(), f64_type.into(), f64_type.into(), i8_type.into()],
                 false,
             ),
             Some(Linkage::External),
@@ -576,9 +607,27 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
-            "thaw_array_presence_extend",
+            "thaw_array_ensure_index",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_resize",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_set_state",
             i8_ptr.fn_type(
                 &[i8_ptr.into(), i64_type.into(), i64_type.into(), i8_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_extend",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i64_type.into(), i64_type.into(), i8_type.into(), i8_ptr.into()],
                 false,
             ),
             Some(Linkage::External),
@@ -690,6 +739,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     f64_type.into(),
                     i64_type.into(),
                     i8_ptr.into(),
+                    i8_ptr.into(),
                 ],
                 false,
             ),
@@ -709,6 +759,28 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, array_sort_type, Some(Linkage::External));
         }
+        self.module.add_function(
+            "thaw_array_undefined_index_of",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), f64_type.into(),
+                    i8_type.into(), i8_type.into(), i8_type.into(), i8_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_tagged_array_index_of",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into(),
+                    i8_type.into(), i8_type.into(), i8_type.into(), i8_type.into(), i8_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         for (name, needle_type, return_type) in [
             (
                 "thaw_number_array_index_of",
@@ -826,6 +898,14 @@ impl<'ctx> HirCompiler<'ctx> {
         ] {
             self.module
                 .add_function(name, string_transform_type, Some(Linkage::External));
+        }
+        let locale_string_case_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        for name in [
+            "thaw_string_to_locale_lower_case",
+            "thaw_string_to_locale_upper_case",
+        ] {
+            self.module
+                .add_function(name, locale_string_case_type, Some(Linkage::External));
         }
         self.module.add_function(
             "thaw_encode_uri_component",
@@ -1080,6 +1160,20 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_date_get_minutes",
             "thaw_date_get_seconds",
             "thaw_date_get_milliseconds",
+            "thaw_date_get_local_full_year",
+            "thaw_date_get_local_month",
+            "thaw_date_get_local_date",
+            "thaw_date_get_local_day",
+            "thaw_date_get_local_hours",
+            "thaw_date_get_local_minutes",
+            "thaw_date_get_local_seconds",
+            "thaw_date_get_local_milliseconds",
+            "thaw_date_get_month_for_full_year",
+            "thaw_date_get_date_for_full_year",
+            "thaw_date_get_local_month_for_full_year",
+            "thaw_date_get_local_date_for_full_year",
+            "thaw_date_time_clip",
+            "thaw_date_get_timezone_offset",
         ] {
             self.module
                 .add_function(name, date_getter_type, Some(Linkage::External));
@@ -1397,25 +1491,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
-        self.module.add_function(
-            "thaw_date_set_full_year",
-            f64_type.fn_type(
-                &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
-                false,
-            ),
-            Some(Linkage::External),
+        let date_set_four_type = f64_type.fn_type(
+            &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
+            false,
         );
+        for name in ["thaw_date_set_full_year", "thaw_date_set_local_full_year"] {
+            self.module
+                .add_function(name, date_set_four_type, Some(Linkage::External));
+        }
         let date_set_three_type = f64_type.fn_type(
             &[f64_type.into(), f64_type.into(), f64_type.into()],
             false,
         );
-        for name in ["thaw_date_set_month", "thaw_date_set_seconds"] {
+        for name in [
+            "thaw_date_set_month",
+            "thaw_date_set_local_month",
+            "thaw_date_set_seconds",
+            "thaw_date_set_local_seconds",
+        ] {
             self.module
                 .add_function(name, date_set_three_type, Some(Linkage::External));
         }
-        self.module.add_function(
-            "thaw_date_set_hours",
-            f64_type.fn_type(
+        let date_set_five_type = f64_type.fn_type(
                 &[
                     f64_type.into(),
                     f64_type.into(),
@@ -1424,38 +1521,41 @@ impl<'ctx> HirCompiler<'ctx> {
                     f64_type.into(),
                 ],
                 false,
-            ),
-            Some(Linkage::External),
-        );
-        self.module.add_function(
-            "thaw_date_set_minutes",
-            f64_type.fn_type(
-                &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
-                false,
-            ),
-            Some(Linkage::External),
-        );
+            );
+        for name in ["thaw_date_set_hours", "thaw_date_set_local_hours"] {
+            self.module
+                .add_function(name, date_set_five_type, Some(Linkage::External));
+        }
+        for name in ["thaw_date_set_minutes", "thaw_date_set_local_minutes"] {
+            self.module
+                .add_function(name, date_set_four_type, Some(Linkage::External));
+        }
         let date_set_two_type = f64_type.fn_type(&[f64_type.into(), f64_type.into()], false);
-        for name in ["thaw_date_set_date", "thaw_date_set_milliseconds"] {
+        for name in [
+            "thaw_date_set_date",
+            "thaw_date_set_local_date",
+            "thaw_date_set_milliseconds",
+            "thaw_date_set_local_milliseconds",
+        ] {
             self.module
                 .add_function(name, date_set_two_type, Some(Linkage::External));
         }
-        self.module.add_function(
-            "thaw_date_utc",
-            f64_type.fn_type(
-                &[
-                    f64_type.into(),
-                    f64_type.into(),
-                    f64_type.into(),
-                    f64_type.into(),
-                    f64_type.into(),
-                    f64_type.into(),
-                    f64_type.into(),
-                ],
-                false,
-            ),
-            Some(Linkage::External),
+        let date_constructor_type = f64_type.fn_type(
+            &[
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
         );
+        for name in ["thaw_date_local", "thaw_date_utc"] {
+            self.module
+                .add_function(name, date_constructor_type, Some(Linkage::External));
+        }
         self.module.add_function(
             "thaw_date_parse",
             f64_type.fn_type(&[i8_ptr.into()], false),
@@ -1691,8 +1791,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
-            "thaw_array_keys",
+            "thaw_json_own_keys",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_keys",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_type.into()], false),
             Some(Linkage::External),
         );
         for name in [

@@ -6,7 +6,7 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                 if matches!(property.sym.as_ref(), "next" | "throw" | "return") {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Function(params, result) = &receiver_type else {
                         return Err(format!(
@@ -409,7 +409,7 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if property.sym == *"forEach" && self.receiver_is_map_or_set(&member.obj) {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let (key_type, value_type, keys_double_as_values) = match &receiver_type {
                         HirType::Map(key_type, value_type) => {
@@ -583,7 +583,8 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if property.sym == *"forEach" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let element_type = match &array_type {
                         HirType::Array(element) => element.as_ref().clone(),
@@ -597,6 +598,11 @@ impl<'a> FnLowerer<'a> {
                                 "`.forEach()` requires an array, got {array_type:?}"
                             ));
                         }
+                    };
+                    let callback_element_type = if sparse_callback {
+                        Self::array_read_type(&element_type)
+                    } else {
+                        element_type.clone()
                     };
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
                         let source_name = format!("__thaw_for_each_source_{}", self.next_binding);
@@ -612,7 +618,7 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         let available = [
-                            element_type.clone(),
+                            callback_element_type.clone(),
                             HirType::F64,
                             array_type.clone(),
                         ];
@@ -626,6 +632,7 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(source_name.clone()),
                             array_type.clone(),
                             element_type,
+                            callback_element_type,
                             callback,
                             arguments.get(1).cloned(),
                         )?;
@@ -640,9 +647,9 @@ impl<'a> FnLowerer<'a> {
                     }
                     let callback = self.lower_array_callback(
                         &call.args[0].expr,
-                        &element_type,
+                        &callback_element_type,
                         &array_type,
-                        &HirType::Void,
+                        Some(&HirType::Void),
                     )?;
                     let this_arg = call
                         .args
@@ -653,6 +660,7 @@ impl<'a> FnLowerer<'a> {
                         receiver,
                         array_type,
                         element_type,
+                        callback_element_type,
                         callback,
                         this_arg,
                     );
@@ -663,7 +671,7 @@ impl<'a> FnLowerer<'a> {
                 ) {
                     let is_subarray = property.sym == *"subarray";
                     let is_substring = property.sym == *"substring" || property.sym == *"substr";
-                    let mut receiver = self.lower_expr(&member.obj)?;
+                    let mut receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     // `slice`/`subarray` keep the byte-buffer identity: a
                     // sliced `Buffer` is still a `Buffer`, so a chained
                     // `buf.slice(0, 4).toString("hex")` decodes rather than
@@ -767,7 +775,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"copyWithin" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !matches!(receiver_type, HirType::Array(_)) {
                         return Err(format!(
@@ -807,7 +815,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"fill" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &receiver_type else {
                         return Err(format!(
@@ -816,12 +824,12 @@ impl<'a> FnLowerer<'a> {
                     };
                     let element = element.as_ref().clone();
                     let (arguments, spread_bindings) =
-                        self.lower_native_spread_values(&call.args, "Array.fill")?;
+                        self.lower_native_spread_array_values(&call.args, "Array.fill")?;
                     if !(1..=3).contains(&arguments.len()) {
                         return Err("native `.fill()` expects one to three arguments".into());
                     }
-                    let value = arguments[0].clone();
-                    self.expect_type(&element, &value, "fill value")?;
+                    let value = self.coerce_array_insert_value(arguments[0].clone(), &element)?;
+                    let value_type = self.infer_expr_type(&value)?;
                     let mut indices = Vec::with_capacity(2);
                     for argument in arguments.into_iter().skip(1) {
                         indices.push(self.coerce_primitive_to_number(argument)?);
@@ -833,6 +841,7 @@ impl<'a> FnLowerer<'a> {
                         indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
                     }
                     let runtime = match &element {
+                        _ if value_type != element => "__thaw_array_fill",
                         HirType::F64 => "__thaw_number_array_fill",
                         HirType::Bool => "__thaw_bool_array_fill",
                         HirType::Str | HirType::Array(_) | HirType::Object(_) => {
@@ -846,12 +855,12 @@ impl<'a> FnLowerer<'a> {
                         .insert(receiver_name.clone(), receiver_type.clone());
                     let value_name = format!("__thaw_fill_value_{}", self.next_binding);
                     self.next_binding += 1;
-                    self.scope.insert(value_name.clone(), element.clone());
+                    self.scope.insert(value_name.clone(), value_type.clone());
                     let mut bindings = vec![
                         (receiver_name.clone(), receiver_type, receiver),
                     ];
                     bindings.extend(spread_bindings);
-                    bindings.push((value_name.clone(), element, value));
+                    bindings.push((value_name.clone(), value_type, value));
                     let mut arguments = vec![HirExpr::Var(receiver_name), HirExpr::Var(value_name)];
                     for (position, index) in indices.into_iter().enumerate() {
                         let name = format!("__thaw_fill_index_{}_{}", position, self.next_binding);
@@ -867,7 +876,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.reverse()` expects no arguments".into());
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !matches!(receiver_type, HirType::Array(_)) {
                         return Err(format!(
@@ -883,7 +892,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !matches!(receiver_type, HirType::Array(_)) {
                         return Err(format!(
@@ -892,9 +901,9 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     let runtime = if property.sym == *"pop" {
-                        "__thaw_array_pop"
+                        "__thaw_array_pop_optional"
                     } else {
-                        "__thaw_array_shift"
+                        "__thaw_array_shift_optional"
                     };
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var(runtime.to_string())),
@@ -902,7 +911,7 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if property.sym == *"push" || property.sym == *"unshift" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &receiver_type else {
                         return Err(format!(
@@ -913,7 +922,7 @@ impl<'a> FnLowerer<'a> {
                     let element = element.as_ref().clone();
                     let label = if property.sym == *"push" { "push" } else { "unshift" };
                     let (arguments, spread_bindings) =
-                        self.lower_native_spread_values(&call.args, &format!("Array.{label}"))?;
+                        self.lower_native_spread_array_values(&call.args, &format!("Array.{label}"))?;
                     // `coerce_to_declared`, not the stricter `expect_type`
                     // this replaced: a `Json`/`JsValue` value pushed into a
                     // *typed* array (real trigger: a for-of loop element
@@ -928,7 +937,7 @@ impl<'a> FnLowerer<'a> {
                     // rejected exactly as before.
                     let arguments = arguments
                         .into_iter()
-                        .map(|value| self.coerce_to_declared(&element, value))
+                        .map(|value| self.coerce_array_insert_value(value, &element))
                         .collect::<Result<Vec<_>, String>>()?;
                     let receiver_name = format!("__thaw_{label}_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -940,9 +949,10 @@ impl<'a> FnLowerer<'a> {
                     for (position, value) in arguments.into_iter().enumerate() {
                         let name = format!("__thaw_{label}_value_{position}_{}", self.next_binding);
                         self.next_binding += 1;
-                        self.scope.insert(name.clone(), element.clone());
+                        let value_type = self.infer_expr_type(&value)?;
+                        self.scope.insert(name.clone(), value_type.clone());
                         call_arguments.push(HirExpr::Var(name.clone()));
-                        bindings.push((name, element.clone(), value));
+                        bindings.push((name, value_type, value));
                     }
                     let runtime = if property.sym == *"push" {
                         "__thaw_array_push"
@@ -954,7 +964,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"splice" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &receiver_type else {
                         return Err(format!(
@@ -963,7 +973,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let element = element.as_ref().clone();
                     let (arguments, spread_bindings) =
-                        self.lower_native_spread_values(&call.args, "Array.splice")?;
+                        self.lower_native_spread_array_values(&call.args, "Array.splice")?;
                     let mut arguments = arguments.into_iter();
                     let start = match arguments.next() {
                         Some(value) => self.coerce_primitive_to_number(value)?,
@@ -973,10 +983,9 @@ impl<'a> FnLowerer<'a> {
                         Some(value) => self.coerce_primitive_to_number(value)?,
                         None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
                     };
-                    let items: Vec<HirExpr> = arguments.collect();
-                    for item in &items {
-                        self.expect_type(&element, item, "splice item")?;
-                    }
+                    let items = arguments
+                        .map(|item| self.coerce_array_insert_value(item, &element))
+                        .collect::<Result<Vec<_>, _>>()?;
                     let receiver_name = format!("__thaw_splice_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope
@@ -999,9 +1008,10 @@ impl<'a> FnLowerer<'a> {
                     for (position, item) in items.into_iter().enumerate() {
                         let name = format!("__thaw_splice_item_{position}_{}", self.next_binding);
                         self.next_binding += 1;
-                        self.scope.insert(name.clone(), element.clone());
+                        let item_type = self.infer_expr_type(&item)?;
+                        self.scope.insert(name.clone(), item_type.clone());
                         call_arguments.push(HirExpr::Var(name.clone()));
-                        bindings.push((name, element.clone(), item));
+                        bindings.push((name, item_type, item));
                     }
                     let result = HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_array_splice".to_string())),
@@ -1010,7 +1020,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"join" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, "join")?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let source_name = format!("__thaw_join_source_{}", self.next_binding);
                     self.next_binding += 1;
@@ -1136,6 +1146,12 @@ impl<'a> FnLowerer<'a> {
                                     HirType::Str => "__thaw_string_array_join",
                                     HirType::Bool => "__thaw_bool_array_join",
                                     HirType::Object(_) => "__thaw_object_array_join",
+                                    HirType::Optional(_)
+                                    | HirType::Nullable(_)
+                                    | HirType::Nullish(_)
+                                    | HirType::Undefined
+                                    | HirType::Null
+                                    | HirType::Union(_) => "__thaw_tagged_array_join",
                                     other => {
                                         return Err(format!(
                                             "array join does not support element type {other:?}"
@@ -1188,7 +1204,7 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     }
-                    let mut receiver = self.lower_expr(&member.obj)?;
+                    let mut receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     // `buf.indexOf` / `includes` / `lastIndexOf` on a byte
                     // buffer with a string or sub-buffer needle is a
                     // *subsequence* search, not the element search a plain
@@ -1279,6 +1295,103 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         HirExpr::Lit(HirLit::F64(0.0))
                     };
+                    if needle_type == HirType::Undefined
+                        || (needle_type == HirType::Null
+                            && (matches!(element.as_ref(), HirType::Null | HirType::Nullable(_) | HirType::Nullish(_))
+                                || matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Null))))
+                    {
+                        let receiver_name = format!("__thaw_search_array_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let needle_name = format!("__thaw_search_needle_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let start_name = format!("__thaw_search_start_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(receiver_name.clone(), receiver_type.clone());
+                        self.scope.insert(needle_name.clone(), needle_type.clone());
+                        self.scope.insert(start_name.clone(), HirType::F64);
+                        let (kind, union_tag) = match (needle_type.clone(), element.as_ref()) {
+                            (HirType::Null, HirType::Nullable(_)) => (4.0, 0.0),
+                            (HirType::Null, HirType::Nullish(_)) => (5.0, 0.0),
+                            (HirType::Null, HirType::Null) => (6.0, 0.0),
+                            (HirType::Null, HirType::Union(members)) => (
+                                8.0,
+                                members.iter().position(|ty| ty == &HirType::Null)
+                                    .expect("null union member") as f64,
+                            ),
+                            (_, HirType::Undefined) => (1.0, 0.0),
+                            (_, HirType::Optional(_)) => (2.0, 0.0),
+                            (_, HirType::Nullish(_)) => (3.0, 0.0),
+                            (_, HirType::Union(members)) => members.iter()
+                                .position(|ty| ty == &HirType::Undefined)
+                                .map_or((0.0, 0.0), |index| (7.0, index as f64)),
+                            _ => (0.0, 0.0),
+                        };
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_undefined_index_of".into())),
+                            vec![
+                                HirExpr::Var(receiver_name.clone()),
+                                HirExpr::Var(start_name.clone()),
+                                HirExpr::Lit(HirLit::Bool(property.sym == *"lastIndexOf")),
+                                HirExpr::Lit(HirLit::F64(kind)),
+                                HirExpr::Lit(HirLit::Bool(
+                                    property.sym == *"includes" && needle_type == HirType::Undefined,
+                                )),
+                                HirExpr::Lit(HirLit::F64(union_tag)),
+                            ],
+                        );
+                        let result = if property.sym == *"includes" {
+                            HirExpr::BinOp(
+                                BinOp::GtEq,
+                                Box::new(result),
+                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            )
+                        } else {
+                            result
+                        };
+                        let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((needle_name, needle_type, needle));
+                        bindings.push((start_name, HirType::F64, from_index));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if matches!(element.as_ref(), HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) if payload.as_ref() == &needle_type)
+                        || matches!(element.as_ref(), HirType::Union(members) if members.contains(&needle_type))
+                    {
+                        let receiver_name = format!("__thaw_search_array_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let needle_name = format!("__thaw_search_needle_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let start_name = format!("__thaw_search_start_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                        self.scope.insert(needle_name.clone(), needle_type.clone());
+                        self.scope.insert(start_name.clone(), HirType::F64);
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_tagged_array_index_of".into())),
+                            vec![
+                                HirExpr::Var(receiver_name.clone()),
+                                HirExpr::Var(needle_name.clone()),
+                                HirExpr::Var(start_name.clone()),
+                                HirExpr::Lit(HirLit::Bool(property.sym == *"lastIndexOf")),
+                                HirExpr::Lit(HirLit::Bool(property.sym == *"includes")),
+                            ],
+                        );
+                        let result = if property.sym == *"includes" {
+                            HirExpr::BinOp(
+                                BinOp::GtEq,
+                                Box::new(result),
+                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            )
+                        } else {
+                            result
+                        };
+                        let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((needle_name, needle_type, needle));
+                        bindings.push((start_name, HirType::F64, from_index));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     if needle_type != *element {
                         let receiver_name = format!("__thaw_search_array_{}", self.next_binding);
                         self.next_binding += 1;

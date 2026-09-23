@@ -963,6 +963,9 @@ impl<'a> FnLowerer<'a> {
             return None;
         };
         let values = self.union_discriminants.get(&name)?.get(&property)?;
+        if values.len() != elements.len() {
+            return None;
+        }
         let allowed = self
             .union_narrowings
             .get(&name)

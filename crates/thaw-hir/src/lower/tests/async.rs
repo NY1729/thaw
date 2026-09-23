@@ -287,14 +287,12 @@ fn promise_combinators_accept_homogeneous_array_spreads() {
 }
 
 #[test]
-fn promise_race_rejects_empty_mixed_and_non_promise_inputs() {
+fn promise_race_accepts_empty_and_rejects_mixed_and_non_promise_inputs() {
     let empty = thaw_parser::parse_typescript(
         "async function main(): Promise<void> { await Promise.race([]); }",
     )
     .unwrap();
-    assert!(lower_module(&empty)
-        .unwrap_err()
-        .contains("requires at least one promise"));
+    assert!(lower_module(&empty).is_ok());
 
     let mixed = thaw_parser::parse_typescript(
         r#"
@@ -320,14 +318,12 @@ fn promise_race_rejects_empty_mixed_and_non_promise_inputs() {
 }
 
 #[test]
-fn promise_any_rejects_empty_mixed_and_non_promise_inputs() {
+fn promise_any_accepts_empty_and_rejects_mixed_and_non_promise_inputs() {
     let empty = thaw_parser::parse_typescript(
         "async function main(): Promise<void> { await Promise.any([]); }",
     )
     .unwrap();
-    assert!(lower_module(&empty)
-        .unwrap_err()
-        .contains("requires at least one promise"));
+    assert!(lower_module(&empty).is_ok());
 
     let mixed = thaw_parser::parse_typescript(
         r#"

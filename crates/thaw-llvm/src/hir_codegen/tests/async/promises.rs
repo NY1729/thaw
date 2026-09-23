@@ -366,6 +366,31 @@ fn frame_split_promise_race_uses_the_first_completion() {
 }
 
 #[test]
+fn frame_split_empty_promise_race_remains_pending() {
+    let source = r#"
+        async function delayed(value: number): Promise<number> {
+            await sleep(1);
+            return value;
+        }
+        async function main(): Promise<void> {
+            const literal: number = await Promise.race([
+                Promise.race([]), delayed(7)
+            ]);
+            console.log(literal);
+            const empty: Promise<number>[] = [];
+            const dynamic: number = await Promise.race([
+                Promise.race(empty), delayed(8)
+            ]);
+            console.log(dynamic);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_race_empty_pending"),
+        "7\n8\n"
+    );
+}
+
+#[test]
 fn frame_split_promise_race_supports_native_value_shapes() {
     let source = r#"
         interface Item { value: number; }
@@ -442,6 +467,50 @@ fn frame_split_promise_any_ignores_rejections_and_accepts_array_variables() {
         }
     "#;
     assert_eq!(compile_and_run(source, "promise_any_success"), "5\n6\n");
+}
+
+#[test]
+fn frame_split_empty_promise_any_rejects() {
+    let source = r#"
+        async function main(): Promise<void> {
+            try {
+                await Promise.any([]);
+            } catch (error) {
+                console.log(error);
+            }
+            const empty: Promise<number>[] = [];
+            try {
+                await Promise.any(empty);
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_any_empty_rejection"),
+        "All promises were rejected\nAll promises were rejected\n"
+    );
+}
+
+#[test]
+fn promise_executor_throw_preserves_object_identity() {
+    let source = r#"
+        interface ThrownValue { value: number; }
+        async function main(): Promise<void> {
+            try {
+                await new Promise<void>(() => {
+                    throw { value: 17 };
+                });
+            } catch (error) {
+                const object = error as ThrownValue;
+                console.log(object.value);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_executor_object_throw"),
+        "17\n"
+    );
 }
 
 #[test]

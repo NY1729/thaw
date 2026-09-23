@@ -52,7 +52,7 @@ fn formats_numbers_with_javascript_string_boundaries() {
 #[test]
 fn creates_numeric_property_keys_for_native_arrays() {
     let array = [3_i64, 0, 0, 0];
-    let keys = unsafe { thaw_array_keys(array.as_ptr().cast()) };
+    let keys = unsafe { thaw_array_keys(array.as_ptr().cast(), std::ptr::null(), 0) };
     assert_eq!(unsafe { keys.cast::<i64>().read() }, 3);
     for index in 0..3 {
         let key = unsafe {
@@ -817,13 +817,11 @@ fn promise_race_forwards_first_rejection_and_deduplicates_handles() {
 }
 
 #[test]
-fn promise_race_rejects_an_empty_input() {
+fn promise_race_keeps_an_empty_input_pending() {
     let raced = unsafe { thaw_promise_race(std::ptr::null(), 0) };
-    assert_eq!(thaw_promise_state(raced), 2);
-    assert_eq!(
-        thaw_runtime_run_until_resolved(raced),
-        PROMISE_RACE_EMPTY_ERROR.as_ptr()
-    );
+    assert_eq!(thaw_promise_state(raced), 0);
+    assert!(thaw_runtime_run_until_resolved(raced).is_null());
+    assert_eq!(thaw_promise_state(raced), 0);
     unsafe { thaw_promise_destroy(raced) };
 }
 

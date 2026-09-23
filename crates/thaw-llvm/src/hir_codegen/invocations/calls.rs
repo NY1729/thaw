@@ -75,21 +75,295 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 return Ok(self.compile_array_has_index(handle, index)?.into());
             }
-            "__thaw_array_copy_presence" => {
+            "__thaw_array_has_property" | "__thaw_array_has_own"
+            | "__thaw_array_property_is_enumerable" => {
+                let [array, key] = args else {
+                    return Err("array property check expects two operands".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let key = self.compile_expr(key)?;
+                let data = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
+                let found = self.builder.build_call(
+                    self.module.get_function("thaw_array_has_property").unwrap(),
+                    &[
+                        data.into(), presence.into(), key.into(),
+                        self.context.i8_type().const_int(match name.as_str() {
+                            "__thaw_array_has_own" => 1,
+                            "__thaw_array_property_is_enumerable" => 2,
+                            _ => 0,
+                        }, false).into(),
+                    ],
+                    "array_has_property",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("array property check returned no value")?.into_int_value();
+                return self.builder.build_int_compare(
+                    IntPredicate::NE, found, self.context.i8_type().const_zero(), "array_has_property_bool",
+                ).map(Into::into).map_err(|error| error.to_string());
+            }
+            "__thaw_array_index_state" => {
+                let [array, index] = args else {
+                    return Err("array state lookup expects two operands".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let index = self.compile_expr(index)?.into_float_value();
+                let index = self
+                    .builder
+                    .build_float_to_unsigned_int(index, self.context.i64_type(), "array_state_index")
+                    .map_err(|error| error.to_string())?;
+                let state = self.compile_array_index_state(handle, index)?;
+                return self
+                    .builder
+                    .build_unsigned_int_to_float(state, self.context.f64_type(), "array_state_number")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_array_densify" => {
+                let [array] = args else {
+                    return Err("array densify expects one operand".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let presence = self.compile_array_presence(handle)?;
+                let presence = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_presence_densify").unwrap(),
+                        &[presence.into()],
+                        "array_densify",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array densify returned no value")?
+                    .into_pointer_value();
+                self.compile_array_set_presence(handle, presence)?;
+                return Ok(handle.into());
+            }
+            "__thaw_array_copy_index_state" => {
+                let [target, target_index, source, source_index] = args else {
+                    return Err("array state copy expects four operands".into());
+                };
+                let target = self.compile_expr(target)?.into_pointer_value();
+                let target_index = self.compile_expr(target_index)?.into_float_value();
+                let source = self.compile_expr(source)?.into_pointer_value();
+                let source_index = self.compile_expr(source_index)?.into_float_value();
+                let i64_type = self.context.i64_type();
+                let target_index = self.builder.build_float_to_unsigned_int(
+                    target_index, i64_type, "target_state_index",
+                ).map_err(|error| error.to_string())?;
+                let source_index = self.builder.build_float_to_unsigned_int(
+                    source_index, i64_type, "source_state_index",
+                ).map_err(|error| error.to_string())?;
+                let state = self.compile_array_index_state(source, source_index)?;
+                let target_data = self.compile_array_data(target)?;
+                let length = self.builder.build_load(i64_type, target_data, "state_target_length")
+                    .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(target)?;
+                let new_presence = self.builder.build_call(
+                    self.module.get_function("thaw_array_presence_set_state").unwrap(),
+                    &[presence.into(), length.into(), target_index.into(), state.into()],
+                    "copy_index_state",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("array state copy returned no value")?.into_pointer_value();
+                self.compile_array_set_presence(target, new_presence)?;
+                return Ok(target.into());
+            }
+            "__thaw_array_set_undefined" | "__thaw_array_set_hole" => {
+                let [array, index] = args else {
+                    return Err("array undefined write expects two operands".into());
+                };
+                let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
+                    return Err("array undefined write requires a homogeneous array".into());
+                };
+                let target = self.compile_expr(array)?.into_pointer_value();
+                let index = self.compile_expr(index)?.into_float_value();
+                let i64_type = self.context.i64_type();
+                let slot = self.builder.build_call(
+                    self.module.get_function("thaw_array_ensure_index").unwrap(),
+                    &[target.into(), i64_type.const_int(array_element_storage_bytes(&element), false).into(), index.into()],
+                    "undefined_write_slot",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("array undefined write returned no slot")?.into_pointer_value();
+                let write = self.context.append_basic_block(self.current_function(), "array_state_write_valid");
+                let done = self.context.append_basic_block(self.current_function(), "array_state_write_done");
+                let valid = self.builder.build_is_not_null(slot, "array_state_write_in_range")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(valid, write, done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(write);
+                let index = self.builder.build_float_to_unsigned_int(
+                    index, i64_type, "undefined_write_index",
+                ).map_err(|error| error.to_string())?;
+                let data = self.compile_array_data(target)?;
+                let length = self.builder.build_load(i64_type, data, "undefined_write_length")
+                    .map_err(|error| error.to_string())?;
+                let presence = self.compile_array_presence(target)?;
+                let presence = self.builder.build_call(
+                    self.module.get_function("thaw_array_presence_set_state").unwrap(),
+                    &[presence.into(), length.into(), index.into(), self.context.i8_type().const_int(u64::from(name == "__thaw_array_set_undefined") * 2, false).into()],
+                    "write_undefined_state",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("undefined write returned no value")?.into_pointer_value();
+                self.compile_array_set_presence(target, presence)?;
+                self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+                return Ok(target.into());
+            }
+            "__thaw_array_resize" => {
+                let [array, length] = args else {
+                    return Err("array resize expects two operands".into());
+                };
+                let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
+                    return Err("array resize requires a homogeneous array".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let length = self.compile_expr(length)?.into_float_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_array_resize").unwrap(),
+                    &[
+                        handle.into(),
+                        self.context.i64_type().const_int(array_element_storage_bytes(&element), false).into(),
+                        length.into(),
+                    ],
+                    "array_resize",
+                ).map_err(|error| error.to_string())?;
+                return Ok(handle.into());
+            }
+            "__thaw_array_undefined_index_of" => {
+                let [array, from_index, reverse, kind, include_holes, union_tag] = args else {
+                    return Err("undefined array search expects six operands".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let from_index = self.compile_expr(from_index)?;
+                let reverse = self.compile_expr(reverse)?.into_int_value();
+                let kind = self.compile_expr(kind)?.into_float_value();
+                let include_holes = self.compile_expr(include_holes)?.into_int_value();
+                let union_tag = self.compile_expr(union_tag)?.into_float_value();
+                let data = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
+                let reverse = self.builder.build_int_z_extend(
+                    reverse, self.context.i8_type(), "array_search_reverse",
+                ).map_err(|error| error.to_string())?;
+                let kind = self.builder.build_float_to_unsigned_int(
+                    kind, self.context.i8_type(), "array_search_element_kind",
+                ).map_err(|error| error.to_string())?;
+                let include_holes = self.builder.build_int_z_extend(
+                    include_holes, self.context.i8_type(), "array_search_holes",
+                ).map_err(|error| error.to_string())?;
+                let union_tag = self.builder.build_float_to_unsigned_int(
+                    union_tag, self.context.i8_type(), "array_search_union_tag",
+                ).map_err(|error| error.to_string())?;
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_array_undefined_index_of").unwrap(),
+                    &[data.into(), presence.into(), from_index.into(), reverse.into(), kind.into(), include_holes.into(), union_tag.into()],
+                    "undefined_index_of",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("undefined array search returned no value")?;
+                return Ok(result);
+            }
+            "__thaw_tagged_array_index_of" => {
+                let [array, needle, from_index, reverse, includes] = args else {
+                    return Err("tagged array search expects five operands".into());
+                };
+                let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
+                    return Err("tagged search requires an array".into());
+                };
+                let (payload, value_tag, union_layout) = match element.as_ref() {
+                    HirType::Optional(payload) | HirType::Nullable(payload) => (payload.as_ref(), 1, 0),
+                    HirType::Nullish(payload) => (payload.as_ref(), 0, 0),
+                    HirType::Union(members) => {
+                        let needle_type = self.expr_hir_type(needle).ok_or("tagged needle has no type")?;
+                        let index = members.iter().position(|member| member == &needle_type)
+                            .ok_or("tagged needle is not a union member")?;
+                        (members.get(index).unwrap(), index as u64, 1)
+                    }
+                    _ => return Err("tagged search requires tagged elements".into()),
+                };
+                let kind = match payload {
+                    HirType::F64 => 0,
+                    HirType::Str => 1,
+                    HirType::Bool => 2,
+                    HirType::Object(_) => 3,
+                    _ => return Err("tagged search does not support this payload type".into()),
+                };
+                let needle_type = self.basic_type(payload)?;
+                let needle_slot = self.builder.build_alloca(needle_type, "tagged_search_needle")
+                    .map_err(|error| error.to_string())?;
+                let array = self.compile_expr(array)?.into_pointer_value();
+                let needle = self.compile_expr(needle)?;
+                self.builder.build_store(needle_slot, needle).map_err(|error| error.to_string())?;
+                let from_index = self.compile_expr(from_index)?;
+                let reverse = self.compile_expr(reverse)?.into_int_value();
+                let includes = self.compile_expr(includes)?.into_int_value();
+                let i8_type = self.context.i8_type();
+                let reverse = self.builder.build_int_z_extend(reverse, i8_type, "tagged_search_reverse")
+                    .map_err(|error| error.to_string())?;
+                let includes = self.builder.build_int_z_extend(includes, i8_type, "tagged_search_includes")
+                    .map_err(|error| error.to_string())?;
+                let data = self.compile_array_data(array)?;
+                let presence = self.compile_array_presence(array)?;
+                return self.builder.build_call(
+                    self.module.get_function("thaw_tagged_array_index_of").unwrap(),
+                    &[
+                        data.into(), presence.into(), needle_slot.into(), from_index.into(),
+                        reverse.into(), includes.into(), i8_type.const_int(kind, false).into(),
+                        i8_type.const_int(value_tag, false).into(),
+                        i8_type.const_int(union_layout, false).into(),
+                    ],
+                    "tagged_index_of",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("tagged array search returned no value".into());
+            }
+            "__thaw_array_copy_presence" | "__thaw_array_map_presence" => {
                 let [target, source] = args else {
                     return Err("array presence copy expects two operands".into());
                 };
                 let target = self.compile_expr(target)?.into_pointer_value();
                 let source = self.compile_expr(source)?.into_pointer_value();
-                return Ok(self.compile_array_copy_presence(target, source)?.into());
+                let target = self.compile_array_copy_presence(target, source)?;
+                if name == "__thaw_array_map_presence" {
+                    let presence = self.compile_array_presence(target)?;
+                    self.builder.build_call(
+                        self.module.get_function("thaw_array_presence_mapped").unwrap(),
+                        &[presence.into()],
+                        "array_mapped_presence",
+                    ).map_err(|error| error.to_string())?;
+                }
+                return Ok(target.into());
             }
             "__thaw_array_compact_for_sort" => {
                 let [array] = args else {
                     return Err("array sort compaction expects one operand".into());
                 };
+                let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
+                    return Err("array sort compaction requires an array".into());
+                };
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
-                let presence = self.compile_array_presence(handle)?;
+                let mut presence = self.compile_array_presence(handle)?;
+                let undefined_tag = match element.as_ref() {
+                    HirType::Optional(_) => Some((0, 1)),
+                    HirType::Nullish(_) => Some((2, 1)),
+                    HirType::Nullable(_) => Some((0, 0)),
+                    HirType::Undefined => Some((0, 2)),
+                    HirType::Union(members) => Some(members.iter()
+                        .position(|member| member == &HirType::Undefined)
+                        .map_or((0, 0), |index| (index as u64, 1))),
+                    _ => None,
+                };
+                if let Some((tag, mode)) = undefined_tag {
+                    presence = self.builder.build_call(
+                        self.module.get_function("thaw_array_presence_tagged_sort").unwrap(),
+                        &[
+                            buffer.into(), presence.into(),
+                            self.context.i8_type().const_int(tag, false).into(),
+                            self.context.i8_type().const_int(mode, false).into(),
+                        ],
+                        "array_tagged_sort_presence",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("tagged sort presence returned no value")?.into_pointer_value();
+                    self.compile_array_set_presence(handle, presence)?;
+                }
                 let length = self
                     .builder
                     .build_call(
@@ -99,7 +373,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         &[
                             buffer.into(),
                             presence.into(),
-                            self.context.i64_type().const_int(8, false).into(),
+                            self.context.i64_type().const_int(array_element_storage_bytes(&element), false).into(),
                         ],
                         "array_sort_present_length",
                     )
@@ -151,6 +425,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[
                         presence.into(), old_len.into(), start.into(),
                         delete_count.into(), insert_count.into(),
+                        self.context.ptr_type(AddressSpace::default()).const_null().into(),
                         removed.into(),
                     ],
                     "to_spliced_presence",
@@ -202,7 +477,21 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_date_get_hours"
             | "__thaw_date_get_minutes"
             | "__thaw_date_get_seconds"
-            | "__thaw_date_get_milliseconds" => {
+            | "__thaw_date_get_milliseconds"
+            | "__thaw_date_get_local_full_year"
+            | "__thaw_date_get_local_month"
+            | "__thaw_date_get_local_date"
+            | "__thaw_date_get_local_day"
+            | "__thaw_date_get_local_hours"
+            | "__thaw_date_get_local_minutes"
+            | "__thaw_date_get_local_seconds"
+            | "__thaw_date_get_local_milliseconds"
+            | "__thaw_date_get_month_for_full_year"
+            | "__thaw_date_get_date_for_full_year"
+            | "__thaw_date_get_local_month_for_full_year"
+            | "__thaw_date_get_local_date_for_full_year"
+            | "__thaw_date_time_clip"
+            | "__thaw_date_get_timezone_offset" => {
                 let [timestamp] = args else {
                     return Err(format!("{name} expects one operand"));
                 };
@@ -1107,12 +1396,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("thaw_promise_detach returned no value".into());
             }
             "__thaw_date_set_full_year"
+            | "__thaw_date_set_local_full_year"
             | "__thaw_date_set_month"
+            | "__thaw_date_set_local_month"
             | "__thaw_date_set_date"
+            | "__thaw_date_set_local_date"
             | "__thaw_date_set_hours"
+            | "__thaw_date_set_local_hours"
             | "__thaw_date_set_minutes"
+            | "__thaw_date_set_local_minutes"
             | "__thaw_date_set_seconds"
+            | "__thaw_date_set_local_seconds"
             | "__thaw_date_set_milliseconds"
+            | "__thaw_date_set_local_milliseconds"
+            | "__thaw_date_local"
             | "__thaw_date_utc" => {
                 let mut compiled = Vec::with_capacity(args.len());
                 for argument in args {
