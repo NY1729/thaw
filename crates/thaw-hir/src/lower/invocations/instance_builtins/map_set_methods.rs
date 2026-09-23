@@ -108,7 +108,9 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.set()` expects exactly two arguments".into());
                     };
                     let key = self.coerce_map_key(&key_type, key.clone())?;
-                    self.expect_type(&value_type, value, "Map.set value")?;
+                    let value = self
+                        .coerce_to_declared(&value_type, value.clone())
+                        .map_err(|error| format!("Map.set value: {error}"))?;
                     let receiver_name = format!("__thaw_map_set_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     let key_name = format!("__thaw_map_set_key_{}", self.next_binding);
@@ -199,19 +201,18 @@ impl<'a> FnLowerer<'a> {
                         self.next_binding += 1;
                         self.scope.insert(computed_name.clone(), value_type.clone());
                         let call = HirExpr::Call(Box::new(second.clone()), vec![key]);
-                        self.expect_type(
-                            &value_type,
-                            &call,
-                            "Map.getOrInsertComputed callback result",
-                        )?;
+                        let call = self
+                            .coerce_to_declared(&value_type, call)
+                            .map_err(|error| format!("Map.getOrInsertComputed callback result: {error}"))?;
                         body.push(HirStmt::Let(computed_name.clone(), value_type.clone(), call));
                         var(&computed_name)
                     } else {
-                        self.expect_type(&value_type, second, "Map.getOrInsert value")?;
+                        let value = self
+                            .coerce_to_declared(&value_type, second.clone())
+                            .map_err(|error| format!("Map.getOrInsert value: {error}"))?;
                         let value_name =
                             format!("__thaw_map_get_or_insert_value_{}", self.next_binding);
                         self.next_binding += 1;
-                        let value = second.clone();
                         bindings.push((value_name.clone(), value_type.clone(), value));
                         self.scope.insert(value_name.clone(), value_type.clone());
                         var(&value_name)
