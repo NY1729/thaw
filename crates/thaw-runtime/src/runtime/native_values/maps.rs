@@ -546,7 +546,7 @@ fn encode_ref_key(key: *const u8) -> u64 {
 }
 
 macro_rules! key_kind_functions {
-    ($kind:ty, $key_ty:ty, $encode:ident, $has:ident, $set:ident, $delete:ident, $get_f64:ident, $get_bool:ident, $get_ptr:ident) => {
+    ($kind:ty, $key_ty:ty, $encode:ident, $has:ident, $set:ident, $delete:ident, $get_f64:ident, $get_bool:ident, $get_ptr:ident, $get_i64:ident) => {
         #[no_mangle]
         /// # Safety
         /// `map` must be null or a pointer returned by `thaw_map_new`; a
@@ -608,6 +608,18 @@ macro_rules! key_kind_functions {
         pub unsafe extern "C" fn $get_ptr(map: *const u8, key: $key_ty) -> *mut u8 {
             unsafe { map_get::<$kind>(map, $encode(key)) }.unwrap_or(0) as *mut u8
         }
+
+        #[no_mangle]
+        /// Decodes the value word as a raw `i64`; chosen at HIR lowering
+        /// time when the map's value type is `I64`/`JsValue` -- both
+        /// already fit the same opaque 64-bit storage word `$get_f64`/
+        /// `$get_bool` reinterpret, with no boxing needed.
+        ///
+        /// # Safety
+        /// Same as the getter family above.
+        pub unsafe extern "C" fn $get_i64(map: *const u8, key: $key_ty) -> i64 {
+            unsafe { map_get::<$kind>(map, $encode(key)) }.unwrap_or(0) as i64
+        }
     };
 }
 
@@ -620,7 +632,8 @@ key_kind_functions!(
     thaw_map_num_delete,
     thaw_map_num_get_f64,
     thaw_map_num_get_bool,
-    thaw_map_num_get_ptr
+    thaw_map_num_get_ptr,
+    thaw_map_num_get_i64
 );
 
 key_kind_functions!(
@@ -632,7 +645,8 @@ key_kind_functions!(
     thaw_map_str_delete,
     thaw_map_str_get_f64,
     thaw_map_str_get_bool,
-    thaw_map_str_get_ptr
+    thaw_map_str_get_ptr,
+    thaw_map_str_get_i64
 );
 
 key_kind_functions!(
@@ -644,7 +658,8 @@ key_kind_functions!(
     thaw_map_ref_delete,
     thaw_map_ref_get_f64,
     thaw_map_ref_get_bool,
-    thaw_map_ref_get_ptr
+    thaw_map_ref_get_ptr,
+    thaw_map_ref_get_i64
 );
 
 #[cfg(test)]

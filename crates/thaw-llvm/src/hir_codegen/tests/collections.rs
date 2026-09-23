@@ -1108,6 +1108,34 @@ fn compiles_native_array_from_a_map_or_set() {
     );
 }
 
+/// `Map`/`Set` values used to reject `I64`/`JsValue` outright ("Map/Set
+/// values of type ... are not supported") -- both already fit the same
+/// opaque 64-bit storage word `F64`/`Bool` values decode from, with no
+/// boxing needed, so `Map<K, bigint>` should work exactly like
+/// `Map<K, number>`. Includes a value past `Number.MAX_SAFE_INTEGER` to
+/// pin that the raw word round-trips through `.set()`/`.get()`/`.forEach()`
+/// without ever narrowing through `f64`.
+#[test]
+fn compiles_map_with_bigint_values() {
+    let source = r#"
+        function main(): void {
+            const m = new Map<string, bigint>();
+            m.set("a", 10n);
+            m.set("b", 9007199254740993n);
+            const missing: bigint | undefined = m.get("c");
+            console.log(m.has("c"), missing === undefined);
+            console.log(m.size);
+            m.forEach((value: bigint, key: string) => {
+                console.log(key, value, typeof value);
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_bigint_values"),
+        "false true\n2\na 10n bigint\nb 9007199254740993n bigint\n"
+    );
+}
+
 #[test]
 fn compiles_native_array_from_an_array_like_length_object() {
     // `Array.from({length})` -- as opposed to the real-array/string source
