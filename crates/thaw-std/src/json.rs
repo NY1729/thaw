@@ -531,10 +531,49 @@ pub unsafe extern "C" fn thaw_json_index_set(
 #[no_mangle]
 pub extern "C" fn thaw_json_as_number(value: *mut Value) -> f64 {
     let value = unsafe { &*value };
-    value
-        .as_f64()
-        .or_else(|| non_finite_number(value))
-        .unwrap_or(0.0)
+    json_to_number(value)
+}
+
+/// Real ECMAScript `ToNumber`, for every `Value` shape this file can
+/// actually produce. The one deliberate departure: a missing-key
+/// sentinel (`is_napi_undefined`) still reads as `0.0` rather than real
+/// JS's `NaN` -- see this file's own module doc comment for why (already
+/// load-bearing elsewhere for `missing == 0`).
+fn json_to_number(value: &Value) -> f64 {
+    if let Some(number) = non_finite_number(value) {
+        return number;
+    }
+    if is_napi_undefined(value) {
+        return 0.0;
+    }
+    match value {
+        Value::Number(number) => number.as_f64().unwrap_or(0.0),
+        Value::Null => 0.0,
+        Value::Bool(flag) => f64::from(*flag),
+        Value::String(text) => javascript_string_to_number(text),
+        // `Number([])` is `0` (empty join is `""`), `Number([x])` is
+        // `x`'s own `ToNumber` (a one-element join has no comma), and
+        // anything else is `NaN` (a multi-element join always contains a
+        // comma, which no number literal can parse as).
+        Value::Array(items) => match items.as_slice() {
+            [] => 0.0,
+            [only] => json_to_number(only),
+            _ => f64::NAN,
+        },
+        Value::Object(_) if thaw_json_is_date_shape(value) != 0 => thaw_json_date_timestamp(value),
+        Value::Object(_) => 0.0,
+    }
+}
+
+unsafe extern "C" {
+    fn thaw_string_to_number(value: *const c_char) -> f64;
+}
+
+fn javascript_string_to_number(text: &str) -> f64 {
+    let Ok(text) = CString::new(text) else {
+        return f64::NAN;
+    };
+    unsafe { thaw_string_to_number(text.as_ptr()) }
 }
 
 #[no_mangle]
