@@ -1577,12 +1577,15 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_map_num_get_f64"
             | "__thaw_map_num_get_bool"
             | "__thaw_map_num_get_ptr"
+            | "__thaw_map_num_get_i64"
             | "__thaw_map_str_get_f64"
             | "__thaw_map_str_get_bool"
             | "__thaw_map_str_get_ptr"
+            | "__thaw_map_str_get_i64"
             | "__thaw_map_ref_get_f64"
             | "__thaw_map_ref_get_bool"
-            | "__thaw_map_ref_get_ptr" => {
+            | "__thaw_map_ref_get_ptr"
+            | "__thaw_map_ref_get_i64" => {
                 let [map, key] = args else {
                     return Err(format!("{name} expects two operands"));
                 };

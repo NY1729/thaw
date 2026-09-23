@@ -76,9 +76,11 @@ fn map_value_get_suffix(value_type: &HirType) -> Result<(&'static str, bool), St
     match value_type {
         HirType::F64 => Ok(("f64", false)),
         HirType::Bool | HirType::Undefined | HirType::Null => Ok(("bool", false)),
-        HirType::I64 | HirType::JsValue => Err(format!(
-            "Map/Set values of type {value_type:?} are not supported"
-        )),
+        // Both already fit the same opaque 64-bit storage word as `F64`/
+        // `Bool` (see `functions.rs`'s LLVM-type mapping: `I64`/`JsValue`
+        // are both a plain `i64`, no boxing/pointer indirection), so no
+        // `TypedClosure` wrap is needed either -- same as `F64`/`Bool`.
+        HirType::I64 | HirType::JsValue => Ok(("i64", false)),
         _ => Ok(("ptr", true)),
     }
 }
