@@ -435,6 +435,48 @@ impl<'a> FnLowerer<'a> {
             if member_property_name(&member.prop).as_deref() == Some("length") {
                 let array = self.lower_expr(&member.obj)?;
                 if let HirType::Array(element) = self.infer_expr_type(&array)? {
+                    if assign.op == AssignOp::NullishAssign {
+                        // `.length` is always a plain number, never
+                        // null/undefined, so `??=` never assigns --
+                        // matching real ECMAScript's short-circuit, this
+                        // never evaluates the RHS at all (its side
+                        // effects, if any, don't run).
+                        return Ok(HirExpr::ArrayLen(Box::new(array)));
+                    }
+                    if matches!(assign.op, AssignOp::AndAssign | AssignOp::OrAssign) {
+                        let array_type = HirType::Array(element);
+                        let array_name = format!("__thaw_length_target_{}", self.next_binding);
+                        let current_name = format!("__thaw_length_old_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(array_name.clone(), array_type.clone());
+                        self.scope.insert(current_name.clone(), HirType::F64);
+                        // Lowered only here, inside the branch that needs
+                        // it -- matching real ECMAScript, `&&=`/`||=`
+                        // evaluate the RHS only when they actually assign.
+                        let rhs = self.lower_expr(&assign.right)?;
+                        let assigned = self.lower_array_length_write(
+                            HirExpr::Var(array_name.clone()),
+                            rhs,
+                        )?;
+                        let current = HirExpr::Var(current_name.clone());
+                        let condition = self.truthiness_expr(current.clone(), &HirType::F64)?;
+                        let (then_branch, else_branch) = if assign.op == AssignOp::AndAssign {
+                            (assigned, current)
+                        } else {
+                            (current, assigned)
+                        };
+                        let result = HirExpr::Block(vec![HirStmt::If(
+                            condition,
+                            vec![HirStmt::Return(Some(then_branch))],
+                            vec![HirStmt::Return(Some(else_branch))],
+                        )]);
+                        let old_length =
+                            HirExpr::ArrayLen(Box::new(HirExpr::Var(array_name.clone())));
+                        return self.wrap_call_argument_bindings(result, &[
+                            (array_name, array_type, array),
+                            (current_name, HirType::F64, old_length),
+                        ]);
+                    }
                     let rhs = self.lower_expr(&assign.right)?;
                     if assign.op == AssignOp::Assign {
                         return self.lower_array_length_write(array, rhs);
