@@ -1482,10 +1482,39 @@ impl<'a> FnLowerer<'a> {
                 }
                 return match ty {
                     HirType::I64 => Ok(value),
-                    HirType::F64 => Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_i64_from_number".to_string())),
-                        vec![value],
-                    )),
+                    // Real `BigInt(number)` (`NumberToBigInt`) requires an
+                    // *integral* number -- `NaN`/`Infinity`/a fractional
+                    // value all throw `RangeError`, matching `.length =`'s
+                    // own `RangeError`s elsewhere in this file. Previously
+                    // `__thaw_i64_from_number` silently truncated/saturated
+                    // instead (`BigInt(5.5)` gave `5n`, not a thrown error).
+                    HirType::F64 => {
+                        let value_name =
+                            format!("__thaw_bigint_from_number_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(value_name.clone(), HirType::F64);
+                        let is_integer = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_number_is_integer".to_string())),
+                            vec![HirExpr::Var(value_name.clone())],
+                        );
+                        let body = HirExpr::Block(vec![
+                            HirStmt::If(
+                                is_integer,
+                                Vec::new(),
+                                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                    "\u{1}RangeError\u{1}The number cannot be converted to a BigInt because it is not an integer".into(),
+                                )))],
+                            ),
+                            HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_i64_from_number".to_string())),
+                                vec![HirExpr::Var(value_name.clone())],
+                            ))),
+                        ]);
+                        return self.wrap_call_argument_bindings(
+                            body,
+                            &[(value_name, HirType::F64, value)],
+                        );
+                    }
                     HirType::Str => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_i64_from_string".to_string())),
                         vec![value],

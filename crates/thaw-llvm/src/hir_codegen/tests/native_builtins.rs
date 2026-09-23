@@ -6459,8 +6459,9 @@ fn compiles_weak_ref_finalization_registry_and_proxy() {
 /// `BigInt` support beyond literals/arithmetic: `console.log`'s `n`
 /// suffix, radix `toString`, `BigInt(number|string|boolean)` conversion,
 /// and `BigInt.asIntN`/`asUintN`. thaw's BigInt is a fixed-width `i64`
-/// (not arbitrary precision), and `BigInt(fractional)` truncates where
-/// real JS throws a `RangeError`.
+/// (not arbitrary precision) -- see `compiles_bigint_from_number_range_errors`
+/// for `BigInt(fractional|NaN|Infinity)`, which does throw a real
+/// `RangeError`, matching the specification.
 #[test]
 fn compiles_bigint_operations() {
     let source = r#"
@@ -6489,6 +6490,29 @@ fn compiles_bigint_operations() {
     assert_eq!(
         compile_and_run(source, "bigint_operations"),
         "9007199254740991n\n9007199254740991\n1fffffffffffff\n-ff\nbigint\n42n\n123n\n-42n\n1n\n-1n\n255n\n9007199254740992n\n18014398509481982n\n3002399751580330n\n3n\n3n\n-2n\ntrue\n"
+    );
+}
+
+/// `BigInt(number)` (the specification's `NumberToBigInt`) requires an
+/// *integral* number -- `NaN`, `Infinity`, and any fractional value all
+/// throw a real `RangeError`, matching real JS, instead of the native
+/// `i64` conversion's own silent truncate/saturate (used once the value
+/// is already known integral).
+#[test]
+fn compiles_bigint_from_number_range_errors() {
+    let source = r#"
+        function main(): void {
+            console.log(BigInt(42));
+            console.log(BigInt(-7));
+            try { BigInt(5.5); } catch (error) { console.log((error as Error).name); }
+            try { BigInt(NaN); } catch (error) { console.log((error as Error).name); }
+            try { BigInt(Infinity); } catch (error) { console.log((error as Error).name); }
+            try { BigInt(-Infinity); } catch (error) { console.log((error as Error).name); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bigint_from_number_range_errors"),
+        "42n\n-7n\nRangeError\nRangeError\nRangeError\nRangeError\n"
     );
 }
 
