@@ -76,6 +76,22 @@ fn leak(value: Value) -> *mut Value {
     Box::into_raw(Box::new(value))
 }
 
+#[no_mangle]
+/// `structuredClone` on a dynamic (`Json`-typed) value -- `Value`'s
+/// derived `Clone` is already a full recursive deep copy (it's a plain
+/// tree of owned `Array`/`Object`/scalar variants, no shared/interior
+/// mutability to alias), so mutating the clone never observably affects
+/// the original, matching the specification.
+///
+/// # Safety
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_clone(value: *const Value) -> *mut Value {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return leak(Value::Null);
+    };
+    leak(value.clone())
+}
+
 fn number_value(value: f64) -> Value {
     if value.is_finite() && value.fract() == 0.0 {
         if value >= i64::MIN as f64 && value <= i64::MAX as f64 {

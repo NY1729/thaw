@@ -19,6 +19,15 @@ impl<'a> FnLowerer<'a> {
                 let json = self.wrap_native_value_as_json(value, value_type.clone())?;
                 Ok(HirExpr::JsonAsNative(Box::new(json), value_type))
             }
+            // A dynamic (`any`/`Json`-typed) value -- `structuredClone`
+            // on plain data objects/arrays typed loosely as `any` is the
+            // common case in real code, not the fixed-shape native
+            // `Object`/`Array` case above. `Value`'s derived `Clone` is
+            // already a full recursive deep copy (`thaw_json_clone`).
+            HirType::Json => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_clone".to_string())),
+                vec![value],
+            )),
             HirType::Map(key_type, val_type) => self.lower_structured_clone_map(
                 value,
                 key_type.as_ref().clone(),
