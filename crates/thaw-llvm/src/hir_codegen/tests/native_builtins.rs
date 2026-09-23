@@ -5568,6 +5568,39 @@ fn sparse_array_callbacks_coerce_explicit_annotations() {
     );
 }
 
+/// `Number(x)` on a dynamic (`Json`-typed) value shares its native
+/// implementation (`thaw_json_as_number`) with decoding a statically
+/// `number`-typed field out of dynamic data, which used to just default
+/// every non-`Value::Number` shape to `0.0`. Pins real ECMAScript
+/// `ToNumber` for the shapes that default degrades: numeric strings
+/// (including exponents), booleans, and the empty/one-element/many-
+/// element array cases -- everything but the one shape this file's own
+/// module doc comment documents as a deliberate, load-bearing exception
+/// (a missing key stays `0`, not real JS's `NaN`).
+#[test]
+fn compiles_dynamic_number_coercion_shapes() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const j: any = JSON.parse(
+                '{"s":"123","x":"12.5e2","bad":"abc","b":true,"bf":false,"arr0":[],"arr1":[5],"arr2":[1,2],"n":null}'
+            );
+            console.log(Number(j.s));
+            console.log(Number(j.x));
+            console.log(Number(j.bad));
+            console.log(Number(j.b));
+            console.log(Number(j.bf));
+            console.log(Number(j.arr0));
+            console.log(Number(j.arr1));
+            console.log(Number(j.arr2));
+            console.log(Number(j.n));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_number_coercion_shapes"),
+        "123\n1250\nNaN\n1\n0\n0\n5\nNaN\n0\n"
+    );
+}
+
 /// `Object.freeze`/`seal`/`preventExtensions` record observable state, so
 /// `isFrozen`/`isSealed`/`isExtensible` (and the `Reflect` equivalents)
 /// report the real transitions, including through a `const` alias and an
