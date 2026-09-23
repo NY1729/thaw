@@ -369,6 +369,37 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// Builds a call to an array iteration callback, coercing each
+    /// argument to the callback's own declared parameter type first.
+    ///
+    /// The callback's parameter types come from its own signature (e.g. an
+    /// explicit `(x: number) =>` annotation), which can be narrower than
+    /// the contextual type used to build `available` -- a sparse array's
+    /// element read is `T | undefined` (`Optional`) even when an explicit
+    /// annotation declares plain `T`, since the compiler respects explicit
+    /// annotations over the contextual type (`lower_contextual_arrow`).
+    /// Without this coercion, `.map()`/`.filter()`/predicate/`reduce`/
+    /// `.forEach()` on a possibly-sparse array pass an `Optional` value's
+    /// runtime layout to a callback compiled to expect the bare payload,
+    /// which LLVM's module verifier rejects as a parameter type mismatch.
+    fn lower_array_callback_call(
+        &mut self,
+        callback_name: &str,
+        params: &[HirType],
+        available: &[HirExpr],
+    ) -> Result<HirExpr, String> {
+        let args = available[..params.len()]
+            .iter()
+            .cloned()
+            .zip(params)
+            .map(|(value, declared)| self.coerce_primitive_array_argument(value, declared))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name.to_string())),
+            args,
+        ))
+    }
+
     fn lower_array_callback(
         &mut self,
         expr: &Expr,

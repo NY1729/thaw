@@ -245,10 +245,8 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Lit(HirLit::Undefined),
             HirExpr::Var(index_name.clone()),
         ];
-        let callback_call = HirExpr::Call(
-            Box::new(HirExpr::Var(callback_name.clone())),
-            available[..params.len()].to_vec(),
-        );
+        let callback_call =
+            self.lower_array_callback_call(&callback_name, params, &available)?;
         let callback_call = if returns_void {
             self.array_void_to_undefined(callback_call)?
         } else {
@@ -367,10 +365,8 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(index_name.clone()),
             HirExpr::Var(receiver_name.clone()),
         ];
-        let callback_call = HirExpr::Call(
-            Box::new(HirExpr::Var(callback_name.clone())),
-            available[..params.len()].to_vec(),
-        );
+        let callback_call =
+            self.lower_array_callback_call(&callback_name, params, &available)?;
         let callback_call = if returns_void {
             self.array_void_to_undefined(callback_call)?
         } else {
@@ -520,10 +516,8 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(index_name.clone()),
             HirExpr::Var(receiver_name.clone()),
         ];
-        let callback_call = HirExpr::Call(
-            Box::new(HirExpr::Var(callback_name.clone())),
-            available[..params.len()].to_vec(),
-        );
+        let callback_call =
+            self.lower_array_callback_call(&callback_name, params, &available)?;
         let callback_truthy = self.array_callback_truthy(callback_call)?;
         let increment = |name: &str| {
             HirStmt::Expr(HirExpr::Assign(
