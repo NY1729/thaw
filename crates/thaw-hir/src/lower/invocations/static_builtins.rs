@@ -477,7 +477,32 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
-                        let result = HirExpr::JsonObjectLit(Vec::new(), HirType::Json);
+                        // Record whatever `proto` was for `getPrototypeOf`
+                        // to read back later -- there's still no
+                        // prototype *chain* (property lookup never walks
+                        // it), just enough bookkeeping to make
+                        // `Object.getPrototypeOf(Object.create(proto))`
+                        // round-trip (see `thaw_json_set_prototype`'s own
+                        // doc comment, thaw-std).
+                        let result_name =
+                            format!("__thaw_object_create_result_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(result_name.clone(), HirType::Json);
+                        let prototype =
+                            self.coerce_to_declared(&HirType::Json, arguments[0].clone())?;
+                        let result = HirExpr::Block(vec![
+                            HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_set_prototype".to_string())),
+                                vec![HirExpr::Var(result_name.clone()), prototype],
+                            )),
+                            HirStmt::Return(Some(HirExpr::Var(result_name.clone()))),
+                        ]);
+                        let mut bindings = bindings;
+                        bindings.push((
+                            result_name,
+                            HirType::Json,
+                            HirExpr::JsonObjectLit(Vec::new(), HirType::Json),
+                        ));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if (object.sym == *"Object" || object.sym == *"Reflect")
@@ -509,8 +534,15 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
-                        // Approx: thaw models no prototype chain, so report
-                        // `null` (correct for an `Object.create(null)` map).
+                        if self.infer_expr_type(&arguments[0])? == HirType::Json {
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_get_prototype".to_string())),
+                                vec![arguments[0].clone()],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        // Approx: thaw models no prototype chain for a
+                        // fixed-layout native object, so report `null`.
                         return self.wrap_call_argument_bindings(
                             HirExpr::Lit(HirLit::Null),
                             &bindings,
@@ -545,6 +577,15 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Lit(HirLit::Str("setPrototypeOf".to_string())),
                                     json_arguments,
                                 ],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if self.infer_expr_type(target)? == HirType::Json {
+                            let prototype =
+                                self.coerce_to_declared(&HirType::Json, prototype.clone())?;
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_set_prototype".to_string())),
+                                vec![target.clone(), prototype],
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }

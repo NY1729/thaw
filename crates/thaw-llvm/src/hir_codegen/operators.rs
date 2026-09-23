@@ -205,7 +205,12 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_object_from_string_entries"
                         | "__thaw_json_object_from_bool_entries"
                         | "__thaw_json_object_from_json_entries"
-                        | "__thaw_json_object_assign" => return Some(HirType::Json),
+                        | "__thaw_json_object_assign"
+                        | "__thaw_json_clone"
+                        | "__thaw_json_get_mut"
+                        | "__thaw_json_index_get_mut"
+                        | "__thaw_json_get_prototype"
+                        | "__thaw_json_set_prototype" => return Some(HirType::Json),
                         "JSON.stringify"
                         | "__thaw_json_stringify_number_space"
                         | "__thaw_json_stringify_string_space"

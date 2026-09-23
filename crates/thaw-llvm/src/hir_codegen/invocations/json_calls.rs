@@ -215,6 +215,31 @@ impl<'ctx> HirCompiler<'ctx> {
                     "structuredClone",
                 );
             }
+            "__thaw_json_set_prototype" => {
+                let [object, prototype] = args else {
+                    return Err("__thaw_json_set_prototype expects two operands".into());
+                };
+                let object = self.compile_expr(object)?;
+                let prototype = self.compile_expr(prototype)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_set_prototype").unwrap(),
+                        &[object.into(), prototype.into()],
+                        "json_set_prototype",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "thaw_json_set_prototype returned no value".to_string());
+            }
+            "__thaw_json_get_prototype" => {
+                return self.compile_single_arg_call(
+                    name.trim_start_matches("__"),
+                    args,
+                    "Object.getPrototypeOf",
+                );
+            }
             "__thaw_json_get_mut" => {
                 let [object, key] = args else {
                     return Err("__thaw_json_get_mut expects two operands".into());

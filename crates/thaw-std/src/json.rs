@@ -43,11 +43,27 @@
 //! above -- see `top_level_undefined_string`'s own doc comment for why
 //! that's a string approximation rather than a real `undefined` return.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 use serde::Serialize;
 use serde_json::Value;
+
+thread_local! {
+    // `Object.create(proto)`/`Object.setPrototypeOf` on a `Json`-typed
+    // value record its prototype by pointer identity -- this compiler's
+    // fixed-layout object model has no prototype *chain* (property lookup
+    // never walks it), only enough bookkeeping for `Object.getPrototypeOf`/
+    // `Reflect.getPrototypeOf` to read back exactly what was set. Same
+    // pointer-identity side-table pattern `OBJECT_STATES` (thaw-runtime's
+    // `objects.rs`) already uses for `Object.freeze`/`seal` state on
+    // fixed-layout objects -- `Json` values live for the process lifetime
+    // (see this file's own module doc comment above), so a raw pointer
+    // key stays valid for as long as anything could still look it up.
+    static PROTOTYPES: RefCell<HashMap<usize, *mut Value>> = RefCell::new(HashMap::new());
+}
 
 fn to_str(ptr: *const c_char) -> String {
     unsafe { CStr::from_ptr(ptr) }
@@ -74,6 +90,42 @@ fn string_value(value: *const c_char) -> Value {
 
 fn leak(value: Value) -> *mut Value {
     Box::into_raw(Box::new(value))
+}
+
+/// Records `prototype` as `object`'s prototype (`Object.create(proto)`,
+/// `Object.setPrototypeOf(object, prototype)`). Returns `object` back
+/// unchanged, so a caller can use this as one leg of a single expression
+/// (`Object.setPrototypeOf` itself returns its first argument) instead of
+/// needing a separate void-call statement. See `PROTOTYPES`'s own doc
+/// comment for what this does and doesn't model.
+///
+/// # Safety
+/// `object` must be null or point to a valid, mutable JSON `Value`;
+/// `prototype` must be null or point to a valid JSON `Value` that
+/// outlives this call.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_set_prototype(
+    object: *mut Value,
+    prototype: *mut Value,
+) -> *mut Value {
+    if object.is_null() {
+        return object;
+    }
+    PROTOTYPES.with(|table| {
+        table.borrow_mut().insert(object as usize, prototype);
+    });
+    object
+}
+
+/// Returns the prototype `thaw_json_set_prototype` recorded for `object`,
+/// or a fresh JSON `null` if none was ever recorded (`Object.create(null)`,
+/// or a plain object literal that was never passed through
+/// `Object.create`/`Object.setPrototypeOf`).
+#[no_mangle]
+pub extern "C" fn thaw_json_get_prototype(object: *const Value) -> *mut Value {
+    PROTOTYPES
+        .with(|table| table.borrow().get(&(object as usize)).copied())
+        .unwrap_or_else(|| leak(Value::Null))
 }
 
 #[no_mangle]

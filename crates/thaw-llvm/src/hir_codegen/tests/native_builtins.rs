@@ -5837,6 +5837,48 @@ fn compiles_dynamic_object_descriptors_and_prototypes() {
     );
 }
 
+/// `Object.create`/`getPrototypeOf`/`setPrototypeOf` on an `any`-typed
+/// (`Json`) value -- as opposed to the `Proxy.revocable(...).proxy`
+/// (`JsValue`) receiver the test above covers. There's still no
+/// prototype *chain* (property lookup never walks it, so `created.
+/// inherited` stays unreachable, unlike the `JsValue` case above where
+/// Proxy traps make it work), only enough bookkeeping for
+/// `getPrototypeOf` to read back exactly what `create`/`setPrototypeOf`
+/// set, by pointer identity, matching how `Object.freeze`/`seal` state
+/// already works for fixed-layout objects. A plain object literal never
+/// passed through either stays the accepted approximation: `null`
+/// (real JS: `Object.prototype`, not modeled here). Also pins that a
+/// directly-`console.log`ed result (not read back through a variable
+/// first) prints correctly -- regression for a bug this fix's own
+/// investigation found in `expr_hir_type` (thaw-llvm's `operators.rs`),
+/// which also silently affected `structuredClone`'s `Json` case.
+#[test]
+fn compiles_dynamic_json_value_prototypes() {
+    let source = r#"
+        function main(): void {
+            const proto: any = { greet: "hello" };
+            const created: any = Object.create(proto);
+            console.log(Object.getPrototypeOf(created) === proto);
+            console.log(Object.getPrototypeOf(created));
+
+            const plain: any = {};
+            console.log(Object.getPrototypeOf(plain));
+
+            const withNull: any = Object.create(null);
+            console.log(Object.getPrototypeOf(withNull));
+
+            const target: any = {};
+            const other: any = { x: 1 };
+            console.log(Object.setPrototypeOf(target, other) === target);
+            console.log(Object.getPrototypeOf(target) === other);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_json_value_prototypes"),
+        "true\n{\"greet\":\"hello\"}\nnull\nnull\ntrue\ntrue\n"
+    );
+}
+
 /// Dynamic integrity and prototype operations preserve Proxy trap return
 /// values and exceptions instead of using thaw's fixed-object state model.
 #[test]
