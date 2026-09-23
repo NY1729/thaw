@@ -208,6 +208,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_json_clone" => {
+                return self.compile_single_arg_call(
+                    name.trim_start_matches("__"),
+                    args,
+                    "structuredClone",
+                );
+            }
             "__thaw_json_keys" | "__thaw_json_own_keys" => {
                 let result = self
                     .compile_single_arg_call(name.trim_start_matches("__"), args, "Object.keys")?

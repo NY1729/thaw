@@ -831,6 +831,30 @@ fn compiles_structured_clone_of_a_map_or_set() {
     );
 }
 
+/// `structuredClone` on a dynamic (`any`/`Json`-typed) value -- the common
+/// case for loosely-typed data, as opposed to the fixed-shape native
+/// `Object`/`Array` case above. `Value`'s derived `Clone` is already a
+/// full recursive deep copy, so mutating a top-level field of the clone
+/// (the compiler's existing support for writing an `any`-typed field,
+/// independent of this fix) never touches the original.
+#[test]
+fn compiles_structured_clone_of_a_dynamic_value() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const original: any = { a: 1, b: "x", nested: { d: true } };
+            const clone = structuredClone(original);
+            clone.a = 999;
+            console.log(JSON.stringify(original));
+            console.log(JSON.stringify(clone));
+            console.log(original === clone);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structured_clone_dynamic_value"),
+        "{\"a\":1,\"b\":\"x\",\"nested\":{\"d\":true}}\n{\"a\":999,\"b\":\"x\",\"nested\":{\"d\":true}}\nfalse\n"
+    );
+}
+
 #[test]
 fn json_stringify_calls_function_replacers() {
     let source = r#"function main(): void {

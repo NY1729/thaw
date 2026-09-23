@@ -1610,6 +1610,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "Buffer.isBuffer JSON operand")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_clone" => {
+                        let [value] = args.as_slice() else {
+                            return Err("structuredClone expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "structuredClone JSON operand")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_keys" | "__thaw_json_own_keys" => {
                         let [value] = args.as_slice() else {
                             return Err("Object.keys expects one operand".into());
