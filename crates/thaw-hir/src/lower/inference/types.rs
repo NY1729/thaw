@@ -1610,6 +1610,25 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "Buffer.isBuffer JSON operand")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_set_prototype" => {
+                        let [object, prototype] = args.as_slice() else {
+                            return Err("__thaw_json_set_prototype expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Json, object, "Object.setPrototypeOf target")?;
+                        self.expect_type(
+                            &HirType::Json,
+                            prototype,
+                            "Object.setPrototypeOf prototype",
+                        )?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_get_prototype" => {
+                        let [object] = args.as_slice() else {
+                            return Err("Object.getPrototypeOf expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, object, "Object.getPrototypeOf operand")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_get_mut" => {
                         let [object, key] = args.as_slice() else {
                             return Err("__thaw_json_get_mut expects two operands".into());
