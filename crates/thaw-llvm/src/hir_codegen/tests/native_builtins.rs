@@ -5541,6 +5541,33 @@ fn compiles_sparse_array_search_and_iterators() {
     );
 }
 
+/// A sparse array's element read is `T | undefined` in the general case
+/// (a non-hole slot can still hold a stored `undefined`), but an explicit
+/// callback parameter annotation like `(x: number) =>` keeps its declared
+/// plain `T` rather than being widened to that contextual optional type --
+/// so the call site must coerce the read value down to `T` to match what
+/// the callback actually expects. Regression test for a bug where `.map()`
+/// (and its siblings) skipped that coercion and passed the optional's
+/// runtime layout directly, which the LLVM module verifier rejected as a
+/// parameter type mismatch.
+#[test]
+fn sparse_array_callbacks_coerce_explicit_annotations() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const sparse: number[] = [1, , 3];
+            console.log(sparse.map((x: number) => typeof x).join(","));
+            console.log(sparse.filter((x: number) => x > 0).join(","));
+            console.log(sparse.some((x: number) => x > 2));
+            console.log(sparse.reduce((total: number, x: number) => total + x, 0));
+            sparse.forEach((x: number) => console.log(x));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_array_callbacks_coerce_explicit_annotations"),
+        "number,,number\n1,3\ntrue\n4\n1\n3\n"
+    );
+}
+
 /// `Object.freeze`/`seal`/`preventExtensions` record observable state, so
 /// `isFrozen`/`isSealed`/`isExtensible` (and the `Reflect` equivalents)
 /// report the real transitions, including through a `const` alias and an
