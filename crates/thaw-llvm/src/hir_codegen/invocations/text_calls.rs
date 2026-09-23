@@ -169,6 +169,25 @@ impl<'ctx> HirCompiler<'ctx> {
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
                 return self.compile_single_arg_call(&runtime, args, "string transform");
             }
+            "__thaw_string_to_locale_lower_case" | "__thaw_string_to_locale_upper_case" => {
+                let [value, locale] = args else {
+                    return Err("locale string case expects two operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let locale = self.compile_expr(locale)?;
+                let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[value.into(), locale.into()],
+                        "locale_string_case",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("locale string case returned no value".into());
+            }
             "__thaw_string_to_array" => {
                 let result = self
                     .compile_single_arg_call("thaw_string_to_array", args, "string iterator array")?

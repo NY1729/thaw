@@ -1,4 +1,25 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_sparse_mapping_returns(&mut self, statements: &mut [HirStmt]) -> Result<(), String> {
+        for statement in statements {
+            match statement {
+                HirStmt::Return(Some(value)) => {
+                    *value = self.lower_array_index_operand(value.clone())?;
+                }
+                HirStmt::If(_, then_branch, else_branch) => {
+                    self.lower_sparse_mapping_returns(then_branch)?;
+                    self.lower_sparse_mapping_returns(else_branch)?;
+                }
+                HirStmt::While(_, body) => self.lower_sparse_mapping_returns(body)?,
+                HirStmt::Try(body, _, catch, _) => {
+                    self.lower_sparse_mapping_returns(body)?;
+                    self.lower_sparse_mapping_returns(catch)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn lower_satisfies(
         &mut self,
         satisfies: &swc_ecma_ast::TsSatisfiesExpr,
@@ -118,6 +139,8 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_arrow(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
+        let sparse_mapping_result = self.sparse_mapping_result;
+        self.sparse_mapping_result = false;
         if arrow.type_params.is_some() {
             return Err("generic arrow functions are not supported yet".into());
         }
@@ -146,6 +169,7 @@ impl<'a> FnLowerer<'a> {
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
+        let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let result = (|| {
@@ -218,6 +242,12 @@ impl<'a> FnLowerer<'a> {
                     // way.
                     let ret_type = self.ret_type.clone();
                     let mut expression = self.lower_expr_with_expected_type(expr, Some(&ret_type))?;
+                    if declared_return.is_none() && !arrow.is_async {
+                        expression = self.lower_inferred_array_literal(expression)?;
+                    }
+                    if sparse_mapping_result && declared_return.is_none() && !arrow.is_async {
+                        expression = self.lower_array_index_operand(expression)?;
+                    }
                     let mut inferred = self.infer_expr_type(&expression)?;
                     if arrow.is_async {
                         if let HirExpr::AwaitPromise(promise, resolved) = expression {
@@ -302,6 +332,9 @@ impl<'a> FnLowerer<'a> {
                 ArrowFunctionBody::FunctionBody(block) => {
                     let mut stmts = prefix;
                     stmts.extend(self.lower_stmts(&block.stmts)?);
+                    if sparse_mapping_result && declared_return.is_none() {
+                        self.lower_sparse_mapping_returns(&mut stmts)?;
+                    }
                     let inferred = self.infer_return_type(&stmts)?;
                     if arrow.is_async {
                         let has_await = stmts.iter().any(stmt_contains_await);
@@ -395,6 +428,7 @@ impl<'a> FnLowerer<'a> {
         self.scope = saved_scope;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
+        self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
         self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
         result
@@ -423,6 +457,7 @@ impl<'a> FnLowerer<'a> {
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
+        let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let saved_generator_yields = self.generator_yields.clone();
@@ -474,6 +509,7 @@ impl<'a> FnLowerer<'a> {
         self.scope = saved_scope;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
+        self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
         self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
         self.generator_yields = saved_generator_yields;
@@ -844,9 +880,12 @@ impl<'a> FnLowerer<'a> {
             parameter_types.to_vec()
         };
         let parameter_types = declared_parameter_types.as_slice();
+        let sparse_mapping_result = self.sparse_mapping_result;
+        self.sparse_mapping_result = false;
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
+        let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let result = (|| {
@@ -910,6 +949,16 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         self.lower_expr(expr)?
                     };
+                    let expression = if sparse_mapping_result && expected_return.is_none() {
+                        self.lower_array_index_operand(expression)?
+                    } else {
+                        expression
+                    };
+                    let expression = if expected_return.is_none() {
+                        self.lower_inferred_array_literal(expression)?
+                    } else {
+                        expression
+                    };
                     let inferred = self.infer_expr_type(&expression)?;
                     if expected_return == Some(&HirType::Void) {
                         prefix.push(HirStmt::Expr(expression));
@@ -927,6 +976,9 @@ impl<'a> FnLowerer<'a> {
                 ArrowFunctionBody::FunctionBody(block) => {
                     let mut stmts = prefix;
                     stmts.extend(self.lower_stmts(&block.stmts)?);
+                    if sparse_mapping_result && expected_return.is_none() {
+                        self.lower_sparse_mapping_returns(&mut stmts)?;
+                    }
                     let inferred = self.infer_return_type(&stmts)?;
                     (HirExpr::Block(stmts), inferred)
                 }
@@ -962,6 +1014,7 @@ impl<'a> FnLowerer<'a> {
         self.scope = saved_scope;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
+        self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
         self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
         result

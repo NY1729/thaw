@@ -1000,6 +1000,22 @@ pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
 
 #[no_mangle]
 /// # Safety
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
+    let Some(Value::Array(items)) = (unsafe { value.as_ref() }) else {
+        return unsafe { thaw_json_keys(value) };
+    };
+    alloc_pointer_array(
+        (0..items.len())
+            .map(|index| index.to_string())
+            .chain(std::iter::once("length".to_string()))
+            .map(|key| CString::new(key).unwrap_or_default().into_raw().cast())
+            .collect(),
+    )
+}
+
+#[no_mangle]
+/// # Safety
 ///
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {

@@ -188,17 +188,24 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_conditional_branch(has_error, rejected, complete)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(rejected);
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_promise_reject").unwrap(),
-                &[promise.into(), pending.into()],
-                "reject_executor_throw",
-            )
-            .map_err(|error| error.to_string())?;
+        self.reject_promise_with_pending_exception(promise, pending, "reject_executor_throw")?;
         self.builder
             .build_store(
                 pending_slot,
                 self.context.ptr_type(AddressSpace::default()).const_null(),
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(
+                self.pending_exception_object().as_pointer_value(),
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(
+                self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
+                    .as_pointer_value(),
+                self.context.i64_type().const_zero(),
             )
             .map_err(|error| error.to_string())?;
         self.builder

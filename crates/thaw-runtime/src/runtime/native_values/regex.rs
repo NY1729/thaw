@@ -111,37 +111,26 @@ impl CompiledRegex {
         }
     }
 
-    fn replace_all(&self, text: &str, replacement: &str) -> String {
-        match self {
-            Self::Native(regex) => regex
-                .replace_all(text, regex::NoExpand(replacement))
-                .into_owned(),
-            Self::Fancy(regex) => regex
-                .replace_all(text, fancy_regex::NoExpand(replacement))
-                .into_owned(),
-        }
-    }
-
-    fn replacen(&self, text: &str, limit: usize, replacement: &str) -> String {
-        match self {
-            Self::Native(regex) => regex
-                .replacen(text, limit, regex::NoExpand(replacement))
-                .into_owned(),
-            Self::Fancy(regex) => regex
-                .replacen(text, limit, fancy_regex::NoExpand(replacement))
-                .into_owned(),
-        }
-    }
-
     fn split(&self, text: &str) -> Vec<String> {
-        match self {
-            Self::Native(regex) => regex.split(text).map(str::to_string).collect(),
-            Self::Fancy(regex) => regex
-                .split(text)
-                .filter_map(|part| part.ok())
-                .map(str::to_string)
-                .collect(),
+        let mut parts = Vec::new();
+        let mut cursor = 0;
+        for captures in self.captures_iter(text) {
+            let matched = captures.get(0).unwrap_or("");
+            let start = captures.start;
+            let end = start + matched.len();
+            if start == end && (start == 0 || start == text.len()) {
+                continue;
+            }
+            parts.push(text[cursor..start].to_string());
+            parts.extend(
+                captures.groups[1..]
+                    .iter()
+                    .map(|group| group.clone().unwrap_or_default()),
+            );
+            cursor = end;
         }
+        parts.push(text[cursor..].to_string());
+        parts
     }
 }
 
@@ -332,11 +321,36 @@ unsafe fn thaw_regex_replace_impl(
     let replacement = unsafe { CStr::from_ptr(replacement) }.to_string_lossy();
     let global = all || flags.contains('g');
     let Some(replaced) = with_compiled_regex(&source, &flags, |regex| {
-        if global {
-            regex.replace_all(&value, &replacement)
+        let captures = if global {
+            regex.captures_iter(&value)
         } else {
-            regex.replacen(&value, 1, &replacement)
+            regex.captures(&value).into_iter().collect()
+        };
+        let mut output = String::new();
+        let mut cursor = 0;
+        for captures in captures {
+            let matched = captures.get(0).unwrap_or("");
+            let start = captures.start;
+            let end = start + matched.len();
+            let names = regex.capture_names();
+            let named_captures: Vec<_> = names
+                .into_iter()
+                .zip(captures.groups.iter())
+                .filter_map(|(name, value)| name.map(|name| (name.to_string(), value.clone())))
+                .collect();
+            output.push_str(&value[cursor..start]);
+            output.push_str(&expand_replacement(
+                &replacement,
+                matched,
+                &value[..start],
+                &value[end..],
+                &captures.groups[1..],
+                &named_captures,
+            ));
+            cursor = end;
         }
+        output.push_str(&value[cursor..]);
+        output
     }) else {
         return std::ptr::null();
     };
@@ -347,9 +361,8 @@ unsafe fn thaw_regex_replace_impl(
 /// Replaces the first match of the regex named by `source`/`flags` in
 /// `value` with `replacement`, or every match when `flags` contains `g`,
 /// matching `String.prototype.replace` for a `RegExp` search value.
-/// `replacement` is inserted literally: `$1`/`$&`-style capture-group
-/// interpolation is not supported. Returns a null pointer for a null
-/// argument or a pattern the `regex` crate cannot compile.
+/// Returns a null pointer for a null argument or a pattern the `regex`
+/// crate cannot compile.
 ///
 /// # Safety
 /// `value`, `source`, `flags` and `replacement` must be null or point to
@@ -420,10 +433,12 @@ pub unsafe extern "C" fn thaw_regex_split(
     // instead) -- matching thaw_string_split's own limit handling, and
     // JavaScript's own `String.prototype.split(separator, limit)`, which
     // truncates the result rather than limiting how many splits happen.
-    let limit = if limit.is_finite() && limit >= 0.0 {
-        limit as usize
-    } else {
+    let limit = if limit == -1.0 {
         usize::MAX
+    } else if limit.is_finite() {
+        limit.trunc().rem_euclid(4_294_967_296.0) as usize
+    } else {
+        0
     };
     parts.truncate(limit);
     arena_string_array(parts)

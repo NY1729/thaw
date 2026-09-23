@@ -7,6 +7,9 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let mut field_types = Vec::with_capacity(elements.len());
         for element in elements {
+            if matches!(element, HirType::Undefined | HirType::Null) {
+                continue;
+            }
             let HirType::Object(fields) = element else {
                 return Err(format!(
                     "cannot access `.{property}` because union member {element:?} is not an object"
@@ -41,6 +44,28 @@ impl<'a> FnLowerer<'a> {
         let parameter = "__thaw_union_property_value".to_string();
         let mut statements = Vec::with_capacity(elements.len());
         for (index, element) in elements.iter().enumerate() {
+            if matches!(element, HirType::Undefined | HirType::Null) {
+                let returns = vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                    "Cannot read properties of {}",
+                    if *element == HirType::Null { "null" } else { "undefined" }
+                ))))];
+                if index + 1 == elements.len() {
+                    statements.extend(returns);
+                } else {
+                    statements.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(
+                                Box::new(HirExpr::Var(parameter.clone())), elements.to_vec(),
+                            )),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
+                        returns,
+                        Vec::new(),
+                    ));
+                }
+                continue;
+            }
             let field = HirExpr::PropAccess(
                 Box::new(HirExpr::UnionValue(
                     Box::new(HirExpr::Var(parameter.clone())),

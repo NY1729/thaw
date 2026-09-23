@@ -462,7 +462,114 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "array presence index")?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_array_copy_presence" => {
+                    "__thaw_array_has_property" | "__thaw_array_has_own"
+                    | "__thaw_array_property_is_enumerable" => {
+                        let [array, key] = args.as_slice() else {
+                            return Err("array property check expects two operands".into());
+                        };
+                        if !matches!(self.infer_expr_type(array)?, HirType::Array(_)) {
+                            return Err("array property check requires an array".into());
+                        }
+                        if !matches!(self.infer_expr_type(key)?, HirType::Str | HirType::Symbol) {
+                            return Err("array property key must be a string or symbol".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_array_undefined_index_of" => {
+                        let [array, index, reverse, kind, include_holes, union_tag] = args.as_slice() else {
+                            return Err("undefined array search expects six operands".into());
+                        };
+                        if !matches!(self.infer_expr_type(array)?, HirType::Array(_)) {
+                            return Err("undefined search requires an array".into());
+                        }
+                        self.expect_type(&HirType::F64, index, "search start")?;
+                        self.expect_type(&HirType::Bool, reverse, "search direction")?;
+                        self.expect_type(&HirType::F64, kind, "search element kind")?;
+                        self.expect_type(&HirType::Bool, include_holes, "search hole mode")?;
+                        self.expect_type(&HirType::F64, union_tag, "search union tag")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_tagged_array_index_of" => {
+                        let [array, needle, index, reverse, includes] = args.as_slice() else {
+                            return Err("tagged array search expects five operands".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        let HirType::Array(element) = ty else {
+                            return Err("tagged search requires an array".into());
+                        };
+                        let payload = match element.as_ref() {
+                            HirType::Optional(payload)
+                            | HirType::Nullable(payload)
+                            | HirType::Nullish(payload) => payload.as_ref(),
+                            HirType::Union(members) if members.contains(&self.infer_expr_type(needle)?) => {
+                                self.expect_type(&HirType::F64, index, "search start")?;
+                                self.expect_type(&HirType::Bool, reverse, "search direction")?;
+                                self.expect_type(&HirType::Bool, includes, "search mode")?;
+                                return Ok(HirType::F64);
+                            }
+                            _ => return Err("tagged search requires tagged elements".into()),
+                        };
+                        self.expect_type(payload, needle, "search needle")?;
+                        self.expect_type(&HirType::F64, index, "search start")?;
+                        self.expect_type(&HirType::Bool, reverse, "search direction")?;
+                        self.expect_type(&HirType::Bool, includes, "search mode")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_array_index_state" => {
+                        let [array, index] = args.as_slice() else {
+                            return Err("array state lookup expects two operands".into());
+                        };
+                        if !matches!(self.infer_expr_type(array)?, HirType::Array(_)) {
+                            return Err("array state lookup requires an array".into());
+                        }
+                        self.expect_type(&HirType::F64, index, "array state index")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_array_densify" => {
+                        let [array] = args.as_slice() else {
+                            return Err("array densify expects one operand".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        if !matches!(ty, HirType::Array(_)) {
+                            return Err("array densify requires an array".into());
+                        }
+                        return Ok(ty);
+                    }
+                    "__thaw_array_copy_index_state" => {
+                        let [target, target_index, source, source_index] = args.as_slice() else {
+                            return Err("array state copy expects four operands".into());
+                        };
+                        let ty = self.infer_expr_type(target)?;
+                        if ty != self.infer_expr_type(source)? || !matches!(ty, HirType::Array(_)) {
+                            return Err("array state copy requires matching arrays".into());
+                        }
+                        self.expect_type(&HirType::F64, target_index, "target index")?;
+                        self.expect_type(&HirType::F64, source_index, "source index")?;
+                        return Ok(ty);
+                    }
+                    "__thaw_array_resize" => {
+                        let [array, length] = args.as_slice() else {
+                            return Err("array resize expects an array and length".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        if !matches!(ty, HirType::Array(_)) {
+                            return Err("array resize requires a homogeneous array".into());
+                        }
+                        self.expect_type(&HirType::F64, length, "array length")?;
+                        return Ok(ty);
+                    }
+                    "__thaw_array_set_undefined" | "__thaw_array_set_hole" => {
+                        let [array, index] = args.as_slice() else {
+                            return Err("array undefined write expects two operands".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        if !matches!(ty, HirType::Array(_)) {
+                            return Err("array undefined write requires an array".into());
+                        }
+                        self.expect_type(&HirType::F64, index, "undefined write index")?;
+                        return Ok(ty);
+                    }
+                    "__thaw_array_copy_presence" | "__thaw_array_map_presence" => {
                         let [target, source] = args.as_slice() else {
                             return Err("array presence copy expects two operands".into());
                         };
@@ -596,7 +703,8 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_number_array_join"
                     | "__thaw_string_array_join"
                     | "__thaw_bool_array_join"
-                    | "__thaw_object_array_join" => {
+                    | "__thaw_object_array_join"
+                    | "__thaw_tagged_array_join" => {
                         if args.len() != 2 {
                             return Err("array join expects two operands".into());
                         }
@@ -637,7 +745,9 @@ impl<'a> FnLowerer<'a> {
                         let HirType::Array(element) = &ty else {
                             return Err("array fill requires a homogeneous array".into());
                         };
-                        self.expect_type(element, &args[1], "fill value")?;
+                        if self.infer_expr_type(&args[1])? != HirType::Optional(element.clone()) {
+                            self.expect_type(element, &args[1], "fill value")?;
+                        }
                         for argument in &args[2..] {
                             self.expect_type(&HirType::F64, argument, "fill index")?;
                         }
@@ -675,7 +785,9 @@ impl<'a> FnLowerer<'a> {
                             return Err("array push/unshift requires a homogeneous array".into());
                         };
                         for value in values {
-                            self.expect_type(element, value, "array push/unshift value")?;
+                            if self.infer_expr_type(value)? != HirType::Optional(element.clone()) {
+                                self.expect_type(element, value, "array push/unshift value")?;
+                            }
                         }
                         return Ok(HirType::F64);
                     }
@@ -689,6 +801,30 @@ impl<'a> FnLowerer<'a> {
                         };
                         return Ok(*element);
                     }
+                    "__thaw_array_pop_optional" | "__thaw_array_shift_optional" => {
+                        let [array] = args.as_slice() else {
+                            return Err("array pop/shift expects one operand".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        let HirType::Array(element) = ty else {
+                            return Err("array pop/shift requires a homogeneous array".into());
+                        };
+                        if let HirType::Nullable(payload) = element.as_ref() {
+                            return Ok(HirType::Nullish(payload.clone()));
+                        }
+                        if let HirType::Union(members) = element.as_ref() {
+                            let mut members = members.clone();
+                            if !members.contains(&HirType::Undefined) {
+                                members.push(HirType::Undefined);
+                            }
+                            return Ok(HirType::Union(members));
+                        }
+                        return Ok(if matches!(element.as_ref(), HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined) {
+                            *element
+                        } else {
+                            HirType::Optional(element)
+                        });
+                    }
                     "__thaw_array_splice" => {
                         if args.len() < 3 {
                             return Err("array splice expects at least three operands".into());
@@ -700,7 +836,9 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, &args[1], "splice start")?;
                         self.expect_type(&HirType::F64, &args[2], "splice deleteCount")?;
                         for item in &args[3..] {
-                            self.expect_type(element, item, "splice item")?;
+                            if self.infer_expr_type(item)? != HirType::Optional(element.clone()) {
+                                self.expect_type(element, item, "splice item")?;
+                            }
                         }
                         return Ok(ty);
                     }
@@ -787,6 +925,15 @@ impl<'a> FnLowerer<'a> {
                             return Err("string trim expects one operand".into());
                         };
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_string_to_locale_lower_case"
+                    | "__thaw_string_to_locale_upper_case" => {
+                        let [value, locale] = args.as_slice() else {
+                            return Err("locale string case expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "string case receiver")?;
+                        self.expect_type(&HirType::Str, locale, "string case locale")?;
                         return Ok(HirType::Str);
                     }
                     "__thaw_string_slice" | "__thaw_string_substring" | "__thaw_string_substr" => {
@@ -1161,7 +1308,21 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_date_get_hours"
                     | "__thaw_date_get_minutes"
                     | "__thaw_date_get_seconds"
-                    | "__thaw_date_get_milliseconds" => {
+                    | "__thaw_date_get_milliseconds"
+                    | "__thaw_date_get_local_full_year"
+                    | "__thaw_date_get_local_month"
+                    | "__thaw_date_get_local_date"
+                    | "__thaw_date_get_local_day"
+                    | "__thaw_date_get_local_hours"
+                    | "__thaw_date_get_local_minutes"
+                    | "__thaw_date_get_local_seconds"
+                    | "__thaw_date_get_local_milliseconds"
+                    | "__thaw_date_get_month_for_full_year"
+                    | "__thaw_date_get_date_for_full_year"
+                    | "__thaw_date_get_local_month_for_full_year"
+                    | "__thaw_date_get_local_date_for_full_year"
+                    | "__thaw_date_time_clip"
+                    | "__thaw_date_get_timezone_offset" => {
                         let [timestamp] = args.as_slice() else {
                             return Err(format!("{name} expects one operand"));
                         };
@@ -1257,12 +1418,20 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_epoch_nanoseconds"
                     | "__thaw_temporal_time_zone_id" => return Ok(HirType::Str),
                     "__thaw_date_set_full_year"
+                    | "__thaw_date_set_local_full_year"
                     | "__thaw_date_set_month"
+                    | "__thaw_date_set_local_month"
                     | "__thaw_date_set_date"
+                    | "__thaw_date_set_local_date"
                     | "__thaw_date_set_hours"
+                    | "__thaw_date_set_local_hours"
                     | "__thaw_date_set_minutes"
+                    | "__thaw_date_set_local_minutes"
                     | "__thaw_date_set_seconds"
+                    | "__thaw_date_set_local_seconds"
                     | "__thaw_date_set_milliseconds"
+                    | "__thaw_date_set_local_milliseconds"
+                    | "__thaw_date_local"
                     | "__thaw_date_utc" => {
                         for (index, argument) in args.iter().enumerate() {
                             self.expect_type(
@@ -1441,7 +1610,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "Buffer.isBuffer JSON operand")?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_json_keys" => {
+                    "__thaw_json_keys" | "__thaw_json_own_keys" => {
                         let [value] = args.as_slice() else {
                             return Err("Object.keys expects one operand".into());
                         };
@@ -1454,13 +1623,14 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
                     "__thaw_array_keys" => {
-                        let [value] = args.as_slice() else {
-                            return Err("Object.keys expects one operand".into());
+                        let [value, include_length] = args.as_slice() else {
+                            return Err("array keys expects an array and length flag".into());
                         };
                         let ty = self.infer_expr_type(value)?;
                         if !matches!(ty, HirType::Array(_) | HirType::Tuple(_)) {
                             return Err(format!("Object.keys expected an array, got {ty:?}"));
                         }
+                        self.expect_type(&HirType::Bool, include_length, "array length key flag")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
                     "__thaw_json_values" => {

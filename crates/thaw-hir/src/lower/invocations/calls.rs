@@ -534,6 +534,7 @@ impl<'a> FnLowerer<'a> {
                         | "getMinutes"
                         | "getSeconds"
                         | "getMilliseconds"
+                        | "getTimezoneOffset"
                         | "getUTCFullYear"
                         | "getUTCMonth"
                         | "getUTCDate"
@@ -1358,6 +1359,11 @@ impl<'a> FnLowerer<'a> {
                 );
             }
             let value = self.lower_expr(&arg.expr)?;
+            let value = if callee_name != "BigInt" {
+                self.lower_primitive_array_operand(value)?
+            } else {
+                value
+            };
             let ty = self.infer_expr_type(&value)?;
             if callee_name == "String" && ty == HirType::Str {
                 return Ok(HirExpr::Call(
@@ -1438,6 +1444,12 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("readDynamicValue".to_string())),
                     vec![value],
                 ))));
+            }
+            if callee_name == "Number"
+                && matches!(ty, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                    | HirType::Undefined | HirType::Null)
+            {
+                return self.coerce_primitive_to_number(value);
             }
             if callee_name == "Number"
                 && matches!(
@@ -1982,7 +1994,7 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             value
                         };
-                        self.coerce_to_declared(declared, value).map_err(|error| {
+                        self.coerce_primitive_array_argument(value, declared).map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                         })
                     }
@@ -1990,6 +2002,21 @@ impl<'a> FnLowerer<'a> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        if matches!(callee_name.as_str(), "console.log" | "console.info" | "console.debug" | "console.warn" | "console.error" | "console.assert") {
+            args = args.into_iter().map(|arg| match arg {
+                HirExpr::TypedIndex(array, index, element)
+                    if matches!(self.infer_expr_type(&array), Ok(HirType::Array(_))) => {
+                        self.lower_array_index(
+                            *array,
+                            HirType::Array(Box::new(element.clone())),
+                            element,
+                            *index,
+                        )
+                    }
+                other => Ok(other),
+            }).collect::<Result<Vec<_>, _>>()?;
+        }
 
         if callee_name == "console.assert" {
             if args.is_empty() {
@@ -2026,7 +2053,7 @@ impl<'a> FnLowerer<'a> {
                         matches!(constraint, TsType::TsTypeOperator(operator) if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf)
                     })
             };
-            let actual = args
+            let mut actual = args
                 .iter()
                 .enumerate()
                 .map(|(index, arg)| {
@@ -2045,6 +2072,17 @@ impl<'a> FnLowerer<'a> {
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            if call.type_args.is_some() {
+                for (index, ty) in actual.iter_mut().enumerate() {
+                    let Some(argument) = call.args.get(index).filter(|arg| arg.spread.is_none()) else {
+                        continue;
+                    };
+                    let HirType::Optional(payload) = ty else { continue };
+                    if self.is_primitive_array_index(&argument.expr, payload) {
+                        *ty = payload.as_ref().clone();
+                    }
+                }
+            }
             let types = if let Some(type_args) = &call.type_args {
                 resolve_explicit_generic_type_tuple(
                     signature,
@@ -2162,7 +2200,7 @@ impl<'a> FnLowerer<'a> {
                     .enumerate()
                     .map(|(i, declared)| {
                         let value = args.next().expect("fixed_count <= args.len()");
-                        self.coerce_to_declared(declared, value).map_err(|error| {
+                        self.coerce_primitive_array_argument(value, declared).map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                         })
                     })
@@ -2238,7 +2276,7 @@ impl<'a> FnLowerer<'a> {
                 .enumerate()
                 .map(|(i, declared)| {
                     let value = args.next().expect("fixed_count <= args.len()");
-                    self.coerce_to_declared(declared, value).map_err(|error| {
+                    self.coerce_primitive_array_argument(value, declared).map_err(|error| {
                         format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                     })
                 })
@@ -2265,25 +2303,39 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &argument_bindings);
         }
 
+        let mut args = args;
         let lowered_name = if let Some(types) = generic_types
             .as_ref()
             .filter(|types| !types.contains(&HirType::Dynamic))
         {
-            let param_types = args
-                .iter()
-                .map(|arg| self.infer_expr_type(arg))
-                .collect::<Result<Vec<_>, _>>()?;
             let signature = signature
                 .as_ref()
                 .expect("generic types require a generic signature");
-            let lowered_name =
-                specialized_generic_function_name(&callee_name, &param_types, signature, types);
             let substitution = signature
                 .generic_type_params
                 .iter()
                 .cloned()
                 .zip(types.iter().cloned())
                 .collect::<HashMap<_, _>>();
+            if call.type_args.is_some() {
+                for (index, arg) in args.iter_mut().enumerate() {
+                    let Some(pattern) = signature.generic_param_patterns.get(index) else {
+                        break;
+                    };
+                    let declared = instantiate_generic_pattern(pattern, &substitution)?;
+                    if matches!(declared, HirType::F64 | HirType::Str)
+                        && matches!(self.infer_expr_type(arg)?, HirType::Optional(payload) if *payload == declared)
+                    {
+                        *arg = self.coerce_primitive_array_argument(arg.clone(), &declared)?;
+                    }
+                }
+            }
+            let param_types = args
+                .iter()
+                .map(|arg| self.infer_expr_type(arg))
+                .collect::<Result<Vec<_>, _>>()?;
+            let lowered_name =
+                specialized_generic_function_name(&callee_name, &param_types, signature, types);
             let return_type = resolve_ts_type_with_substitution(
                 signature
                     .generic_return_type

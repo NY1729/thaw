@@ -6,7 +6,7 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                 if property.sym == *"codePointAt" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "codePointAt receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.codePointAt")?;
@@ -104,10 +104,13 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"concat" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let (arguments, spread_bindings) =
-                        self.lower_native_spread_values(&call.args, "native concat")?;
+                    let (arguments, spread_bindings) = if matches!(receiver_type, HirType::Array(_)) {
+                        self.lower_native_spread_array_values(&call.args, "native concat")?
+                    } else {
+                        self.lower_native_spread_values(&call.args, "native concat")?
+                    };
                     if let HirType::Array(element) = receiver_type {
                         let element = element.as_ref().clone();
                         let array_type = HirType::Array(Box::new(element.clone()));
@@ -122,12 +125,12 @@ impl<'a> FnLowerer<'a> {
                             let actual = self.infer_expr_type(&value)?;
                             let part = if actual == HirType::Array(Box::new(element.clone())) {
                                 value
-                            } else if actual == element {
-                                HirExpr::ArrayLit(vec![value])
                             } else {
-                                return Err(format!(
-                                    "array concat argument has type {actual:?}, expected {element:?} or an array of it"
-                                ));
+                                let value = self.coerce_array_insert_value(value, &element)
+                                    .map_err(|_| format!(
+                                        "array concat argument has type {actual:?}, expected {element:?} or an array of it"
+                                    ))?;
+                                self.lower_native_array_literal(vec![value], element.clone())?
                             };
                             let ty = self.infer_expr_type(&part)?;
                             let name = format!(
@@ -180,7 +183,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "string trim receiver")?;
                     let suffix = match property.sym.as_ref() {
                         "trim" => "trim",
@@ -194,7 +197,7 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if property.sym == *"repeat" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "string repeat receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.repeat")?;
@@ -265,7 +268,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if matches!(property.sym.as_ref(), "padStart" | "padEnd") {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "string pad receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "String.padStart/padEnd")?;
@@ -309,7 +312,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"toFixed" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::F64, &receiver, "toFixed receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "Number.toFixed")?;
@@ -385,7 +388,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if property.sym == *"toPrecision" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::F64, &receiver, "toPrecision receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "Number.toPrecision")?;
@@ -468,7 +471,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if property.sym == *"toExponential" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::F64, &receiver, "toExponential receiver")?;
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_values(&call.args, "Number.toExponential")?;
@@ -557,10 +560,6 @@ impl<'a> FnLowerer<'a> {
                     property.sym.as_ref(),
                     "toLowerCase" | "toUpperCase" | "toLocaleLowerCase" | "toLocaleUpperCase"
                 ) {
-                    // The `toLocale*` variants take an optional `locales`
-                    // argument, which is ignored: locale-specific casing
-                    // (e.g. Turkish dotless i) is approximated with the
-                    // locale-independent transform.
                     let locale = matches!(
                         property.sym.as_ref(),
                         "toLocaleLowerCase" | "toLocaleUpperCase"
@@ -568,26 +567,46 @@ impl<'a> FnLowerer<'a> {
                     if call.args.len() > usize::from(locale) {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(&HirType::Str, &receiver, "string case receiver")?;
-                    let suffix = if matches!(
+                    let lower = matches!(
                         property.sym.as_ref(),
                         "toLowerCase" | "toLocaleLowerCase"
-                    ) {
+                    );
+                    let suffix = if locale && lower {
+                        "to_locale_lower_case"
+                    } else if locale {
+                        "to_locale_upper_case"
+                    } else if lower {
                         "to_lower_case"
                     } else {
                         "to_upper_case"
                     };
+                    let mut arguments = vec![receiver];
+                    if locale {
+                        arguments.push(if let Some(argument) = call.args.first() {
+                            if argument.spread.is_some() {
+                                return Err(format!(
+                                    "native `.{}()` does not support spread arguments",
+                                    property.sym
+                                ));
+                            }
+                            let argument = self.lower_expr(&argument.expr)?;
+                            self.coerce_primitive_to_string(argument)?
+                        } else {
+                            HirExpr::Lit(HirLit::Str(String::new()))
+                        });
+                    }
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
-                        vec![receiver],
+                        arguments,
                     ));
                 }
                 if matches!(property.sym.as_ref(), "isWellFormed" | "toWellFormed") {
                     if !call.args.is_empty() {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     self.expect_type(
                         &HirType::Str,
                         &receiver,
@@ -608,4 +627,3 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 }
-

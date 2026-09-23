@@ -526,7 +526,12 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty
                 };
-                let mut value = self.coerce_to_declared(&ty, value)?;
+                let sparse_index = self.is_primitive_array_index(init, &ty);
+                let mut value = if binding.type_ann.is_some() && sparse_index {
+                    self.coerce_primitive_array_argument(value, &ty)?
+                } else {
+                    self.coerce_to_declared(&ty, value)?
+                };
 
                 let storage_type = if class_name_from_type(&actual_type).is_some()
                     && matches!(&ty, HirType::Object(fields) if fields.iter().any(|(_, field)| *field == HirType::Dynamic))

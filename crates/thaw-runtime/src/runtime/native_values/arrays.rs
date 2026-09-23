@@ -1,9 +1,10 @@
 #[no_mangle]
 /// Splits `value` on `separator` into the native `string[]` array layout,
 /// matching `String.prototype.split` for a string separator (`RegExp`
-/// separators are not supported). An empty separator splits into Unicode
-/// scalar values. `limit` truncates the result and is treated as unlimited
-/// when not finite or negative.
+/// separators are not supported). An empty separator splits into UTF-16
+/// code units. `limit` is coerced with ECMAScript's `ToUint32`; `-1` is
+/// also the generated code's omitted-limit sentinel and has the same
+/// observable result as `u32::MAX` for a native array.
 ///
 /// # Safety
 /// `value` and `separator` must be null or point to valid NUL-terminated
@@ -19,17 +20,22 @@ pub unsafe extern "C" fn thaw_string_split(
     let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
     let mut parts: Vec<String> = if separator.is_empty() {
-        value.chars().map(|character| character.to_string()).collect()
+        value
+            .encode_utf16()
+            .map(|unit| String::from_utf16_lossy(&[unit]))
+            .collect()
     } else {
         value
             .split(separator.as_ref())
             .map(str::to_string)
             .collect()
     };
-    let limit = if limit.is_finite() && limit >= 0.0 {
-        limit as usize
-    } else {
+    let limit = if limit == -1.0 {
         usize::MAX
+    } else if limit.is_finite() {
+        limit.trunc().rem_euclid(4_294_967_296.0) as usize
+    } else {
+        0
     };
     parts.truncate(limit);
     let output = thaw_arena::thaw_arena_alloc((parts.len() + 1) * 8, 8);
@@ -93,29 +99,51 @@ pub unsafe extern "C" fn thaw_string_to_array(value: *const c_char) -> *mut u8 {
 /// # Safety
 /// `array` must be null or point to a native array layout beginning with its
 /// signed 64-bit element count.
-pub unsafe extern "C" fn thaw_array_keys(array: *const u8) -> *mut u8 {
+pub unsafe extern "C" fn thaw_array_keys(
+    array: *const u8,
+    presence: *const u8,
+    include_length: u8,
+) -> *mut u8 {
     let length = if array.is_null() {
         0
     } else {
         unsafe { array.cast::<i64>().read() }.max(0) as usize
     };
-    let output = thaw_arena::thaw_arena_alloc((length + 1) * 8, 8);
+    let present = |index| unsafe { array_index_exists(presence, index) };
+    let key_count = (0..length).filter(|index| present(*index)).count() + usize::from(include_length != 0);
+    let output = thaw_arena::thaw_arena_alloc((key_count + 1) * 8, 8);
     if output.is_null() {
         return output;
     }
-    unsafe { output.cast::<i64>().write(length as i64) };
+    unsafe { output.cast::<i64>().write(key_count as i64) };
+    let mut position = 0;
     for index in 0..length {
+        if !present(index) {
+            continue;
+        }
         let Some(key) = arena_c_string(&index.to_string()) else {
             return std::ptr::null_mut();
         };
         unsafe {
             output
-                .add(8 + index * 8)
+                .add(8 + position * 8)
                 .cast::<*const u8>()
                 .write_unaligned(key)
         };
+        position += 1;
+    }
+    if include_length != 0 {
+        unsafe {
+            output.add(8 + position * 8).cast::<*const c_char>().write_unaligned(c"length".as_ptr());
+        }
     }
     output
+}
+
+unsafe fn array_index_exists(presence: *const u8, index: usize) -> bool {
+    presence.is_null()
+        || index >= unsafe { presence.cast::<u64>().read() as usize }
+        || unsafe { presence.add(8 + index).read() != 0 }
 }
 
 #[no_mangle]
@@ -164,8 +192,95 @@ pub unsafe extern "C" fn thaw_array_presence_reverse(presence: *mut u8) -> *mut 
 }
 
 #[no_mangle]
-/// Compacts present elements to the front before sorting and moves holes to
-/// the end of the presence mask. Returns the number of present elements.
+/// Converts holes in a presence mask to present `undefined` entries.
+///
+/// # Safety
+/// `presence` must be null or point to a writable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_densify(presence: *mut u8) -> *mut u8 {
+    if presence.is_null() {
+        return presence;
+    }
+    let length = unsafe { presence.cast::<u64>().read() as usize };
+    for index in 0..length {
+        let state = unsafe { presence.add(8 + index) };
+        if unsafe { state.read() } == 0 {
+            unsafe { state.write(2) };
+        }
+    }
+    presence
+}
+
+#[no_mangle]
+/// Keeps source holes but marks every visited map result as a concrete value.
+///
+/// # Safety
+/// `presence` must be null or point to a writable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_mapped(presence: *mut u8) -> *mut u8 {
+    if !presence.is_null() {
+        let length = unsafe { presence.cast::<u64>().read() as usize };
+        for index in 0..length {
+            let state = unsafe { presence.add(8 + index) };
+            if unsafe { state.read() } == 2 {
+                unsafe { state.write(1) };
+            }
+        }
+    }
+    presence
+}
+
+#[no_mangle]
+/// Marks undefined payloads in a tagged array before sorting.
+/// `mode`: 0 = none, 1 = matching tag, 2 = all elements.
+///
+/// # Safety
+/// `array` is a readable array of 16-byte tagged slots and `presence` is its writable mask or null.
+pub unsafe extern "C" fn thaw_array_presence_tagged_sort(
+    array: *const u8,
+    mut presence: *mut u8,
+    undefined_tag: u8,
+    mode: u8,
+) -> *mut u8 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return presence;
+    };
+    let mask_len = if presence.is_null() { 0 } else { unsafe { presence.cast::<u64>().read() as usize } };
+    if presence.is_null() {
+        if mode == 0
+            || (mode == 1
+                && !(0..length).any(|index| unsafe { array.add(8 + index * 16).read() } == undefined_tag))
+        {
+            return presence;
+        }
+    }
+    if mask_len < length {
+        let previous = presence;
+        presence = thaw_arena::thaw_arena_alloc(8 + length, 1);
+        if presence.is_null() {
+            return previous;
+        }
+        unsafe {
+            presence.cast::<u64>().write(length as u64);
+            std::ptr::write_bytes(presence.add(8), 1, length);
+            if !previous.is_null() {
+                std::ptr::copy_nonoverlapping(previous.add(8), presence.add(8), mask_len);
+            }
+        }
+    }
+    for index in 0..length {
+        let state = unsafe { presence.add(8 + index) };
+        if mode != 0
+            && unsafe { state.read() } == 1
+            && (mode == 2 || unsafe { array.add(8 + index * 16).read() } == undefined_tag)
+        {
+            unsafe { state.write(2) };
+        }
+    }
+    presence
+}
+
+#[no_mangle]
+/// Compacts concrete values before sorting, followed by undefined entries and holes.
+/// Returns the number of concrete values that should be sorted.
 ///
 /// # Safety
 /// `array` and `presence` must describe the same writable Thaw array.
@@ -182,9 +297,14 @@ pub unsafe extern "C" fn thaw_array_presence_compact(
     }
     let mask_len = unsafe { presence.cast::<u64>().read() as usize };
     let mut write = 0;
+    let mut undefined_count = 0;
     for read in 0..length {
-        let present = read >= mask_len || unsafe { presence.add(8 + read).read() != 0 };
-        if present {
+        let state = if read >= mask_len {
+            1
+        } else {
+            unsafe { presence.add(8 + read).read() }
+        };
+        if state == 1 {
             if write != read {
                 unsafe {
                     std::ptr::copy(
@@ -195,11 +315,18 @@ pub unsafe extern "C" fn thaw_array_presence_compact(
                 }
             }
             write += 1;
+        } else if state == 2 {
+            undefined_count += 1;
         }
     }
     unsafe {
         std::ptr::write_bytes(presence.add(8), 1, write);
-        std::ptr::write_bytes(presence.add(8 + write), 0, length - write);
+        std::ptr::write_bytes(presence.add(8 + write), 2, undefined_count);
+        std::ptr::write_bytes(
+            presence.add(8 + write + undefined_count),
+            0,
+            length - write - undefined_count,
+        );
     }
     write
 }
@@ -286,18 +413,25 @@ pub unsafe extern "C" fn thaw_array_presence_copy_within(
 /// # Safety
 /// `presence` must be null or point to a writable Thaw presence mask.
 pub unsafe extern "C" fn thaw_array_presence_fill(
-    presence: *mut u8,
+    mut presence: *mut u8,
+    length: usize,
     start: f64,
     end: f64,
+    state: u8,
 ) -> *mut u8 {
-    if presence.is_null() {
-        return presence;
-    }
-    let length = unsafe { presence.cast::<u64>().read() as usize };
     let start = relative_array_index(start, length);
     let end = relative_array_index(end, length);
-    if end > start {
-        unsafe { std::ptr::write_bytes(presence.add(8 + start), 1, end - start) };
+    if end <= start {
+        return presence;
+    }
+    if presence.is_null() {
+        presence = unsafe { thaw_array_presence_set_state(presence, length, start, state) };
+    }
+    if !presence.is_null() {
+        let mask_len = unsafe { presence.cast::<u64>().read() as usize };
+        if start < mask_len {
+            unsafe { std::ptr::write_bytes(presence.add(8 + start), state, end.min(mask_len) - start) };
+        }
     }
     presence
 }
@@ -318,6 +452,152 @@ pub unsafe extern "C" fn thaw_array_presence_mark(presence: *mut u8, index: usiz
 }
 
 #[no_mangle]
+/// Writes an exact array element state, allocating a sidecar for a dense array if needed.
+///
+/// # Safety
+/// `presence` must be null or point to a writable Thaw presence mask.
+pub unsafe extern "C" fn thaw_array_presence_set_state(
+    mut presence: *mut u8,
+    length: usize,
+    index: usize,
+    state: u8,
+) -> *mut u8 {
+    if index >= length {
+        return presence;
+    }
+    if presence.is_null() {
+        if state == 1 {
+            return presence;
+        }
+        presence = thaw_arena::thaw_arena_alloc(8 + length, 1);
+        if presence.is_null() {
+            return presence;
+        }
+        unsafe {
+            presence.cast::<u64>().write(length as u64);
+            std::ptr::write_bytes(presence.add(8), 1, length);
+        }
+    }
+    if index < unsafe { presence.cast::<u64>().read() as usize } {
+        unsafe { presence.add(8 + index).write(state) };
+    }
+    presence
+}
+
+#[no_mangle]
+/// Ensures an indexed write has storage, leaving skipped slots as holes.
+///
+/// # Safety
+/// `handle` must point to a writable two-pointer native array handle.
+pub unsafe extern "C" fn thaw_array_ensure_index(
+    handle: *mut u8,
+    element_width: usize,
+    index: f64,
+) -> *mut u8 {
+    // ponytail: non-index array properties need an object-property side table;
+    // this native buffer handles only canonical array indices.
+    if handle.is_null() || element_width == 0 || !index.is_finite()
+        || index < 0.0 || index.fract() != 0.0 || index > (u32::MAX as f64 - 1.0)
+    {
+        return std::ptr::null_mut();
+    }
+    let index = index as usize;
+    let array = unsafe { handle.cast::<*mut u8>().read() };
+    let Some(old_len) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null_mut();
+    };
+    if index < old_len {
+        return unsafe { array.add(8 + index * element_width) };
+    }
+    let new_len = index + 1;
+    let Some(bytes) = new_len.checked_mul(element_width).and_then(|bytes| bytes.checked_add(8)) else {
+        return std::ptr::null_mut();
+    };
+    let new_array = thaw_arena::thaw_arena_alloc(bytes, element_width.min(8));
+    let new_mask = thaw_arena::thaw_arena_alloc(8 + new_len, 1);
+    if new_array.is_null() || new_mask.is_null() {
+        return std::ptr::null_mut();
+    }
+    let old_mask = unsafe { handle.add(8).cast::<*mut u8>().read() };
+    unsafe {
+        new_array.cast::<u64>().write(new_len as u64);
+        std::ptr::copy_nonoverlapping(array.add(8), new_array.add(8), old_len * element_width);
+        std::ptr::write_bytes(new_array.add(8 + old_len * element_width), 0, (new_len - old_len) * element_width);
+        new_mask.cast::<u64>().write(new_len as u64);
+        std::ptr::write_bytes(new_mask.add(8), 1, old_len);
+        if !old_mask.is_null() {
+            let mask_len = old_mask.cast::<u64>().read() as usize;
+            std::ptr::copy_nonoverlapping(old_mask.add(8), new_mask.add(8), old_len.min(mask_len));
+        }
+        std::ptr::write_bytes(new_mask.add(8 + old_len), 0, new_len - old_len);
+        handle.cast::<*mut u8>().write(new_array);
+        handle.add(8).cast::<*mut u8>().write(new_mask);
+        new_array.add(8 + index * element_width)
+    }
+}
+
+#[no_mangle]
+/// Resizes a native array in place, dropping truncated slots or adding holes.
+///
+/// # Safety
+/// `handle` must point to a writable two-pointer native array handle.
+pub unsafe extern "C" fn thaw_array_resize(
+    handle: *mut u8,
+    element_width: usize,
+    new_length: f64,
+) -> *mut u8 {
+    if handle.is_null() || element_width == 0 || !new_length.is_finite()
+        || new_length < 0.0 || new_length.fract() != 0.0 || new_length > u32::MAX as f64
+    {
+        return std::ptr::null_mut();
+    }
+    let array = unsafe { handle.cast::<*mut u8>().read() };
+    let Some(old_len) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null_mut();
+    };
+    let new_len = new_length as usize;
+    if new_len == old_len {
+        return handle;
+    }
+    if new_len > old_len {
+        return if (unsafe { thaw_array_ensure_index(handle, element_width, (new_len - 1) as f64) }).is_null() {
+            std::ptr::null_mut()
+        } else {
+            handle
+        };
+    }
+    let Some(bytes) = new_len.checked_mul(element_width).and_then(|bytes| bytes.checked_add(8)) else {
+        return std::ptr::null_mut();
+    };
+    let new_array = thaw_arena::thaw_arena_alloc(bytes, element_width.min(8));
+    if new_array.is_null() {
+        return std::ptr::null_mut();
+    }
+    let old_mask = unsafe { handle.add(8).cast::<*mut u8>().read() };
+    let new_mask = if old_mask.is_null() {
+        std::ptr::null_mut()
+    } else {
+        thaw_arena::thaw_arena_alloc(8 + new_len, 1)
+    };
+    if !old_mask.is_null() && new_mask.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        new_array.cast::<u64>().write(new_len as u64);
+        std::ptr::copy_nonoverlapping(array.add(8), new_array.add(8), new_len * element_width);
+        if !new_mask.is_null() {
+            new_mask.cast::<u64>().write(new_len as u64);
+            std::ptr::write_bytes(new_mask.add(8), 1, new_len);
+            let mask_len = old_mask.cast::<u64>().read() as usize;
+            std::ptr::copy_nonoverlapping(old_mask.add(8), new_mask.add(8), new_len.min(mask_len));
+        }
+        handle.cast::<*mut u8>().write(new_array);
+        handle.add(8).cast::<*mut u8>().write(new_mask);
+    }
+    handle
+}
+
+#[no_mangle]
 /// Resizes a presence mask after push/unshift.
 ///
 /// # Safety
@@ -327,11 +607,14 @@ pub unsafe extern "C" fn thaw_array_presence_extend(
     old_len: usize,
     count: usize,
     prepend: u8,
+    insert_states: *const u8,
 ) -> *mut u8 {
-    if presence.is_null() {
+    let has_undefined = !insert_states.is_null()
+        && (0..count).any(|index| unsafe { insert_states.add(index).read() != 1 });
+    if presence.is_null() && !has_undefined {
         return std::ptr::null_mut();
     }
-    let mask_len = unsafe { presence.cast::<u64>().read() as usize };
+    let mask_len = if presence.is_null() { 0 } else { unsafe { presence.cast::<u64>().read() as usize } };
     let new_len = old_len + count;
     let output = thaw_arena::thaw_arena_alloc(8 + new_len, 1);
     if output.is_null() {
@@ -341,11 +624,17 @@ pub unsafe extern "C" fn thaw_array_presence_extend(
         output.cast::<u64>().write(new_len as u64);
         std::ptr::write_bytes(output.add(8), 1, new_len);
         let destination = if prepend != 0 { count } else { 0 };
-        std::ptr::copy_nonoverlapping(
-            presence.add(8),
-            output.add(8 + destination),
-            old_len.min(mask_len),
-        );
+        if mask_len != 0 {
+            std::ptr::copy_nonoverlapping(
+                presence.add(8),
+                output.add(8 + destination),
+                old_len.min(mask_len),
+            );
+        }
+        if !insert_states.is_null() && count != 0 {
+            let offset = if prepend != 0 { 0 } else { old_len };
+            std::ptr::copy_nonoverlapping(insert_states, output.add(8 + offset), count);
+        }
     }
     output
 }
@@ -1041,13 +1330,16 @@ pub unsafe extern "C" fn thaw_array_presence_splice(
     start: f64,
     delete_count: f64,
     insert_count: usize,
+    insert_states: *const u8,
     out_removed: *mut *mut u8,
 ) -> *mut u8 {
-    if presence.is_null() {
+    let has_undefined = !insert_states.is_null()
+        && (0..insert_count).any(|index| unsafe { insert_states.add(index).read() != 1 });
+    if presence.is_null() && !has_undefined {
         unsafe { out_removed.write(std::ptr::null_mut()) };
         return std::ptr::null_mut();
     }
-    let mask_len = unsafe { presence.cast::<u64>().read() as usize };
+    let mask_len = if presence.is_null() { 0 } else { unsafe { presence.cast::<u64>().read() as usize } };
     let start = relative_array_index(start, old_len);
     let delete_count = if delete_count.is_nan() {
         0
@@ -1077,7 +1369,13 @@ pub unsafe extern "C" fn thaw_array_presence_splice(
         for index in 0..start {
             output.add(8 + index).write(present(index));
         }
-        std::ptr::write_bytes(output.add(8 + start), 1, insert_count);
+        if insert_count != 0 {
+            if insert_states.is_null() {
+                std::ptr::write_bytes(output.add(8 + start), 1, insert_count);
+            } else {
+                std::ptr::copy_nonoverlapping(insert_states, output.add(8 + start), insert_count);
+            }
+        }
         let tail_start = start + delete_count;
         for index in tail_start..old_len {
             output
@@ -1534,6 +1832,65 @@ pub unsafe extern "C" fn thaw_object_array_join(
     arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
+#[no_mangle]
+/// # Safety
+/// `array` and `presence` must describe a Thaw array; `separator` must be a C string.
+pub unsafe extern "C" fn thaw_tagged_array_join(
+    array: *const u8,
+    presence: *const u8,
+    separator: *const c_char,
+    kind: u8,
+    value_tag: u8,
+    tags: *const c_char,
+) -> *const c_char {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null();
+    };
+    if separator.is_null() {
+        return std::ptr::null();
+    }
+    if kind == 5 && tags.is_null() {
+        return std::ptr::null();
+    }
+    let tags = if kind == 5 { unsafe { CStr::from_ptr(tags) }.to_bytes() } else { &[] };
+    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
+    let mut result = String::new();
+    for index in 0..length {
+        if index != 0 {
+            result.push_str(&separator);
+        }
+        if kind == 4 || !unsafe { array_index_present(presence, index) } {
+            continue;
+        }
+        let slot = unsafe { array.add(8 + index * 16) };
+        let tag = unsafe { slot.read() };
+        if kind != 5 && tag != value_tag {
+            continue;
+        }
+        let payload = unsafe { slot.add(if kind == 2 { 1 } else { 8 }) };
+        let value_kind = if kind == 5 {
+            tags.get(tag as usize).copied().unwrap_or(b'u')
+        } else {
+            match kind { 0 => b'n', 1 => b's', 2 => b'b', 3 => b'o', _ => b'u' }
+        };
+        match value_kind {
+            b'n' => result.push_str(&javascript_number_string(unsafe {
+                payload.cast::<f64>().read_unaligned()
+            })),
+            b's' => {
+                let string = unsafe { payload.cast::<*const c_char>().read_unaligned() };
+                if !string.is_null() {
+                    result.push_str(&unsafe { CStr::from_ptr(string) }.to_string_lossy());
+                }
+            }
+            b'b' => result.push_str(if unsafe { payload.read() } == 0 { "false" } else { "true" }),
+            b'o' => result.push_str("[object Object]"),
+            _ => {}
+        }
+    }
+    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+}
+
 fn array_search_start(length: usize, from_index: f64) -> usize {
     if from_index.is_nan() || from_index == f64::NEG_INFINITY {
         return 0;
@@ -1574,7 +1931,156 @@ fn array_search_end(length: usize, from_index: f64) -> Option<usize> {
 unsafe fn array_index_present(presence: *const u8, index: usize) -> bool {
     presence.is_null()
         || index >= unsafe { presence.cast::<u64>().read() as usize }
-        || unsafe { presence.add(8 + index).read() != 0 }
+        || unsafe { presence.add(8 + index).read() == 1 }
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` is a readable Thaw array, `presence` its mask or null, and `key` a C string.
+pub unsafe extern "C" fn thaw_array_has_property(
+    array: *const u8,
+    presence: *const u8,
+    key: *const c_char,
+    mode: u8,
+) -> u8 {
+    if key.is_null() {
+        return 0;
+    }
+    let Ok(key) = (unsafe { CStr::from_ptr(key) }).to_str() else {
+        return 0;
+    };
+    if key == "length" {
+        return u8::from(mode != 2);
+    }
+    if mode == 0 && matches!(key,
+        "\u{1f}@@iterator" | "\u{1f}@@unscopables"
+        |
+        "at" | "concat" | "copyWithin" | "entries" | "every" | "fill"
+        | "filter" | "find" | "findIndex" | "findLast" | "findLastIndex"
+        | "flat" | "flatMap" | "forEach" | "includes" | "indexOf"
+        | "join" | "keys" | "lastIndexOf" | "map" | "pop" | "push"
+        | "reduce" | "reduceRight" | "reverse" | "shift" | "slice"
+        | "some" | "sort" | "splice" | "toLocaleString" | "toReversed"
+        | "toSorted" | "toSpliced" | "toString" | "unshift" | "values"
+        | "with" | "constructor" | "valueOf" | "hasOwnProperty"
+        | "isPrototypeOf" | "propertyIsEnumerable" | "__proto__"
+        | "__defineGetter__" | "__defineSetter__" | "__lookupGetter__"
+        | "__lookupSetter__"
+    ) {
+        return 1;
+    }
+    let Ok(index) = key.parse::<u32>() else {
+        return 0;
+    };
+    if key != index.to_string() || !unsafe { native_array_length(array) }.is_some_and(|length| (index as usize) < length) {
+        return 0;
+    }
+    let index = index as usize;
+    u8::from(unsafe { array_index_exists(presence, index) })
+}
+
+#[no_mangle]
+/// Finds an `undefined` element, optionally treating holes as undefined for includes.
+///
+/// # Safety
+/// `array` must point to a Thaw array and `presence` to its mask or null.
+pub unsafe extern "C" fn thaw_array_undefined_index_of(
+    array: *const u8,
+    presence: *const u8,
+    from_index: f64,
+    reverse: u8,
+    element_kind: u8,
+    include_holes: u8,
+    union_tag: u8,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    let matches_undefined = |index: &usize| {
+        let state = if !presence.is_null()
+            && *index < unsafe { presence.cast::<u64>().read() as usize }
+        {
+            unsafe { presence.add(8 + *index).read() }
+        } else {
+            1
+        };
+        if state != 1 {
+            return (state == 2 && (element_kind <= 3 || element_kind == 7))
+                || (state == 0 && include_holes != 0);
+        }
+        match element_kind {
+            1 => true,
+            2 => (unsafe { array.add(8 + *index * 16).read() }) == 0,
+            3 => (unsafe { array.add(8 + *index * 16).read() }) == 2,
+            4 => (unsafe { array.add(8 + *index * 16).read() }) == 0,
+            5 => (unsafe { array.add(8 + *index * 16).read() }) == 1,
+            6 => true,
+            7 | 8 => (unsafe { array.add(8 + *index * 16).read() }) == union_tag,
+            _ => false,
+        }
+    };
+    let found = if reverse == 0 {
+        (array_search_start(length, from_index)..length).find(matches_undefined)
+    } else {
+        array_search_end(length, from_index)
+            .and_then(|end| (0..=end).rev().find(matches_undefined))
+    };
+    found.map_or(-1.0, |index| index as f64)
+}
+
+#[no_mangle]
+/// Searches concrete payloads in arrays of tagged values.
+///
+/// # Safety
+/// `array`, `presence`, and `needle` must describe readable Thaw values of `kind`.
+pub unsafe extern "C" fn thaw_tagged_array_index_of(
+    array: *const u8,
+    presence: *const u8,
+    needle: *const u8,
+    from_index: f64,
+    reverse: u8,
+    includes: u8,
+    kind: u8,
+    value_tag: u8,
+    union_layout: u8,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    let matches_value = |index: &usize| {
+        if !unsafe { array_index_present(presence, *index) } {
+            return false;
+        }
+        let slot = unsafe { array.add(8 + *index * 16) };
+        if unsafe { slot.read() } != value_tag {
+            return false;
+        }
+        let payload = unsafe { slot.add(if kind == 2 && union_layout == 0 { 1 } else { 8 }) };
+        match kind {
+            0 => {
+                let value = unsafe { payload.cast::<f64>().read_unaligned() };
+                let expected = unsafe { needle.cast::<f64>().read_unaligned() };
+                value == expected || (includes != 0 && value.is_nan() && expected.is_nan())
+            }
+            1 => {
+                let value = unsafe { payload.cast::<*const c_char>().read_unaligned() };
+                let expected = unsafe { needle.cast::<*const c_char>().read_unaligned() };
+                !value.is_null() && !expected.is_null()
+                    && unsafe { CStr::from_ptr(value).to_bytes() == CStr::from_ptr(expected).to_bytes() }
+            }
+            2 => (unsafe { payload.read() } != 0) == (unsafe { needle.read() } != 0),
+            3 => (unsafe { payload.cast::<*const u8>().read_unaligned() })
+                == unsafe { needle.cast::<*const u8>().read_unaligned() },
+            _ => false,
+        }
+    };
+    let found = if reverse == 0 {
+        (array_search_start(length, from_index)..length).find(matches_value)
+    } else {
+        array_search_end(length, from_index)
+            .and_then(|end| (0..=end).rev().find(matches_value))
+    };
+    found.map_or(-1.0, |index| index as f64)
 }
 
 unsafe fn number_array_search(

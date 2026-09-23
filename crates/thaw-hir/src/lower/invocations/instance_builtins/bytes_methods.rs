@@ -17,7 +17,7 @@ impl<'a> FnLowerer<'a> {
         let (width, signed, float, big_endian, write) =
             Self::bytes_numeric_accessor(property.sym.as_ref())
                 .expect("dispatch checked bytes_numeric_accessor");
-        let receiver = self.lower_expr(&member.obj)?;
+        let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
         if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
             return Err(format!(
                 "`.{}()` is only supported on a Buffer / Uint8Array",
@@ -82,7 +82,7 @@ impl<'a> FnLowerer<'a> {
         let (signed, big_endian, write) =
             Self::bytes_variable_width_accessor(property.sym.as_ref())
                 .expect("dispatch checked bytes_variable_width_accessor");
-        let receiver = self.lower_expr(&member.obj)?;
+        let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
         if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
             return Err(format!(
                 "`.{}()` is only supported on a Buffer / Uint8Array",
@@ -146,7 +146,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let (_signed, big_endian, write) = Self::bytes_bigint_accessor(property.sym.as_ref())
             .expect("dispatch checked bytes_bigint_accessor");
-        let receiver = self.lower_expr(&member.obj)?;
+        let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
         if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
             return Err(format!(
                 "`.{}()` is only supported on a Buffer / Uint8Array",
@@ -199,7 +199,7 @@ impl<'a> FnLowerer<'a> {
         member: &MemberExpr,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
-        let receiver = self.lower_expr(&member.obj)?;
+        let receiver = self.lower_required_member_receiver(&member.obj, "copy")?;
         if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
             return Err("`.copy()` is only supported on a Buffer / Uint8Array".into());
         }
@@ -300,7 +300,7 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
-        let receiver = self.lower_expr(&member.obj)?;
+        let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
         if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
             return Err(format!(
                 "`.{}()` is only supported on a Buffer / Uint8Array",

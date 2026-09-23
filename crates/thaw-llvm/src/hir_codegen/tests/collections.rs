@@ -572,6 +572,7 @@ fn compiles_native_array_reduce_and_reduce_right() {
                 empty.reduce((accumulator, value) => accumulator + value);
             } catch (error) {
                 console.log(error);
+                console.log(error.name, error instanceof TypeError);
             }
             const sparse: number[] = [, 2, , 4, ];
             let calls = 0;
@@ -594,12 +595,13 @@ fn compiles_native_array_reduce_and_reduce_right() {
                 holes.reduce((accumulator, value) => accumulator + value);
             } catch (error) {
                 console.log(error);
+                console.log(error.name, error instanceof TypeError);
             }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_reduce"),
-        "1\n2\n6\nreceiver\ninitial\n16\ncba\n12\n7\n2\nawaited\ncba\nReduce of empty array with no initial value\n6 1\n2 1\n16 2\nReduce of empty array with no initial value\n"
+        "1\n2\n6\nreceiver\ninitial\n16\ncba\n12\n7\n2\nawaited\ncba\nReduce of empty array with no initial value\nTypeError true\n6 1\n2 1\n16 2\nReduce of empty array with no initial value\nTypeError true\n"
     );
 }
 
@@ -740,18 +742,20 @@ fn compiles_native_array_with() {
                 source.with(3, 0);
             } catch (error) {
                 console.log(error);
+                console.log(error.name, error instanceof RangeError);
             }
             const empty: number[] = [];
             try {
                 empty.with(0, 1);
             } catch (error) {
                 console.log(error);
+                console.log(error.name, error instanceof RangeError);
             }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_with"),
-        "1,9,3\n1,2,3\n1,2,8\n7,2,3\n8\nreceiver\nindex\nvalue\n1,9,3\nawaited receiver\nawaited index\nawaited value\na,z\nInvalid index for Array.prototype.with\nInvalid index for Array.prototype.with\n"
+        "1,9,3\n1,2,3\n1,2,8\n7,2,3\n8\nreceiver\nindex\nvalue\n1,9,3\nawaited receiver\nawaited index\nawaited value\na,z\nInvalid index for Array.prototype.with\nRangeError true\nInvalid index for Array.prototype.with\nRangeError true\n"
     );
 }
 

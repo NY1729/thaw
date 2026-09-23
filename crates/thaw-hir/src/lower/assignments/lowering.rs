@@ -1,4 +1,127 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_array_index_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let HirExpr::TypedIndex(source, offset, element) = value else {
+            return Ok(value);
+        };
+        if matches!(element, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_) | HirType::Undefined) {
+            return Ok(HirExpr::TypedIndex(source, offset, element));
+        }
+        let source_type = self.infer_expr_type(&source)?;
+        if matches!(source_type, HirType::Array(_)) {
+            self.lower_array_index(*source, source_type, element, *offset)
+        } else {
+            Ok(HirExpr::TypedIndex(source, offset, element))
+        }
+    }
+
+    fn lower_assignment_target_read(&mut self, target: &Target) -> Result<HirExpr, String> {
+        let Target::Index(array, index) = target else {
+            return target_to_read_expr(target);
+        };
+        let array_type = self.infer_expr_type(array)?;
+        let HirType::Array(element) = &array_type else {
+            return Err("index assignment target is not an array".into());
+        };
+        self.lower_array_index(
+            array.clone(), array_type.clone(), element.as_ref().clone(), index.as_ref().clone(),
+        )
+    }
+
+    fn lower_optional_index_assignment(
+        &mut self,
+        array: HirExpr,
+        index: HirExpr,
+        value: HirExpr,
+        element: HirType,
+    ) -> Result<HirExpr, String> {
+        let array_name = format!("__thaw_assign_array_{}", self.next_binding);
+        let index_name = format!("__thaw_assign_index_{}", self.next_binding);
+        let value_name = format!("__thaw_assign_value_{}", self.next_binding);
+        self.next_binding += 1;
+        let array_type = HirType::Array(Box::new(element.clone()));
+        let optional_type = HirType::Optional(Box::new(element.clone()));
+        self.scope.insert(array_name.clone(), array_type.clone());
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope.insert(value_name.clone(), optional_type.clone());
+        let array_var = HirExpr::Var(array_name.clone());
+        let index_var = HirExpr::Var(index_name.clone());
+        let value_var = HirExpr::Var(value_name.clone());
+        let result = HirExpr::Block(vec![HirStmt::If(
+            HirExpr::OptionalIsNone(Box::new(value_var.clone()), element.clone()),
+            vec![
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_set_undefined".into())),
+                    vec![array_var.clone(), index_var.clone()],
+                )),
+                HirStmt::Return(Some(value_var.clone())),
+            ],
+            vec![
+                HirStmt::Expr(HirExpr::IndexAssign(
+                    Box::new(array_var),
+                    Box::new(index_var),
+                    Box::new(HirExpr::OptionalValue(Box::new(value_var.clone()), element)),
+                )),
+                HirStmt::Return(Some(value_var)),
+            ],
+        )]);
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (array_name, array_type, array),
+                (index_name, HirType::F64, index),
+                (value_name, optional_type, value),
+            ],
+        )
+    }
+
+    fn lower_array_length_write(
+        &mut self,
+        array: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let array_type = self.infer_expr_type(&array)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        let array_name = format!("__thaw_length_array_{}", self.next_binding);
+        let value_name = format!("__thaw_length_value_{}", self.next_binding);
+        let number_name = format!("__thaw_length_number_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(array_name.clone(), array_type.clone());
+        self.scope.insert(value_name.clone(), rhs_type.clone());
+        self.scope.insert(number_name.clone(), HirType::F64);
+        let value = HirExpr::Var(value_name.clone());
+        let number = HirExpr::Var(number_name.clone());
+        let invalid = || HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+            "\u{1}RangeError\u{1}Invalid array length".into(),
+        )));
+        let result = HirExpr::Block(vec![
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::Lt, Box::new(number.clone()), Box::new(HirExpr::Lit(HirLit::F64(0.0)))),
+                vec![invalid()], Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::GtEq, Box::new(number.clone()), Box::new(HirExpr::Lit(HirLit::F64(4294967296.0)))),
+                vec![invalid()], Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::EqEqEq, Box::new(number.clone()), Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_math_trunc".into())), vec![number.clone()],
+                ))),
+                Vec::new(), vec![invalid()],
+            ),
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_resize".into())),
+                vec![HirExpr::Var(array_name.clone()), number],
+            )),
+            HirStmt::Return(Some(value)),
+        ]);
+        let numeric = self.coerce_primitive_to_number(HirExpr::Var(value_name.clone()))?;
+        self.wrap_call_argument_bindings(result, &[
+            (array_name, array_type, array),
+            (value_name, rhs_type, rhs),
+            (number_name, HirType::F64, numeric),
+        ])
+    }
+
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
         let assigned_function_property = if assign.op == AssignOp::Assign {
             match &assign.left {
@@ -308,6 +431,49 @@ impl<'a> FnLowerer<'a> {
             );
         }
 
+        if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
+            if member_property_name(&member.prop).as_deref() == Some("length") {
+                let array = self.lower_expr(&member.obj)?;
+                if let HirType::Array(element) = self.infer_expr_type(&array)? {
+                    let rhs = self.lower_expr(&assign.right)?;
+                    if assign.op == AssignOp::Assign {
+                        return self.lower_array_length_write(array, rhs);
+                    }
+                    let Some(operator) = compound_op(assign.op) else {
+                        return Err(format!("unsupported array length assignment operator {:?}", assign.op));
+                    };
+                    let array_name = format!("__thaw_length_target_{}", self.next_binding);
+                    let current_name = format!("__thaw_length_old_{}", self.next_binding);
+                    let rhs_name = format!("__thaw_length_rhs_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let array_type = HirType::Array(element);
+                    self.scope.insert(array_name.clone(), array_type.clone());
+                    self.scope.insert(current_name.clone(), HirType::F64);
+                    let rhs_type = self.infer_expr_type(&rhs)?;
+                    self.scope.insert(rhs_name.clone(), rhs_type.clone());
+                    let old = HirExpr::Var(current_name.clone());
+                    let value = HirExpr::Var(rhs_name.clone());
+                    let updated = if assign.op == AssignOp::AddAssign && rhs_type == HirType::Str {
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                            vec![self.coerce_primitive_to_string(old)?, value],
+                        )
+                    } else {
+                        HirExpr::BinOp(operator,
+                            Box::new(self.coerce_primitive_to_number(old)?),
+                            Box::new(self.coerce_primitive_to_number(value)?),
+                        )
+                    };
+                    let result = self.lower_array_length_write(HirExpr::Var(array_name.clone()), updated)?;
+                    let old_length = HirExpr::ArrayLen(Box::new(HirExpr::Var(array_name.clone())));
+                    return self.wrap_call_argument_bindings(result, &[
+                        (array_name, array_type, array),
+                        (current_name, HirType::F64, old_length),
+                        (rhs_name, rhs_type, rhs),
+                    ]);
+                }
+            }
+        }
         let mut target = self.lower_assign_target(&assign.left)?;
         if let Target::Var(name) = &target {
             if self.immutable_bindings.contains(name) {
@@ -389,7 +555,7 @@ impl<'a> FnLowerer<'a> {
                 Target::Index(array, index) => {
                     let array_name = format!("__thaw_assign_array_{}", self.next_binding);
                     self.next_binding += 1;
-                    let array_type = HirType::Array(Box::new(HirType::F64));
+                    let array_type = self.infer_expr_type(&array)?;
                     self.scope.insert(array_name.clone(), array_type.clone());
                     bindings.push((array_name.clone(), array_type, array));
 
@@ -443,7 +609,7 @@ impl<'a> FnLowerer<'a> {
         }
 
         if assign.op == AssignOp::NullishAssign {
-            let current = target_to_read_expr(&target)?;
+            let current = self.lower_assignment_target_read(&target)?;
             let current_type = self.infer_expr_type(&current)?;
             let (payload, absence_kind) = match current_type.clone() {
                 HirType::Optional(payload) => (payload, 0),
@@ -451,6 +617,27 @@ impl<'a> FnLowerer<'a> {
                 HirType::Nullish(payload) => (payload, 2),
                 _ => return self.wrap_call_argument_bindings(current, &bindings),
             };
+            if let Target::Index(array, index) = &target {
+                if self.infer_expr_type(array)? == HirType::Array(payload.clone()) {
+                    let indexed_rhs = self.lower_array_index_operand(rhs.clone())?;
+                    if self.infer_expr_type(&indexed_rhs)? == current_type {
+                        let current_name = format!("__thaw_nullish_assign_current_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(current_name.clone(), current_type.clone());
+                        let value = HirExpr::Var(current_name.clone());
+                        let assigned = self.lower_optional_index_assignment(
+                            array.clone(), index.as_ref().clone(), indexed_rhs, payload.as_ref().clone(),
+                        )?;
+                        let result = HirExpr::Block(vec![HirStmt::If(
+                            HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
+                            vec![HirStmt::Return(Some(assigned))],
+                            vec![HirStmt::Return(Some(value))],
+                        )]);
+                        bindings.push((current_name, current_type, current));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                }
+            }
             let rhs = self.coerce_to_declared(payload.as_ref(), rhs)?;
             let current_name = format!("__thaw_nullish_assign_current_{}", self.next_binding);
             self.next_binding += 1;
@@ -461,7 +648,14 @@ impl<'a> FnLowerer<'a> {
             self.scope
                 .insert(rhs_name.clone(), payload.as_ref().clone());
 
-            let stored = match absence_kind {
+            let direct_index = if let Target::Index(array, _) = &target {
+                self.infer_expr_type(array)? == HirType::Array(payload.clone())
+            } else {
+                false
+            };
+            let stored = if direct_index {
+                HirExpr::Var(rhs_name.clone())
+            } else { match absence_kind {
                 0 => HirExpr::OptionalSome(
                     Box::new(HirExpr::Var(rhs_name.clone())),
                     payload.as_ref().clone(),
@@ -475,7 +669,7 @@ impl<'a> FnLowerer<'a> {
                     payload.as_ref().clone(),
                 ),
                 _ => unreachable!(),
-            };
+            }};
             let assigned = HirExpr::Block(vec![
                 HirStmt::Expr(build_assign(target, stored)),
                 HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
@@ -527,8 +721,13 @@ impl<'a> FnLowerer<'a> {
         }
 
         if matches!(assign.op, AssignOp::AndAssign | AssignOp::OrAssign) {
-            let current = target_to_read_expr(&target)?;
+            let current = self.lower_assignment_target_read(&target)?;
             let current_type = self.infer_expr_type(&current)?;
+            let rhs = if matches!(target, Target::Index(_, _)) {
+                self.lower_array_index_operand(rhs)?
+            } else {
+                rhs
+            };
             let rhs = self.coerce_to_declared(&current_type, rhs)?;
             let current_name = format!("__thaw_logical_assign_current_{}", self.next_binding);
             self.next_binding += 1;
@@ -537,13 +736,29 @@ impl<'a> FnLowerer<'a> {
             let rhs_name = format!("__thaw_logical_assign_rhs_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(rhs_name.clone(), current_type.clone());
-            let assigned = HirExpr::Block(vec![
-                HirStmt::Expr(build_assign(
-                    target,
-                    HirExpr::Var(rhs_name.clone()),
-                )),
-                HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
-            ]);
+            let assigned = if let Target::Index(array, index) = &target {
+                let array_type = self.infer_expr_type(array)?;
+                if let HirType::Array(element) = array_type {
+                    if current_type == HirType::Optional(element.clone()) {
+                        self.lower_optional_index_assignment(
+                            array.clone(), index.as_ref().clone(),
+                            HirExpr::Var(rhs_name.clone()), element.as_ref().clone(),
+                        )?
+                    } else {
+                        HirExpr::Block(vec![
+                            HirStmt::Expr(build_assign(target, HirExpr::Var(rhs_name.clone()))),
+                            HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
+                        ])
+                    }
+                } else {
+                    return Err("index assignment target is not an array".into());
+                }
+            } else {
+                HirExpr::Block(vec![
+                    HirStmt::Expr(build_assign(target, HirExpr::Var(rhs_name.clone()))),
+                    HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
+                ])
+            };
             let assigned = self.wrap_call_argument_bindings(
                 assigned,
                 &[(rhs_name, current_type.clone(), rhs)],
@@ -567,9 +782,16 @@ impl<'a> FnLowerer<'a> {
         let value = if assign.op == AssignOp::Assign {
             rhs
         } else if let Some(op) = compound_op(assign.op) {
-            let current = target_to_read_expr(&target)?;
+            let current = self.lower_assignment_target_read(&target)?;
+            let current_type = self.infer_expr_type(&current)?;
+            let rhs = if matches!(target, Target::Index(_, _)) {
+                self.lower_array_index_operand(rhs)?
+            } else {
+                rhs
+            };
             if assign.op == AssignOp::AddAssign
-                && (self.infer_expr_type(&current)? == HirType::Str
+                && (current_type == HirType::Str
+                    || current_type == HirType::Optional(Box::new(HirType::Str))
                     || self.infer_expr_type(&rhs)? == HirType::Str)
             {
                 HirExpr::Call(
@@ -604,18 +826,40 @@ impl<'a> FnLowerer<'a> {
             ));
         };
 
+        if assign.op == AssignOp::Assign {
+            if let Target::Index(array, index) = &target {
+                self.expect_type(&HirType::F64, index, "array index")?;
+                if let HirType::Array(element) = self.infer_expr_type(array)? {
+                    let value = self.lower_array_index_operand(value.clone())?;
+                    if self.infer_expr_type(&value)? == HirType::Optional(element.clone()) {
+                        return self.lower_optional_index_assignment(
+                            array.clone(), index.as_ref().clone(), value, element.as_ref().clone(),
+                        );
+                    }
+                }
+            }
+        }
+
         // Reorder/typecheck an object literal against the target's
         // declared shape, same as a `let`/call-argument assignment --
         // needed now that a field can itself be an object (`p.corner =
         // { y: 2, x: 1 }`), not just a plain variable.
         let value = match &target {
             Target::Var(name) => match self.scope.get(name).cloned() {
+                Some(ty) if assign.op == AssignOp::Assign
+                    && self.is_primitive_array_index(&assign.right, &ty) => {
+                    self.coerce_primitive_array_argument(value, &ty)?
+                }
                 Some(ty) => self.coerce_to_declared(&ty, value)?,
                 None => value,
             },
             Target::Prop(_, HirType::Object(fields), field) => {
                 match fields.iter().find(|(n, _)| n == field) {
-                    Some((_, ty)) => self.coerce_to_declared(&ty.clone(), value)?,
+                    Some((_, ty)) if assign.op == AssignOp::Assign
+                        && self.is_primitive_array_index(&assign.right, ty) => {
+                        self.coerce_primitive_array_argument(value, ty)?
+                    }
+                    Some((_, ty)) => self.coerce_to_declared(ty, value)?,
                     None => value,
                 }
             }

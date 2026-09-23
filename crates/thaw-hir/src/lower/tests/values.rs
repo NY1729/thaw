@@ -680,17 +680,12 @@ fn lowers_array_literal_index_and_length() {
             ]),
         )
     );
-    assert_eq!(
-        f.body[1],
-        HirStmt::Expr(HirExpr::Call(
-            Box::new(HirExpr::Var("console.log".into())),
-            vec![HirExpr::TypedIndex(
-                Box::new(HirExpr::Var("xs".into())),
-                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                HirType::F64,
-            )],
-        ))
-    );
+    assert!(matches!(
+        &f.body[1],
+        HirStmt::Expr(HirExpr::Call(callee, args))
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "console.log")
+                && matches!(args.as_slice(), [HirExpr::Call(_, _)])
+    ));
     assert_eq!(
         f.body[2],
         HirStmt::Expr(HirExpr::Call(
@@ -720,7 +715,9 @@ fn lowers_typed_array_spreads_in_source_order() {
     assert_eq!(parts.len(), 4);
     assert!(matches!(&parts[0], HirExpr::ArrayLit(values) if values.len() == 1));
     assert!(matches!(&parts[1], HirExpr::Call(_, _)));
-    assert!(matches!(&parts[2], HirExpr::Var(name) if name == "tail"));
+    assert!(matches!(&parts[2],
+        HirExpr::Call(_, args) if matches!(args.as_slice(),
+            [HirExpr::Call(_, slice_args)] if matches!(slice_args.first(), Some(HirExpr::Var(name)) if name == "tail"))));
     assert!(matches!(&parts[3], HirExpr::ArrayLit(values) if values.len() == 1));
 }
 

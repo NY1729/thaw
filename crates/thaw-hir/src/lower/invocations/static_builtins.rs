@@ -1336,6 +1336,14 @@ impl<'a> FnLowerer<'a> {
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         if property.sym == *"has" {
+                            if matches!(self.infer_expr_type(target)?, HirType::Array(_)) {
+                                let key = self.coerce_primitive_to_string(key.clone())?;
+                                let result = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_has_property".into())),
+                                    vec![target.clone(), key],
+                                );
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
                             let result = self.lower_has_own_value(target.clone(), key.clone())?;
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
@@ -2071,9 +2079,6 @@ impl<'a> FnLowerer<'a> {
                         for argument in &call.args {
                             let mut value = self.lower_expr(&argument.expr)?;
                             if argument.spread.is_some() {
-                                if !pending.is_empty() {
-                                    parts.push(HirExpr::ArrayLit(std::mem::take(&mut pending)));
-                                }
                                 // Same snapshot conversion array-literal spreads
                                 // (`[...str]`/`[...map]`/`[...set]`) already use.
                                 let spread_source_type = self.infer_expr_type(&value)?;
@@ -2119,30 +2124,59 @@ impl<'a> FnLowerer<'a> {
                                 };
                                 if let Some(expected) = &element_type {
                                     if expected != element.as_ref() {
-                                        return Err(format!(
-                                            "`Array.of` spread element has type {element:?}, expected {expected:?}"
-                                        ));
+                                        if expected == &HirType::Optional(element.clone()) {
+                                            element_type = Some(element.as_ref().clone());
+                                        } else {
+                                            return Err(format!(
+                                                "`Array.of` spread element has type {element:?}, expected {expected:?}"
+                                            ));
+                                        }
                                     }
                                 } else {
                                     element_type = Some(element.as_ref().clone());
                                 }
+                                if !pending.is_empty() {
+                                    let values = std::mem::take(&mut pending).into_iter()
+                                        .map(|item| self.coerce_array_insert_value(item, element.as_ref()))
+                                        .collect::<Result<Vec<_>, String>>()?;
+                                    parts.push(self.lower_native_array_literal(values, element.as_ref().clone())?);
+                                }
+                                value = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_densify".into())),
+                                    vec![HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                                        vec![
+                                            value,
+                                            HirExpr::Lit(HirLit::F64(0.0)),
+                                            HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                                        ],
+                                    )],
+                                );
                                 parts.push(value);
                             } else {
+                                value = self.lower_array_index_operand(value)?;
                                 let ty = self.infer_expr_type(&value)?;
                                 if let Some(expected) = &element_type {
-                                    if expected != &ty {
+                                    if expected != &ty && &ty != &HirType::Optional(Box::new(expected.clone())) {
                                         return Err(format!(
                                             "`Array.of` element has type {ty:?}, expected {expected:?}"
                                         ));
                                     }
                                 } else {
-                                    element_type = Some(ty);
+                                    element_type = Some(match ty {
+                                        HirType::Optional(payload) => *payload,
+                                        other => other,
+                                    });
                                 }
                                 pending.push(value);
                             }
                         }
                         if !pending.is_empty() {
-                            parts.push(HirExpr::ArrayLit(pending));
+                            let element = element_type.as_ref().expect("nonempty Array.of has an element type");
+                            let values = pending.into_iter()
+                                .map(|item| self.coerce_array_insert_value(item, element))
+                                .collect::<Result<Vec<_>, String>>()?;
+                            parts.push(self.lower_native_array_literal(values, element.clone())?);
                         }
                         let element_type = element_type.ok_or(
                             "empty `Array.of()` requires an explicit element type argument",
@@ -2174,6 +2208,7 @@ impl<'a> FnLowerer<'a> {
                                     .into(),
                             );
                         }
+                        let sparse_source = self.array_from_source_may_be_sparse(&call.args);
                         let explicit_types = call
                             .type_args
                             .as_ref()
@@ -2400,17 +2435,25 @@ impl<'a> FnLowerer<'a> {
                                 ));
                             }
                         }
-                        if argument_count == 1 {
-                            let result = HirExpr::Call(
+                        let source = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_densify".into())),
+                            vec![HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_array_slice".into())),
                                 vec![
                                     source,
                                     HirExpr::Lit(HirLit::F64(0.0)),
                                     HirExpr::Lit(HirLit::F64(f64::INFINITY)),
                                 ],
-                            );
-                            return self.wrap_call_argument_bindings(result, &spread_bindings);
+                            )],
+                        );
+                        if argument_count == 1 {
+                            return self.wrap_call_argument_bindings(source, &spread_bindings);
                         }
+                        let callback_element_type = if sparse_source {
+                            Self::array_read_type(&element_type)
+                        } else {
+                            element_type.clone()
+                        };
                         let callback = if has_spread {
                             let callback = spread_arguments[1].clone();
                             let params = match self.infer_expr_type(&callback)? {
@@ -2424,7 +2467,7 @@ impl<'a> FnLowerer<'a> {
                                     params.len()
                                 ));
                             }
-                            let available = [element_type.clone(), HirType::F64];
+                            let available = [callback_element_type.clone(), HirType::F64];
                             self.validate_promise_callback_value(
                                 &callback,
                                 &available[..params.len()],
@@ -2432,7 +2475,7 @@ impl<'a> FnLowerer<'a> {
                             )?;
                             callback
                         } else {
-                            self.lower_array_from_callback(&call.args[1].expr, &element_type)?
+                            self.lower_array_from_callback(&call.args[1].expr, &callback_element_type)?
                         };
                         if let Some(expected) = explicit_types.get(1).or(explicit_types.first()) {
                             let HirType::Function(_, output) = self.infer_expr_type(&callback)?
@@ -2456,7 +2499,8 @@ impl<'a> FnLowerer<'a> {
                         let result = self.lower_array_map(
                             source,
                             source_type,
-                            element_type,
+                            element_type.clone(),
+                            callback_element_type,
                             callback,
                             this_arg,
                         )?;
@@ -2576,7 +2620,7 @@ impl<'a> FnLowerer<'a> {
                         let [value] = arguments.as_slice() else {
                             return Err("`Array.isArray` expects exactly one argument".into());
                         };
-                        let value = value.clone();
+                        let value = self.lower_primitive_array_operand(value.clone())?;
                         let ty = self.infer_expr_type(&value)?;
                         if ty == HirType::Json {
                             let result = HirExpr::Call(
@@ -2632,7 +2676,11 @@ impl<'a> FnLowerer<'a> {
                         }
                         if matches!(ty, HirType::Json | HirType::Dictionary(_)) {
                             let result = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_keys".to_string())),
+                                Box::new(HirExpr::Var(if property.sym == *"keys" {
+                                    "__thaw_json_keys"
+                                } else {
+                                    "__thaw_json_own_keys"
+                                }.to_string())),
                                 vec![value],
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
@@ -2640,7 +2688,10 @@ impl<'a> FnLowerer<'a> {
                         if matches!(ty, HirType::Array(_) | HirType::Tuple(_)) {
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_array_keys".to_string())),
-                                vec![value],
+                                vec![
+                                    value,
+                                    HirExpr::Lit(HirLit::Bool(property.sym != *"keys")),
+                                ],
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
@@ -2713,6 +2764,21 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Var(runtime.to_string())),
                                 vec![value],
                             );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if let HirType::Array(element) = &ty {
+                            let element = element.as_ref().clone();
+                            let result = self.lower_array_filter(
+                                value,
+                                ty.clone(),
+                                element.clone(),
+                                element,
+                                HirExpr::Lambda(
+                                    Vec::new(), Vec::new(), HirType::Bool,
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                ),
+                                None,
+                            )?;
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         let HirType::Object(fields) = &ty else {
@@ -2795,6 +2861,47 @@ impl<'a> FnLowerer<'a> {
                                 vec![value],
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if let HirType::Array(element) = &ty {
+                            let receiver_name = format!("__thaw_array_entries_source_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let key_name = format!("__thaw_array_entries_key_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(receiver_name.clone(), ty.clone());
+                            self.scope.insert(key_name.clone(), HirType::Str);
+                            let receiver = HirExpr::Var(receiver_name.clone());
+                            let keys = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_keys".into())),
+                                vec![receiver.clone(), HirExpr::Lit(HirLit::Bool(false))],
+                            );
+                            let key = HirExpr::Var(key_name.clone());
+                            let index = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_to_number".into())),
+                                vec![key.clone()],
+                            );
+                            let entry_value = self.lower_array_at(
+                                receiver,
+                                ty.clone(),
+                                element.as_ref().clone(),
+                                index,
+                            )?;
+                            let entry_type = HirType::Tuple(vec![HirType::Str, self.infer_expr_type(&entry_value)?]);
+                            let callback = HirExpr::Lambda(
+                                vec![HirParam { name: receiver_name.clone(), ty: ty.clone() }],
+                                vec![HirParam { name: key_name, ty: HirType::Str }],
+                                entry_type,
+                                Box::new(HirExpr::ArrayLit(vec![key, entry_value])),
+                            );
+                            let entries = self.lower_array_map(
+                                keys,
+                                HirType::Array(Box::new(HirType::Str)),
+                                HirType::Str,
+                                HirType::Str,
+                                callback,
+                                None,
+                            )?;
+                            bindings.push((receiver_name, ty, value));
+                            return self.wrap_call_argument_bindings(entries, &bindings);
                         }
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
@@ -2993,7 +3100,7 @@ impl<'a> FnLowerer<'a> {
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"hasOwn" {
-                        let (arguments, mut bindings) =
+                        let (arguments, bindings) =
                             self.lower_native_spread_values(&call.args, "Object.hasOwn")?;
                         let [object_value, key_value] = arguments.as_slice() else {
                             return Err("`Object.hasOwn` expects exactly two arguments".into());
@@ -3024,44 +3131,7 @@ impl<'a> FnLowerer<'a> {
                             )));
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
-                        let key_value = self.coerce_primitive_to_string(key_value.clone())?;
-                        if matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
-                            let result = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_has_own".to_string())),
-                                vec![object_value, key_value],
-                            );
-                            return self.wrap_call_argument_bindings(result, &bindings);
-                        }
-                        let HirType::Object(fields) = &object_type else {
-                            return Err(format!(
-                                "`Object.hasOwn` currently requires a fixed object, got {object_type:?}"
-                            ));
-                        };
-                        let field_names = fields
-                            .iter()
-                            .map(|(name, _)| name.clone())
-                            .collect::<Vec<_>>();
-                        let object_name = format!("__thaw_has_own_object_{}", self.next_binding);
-                        self.next_binding += 1;
-                        let key_name = format!("__thaw_has_own_key_{}", self.next_binding);
-                        self.next_binding += 1;
-                        self.scope.insert(object_name.clone(), object_type.clone());
-                        self.scope.insert(key_name.clone(), HirType::Str);
-                        let mut comparisons = field_names.into_iter().map(|field| {
-                            HirExpr::BinOp(
-                                BinOp::EqEqEq,
-                                Box::new(HirExpr::Var(key_name.clone())),
-                                Box::new(HirExpr::Lit(HirLit::Str(field))),
-                            )
-                        });
-                        let mut result = comparisons
-                            .next()
-                            .unwrap_or(HirExpr::Lit(HirLit::Bool(false)));
-                        for comparison in comparisons {
-                            result = self.lower_logical_expr(result, comparison, false)?;
-                        }
-                        bindings.push((object_name, object_type, object_value));
-                        bindings.push((key_name, HirType::Str, key_value));
+                        let result = self.lower_has_own_value(object_value, key_value.clone())?;
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"is" {
@@ -3294,9 +3364,10 @@ impl<'a> FnLowerer<'a> {
                                                         | "SyntaxError"
                                                         | "ReferenceError"
                                                         | "EvalError"
-                                                        | "URIError"
-                                                        | "AggregateError"
-                                                ))
+                                                         | "URIError"
+                                                         | "AggregateError"
+                                                         | "SuppressedError"
+                                                 ))
                                             })
                                 })
                         );
@@ -3621,6 +3692,29 @@ impl<'a> FnLowerer<'a> {
                                 )),
                                 vec![value],
                             );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if ty == HirType::Optional(Box::new(HirType::F64)) {
+                            let name = format!("__thaw_number_predicate_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            let bound = HirExpr::Var(name.clone());
+                            let result = HirExpr::Conditional(
+                                Box::new(HirExpr::OptionalIsNone(Box::new(bound.clone()), HirType::F64)),
+                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var(match property.sym.as_ref() {
+                                        "isNaN" => "__thaw_number_is_nan",
+                                        "isFinite" => "__thaw_number_is_finite",
+                                        "isInteger" => "__thaw_number_is_integer",
+                                        "isSafeInteger" => "__thaw_number_is_safe_integer",
+                                        _ => unreachable!(),
+                                    }.into())),
+                                    vec![HirExpr::OptionalValue(Box::new(bound), HirType::F64)],
+                                )),
+                                HirType::Bool,
+                            );
+                            bindings.push((name, ty, value));
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         let name = format!("__thaw_number_predicate_{}", self.next_binding);

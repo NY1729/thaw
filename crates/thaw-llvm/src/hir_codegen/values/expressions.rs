@@ -265,11 +265,33 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|e| e.to_string())
             }
             HirExpr::IndexAssign(arr, idx, value) => {
-                let (elem_ptr, handle, index) = self.compile_element_parts(arr, idx)?;
+                let handle = self.compile_expr(arr)?.into_pointer_value();
+                let index = self.compile_expr(idx)?.into_float_value();
                 let val = self.compile_expr(value)?;
+                let width = match self.expr_hir_type(arr) {
+                    Some(HirType::Array(element)) => array_element_storage_bytes(&element),
+                    Some(HirType::Tuple(elements)) => elements.iter()
+                        .map(array_element_storage_bytes).max().unwrap_or(ARRAY_ELEM_BYTES),
+                    _ => ARRAY_ELEM_BYTES,
+                };
+                let elem_ptr = self.builder.build_call(
+                    self.module.get_function("thaw_array_ensure_index").unwrap(),
+                    &[handle.into(), self.context.i64_type().const_int(width, false).into(), index.into()],
+                    "array_write_slot",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("array index storage returned no slot")?.into_pointer_value();
+                let write = self.context.append_basic_block(self.current_function(), "array_write_valid");
+                let done = self.context.append_basic_block(self.current_function(), "array_write_done");
+                let valid = self.builder.build_is_not_null(elem_ptr, "array_write_in_range")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(valid, write, done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(write);
                 self.builder
                     .build_store(elem_ptr, val)
                     .map_err(|e| e.to_string())?;
+                let index = self.builder.build_float_to_unsigned_int(index, self.context.i64_type(), "array_write_index")
+                    .map_err(|error| error.to_string())?;
                 let presence = self.compile_array_presence(handle)?;
                 self.builder
                     .build_call(
@@ -280,6 +302,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         "array_presence_mark",
                     )
                     .map_err(|e| e.to_string())?;
+                self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
                 Ok(val)
             }
             HirExpr::ArrayLen(arr) => {

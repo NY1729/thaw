@@ -183,7 +183,6 @@ static NEXT_FD_WATCHER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 static INVALID_FD_ERROR: &[u8] = b"invalid file descriptor\0";
 static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
 static PROMISE_ALL_INVALID_ERROR: &[u8] = b"Promise.all received an invalid promise\0";
-static PROMISE_RACE_EMPTY_ERROR: &[u8] = b"Promise.race requires at least one promise\0";
 static PROMISE_RACE_INVALID_ERROR: &[u8] = b"Promise.race received an invalid promise\0";
 static PROMISE_CYCLE_ERROR: &[u8] = b"Chaining cycle detected for promise\0";
 static PROMISE_ANY_REJECTED_ERROR: &[u8] = b"All promises were rejected\0";

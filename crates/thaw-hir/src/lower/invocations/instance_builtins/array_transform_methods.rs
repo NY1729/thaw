@@ -9,7 +9,7 @@ impl<'a> FnLowerer<'a> {
                     if !call.args.is_empty() {
                         return Err("native `.toReversed()` expects no arguments".into());
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !matches!(receiver_type, HirType::Array(_)) {
                         return Err(format!(
@@ -22,7 +22,7 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if matches!(property.sym.as_ref(), "sort" | "toSorted") {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &receiver_type else {
                         return Err(format!(
@@ -45,7 +45,12 @@ impl<'a> FnLowerer<'a> {
                                 property.sym
                             ));
                         }
-                        let result = if let Some(comparator) = arguments.first() {
+                        let has_comparator = arguments.first()
+                            .map(|argument| self.infer_expr_type(argument).map(|ty| ty != HirType::Undefined))
+                            .transpose()?
+                            .unwrap_or(false);
+                        let result = if has_comparator {
+                            let comparator = arguments.first().unwrap();
                             let available = [element_type.clone(), element_type.clone()];
                             let comparator = self.validate_array_callback_value(
                                 comparator.clone(),
@@ -61,28 +66,12 @@ impl<'a> FnLowerer<'a> {
                                 property.sym == *"toSorted",
                             )?
                         } else {
-                            let prefix = match &element_type {
-                                HirType::F64 => "number",
-                                HirType::Str => "string",
-                                HirType::Bool => "bool",
-                                HirType::Object(_) => "object",
-                                other => {
-                                    return Err(format!(
-                                        "default array sort does not support element type {other:?}"
-                                    ))
-                                }
-                            };
-                            let suffix = if property.sym == *"sort" {
-                                "sort"
-                            } else {
-                                "to_sorted"
-                            };
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var(format!(
-                                    "__thaw_{prefix}_array_{suffix}"
-                                ))),
-                                vec![HirExpr::Var(source_name.clone())],
-                            )
+                            self.lower_array_sort_default(
+                                HirExpr::Var(source_name.clone()),
+                                receiver_type.clone(),
+                                element_type,
+                                property.sym == *"toSorted",
+                            )?
                         };
                         let mut bindings = vec![(source_name, receiver_type, receiver)];
                         bindings.extend(spread_bindings);
@@ -95,6 +84,27 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     if let Some(argument) = call.args.first() {
+                        if !matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
+                            let lowered = self.lower_expr(&argument.expr)?;
+                            if self.infer_expr_type(&lowered)? == HirType::Undefined {
+                                let source_name = format!("__thaw_sort_source_{}", self.next_binding);
+                                self.next_binding += 1;
+                                let argument_name = format!("__thaw_sort_argument_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(source_name.clone(), receiver_type.clone());
+                                self.scope.insert(argument_name.clone(), HirType::Undefined);
+                                let result = self.lower_array_sort_default(
+                                    HirExpr::Var(source_name.clone()),
+                                    receiver_type.clone(),
+                                    element_type,
+                                    property.sym == *"toSorted",
+                                )?;
+                                return self.wrap_call_argument_bindings(result, &[
+                                    (source_name, receiver_type, receiver),
+                                    (argument_name, HirType::Undefined, lowered),
+                                ]);
+                            }
+                        }
                         let comparator = self.lower_promise_callback(
                             &argument.expr,
                             &[element_type.clone(), element_type.clone()],
@@ -108,32 +118,28 @@ impl<'a> FnLowerer<'a> {
                             property.sym == *"toSorted",
                         );
                     }
-                    let prefix = match &element_type {
-                        HirType::F64 => "number",
-                        HirType::Str => "string",
-                        HirType::Bool => "bool",
-                        HirType::Object(_) => "object",
-                        other => {
-                            return Err(format!(
-                                "default array sort does not support element type {other:?}"
-                            ))
-                        }
-                    };
-                    let suffix = if property.sym == *"sort" {
-                        "sort"
-                    } else {
-                        "to_sorted"
-                    };
-                    return Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var(format!("__thaw_{prefix}_array_{suffix}"))),
-                        vec![receiver],
-                    ));
+                    return self.lower_array_sort_default(
+                        receiver,
+                        receiver_type,
+                        element_type,
+                        property.sym == *"toSorted",
+                    );
                 }
                 if matches!(
                     property.sym.as_ref(),
                     "some" | "every" | "find" | "findIndex" | "findLast" | "findLastIndex"
                 ) {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let mode = match property.sym.as_ref() {
+                        "some" => ArrayPredicateMode::Some,
+                        "every" => ArrayPredicateMode::Every,
+                        "find" => ArrayPredicateMode::Find,
+                        "findIndex" => ArrayPredicateMode::FindIndex,
+                        "findLast" => ArrayPredicateMode::FindLast,
+                        "findLastIndex" => ArrayPredicateMode::FindLastIndex,
+                        _ => unreachable!(),
+                    };
+                    let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
@@ -142,6 +148,11 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    let callback_element_type = if sparse_callback {
+                        Self::array_read_type(&element_type)
+                    } else {
+                        element_type.clone()
+                    };
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
                         let source_name = format!("__thaw_predicate_source_{}", self.next_binding);
                         self.next_binding += 1;
@@ -157,14 +168,14 @@ impl<'a> FnLowerer<'a> {
                             ));
                         }
                         let available = [
-                            element_type.clone(),
+                            callback_element_type.clone(),
                             HirType::F64,
                             array_type.clone(),
                         ];
                         let callback = self.validate_array_callback_value(
                             arguments[0].clone(),
                             &available,
-                            Some(&HirType::Bool),
+                            None,
                             "array predicate",
                         )?;
                         let result = self.lower_array_predicate_method(
@@ -173,15 +184,8 @@ impl<'a> FnLowerer<'a> {
                             element_type,
                             callback,
                             arguments.get(1).cloned(),
-                            match property.sym.as_ref() {
-                                "some" => ArrayPredicateMode::Some,
-                                "every" => ArrayPredicateMode::Every,
-                                "find" => ArrayPredicateMode::Find,
-                                "findIndex" => ArrayPredicateMode::FindIndex,
-                                "findLast" => ArrayPredicateMode::FindLast,
-                                "findLastIndex" => ArrayPredicateMode::FindLastIndex,
-                                _ => unreachable!(),
-                            },
+                            mode,
+                            sparse_callback,
                         )?;
                         let mut bindings = vec![(source_name, array_type, receiver)];
                         bindings.extend(spread_bindings);
@@ -195,9 +199,9 @@ impl<'a> FnLowerer<'a> {
                     }
                     let callback = self.lower_array_callback(
                         &call.args[0].expr,
-                        &element_type,
+                        &callback_element_type,
                         &array_type,
-                        &HirType::Bool,
+                        None,
                     )?;
                     let this_arg = call
                         .args
@@ -210,19 +214,13 @@ impl<'a> FnLowerer<'a> {
                         element_type,
                         callback,
                         this_arg,
-                        match property.sym.as_ref() {
-                            "some" => ArrayPredicateMode::Some,
-                            "every" => ArrayPredicateMode::Every,
-                            "find" => ArrayPredicateMode::Find,
-                            "findIndex" => ArrayPredicateMode::FindIndex,
-                            "findLast" => ArrayPredicateMode::FindLast,
-                            "findLastIndex" => ArrayPredicateMode::FindLastIndex,
-                            _ => unreachable!(),
-                        },
+                        mode,
+                        sparse_callback,
                     );
                 }
                 if matches!(property.sym.as_ref(), "reduce" | "reduceRight") {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
@@ -249,13 +247,18 @@ impl<'a> FnLowerer<'a> {
                             let ty = self.infer_expr_type(&value)?;
                             Ok::<_, String>((value, ty))
                         }).transpose()?;
-                        let accumulator_type = initial
-                            .as_ref()
-                            .map(|(_, ty)| ty)
-                            .unwrap_or(&element_type);
+                        let sparse_element_type = Self::array_read_type(&element_type);
+                        let accumulator_type = initial.as_ref().map(|(_, ty)| ty).unwrap_or(
+                            if sparse_callback { &sparse_element_type } else { &element_type }
+                        );
+                        let callback_element_type = if sparse_callback {
+                            Self::array_read_type(&element_type)
+                        } else {
+                            element_type.clone()
+                        };
                         let available = [
                             accumulator_type.clone(),
-                            element_type.clone(),
+                            callback_element_type.clone(),
                             HirType::F64,
                             array_type.clone(),
                         ];
@@ -269,6 +272,7 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(source_name.clone()),
                             array_type.clone(),
                             element_type,
+                            callback_element_type,
                             callback,
                             initial,
                             property.sym == *"reduceRight",
@@ -292,25 +296,33 @@ impl<'a> FnLowerer<'a> {
                             Ok::<_, String>((value, ty))
                         })
                         .transpose()?;
-                    let accumulator_type =
-                        initial.as_ref().map(|(_, ty)| ty).unwrap_or(&element_type);
+                    let sparse_element_type = Self::array_read_type(&element_type);
+                    let accumulator_type = initial.as_ref().map(|(_, ty)| ty).unwrap_or(
+                        if sparse_callback { &sparse_element_type } else { &element_type }
+                    );
+                    let callback_element_type = if sparse_callback {
+                        Self::array_read_type(&element_type)
+                    } else {
+                        element_type.clone()
+                    };
                     let callback = self.lower_array_reducer_callback(
                         &call.args[0].expr,
                         accumulator_type,
-                        &element_type,
+                        &callback_element_type,
                         &array_type,
                     )?;
                     return self.lower_array_reduce(
                         receiver,
                         array_type,
                         element_type,
+                        callback_element_type,
                         callback,
                         initial,
                         property.sym == *"reduceRight",
                     );
                 }
                 if property.sym == *"toSpliced" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
@@ -323,15 +335,18 @@ impl<'a> FnLowerer<'a> {
                     self.scope
                         .insert(source_name.clone(), array_type.clone());
                     let (arguments, spread_bindings) =
-                        self.lower_native_spread_values(&call.args, "Array.toSpliced")?;
-                    for (index, value) in arguments.iter().enumerate() {
-                        let expected = if index < 2 {
-                            &HirType::F64
-                        } else {
-                            &element_type
-                        };
-                        self.expect_type(expected, value, "array toSpliced argument")?;
-                    }
+                        self.lower_native_spread_array_values(&call.args, "Array.toSpliced")?;
+                    let arguments = arguments
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            if index < 2 {
+                                self.coerce_primitive_to_number(value)
+                            } else {
+                                self.coerce_array_insert_value(value, &element_type)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     let result = self.lower_array_to_spliced(
                         HirExpr::Var(source_name.clone()),
                         array_type.clone(),
@@ -343,7 +358,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"at" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if receiver_type == HirType::Str {
                         let (arguments, spread_bindings) =
@@ -491,7 +506,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"with" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
@@ -504,14 +519,12 @@ impl<'a> FnLowerer<'a> {
                     self.scope
                         .insert(receiver_name.clone(), array_type.clone());
                     let (arguments, spread_bindings) =
-                        self.lower_native_spread_values(&call.args, "Array.with")?;
+                        self.lower_native_spread_array_values(&call.args, "Array.with")?;
                     let [index, value] = arguments.as_slice() else {
                         return Err("native `.with()` expects an index and value".into());
                     };
-                    let index = index.clone();
-                    self.expect_type(&HirType::F64, &index, "array with index")?;
-                    let value = value.clone();
-                    self.expect_type(&element_type, &value, "array with value")?;
+                    let index = self.coerce_primitive_to_number(index.clone())?;
+                    let value = self.coerce_array_insert_value(value.clone(), &element_type)?;
                     let result = self.lower_array_with(
                         HirExpr::Var(receiver_name.clone()),
                         array_type.clone(),
@@ -524,7 +537,7 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"flat" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let mut current_type = self.infer_expr_type(&receiver)?;
                     if !matches!(current_type, HirType::Array(_)) {
                         return Err(format!(
@@ -597,6 +610,7 @@ impl<'a> FnLowerer<'a> {
                             result,
                             current_type.clone(),
                             element.as_ref().clone(),
+                            element.as_ref().clone(),
                             HirExpr::Lambda(
                                 Vec::new(),
                                 Vec::new(),
@@ -611,7 +625,8 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"flatMap" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
@@ -619,6 +634,11 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    let callback_element_type = if sparse_callback {
+                        Self::array_read_type(&element_type)
+                    } else {
+                        element_type.clone()
+                    };
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
                         let source_name = format!("__thaw_flat_map_source_{}", self.next_binding);
                         self.next_binding += 1;
@@ -633,7 +653,7 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         let available = [
-                            element_type.clone(),
+                            callback_element_type.clone(),
                             HirType::F64,
                             array_type.clone(),
                         ];
@@ -647,24 +667,11 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(source_name.clone()),
                             array_type.clone(),
                             element_type,
+                            callback_element_type,
                             callback,
                             arguments.get(1).cloned(),
                         )?;
-                        let mapped_type = self.infer_expr_type(&mapped)?;
-                        let HirType::Array(mapped_element) = &mapped_type else {
-                            unreachable!("array map always returns an array")
-                        };
-                        let HirType::Array(flat_element) = mapped_element.as_ref() else {
-                            return Err(format!(
-                                "native `.flatMap()` callback must return a homogeneous array, got {mapped_element:?}"
-                            ));
-                        };
-                        let flat_element = flat_element.as_ref().clone();
-                        let result = self.lower_array_flat_one(
-                            mapped,
-                            mapped_type,
-                            flat_element,
-                        )?;
+                        let result = self.lower_array_flat_map_result(mapped)?;
                         let mut bindings = vec![(source_name, array_type, receiver)];
                         bindings.extend(spread_bindings);
                         return self.wrap_call_argument_bindings(result, &bindings);
@@ -676,7 +683,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     let callback = self.lower_array_mapping_callback(
                         &call.args[0].expr,
-                        &element_type,
+                        &callback_element_type,
                         &array_type,
                     )?;
                     let this_arg = call
@@ -688,23 +695,15 @@ impl<'a> FnLowerer<'a> {
                         receiver,
                         array_type,
                         element_type,
+                        callback_element_type,
                         callback,
                         this_arg,
                     )?;
-                    let mapped_type = self.infer_expr_type(&mapped)?;
-                    let HirType::Array(mapped_element) = &mapped_type else {
-                        unreachable!("array map always returns an array")
-                    };
-                    let HirType::Array(flat_element) = mapped_element.as_ref() else {
-                        return Err(format!(
-                            "native `.flatMap()` callback must return a homogeneous array, got {mapped_element:?}"
-                        ));
-                    };
-                    let flat_element = flat_element.as_ref().clone();
-                    return self.lower_array_flat_one(mapped, mapped_type, flat_element);
+                    return self.lower_array_flat_map_result(mapped);
                 }
                 if property.sym == *"map" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
@@ -712,6 +711,11 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    let callback_element_type = if sparse_callback {
+                        Self::array_read_type(&element_type)
+                    } else {
+                        element_type.clone()
+                    };
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
                         let source_name = format!("__thaw_map_source_{}", self.next_binding);
                         self.next_binding += 1;
@@ -725,7 +729,7 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         let available = [
-                            element_type.clone(),
+                            callback_element_type.clone(),
                             HirType::F64,
                             array_type.clone(),
                         ];
@@ -740,6 +744,7 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(source_name.clone()),
                             array_type.clone(),
                             element_type,
+                            callback_element_type,
                             callback,
                             this_arg,
                         )?;
@@ -754,7 +759,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     let callback = self.lower_array_mapping_callback(
                         &call.args[0].expr,
-                        &element_type,
+                        &callback_element_type,
                         &array_type,
                     )?;
                     let this_arg = call
@@ -766,12 +771,14 @@ impl<'a> FnLowerer<'a> {
                         receiver,
                         array_type,
                         element_type,
+                        callback_element_type,
                         callback,
                         this_arg,
                     );
                 }
                 if property.sym == *"filter" {
-                    let receiver = self.lower_expr(&member.obj)?;
+                    let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
@@ -779,6 +786,11 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    let callback_element_type = if sparse_callback {
+                        Self::array_read_type(&element_type)
+                    } else {
+                        element_type.clone()
+                    };
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
                         let source_name = format!("__thaw_filter_source_{}", self.next_binding);
                         self.next_binding += 1;
@@ -793,20 +805,21 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         let available = [
-                            element_type.clone(),
+                            callback_element_type.clone(),
                             HirType::F64,
                             array_type.clone(),
                         ];
                         let callback = self.validate_array_callback_value(
                             arguments[0].clone(),
                             &available,
-                            Some(&HirType::Bool),
+                            None,
                             "array predicate",
                         )?;
                         let result = self.lower_array_filter(
                             HirExpr::Var(source_name.clone()),
                             array_type.clone(),
                             element_type,
+                            callback_element_type,
                             callback,
                             arguments.get(1).cloned(),
                         )?;
@@ -821,9 +834,9 @@ impl<'a> FnLowerer<'a> {
                     }
                     let callback = self.lower_array_callback(
                         &call.args[0].expr,
-                        &element_type,
+                        &callback_element_type,
                         &array_type,
-                        &HirType::Bool,
+                        None,
                     )?;
                     let this_arg = call
                         .args
@@ -834,6 +847,7 @@ impl<'a> FnLowerer<'a> {
                         receiver,
                         array_type,
                         element_type,
+                        callback_element_type,
                         callback,
                         this_arg,
                     );

@@ -348,6 +348,24 @@ impl<'ctx> HirCompiler<'ctx> {
                             }
                         });
                     }
+                    if matches!(name.as_str(), "__thaw_array_pop_optional" | "__thaw_array_shift_optional") {
+                        return arguments.first().and_then(|argument| {
+                            let HirType::Array(element) = self.expr_hir_type(argument)? else {
+                                return None;
+                            };
+                            Some(match *element {
+                                HirType::Nullable(payload) => HirType::Nullish(payload),
+                                HirType::Union(mut members) => {
+                                    if !members.contains(&HirType::Undefined) {
+                                        members.push(HirType::Undefined);
+                                    }
+                                    HirType::Union(members)
+                                }
+                                element @ (HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined) => element,
+                                element => HirType::Optional(Box::new(element)),
+                            })
+                        });
+                    }
                     if let Some(ret) = self.frame_async_functions.get(name) {
                         return Some(HirType::Promise(Box::new(ret.clone())));
                     }

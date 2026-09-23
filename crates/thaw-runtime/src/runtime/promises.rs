@@ -657,7 +657,6 @@ pub unsafe extern "C" fn thaw_promise_race(
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
     if len == 0 {
-        thaw_promise_reject(output, PROMISE_RACE_EMPTY_ERROR.as_ptr());
         return output;
     }
     if promises.is_null() {

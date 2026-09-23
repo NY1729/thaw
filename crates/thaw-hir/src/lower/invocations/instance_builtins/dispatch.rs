@@ -122,7 +122,7 @@ impl<'a> FnLowerer<'a> {
                 | "getTime"
                 | "setTime" | "toISOString" | "getFullYear" | "getYear" | "setYear"
                 | "getMonth" | "getDate" | "getDay"
-                | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds" | "getUTCFullYear"
+                | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds" | "getTimezoneOffset" | "getUTCFullYear"
                 | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours" | "getUTCMinutes"
                 | "getUTCSeconds" | "getUTCMilliseconds" | "setFullYear" | "setMonth" | "setDate"
                 | "setHours" | "setMinutes" | "setSeconds" | "setMilliseconds" | "setUTCFullYear"
@@ -175,7 +175,7 @@ impl<'a> FnLowerer<'a> {
             "group" | "groupToMap" => self.lower_native_array_group(member, property, call),
             "getTime" | "setTime" | "toISOString" | "getFullYear" | "getYear" | "setYear"
             | "getMonth" | "getDate"
-            | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
+            | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds" | "getTimezoneOffset"
             | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours"
             | "getUTCMinutes" | "getUTCSeconds" | "getUTCMilliseconds" | "setFullYear"
             | "setMonth" | "setDate" | "setHours" | "setMinutes" | "setSeconds"
@@ -222,7 +222,7 @@ impl<'a> FnLowerer<'a> {
         if !call.args.is_empty() {
             return Err("native `.deref()` expects no arguments".into());
         }
-        let receiver = self.lower_expr(&member.obj)?;
+        let receiver = self.lower_required_member_receiver(&member.obj, "deref")?;
         let receiver_type = self.infer_expr_type(&receiver)?;
         let element = match &receiver_type {
             HirType::Array(element) => element.as_ref().clone(),

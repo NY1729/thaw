@@ -822,6 +822,9 @@ impl<'a> FnLowerer<'a> {
         elements
             .iter()
             .map(|element| {
+                if *element == HirType::Undefined {
+                    return Ok(Vec::new());
+                }
                 let HirType::Object(fields) = element else {
                     return Err("correlated destructuring requires object members".into());
                 };
@@ -1214,7 +1217,9 @@ impl<'a> FnLowerer<'a> {
                 continue;
             };
             if literals.len() == source_elements.len()
-                && literals.iter().all(Option::is_some)
+                && literals.iter().zip(source_elements).all(|(value, element)| {
+                    value.is_some() || *element == HirType::Undefined
+                })
                 && literals
                     .iter()
                     .skip(1)

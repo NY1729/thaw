@@ -116,7 +116,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
-    fn compile_array_has_index(
+    fn compile_array_index_state(
         &mut self,
         handle: PointerValue<'ctx>,
         index: IntValue<'ctx>,
@@ -174,20 +174,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?
         };
-        let present = self
+        let state = self
             .builder
-            .build_load(self.context.i8_type(), element, "array_element_present")
+            .build_load(self.context.i8_type(), element, "array_element_state")
             .map_err(|error| error.to_string())?
             .into_int_value();
-        let present = self
-            .builder
-            .build_int_compare(
-                IntPredicate::NE,
-                present,
-                self.context.i8_type().const_zero(),
-                "array_has_index",
-            )
-            .map_err(|error| error.to_string())?;
         self.builder
             .build_unconditional_branch(done)
             .map_err(|error| error.to_string())?;
@@ -198,15 +189,31 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(done);
         let phi = self
             .builder
-            .build_phi(self.context.bool_type(), "array_index_present")
+            .build_phi(self.context.i8_type(), "array_index_state")
             .map_err(|error| error.to_string())?;
-        let present_by_default = self.context.bool_type().const_int(1, false);
+        let present_by_default = self.context.i8_type().const_int(1, false);
         phi.add_incoming(&[
             (&present_by_default, dense),
-            (&present, sparse_present),
+            (&state, sparse_present),
             (&present_by_default, beyond_mask),
         ]);
         Ok(phi.as_basic_value().into_int_value())
+    }
+
+    fn compile_array_has_index(
+        &mut self,
+        handle: PointerValue<'ctx>,
+        index: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let state = self.compile_array_index_state(handle, index)?;
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                state,
+                self.context.i8_type().const_zero(),
+                "array_has_index",
+            )
+            .map_err(|error| error.to_string())
     }
 
     fn compile_array_copy_presence(
@@ -580,11 +587,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let more = self.builder.build_int_compare(IntPredicate::ULT, current, length, "spread_presence_more").map_err(|e| e.to_string())?;
         self.builder.build_conditional_branch(more, body, done).map_err(|e| e.to_string())?;
         self.builder.position_at_end(body);
-        let present = self.compile_array_has_index(source, current)?;
+        let state = self.compile_array_index_state(source, current)?;
         let target_index = self.builder.build_int_add(destination_offset, current, "spread_presence_target").map_err(|e| e.to_string())?;
         let target = unsafe { self.builder.build_in_bounds_gep(self.context.i8_type(), destination, &[self.builder.build_int_add(target_index, i64_type.const_int(8, false), "spread_presence_payload").map_err(|e| e.to_string())?], "spread_presence_slot").map_err(|e| e.to_string())? };
-        let present = self.builder.build_int_z_extend(present, self.context.i8_type(), "spread_presence_byte").map_err(|e| e.to_string())?;
-        self.builder.build_store(target, present).map_err(|e| e.to_string())?;
+        self.builder.build_store(target, state).map_err(|e| e.to_string())?;
         let next = self.builder.build_int_add(current, i64_type.const_int(1, false), "spread_presence_increment").map_err(|e| e.to_string())?;
         let body_end = self.builder.get_insert_block().ok_or("array spread lost its body block")?;
         self.builder.build_unconditional_branch(condition).map_err(|e| e.to_string())?;

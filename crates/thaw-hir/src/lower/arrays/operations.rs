@@ -11,12 +11,8 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(receiver_name.clone(), array_type.clone());
         let mut bindings = vec![(receiver_name.clone(), array_type.clone(), receiver)];
         let mut argument_names = Vec::with_capacity(arguments.len());
-        for (index, argument) in arguments.into_iter().enumerate() {
-            let ty = if index < 2 {
-                HirType::F64
-            } else {
-                element_type.clone()
-            };
+        for argument in arguments {
+            let ty = self.infer_expr_type(&argument)?;
             let name = format!("__thaw_to_spliced_argument_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(name.clone(), ty.clone());
@@ -181,12 +177,24 @@ impl<'a> FnLowerer<'a> {
                 ],
             ),
         ]);
-        for item_name in argument_names.iter().skip(2) {
-            statements.push(HirStmt::Expr(HirExpr::IndexAssign(
-                Box::new(var(&result_name)),
-                Box::new(var(&destination_index_name)),
-                Box::new(var(item_name)),
-            )));
+        let mut absent_items = Vec::new();
+        for (offset, item_name) in argument_names.iter().skip(2).enumerate() {
+            if self.scope.get(item_name) == Some(&HirType::Optional(Box::new(element_type.clone()))) {
+                statements.push(HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(var(item_name)), element_type.clone()),
+                    Vec::new(),
+                    vec![HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(var(&result_name)), Box::new(var(&destination_index_name)),
+                        Box::new(HirExpr::OptionalValue(Box::new(var(item_name)), element_type.clone())),
+                    ))],
+                ));
+                absent_items.push((offset, item_name.clone()));
+            } else {
+                statements.push(HirStmt::Expr(HirExpr::IndexAssign(
+                    Box::new(var(&result_name)), Box::new(var(&destination_index_name)),
+                    Box::new(var(item_name)),
+                )));
+            }
             statements.push(increment(&destination_index_name));
         }
         statements.extend([
@@ -204,24 +212,38 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::TypedIndex(
                             Box::new(var(&receiver_name)),
                             Box::new(var(&source_index_name)),
-                            element_type,
+                            element_type.clone(),
                         )),
                     )),
                     increment(&source_index_name),
                     increment(&destination_index_name),
                 ],
             ),
-            HirStmt::Return(Some(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_array_to_spliced_presence".into())),
-                vec![
-                    var(&result_name),
-                    var(&receiver_name),
-                    var(&start_name),
-                    var(&delete_name),
-                    number(argument_names.len().saturating_sub(2) as f64),
-                ],
-            ))),
+            HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_to_spliced_presence".into())),
+                    vec![
+                        var(&result_name),
+                        var(&receiver_name),
+                        var(&start_name),
+                        var(&delete_name),
+                        number(argument_names.len().saturating_sub(2) as f64),
+                    ],
+            )),
         ]);
+        for (offset, name) in absent_items {
+            statements.push(HirStmt::If(
+                HirExpr::OptionalIsNone(Box::new(var(&name)), element_type.clone()),
+                vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_set_undefined".into())),
+                    vec![var(&result_name), add(var(&start_name), number(offset as f64))],
+                ))],
+                Vec::new(),
+            ));
+        }
+        statements.push(HirStmt::Return(Some(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_densify".into())),
+            vec![var(&result_name)],
+        ))));
         self.wrap_call_argument_bindings(HirExpr::Block(statements), &bindings)
     }
 
@@ -230,6 +252,7 @@ impl<'a> FnLowerer<'a> {
         receiver: HirExpr,
         array_type: HirType,
         element_type: HirType,
+        callback_element_type: HirType,
         callback: HirExpr,
         initial: Option<(HirExpr, HirType)>,
         reverse: bool,
@@ -242,7 +265,7 @@ impl<'a> FnLowerer<'a> {
         let accumulator_type = initial
             .as_ref()
             .map(|(_, ty)| ty.clone())
-            .unwrap_or_else(|| element_type.clone());
+            .unwrap_or_else(|| callback_element_type.clone());
         self.scope.insert(receiver_name.clone(), array_type.clone());
         self.scope
             .insert(callback_name.clone(), callback_type.clone());
@@ -261,7 +284,7 @@ impl<'a> FnLowerer<'a> {
         self.scope
             .insert(accumulator_name.clone(), accumulator_type.clone());
         self.scope
-            .insert(element_name.clone(), element_type.clone());
+            .insert(element_name.clone(), callback_element_type.clone());
         self.scope.insert(found_name.clone(), HirType::Bool);
 
         let one = || HirExpr::Lit(HirLit::F64(1.0));
@@ -277,6 +300,12 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Var(initial_name.clone()),
                 Some(initial_name),
             )
+        } else if accumulator_type == Self::array_read_type(&element_type) {
+            let (_, _, absent) = Self::array_optional_read(
+                &element_type,
+                HirExpr::Lit(HirLit::Undefined),
+            );
+            (absent, None)
         } else {
             (
                 HirExpr::TypedIndex(
@@ -304,6 +333,33 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var(callback_name.clone())),
             available[..params.len()].to_vec(),
         );
+        let raw_element = HirExpr::TypedIndex(
+            Box::new(receiver_var()), Box::new(index()), element_type.clone(),
+        );
+        let element = if callback_element_type == element_type
+            && !matches!(element_type, HirType::Optional(_) | HirType::Nullish(_))
+            && !matches!(&element_type, HirType::Union(members) if members.contains(&HirType::Undefined))
+        {
+            raw_element
+        } else {
+            let (ty, present, absent) = Self::array_optional_read(&element_type, raw_element);
+            HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                        vec![receiver_var(), index()],
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                )),
+                Box::new(present),
+                Box::new(absent),
+                ty,
+            )
+        };
+        let reduce_error = HirExpr::Lit(HirLit::Str(
+            "\u{1}TypeError\u{1}Reduce of empty array with no initial value".into(),
+        ));
         let mut statements = vec![HirStmt::Let(
             length_name.clone(),
             HirType::F64,
@@ -316,9 +372,7 @@ impl<'a> FnLowerer<'a> {
                     Box::new(length()),
                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                 ),
-                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                    "Reduce of empty array with no initial value".into(),
-                )))],
+                vec![HirStmt::Throw(reduce_error.clone())],
                 Vec::new(),
             ));
         }
@@ -357,12 +411,8 @@ impl<'a> FnLowerer<'a> {
                         vec![
                             HirStmt::Let(
                                 element_name.clone(),
-                                element_type.clone(),
-                                HirExpr::TypedIndex(
-                                    Box::new(receiver_var()),
-                                    Box::new(index()),
-                                    element_type,
-                                ),
+                                callback_element_type,
+                                element,
                             ),
                             HirStmt::If(
                                 HirExpr::BinOp(
@@ -404,9 +454,7 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var(found_name)),
                     Box::new(HirExpr::Lit(HirLit::Bool(false))),
                 ),
-                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                    "Reduce of empty array with no initial value".into(),
-                )))],
+                vec![HirStmt::Throw(reduce_error)],
                 Vec::new(),
             ),
             HirStmt::Return(Some(HirExpr::Var(accumulator_name))),
@@ -433,6 +481,7 @@ impl<'a> FnLowerer<'a> {
         callback: HirExpr,
         this_arg: Option<HirExpr>,
         mode: ArrayPredicateMode,
+        sparse_find: bool,
     ) -> Result<HirExpr, String> {
         let receiver_name = format!("__thaw_predicate_receiver_{}", self.next_binding);
         self.next_binding += 1;
@@ -450,8 +499,13 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(length_name.clone(), HirType::F64);
         self.scope.insert(index_name.clone(), HirType::F64);
+        let callback_element_type = if sparse_find {
+            Self::array_read_type(&element_type)
+        } else {
+            element_type.clone()
+        };
         self.scope
-            .insert(element_name.clone(), element_type.clone());
+            .insert(element_name.clone(), callback_element_type.clone());
 
         let HirType::Function(params, _) = &callback_type else {
             unreachable!("array predicate was validated as a function")
@@ -465,6 +519,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var(callback_name.clone())),
             available[..params.len()].to_vec(),
         );
+        let callback_truthy = self.array_callback_truthy(callback_call)?;
         let stop_condition = if matches!(
             mode,
             ArrayPredicateMode::Some
@@ -473,21 +528,26 @@ impl<'a> FnLowerer<'a> {
                 | ArrayPredicateMode::FindLast
                 | ArrayPredicateMode::FindLastIndex
         ) {
-            callback_call
+            callback_truthy
         } else {
             HirExpr::BinOp(
                 BinOp::EqEqEq,
-                Box::new(callback_call),
+                Box::new(callback_truthy),
                 Box::new(HirExpr::Lit(HirLit::Bool(false))),
             )
         };
+        let (find_type, find_present, find_absent) = Self::array_optional_read(
+            &element_type,
+            HirExpr::Var(element_name.clone()),
+        );
         let stop_result = match mode {
             ArrayPredicateMode::Some => HirExpr::Lit(HirLit::Bool(true)),
             ArrayPredicateMode::Every => HirExpr::Lit(HirLit::Bool(false)),
-            ArrayPredicateMode::Find | ArrayPredicateMode::FindLast => HirExpr::OptionalSome(
-                Box::new(HirExpr::Var(element_name.clone())),
-                element_type.clone(),
-            ),
+            ArrayPredicateMode::Find | ArrayPredicateMode::FindLast
+                if callback_element_type == find_type => {
+                HirExpr::Var(element_name.clone())
+            }
+            ArrayPredicateMode::Find | ArrayPredicateMode::FindLast => find_present,
             ArrayPredicateMode::FindIndex | ArrayPredicateMode::FindLastIndex => {
                 HirExpr::Var(index_name.clone())
             }
@@ -495,9 +555,7 @@ impl<'a> FnLowerer<'a> {
         let final_result = match mode {
             ArrayPredicateMode::Some => HirExpr::Lit(HirLit::Bool(false)),
             ArrayPredicateMode::Every => HirExpr::Lit(HirLit::Bool(true)),
-            ArrayPredicateMode::Find | ArrayPredicateMode::FindLast => {
-                HirExpr::OptionalNone(element_type.clone())
-            }
+            ArrayPredicateMode::Find | ArrayPredicateMode::FindLast => find_absent,
             ArrayPredicateMode::FindIndex | ArrayPredicateMode::FindLastIndex => {
                 HirExpr::Lit(HirLit::F64(-1.0))
             }
@@ -507,15 +565,43 @@ impl<'a> FnLowerer<'a> {
             mode,
             ArrayPredicateMode::FindLast | ArrayPredicateMode::FindLastIndex
         );
-        let visit = vec![
-            HirStmt::Let(
-                element_name,
-                element_type.clone(),
+        let element = if sparse_find {
+            let (ty, present, absent) = Self::array_optional_read(
+                &element_type,
                 HirExpr::TypedIndex(
                     Box::new(HirExpr::Var(receiver_name.clone())),
                     Box::new(HirExpr::Var(index_name.clone())),
-                    element_type,
+                    element_type.clone(),
                 ),
+            );
+            HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(index_name.clone()),
+                        ],
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                )),
+                Box::new(present),
+                Box::new(absent),
+                ty,
+            )
+        } else {
+            HirExpr::TypedIndex(
+                Box::new(HirExpr::Var(receiver_name.clone())),
+                Box::new(HirExpr::Var(index_name.clone())),
+                element_type,
+            )
+        };
+        let visit = vec![
+            HirStmt::Let(
+                element_name,
+                callback_element_type,
+                element,
             ),
             HirStmt::If(
                 stop_condition,
@@ -599,6 +685,7 @@ impl<'a> FnLowerer<'a> {
         receiver: HirExpr,
         array_type: HirType,
         element_type: HirType,
+        callback_element_type: HirType,
         callback: HirExpr,
         this_arg: Option<HirExpr>,
     ) -> Result<HirExpr, String> {
@@ -619,7 +706,7 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(length_name.clone(), HirType::F64);
         self.scope.insert(index_name.clone(), HirType::F64);
         self.scope
-            .insert(element_name.clone(), element_type.clone());
+            .insert(element_name.clone(), callback_element_type.clone());
         let HirType::Function(params, _) = &callback_type else {
             unreachable!("array callback was validated as a function")
         };
@@ -632,6 +719,35 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var(callback_name.clone())),
             available[..params.len()].to_vec(),
         );
+        let raw_element = HirExpr::TypedIndex(
+            Box::new(HirExpr::Var(receiver_name.clone())),
+            Box::new(HirExpr::Var(index_name.clone())),
+            element_type.clone(),
+        );
+        let element = if callback_element_type == element_type
+            && !matches!(element_type, HirType::Optional(_) | HirType::Nullish(_))
+            && !matches!(&element_type, HirType::Union(members) if members.contains(&HirType::Undefined))
+        {
+            raw_element
+        } else {
+            let (ty, present, absent) = Self::array_optional_read(&element_type, raw_element);
+            HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(index_name.clone()),
+                        ],
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                )),
+                Box::new(present),
+                Box::new(absent),
+                ty,
+            )
+        };
         let body = HirExpr::Block(vec![
             HirStmt::Let(
                 length_name.clone(),
@@ -661,12 +777,8 @@ impl<'a> FnLowerer<'a> {
                         vec![
                             HirStmt::Let(
                                 element_name,
-                                element_type.clone(),
-                                HirExpr::TypedIndex(
-                                    Box::new(HirExpr::Var(receiver_name.clone())),
-                                    Box::new(HirExpr::Var(index_name.clone())),
-                                    element_type,
-                                ),
+                                callback_element_type,
+                                element,
                             ),
                             HirStmt::Expr(callback_call),
                         ],

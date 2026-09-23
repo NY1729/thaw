@@ -208,16 +208,29 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
-            "__thaw_json_keys" => {
+            "__thaw_json_keys" | "__thaw_json_own_keys" => {
                 let result = self
-                    .compile_single_arg_call("thaw_json_keys", args, "Object.keys")?
+                    .compile_single_arg_call(name.trim_start_matches("__"), args, "Object.keys")?
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_array_keys" => {
-                let result = self
-                    .compile_single_array_arg_call("thaw_array_keys", args, "Object.keys")?
-                    .into_pointer_value();
+                let [array, include_length] = args else {
+                    return Err("array keys expects an array and length flag".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let include_length = self.compile_expr(include_length)?.into_int_value();
+                let array = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
+                let include_length = self.builder.build_int_z_extend(
+                    include_length, self.context.i8_type(), "array_keys_include_length",
+                ).map_err(|error| error.to_string())?;
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_array_keys").unwrap(),
+                    &[array.into(), presence.into(), include_length.into()],
+                    "array_keys",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("array keys returned no value")?.into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_json_values" => {

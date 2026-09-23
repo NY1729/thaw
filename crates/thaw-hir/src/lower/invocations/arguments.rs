@@ -7,12 +7,31 @@ impl<'a> FnLowerer<'a> {
         self.lower_native_spread_values_with_expected(arguments, label, &[], None)
     }
 
+    fn lower_native_spread_array_values(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        self.lower_native_spread_values_impl(arguments, label, &[], None, true)
+    }
+
     fn lower_native_spread_values_with_expected(
         &mut self,
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
         expected: &[HirType],
         rest: Option<&HirType>,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        self.lower_native_spread_values_impl(arguments, label, expected, rest, false)
+    }
+
+    fn lower_native_spread_values_impl(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+        expected: &[HirType],
+        rest: Option<&HirType>,
+        array_reads: bool,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
         let lowered = arguments
             .iter()
@@ -29,6 +48,11 @@ impl<'a> FnLowerer<'a> {
         let mut bindings = Vec::new();
         let mut values = Vec::new();
         for (argument, value) in arguments.iter().zip(lowered) {
+            let value = if array_reads && argument.spread.is_none() {
+                self.lower_array_index_operand(value)?
+            } else {
+                value
+            };
             if !preserve_order {
                 values.push(value);
                 continue;
@@ -44,6 +68,11 @@ impl<'a> FnLowerer<'a> {
             }
             if let HirExpr::ArrayLit(elements) = value {
                 for element in elements {
+                    let element = if array_reads {
+                        self.lower_array_index_operand(element)?
+                    } else {
+                        element
+                    };
                     if matches!(element, HirExpr::Lit(_)) {
                         values.push(element);
                         continue;
@@ -163,7 +192,7 @@ impl<'a> FnLowerer<'a> {
         arguments
             .into_iter()
             .zip(expected)
-            .map(|(value, expected)| self.coerce_to_declared(expected, value))
+            .map(|(value, expected)| self.coerce_primitive_array_argument(value, expected))
             .collect()
     }
 

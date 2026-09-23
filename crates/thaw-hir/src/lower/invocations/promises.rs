@@ -811,9 +811,6 @@ impl<'a> FnLowerer<'a> {
                 let (values, element) = self.lower_promise_array_value(&arg.expr, "race")?;
                 return Ok(HirExpr::PromiseRaceArray(Box::new(values), element));
             }
-            if array.elems.is_empty() {
-                return Err("`Promise.race` requires at least one promise".into());
-            }
             if let Some(dynamic) = self.try_dynamic_promise_combinator("race", &array.elems)? {
                 return Ok(dynamic);
             }
@@ -889,9 +886,6 @@ impl<'a> FnLowerer<'a> {
             {
                 let (values, element) = self.lower_promise_array_value(&arg.expr, "any")?;
                 return Ok(HirExpr::PromiseAnyArray(Box::new(values), element));
-            }
-            if array.elems.is_empty() {
-                return Err("`Promise.any` requires at least one promise".into());
             }
             if let Some(dynamic) = self.try_dynamic_promise_combinator("any", &array.elems)? {
                 return Ok(dynamic);
