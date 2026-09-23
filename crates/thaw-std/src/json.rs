@@ -544,6 +544,74 @@ pub unsafe extern "C" fn thaw_json_index_set(
     value
 }
 
+/// Like `thaw_json_get`, but returns a pointer *into* `value`'s own
+/// storage instead of a clone -- for an assignment target's intermediate
+/// container (`a.b.c = x` needs `a.b` to still be `a`'s own nested
+/// object, not a disconnected copy, or the write never reaches `a`).
+/// Auto-vivifies a missing/non-object field to a fresh empty object,
+/// matching the permissive "degrade instead of abort" policy the rest of
+/// this file follows -- real JS would throw assigning through `undefined`
+/// here, but there's no exception channel wired to this dynamic-value
+/// bridge yet (see this file's own module doc comment).
+///
+/// A newly-created field defaults to an empty *object*, not `Null` --
+/// `.field` access always implies the caller is about to treat it as an
+/// object (either another `.field`/computed-string-key step, which
+/// re-vivifies through this same function, or the final property write,
+/// whose native setter (`thaw_json_object_set_*`/`object_insert`) only
+/// inserts into an already-`Value::Object` target and silently no-ops
+/// otherwise -- by design, matching real JS assigning through a
+/// primitive receiver). Only a chain ending in a *computed numeric*
+/// index (`.a[0] = x` where `.a` doesn't exist yet) still needs `.a` to
+/// become an array instead; `thaw_json_index_get_mut` re-vivifies an
+/// object placeholder like this one into an array on its own, so this
+/// only stays wrong for `.a[0] = x` written as the assignment's own
+/// final step (no further chained access) -- left as a narrower,
+/// unfixed edge case.
+///
+/// # Safety
+/// `value` must be null or point to a valid, mutable JSON `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_get_mut(value: *mut Value, key: *const c_char) -> *mut Value {
+    let Some(value) = (unsafe { value.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    if !matches!(value, Value::Object(_)) || is_napi_undefined(value) {
+        *value = Value::Object(serde_json::Map::new());
+    }
+    let Value::Object(fields) = value else {
+        unreachable!()
+    };
+    fields
+        .entry(to_str(key))
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+}
+
+/// The array/computed-index counterpart to `thaw_json_get_mut`.
+///
+/// # Safety
+/// `value` must be null or point to a valid, mutable JSON `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_index_get_mut(value: *mut Value, index: f64) -> *mut Value {
+    let Some(value) = (unsafe { value.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    if !index.is_finite() || index < 0.0 || index > (u32::MAX - 1) as f64 || index.fract() != 0.0 {
+        return std::ptr::null_mut();
+    }
+    if !matches!(value, Value::Array(_)) {
+        *value = Value::Array(Vec::new());
+    }
+    let Value::Array(items) = value else {
+        unreachable!()
+    };
+    let index = index as usize;
+    if items.len() <= index {
+        items.resize(index + 1, Value::Null);
+    }
+    &mut items[index]
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_as_number(value: *mut Value) -> f64 {
     let value = unsafe { &*value };

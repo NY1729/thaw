@@ -855,6 +855,43 @@ fn compiles_structured_clone_of_a_dynamic_value() {
     );
 }
 
+/// Nested writes through an `any`-typed value (`a.b.c = x`, `a.b[i] = x`)
+/// used to silently no-op: reading `a.b` as an assignment target's
+/// intermediate container went through the same clone-returning read as
+/// any other `.field` expression (`thaw_json_get`), so the write landed
+/// on a disconnected copy instead of `a`'s own nested storage -- pinned
+/// against real Node output. Also covers auto-vivifying a missing
+/// intermediate field (real JS would throw; this compiler has no
+/// exception channel on this bridge yet, so it degrades to creating the
+/// object instead, per this file's own module doc comment) and a
+/// 3-level chain ending in a compound assignment.
+#[test]
+fn compiles_nested_dynamic_value_assignment() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const obj: any = { c: { d: true } };
+            obj.c.d = false;
+            console.log(JSON.stringify(obj));
+
+            const arr: any = { c: [1, 2, 3] };
+            arr.c[0] = 99;
+            console.log(JSON.stringify(arr));
+
+            const deep: any = { p: { q: { r: 5 } } };
+            deep.p.q.r *= 3;
+            console.log(JSON.stringify(deep));
+
+            const fresh: any = {};
+            fresh.a.b = 5;
+            console.log(JSON.stringify(fresh));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_dynamic_value_assignment"),
+        "{\"c\":{\"d\":false}}\n{\"c\":[99,2,3]}\n{\"p\":{\"q\":{\"r\":15}}}\n{\"a\":{\"b\":5}}\n"
+    );
+}
+
 #[test]
 fn json_stringify_calls_function_replacers() {
     let source = r#"function main(): void {

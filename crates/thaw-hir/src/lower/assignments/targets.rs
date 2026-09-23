@@ -1,4 +1,56 @@
 impl<'a> FnLowerer<'a> {
+    /// Resolves `expr` for use as an assignment's intermediate/target
+    /// container, walking through `.field`/`[index]` accesses on a `Json`
+    /// (`any`-typed) value via a *mutable* chain instead of an ordinary
+    /// read. An ordinary read (`self.lower_expr`, `thaw_json_get`/
+    /// `thaw_json_index`) always clones, so a nested assignment
+    /// (`a.b.c = x`) would resolve `a.b` to a disconnected copy and write
+    /// into that instead of `a`'s own nested object -- silently doing
+    /// nothing observable, confirmed against real Node (`a.b.c = x` then
+    /// reading `a.b.c` back still shows the old value).
+    /// `__thaw_json_get_mut`/`__thaw_json_index_get_mut` instead return a
+    /// pointer *into* the parent's own storage, so the final write at the
+    /// bottom of the chain reaches the original.
+    ///
+    /// Bottoms out at a plain variable, or any non-`Json`/non-chain
+    /// sub-expression, which `lower_expr` already resolves correctly (a
+    /// `Json`-typed local already holds its own pointer -- no clone
+    /// happens reading a bare variable -- and every other native value
+    /// type is already pointer-identity by construction).
+    fn lower_json_mutable_chain(&mut self, expr: &Expr) -> Result<HirExpr, String> {
+        let Expr::Member(member) = expr else {
+            return self.lower_expr(expr);
+        };
+        let plain_inner = self.lower_expr(&member.obj)?;
+        let inner_type = self.infer_expr_type(&plain_inner)?;
+        if inner_type != HirType::Json {
+            return self.lower_expr(expr);
+        }
+        let inner = self.lower_json_mutable_chain(&member.obj)?;
+        match &member.prop {
+            MemberProp::Ident(prop) => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_get_mut".to_string())),
+                vec![inner, HirExpr::Lit(HirLit::Str(prop.sym.to_string()))],
+            )),
+            MemberProp::Computed(computed) => {
+                let key = self.lower_expr(&computed.expr)?;
+                if self.infer_expr_type(&key)? == HirType::F64 {
+                    Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_index_get_mut".to_string())),
+                        vec![inner, key],
+                    ))
+                } else {
+                    let key = self.coerce_primitive_to_string(key)?;
+                    Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_get_mut".to_string())),
+                        vec![inner, key],
+                    ))
+                }
+            }
+            _ => self.lower_expr(expr),
+        }
+    }
+
     /// Resolves a computed assignment/update target without confusing the
     /// pointer-compatible array, object, string and JSON layouts.
     fn lower_computed_target(
@@ -6,7 +58,7 @@ impl<'a> FnLowerer<'a> {
         member: &MemberExpr,
         computed: &ComputedPropName,
     ) -> Result<Target, String> {
-        let object = self.lower_expr(&member.obj)?;
+        let object = self.lower_json_mutable_chain(&member.obj)?;
         let object_type = self.infer_expr_type(&object)?;
         match &object_type {
             HirType::Array(_) => {
@@ -109,7 +161,7 @@ impl<'a> FnLowerer<'a> {
                                 return Ok(Target::Var(symbol));
                             }
                         }
-                        let obj = self.lower_expr(&member.obj)?;
+                        let obj = self.lower_json_mutable_chain(&member.obj)?;
                         let obj_ty = self.infer_expr_type(&obj)?;
                         match &obj_ty {
                             HirType::Object(fields)

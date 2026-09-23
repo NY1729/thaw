@@ -215,6 +215,42 @@ impl<'ctx> HirCompiler<'ctx> {
                     "structuredClone",
                 );
             }
+            "__thaw_json_get_mut" => {
+                let [object, key] = args else {
+                    return Err("__thaw_json_get_mut expects two operands".into());
+                };
+                let object = self.compile_expr(object)?;
+                let key = self.compile_expr(key)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_get_mut").unwrap(),
+                        &[object.into(), key.into()],
+                        "json_get_mut",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "thaw_json_get_mut returned no value".to_string());
+            }
+            "__thaw_json_index_get_mut" => {
+                let [object, index] = args else {
+                    return Err("__thaw_json_index_get_mut expects two operands".into());
+                };
+                let object = self.compile_expr(object)?;
+                let index = self.compile_expr(index)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_index_get_mut").unwrap(),
+                        &[object.into(), index.into()],
+                        "json_index_get_mut",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "thaw_json_index_get_mut returned no value".to_string());
+            }
             "__thaw_json_keys" | "__thaw_json_own_keys" => {
                 let result = self
                     .compile_single_arg_call(name.trim_start_matches("__"), args, "Object.keys")?
