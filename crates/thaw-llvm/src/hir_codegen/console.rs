@@ -390,14 +390,14 @@ impl<'ctx> HirCompiler<'ctx> {
         let text = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_handle_to_string").unwrap(),
+                self.module.get_function("thaw_js_handle_to_console_string").unwrap(),
                 &[handle.into()],
                 "console_js_value",
             )
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or("thaw_js_handle_to_string returned no value")?
+            .ok_or("thaw_js_handle_to_console_string returned no value")?
             .into_pointer_value();
         self.compile_console_text(text, newline, "console_js_value", descriptor)
     }
