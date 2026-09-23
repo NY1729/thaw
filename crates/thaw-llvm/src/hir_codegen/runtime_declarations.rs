@@ -279,6 +279,16 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_function("thaw_json_get", json_get_type, Some(Linkage::External));
         self.module
             .add_function("thaw_json_take", json_get_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_json_get_mut",
+            json_get_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_index_get_mut",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
 
         let json_index_type =
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), i8_ptr.into()], false);

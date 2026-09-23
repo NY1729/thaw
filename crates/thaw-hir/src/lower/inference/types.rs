@@ -1610,6 +1610,22 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "Buffer.isBuffer JSON operand")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_get_mut" => {
+                        let [object, key] = args.as_slice() else {
+                            return Err("__thaw_json_get_mut expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Json, object, "nested JSON assignment target")?;
+                        self.expect_type(&HirType::Str, key, "nested JSON assignment key")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_index_get_mut" => {
+                        let [object, index] = args.as_slice() else {
+                            return Err("__thaw_json_index_get_mut expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Json, object, "nested JSON assignment target")?;
+                        self.expect_type(&HirType::F64, index, "nested JSON assignment index")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_clone" => {
                         let [value] = args.as_slice() else {
                             return Err("structuredClone expects one operand".into());
