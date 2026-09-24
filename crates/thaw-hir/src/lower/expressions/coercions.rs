@@ -464,6 +464,35 @@ impl<'a> FnLowerer<'a> {
             return self
                 .wrap_call_argument_bindings(HirExpr::Block(body), &[(name, lhs_type, lhs)]);
         }
+        // `x ?? y` where `x` is a dynamic (`any`-typed) value -- unlike
+        // `Optional`/`Nullable`/`Nullish` below, whose absent/-present
+        // state is a compile-time-known tag, a `Json` value's own
+        // "is this null/undefined" state is only known at runtime
+        // (`__thaw_json_is_nullish`, the same check `==`/`===` against a
+        // bare `null`/`undefined` literal already reuses just above).
+        // Previously fell through to this function's final fallback
+        // (`_ => return Ok(lhs)`), silently keeping a nullish `any`
+        // value instead of falling back to `y` (real trigger: `const m:
+        // any = null; m ?? "default"` returning `null`, not
+        // `"default"`).
+        if lhs_type == HirType::Json {
+            let rhs = self.coerce_to_declared(&HirType::Json, rhs)?;
+            let name = format!("__thaw_nullish_json_left_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), HirType::Json);
+            let left = HirExpr::Var(name.clone());
+            let is_nullish = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".to_string())),
+                vec![left.clone()],
+            );
+            let result = HirExpr::Conditional(
+                Box::new(is_nullish),
+                Box::new(rhs),
+                Box::new(left),
+                HirType::Json,
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, HirType::Json, lhs)]);
+        }
         let (payload, is_none, value) = match lhs_type.clone() {
             HirType::Optional(payload) => {
                 let is_none = HirExpr::OptionalIsNone(
