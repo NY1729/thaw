@@ -1290,6 +1290,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     .compile_array_wrap_with_presence(result, copied_presence)?
                     .into());
             }
+            "__thaw_any_array_flat" => {
+                let [array, depth] = args else {
+                    return Err("array flat expects two operands".to_string());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                let depth = self.compile_expr(depth)?.into_float_value();
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_any_array_flat").unwrap(),
+                        &[buffer.into(), depth.into()],
+                        "array_flat",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_any_array_flat returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
             "__thaw_number_array_index_of"
             | "__thaw_number_array_includes"
             | "__thaw_string_array_index_of"

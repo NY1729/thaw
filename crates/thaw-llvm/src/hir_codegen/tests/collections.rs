@@ -912,6 +912,69 @@ fn compiles_native_array_flat() {
     );
 }
 
+/// `.flat()` on an `any[]` (`Array(Json)`) receiver -- whether a `Json`-
+/// typed element is itself an array is only knowable at runtime, unlike a
+/// statically nested `T[][]` (`compiles_native_array_flat` above), so the
+/// same compile-time unwrap-and-copy loop that handles that case can't
+/// express it: `element` is `Json`, never `Array(_)`, so the loop always
+/// `break`s on its first iteration regardless of `depth`, silently
+/// returning an unflattened copy. Fixed with a dedicated native helper
+/// (`thaw_any_array_flat`, thaw-std's `json.rs`) that walks the boxed
+/// JSON tree at runtime.
+#[test]
+fn compiles_dynamic_array_flat() {
+    let source = r#"
+        function main(): void {
+            const arr: any[] = [1, [2, 3], 4];
+            console.log(JSON.stringify(arr.flat()));
+            const nested: any[] = [1, [2, [3, 4]], 5];
+            console.log(JSON.stringify(nested.flat()));
+            console.log(JSON.stringify(nested.flat(2)));
+            console.log(JSON.stringify(nested.flat(0)));
+            const withHoles: any[] = [1, null, undefined, "x"];
+            console.log(JSON.stringify(withHoles.flat()));
+            const empty: any[] = [];
+            console.log(JSON.stringify(empty.flat()));
+            const source: any[] = [1, [2]];
+            const copied: any[] = source.flat();
+            copied[0] = 9;
+            console.log(JSON.stringify(source));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_array_flat"),
+        "[1,2,3,4]\n[1,2,[3,4],5]\n[1,2,3,4,5]\n[1,[2,[3,4]],5]\n[1,null,null,\"x\"]\n[]\n[1,[2]]\n"
+    );
+}
+
+/// Sibling of `compiles_dynamic_array_flat` for `.flatMap()`: a callback
+/// whose return value is itself dynamically-typed (`Json`, not a
+/// statically nested `T[][]`) hit `lower_array_flat_map_result`'s final
+/// `scalar` fallback (an identity `.filter(() => true)`, no flattening),
+/// for the same "can't know if it's an array until runtime" reason.
+/// Reuses `thaw_any_array_flat` at depth 1. A callback returning a
+/// *union* involving `Json` (e.g. a ternary picking between a value and
+/// an array literal) is a known, separate, non-crashing gap -- not
+/// covered here, see the `HirType::Union` arm's own comment in
+/// `lower_array_flat_map_result` (thaw-hir's `arrays/transformations.rs`).
+#[test]
+fn compiles_dynamic_array_flat_map() {
+    let source = r#"
+        function main(): void {
+            const arr: any[] = [1, 2, 3];
+            console.log(JSON.stringify(arr.flatMap((v) => v)));
+            const nested: any[] = [1, [2, 3], 4];
+            console.log(JSON.stringify(nested.flatMap((v) => v)));
+            const empty: any[] = [];
+            console.log(JSON.stringify(empty.flatMap((v) => v)));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_array_flat_map"),
+        "[1,2,3]\n[1,2,3,4]\n[]\n"
+    );
+}
+
 #[test]
 fn compiles_tuple_spreads_for_array_positional_methods() {
     let source = r#"

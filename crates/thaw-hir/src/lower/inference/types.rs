@@ -868,6 +868,13 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
+                    "__thaw_any_array_flat" => {
+                        if args.len() != 2 {
+                            return Err("array flat expects two operands".into());
+                        }
+                        self.expect_type(&HirType::F64, &args[1], "array flat depth")?;
+                        return Ok(HirType::Array(Box::new(HirType::Json)));
+                    }
                     "__thaw_number_array_index_of"
                     | "__thaw_string_array_index_of"
                     | "__thaw_bool_array_index_of"

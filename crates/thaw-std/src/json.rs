@@ -1058,6 +1058,72 @@ pub unsafe extern "C" fn thaw_json_is_array(value: *const Value) -> u8 {
     (!value.is_null() && matches!(unsafe { &*value }, Value::Array(_))).into()
 }
 
+fn flatten_json_value(value: Value, depth: usize, out: &mut Vec<Value>) {
+    match value {
+        Value::Array(items) if depth > 0 => {
+            for item in items {
+                flatten_json_value(item, depth - 1, out);
+            }
+        }
+        other => out.push(other),
+    }
+}
+
+#[no_mangle]
+/// `any[].flat(depth)` -- whether a `Json`-typed array element is itself
+/// an array is only knowable at runtime, unlike a statically nested
+/// `T[][]` (see `lower_array_flat_one`, thaw-hir), so this can't be
+/// expressed as a compile-time unwrap-and-copy loop the way the concrete
+/// case is. Only the array's own top level is the native `[len][Json
+/// ptr...]` buffer -- everything nested is already a plain
+/// `Value::Array` inside the boxed JSON tree, so flattening past the
+/// first level is really just walking `serde_json::Value`.
+///
+/// # Safety
+/// `array` must be null or point to a valid native `[length][Json
+/// ptr...]` buffer (every slot a `*const Value`, `HirType::Json`'s
+/// native array element width).
+pub unsafe extern "C" fn thaw_any_array_flat(array: *const u8, depth: f64) -> *mut u8 {
+    let depth = if depth.is_nan() || depth <= 0.0 {
+        0
+    } else if depth == f64::INFINITY {
+        usize::MAX
+    } else {
+        depth as usize
+    };
+    let length = if array.is_null() {
+        0
+    } else {
+        unsafe { array.cast::<u64>().read() as usize }
+    };
+    let mut out = Vec::with_capacity(length);
+    for index in 0..length {
+        let element = unsafe {
+            array
+                .add(8 + index * 8)
+                .cast::<*const Value>()
+                .read_unaligned()
+        };
+        let value = if element.is_null() {
+            Value::Null
+        } else {
+            unsafe { (*element).clone() }
+        };
+        flatten_json_value(value, depth, &mut out);
+    }
+    let buffer = thaw_arena::thaw_arena_alloc(8 + out.len() * 8, 8);
+    unsafe {
+        buffer.cast::<u64>().write(out.len() as u64);
+        for (index, value) in out.into_iter().enumerate() {
+            buffer
+                .add(8 + index * 8)
+                .cast::<*const Value>()
+                .write_unaligned(leak(value));
+        }
+    }
+    buffer
+}
+
 #[no_mangle]
 /// `Buffer.isBuffer(value)` for a `Json`-typed operand -- recognizes
 /// the same `{"type":"Buffer","data":[...]}` shape `__thaw_json_

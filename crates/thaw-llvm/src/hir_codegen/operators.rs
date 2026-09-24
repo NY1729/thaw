@@ -227,6 +227,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_i64_as_int_n"
                         | "__thaw_i64_as_uint_n"
                         | "__thaw_bytes_read_i64" => return Some(HirType::I64),
+                        "__thaw_any_array_flat" => {
+                            return Some(HirType::Array(Box::new(HirType::Json)))
+                        }
                         "__thaw_symbol_new" | "__thaw_symbol_for" => {
                             return Some(HirType::Symbol)
                         }
