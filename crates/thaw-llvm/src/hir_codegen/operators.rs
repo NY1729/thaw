@@ -416,6 +416,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.expr_is_string(expr) || self.expr_hir_type(expr) == Some(HirType::Symbol)
             };
             let string_operands = string_like(lhs) && string_like(rhs);
+            // `Json` (`any`-typed) operands are the one pointer-shaped
+            // case where the value at that pointer can be a primitive
+            // (number/string/boolean/`undefined`/`null`), not just an
+            // object/array -- real Strict Equality compares those by
+            // value, unlike the raw-pointer fallback below, which is only
+            // correct for a genuine object/array/other reference type.
+            // `thaw_json_strict_equal` (thaw-std) implements the real
+            // per-kind algorithm, including reference equality for its
+            // own array/object case, so this doesn't change behavior for
+            // those.
+            let json_operands = self.expr_hir_type(lhs) == Some(HirType::Json)
+                && self.expr_hir_type(rhs) == Some(HirType::Json);
             return match (lhs_value, rhs_value) {
                 (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => self
                     .builder
@@ -428,6 +440,30 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string()),
                 (BasicValueEnum::PointerValue(lhs), BasicValueEnum::PointerValue(rhs)) => {
+                    if json_operands {
+                        let compared = self
+                            .builder
+                            .build_call(
+                                self.module.get_function("thaw_json_strict_equal").unwrap(),
+                                &[lhs.into(), rhs.into()],
+                                "json_strict_eq",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or("thaw_json_strict_equal returned no value")?
+                            .into_int_value();
+                        return self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                compared,
+                                self.context.i8_type().const_zero(),
+                                "json_eq",
+                            )
+                            .map(Into::into)
+                            .map_err(|error| error.to_string());
+                    }
                     if string_operands {
                         let compared = self
                             .builder

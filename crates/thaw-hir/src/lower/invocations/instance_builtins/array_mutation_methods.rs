@@ -1295,6 +1295,55 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         HirExpr::Lit(HirLit::F64(0.0))
                     };
+                    if *element == HirType::Json {
+                        // A `Json` (`any`-typed) element can hold any
+                        // primitive shape, so a plain-typed needle
+                        // (`arr.includes(1)`) needs the same declared-
+                        // type coercion any other call argument gets
+                        // before it's comparable -- previously this
+                        // fell through to the type-mismatch fast path
+                        // below (silently `false`/`-1` whenever the
+                        // needle's own natural type wasn't already
+                        // `Json`) or, if it *was* `Json` already, the
+                        // "array search does not support element type
+                        // Json" error further down (`Json` was missing
+                        // from the element-type dispatch entirely).
+                        // Comparison itself is real Strict Equality
+                        // (`__thaw_any_array_*`, `thaw_json_strict_
+                        // equal` in thaw-std) instead of the pointer-
+                        // identity search every other element type uses
+                        // below, since a `Json` slot can hold a
+                        // primitive value.
+                        let needle = self.coerce_to_declared(&HirType::Json, needle)?;
+                        let suffix = match property.sym.as_ref() {
+                            "includes" => "includes",
+                            "lastIndexOf" => "last_index_of",
+                            _ => "index_of",
+                        };
+                        let receiver_name = format!("__thaw_search_array_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let needle_name = format!("__thaw_search_needle_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let start_name = format!("__thaw_search_start_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(receiver_name.clone(), receiver_type.clone());
+                        self.scope.insert(needle_name.clone(), HirType::Json);
+                        self.scope.insert(start_name.clone(), HirType::F64);
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var(format!("__thaw_any_array_{suffix}"))),
+                            vec![
+                                HirExpr::Var(receiver_name.clone()),
+                                HirExpr::Var(needle_name.clone()),
+                                HirExpr::Var(start_name.clone()),
+                            ],
+                        );
+                        let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((needle_name, HirType::Json, needle));
+                        bindings.push((start_name, HirType::F64, from_index));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     if needle_type == HirType::Undefined
                         || (needle_type == HirType::Null
                             && (matches!(element.as_ref(), HirType::Null | HirType::Nullable(_) | HirType::Nullish(_))
