@@ -878,6 +878,33 @@ fn throwing_an_unsupported_value_is_a_compile_error_not_a_crash() {
     assert!(error.contains("string conversion") || error.contains("Promise"), "{error}");
 }
 
+/// `const g: any = gen();` (coercing a generator's own internal
+/// "producer" function -- thaw's own ABI, first parameter an internal
+/// `i64` resume point -- into a dynamic `any` value) used to fall
+/// through into the generic native-closure-to-`JsValue` wrapping path,
+/// which has no way to expose that `i64` parameter to real JS code and
+/// failed confusingly deep inside dynamic-call argument decoding:
+/// "unsupported dynamic result value I64", nowhere near the actual
+/// coercion. `for (const v of gen())` used *directly* (no intermediate
+/// `any` storage) was and remains unaffected -- `Stmt::ForOf` recognizes
+/// the same producer shape itself and handles it natively, never
+/// reaching this coercion at all.
+#[test]
+fn coercing_a_generator_to_a_dynamic_value_is_a_clear_compile_error() {
+    let module = thaw_parser::parse_typescript(
+        r#"function* gen(): Generator<any> {
+            yield 1;
+        }
+        function main(): void {
+            const g: any = gen();
+        }"#,
+    )
+    .unwrap();
+    let error = thaw_hir::lower_module(&module).unwrap_err();
+    assert!(error.contains("Generator"), "{error}");
+    assert!(!error.contains("I64"), "{error}");
+}
+
 #[test]
 fn a_non_tail_throw_still_skips_the_rest_of_every_caller() {
     let source = r#"

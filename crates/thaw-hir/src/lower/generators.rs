@@ -241,6 +241,27 @@ impl<'a> GeneratorStateMachine<'a> {
     }
 }
 
+/// Whether `ty` is thaw's own internal generator-producer ABI -- a
+/// plain `HirType::Function`, no dedicated `HirType` variant of its
+/// own, recognized structurally by its fixed parameter shape
+/// (`(resumePoint: i64, closeSignal: str, ...)`, 6 params total).
+/// Shared between `Stmt::ForOf` (`statements/lowering.rs`, which reads
+/// this signature to drive its own batching/close-on-exit generator
+/// consumption) and `coerce_to_declared`'s `Json`-target branch
+/// (`inference/coercions.rs`, which needs to reject coercing a
+/// generator to `any` *before* it falls into the generic
+/// native-closure-to-`JsValue` wrapping path -- that path has no way
+/// to expose this internal ABI's `i64` resume-point parameter to real
+/// JS code, and previously failed confusingly deep inside dynamic-call
+/// argument decoding, "unsupported dynamic result value I64", instead
+/// of at the coercion itself).
+pub(crate) fn is_generator_producer_type(ty: &HirType) -> bool {
+    let HirType::Function(params, _) = ty else {
+        return false;
+    };
+    params.len() == 6 && params[0] == HirType::I64 && params[1] == HirType::Str
+}
+
 fn generator_emits_value(statement: &HirStmt, values: &str) -> bool {
     match statement {
         HirStmt::Expr(HirExpr::Call(callee, arguments)) => {
