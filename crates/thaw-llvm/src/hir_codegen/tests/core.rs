@@ -602,6 +602,47 @@ fn destructures_a_homogeneous_array_past_its_length_safely() {
     );
 }
 
+/// Sibling of `destructures_a_homogeneous_array_past_its_length_safely`,
+/// found while auditing for more of the same bug class: ordinary
+/// `arr[i]` reads (not just destructuring) on a scalar-element (`number`/
+/// `string`/`boolean`) array function *parameter* skip the bounds/
+/// presence-checked path in `lower_binding_pattern`/`lower_array_index`
+/// -- HIR's `conservative_sparse_arrays` marks every such parameter, and
+/// the computed-member-access gate in objects.rs treats "conservative"
+/// as a reason to fall back to a raw, unchecked `TypedIndex` read for
+/// *any* index, not just to skip the (unrelated) sparse-hole check it
+/// was meant for. Observed before the fix: `arr[100]`/`arr[-5]` on a
+/// 3-element `number[]` parameter returned garbage denormals read from
+/// adjacent heap memory (e.g. `6.65057e-319`), not `0`/`undefined` --
+/// the same "read past the array's own allocation" memory-safety bug,
+/// just reached without destructuring. Fixed at the codegen level
+/// (`thaw_array_read_ptr`, replacing raw pointer arithmetic in
+/// `compile_element_parts`) rather than by widening the HIR-level type,
+/// so it also covers plain locals and tuples uniformly: an out-of-range
+/// index now reads a zeroed scratch slot instead of unrelated heap
+/// bytes. This does NOT fix the *value* (still `0`/`false`/null instead
+/// of real `undefined`, since a parameter's declared element type stays
+/// a plain scalar, matching this compiler's no-`noUncheckedIndexedAccess`
+/// stance) -- only the memory-safety hazard, which is the part that
+/// actually matters here.
+#[test]
+fn reads_past_a_scalar_array_parameters_length_without_touching_foreign_memory() {
+    let source = r#"
+        function f(arr: number[]): void {
+            const a = arr[100];
+            const b = arr[-5];
+            console.log(a, b);
+        }
+        function main(): void {
+            f([1, 2, 3]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_parameter_oob_read_no_foreign_memory"),
+        "0 0\n"
+    );
+}
+
 #[test]
 fn forwards_a_homogeneous_array_to_a_rest_parameter() {
     let source = r#"
