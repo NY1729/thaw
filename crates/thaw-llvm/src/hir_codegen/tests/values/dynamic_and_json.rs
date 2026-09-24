@@ -986,6 +986,66 @@ fn compiles_dynamic_array_search_methods() {
     );
 }
 
+/// `switch` on an `any`-typed discriminant used to reject any `case`
+/// value outright ("switch case has type F64, expected Json") -- each
+/// `case` test only got a strict type *check* against the declared `any`
+/// (`Json`) discriminant, not the same declared-type coercion an
+/// ordinary call argument gets. Matching itself already went through
+/// `===`'s codegen (`BinOp::EqEqEq`), so this reuses the same Strict
+/// Equality fix above once the type mismatch stopped blocking it outright.
+#[test]
+fn compiles_dynamic_switch_statement() {
+    let source = r#"
+        function describe(x: any): string {
+            switch (x) {
+                case 1: return "one";
+                case 2: return "two";
+                default: return "other";
+            }
+        }
+        function main(): void {
+            console.log(describe(1));
+            console.log(describe(2));
+            console.log(describe(3));
+            const y: any = "b";
+            switch (y) {
+                case "a": console.log("a"); break;
+                case "b": console.log("b"); break;
+                default: console.log("?");
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_switch_statement"),
+        "one\ntwo\nother\nb\n"
+    );
+}
+
+/// `.sort()`/`.toSorted()` with no comparator on an `any[]` array used to
+/// hit a hard compile error ("default array sort does not support
+/// element type Json") -- the element-type dispatch had no `Json` case.
+/// Real default sort converts each element to its `String()` form and
+/// compares lexicographically; this already exists as a generic,
+/// element-type-agnostic comparator (`lower_array_sort_default_tagged`,
+/// originally built for `Optional`/`Nullable`/etc. array elements), so
+/// `Json` just needed routing through it too.
+#[test]
+fn compiles_dynamic_default_array_sort() {
+    let source = r#"
+        function main(): void {
+            const a: any[] = [3, 1, 20, "b", "a"];
+            console.log(a.sort().join(","));
+            const b: any[] = [3, 1, 2];
+            console.log(b.toSorted().join(","));
+            console.log(b.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_default_array_sort"),
+        "1,20,3,a,b\n1,2,3\n3,1,2\n"
+    );
+}
+
 #[test]
 fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
     let source = r#"

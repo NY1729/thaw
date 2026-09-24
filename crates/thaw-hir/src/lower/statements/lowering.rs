@@ -1947,7 +1947,9 @@ impl<'a> FnLowerer<'a> {
                             continue;
                         };
                         let test = self.lower_expr(test)?;
-                        self.expect_type(&discriminant_type, &test, "switch case")?;
+                        let test = self
+                            .coerce_to_declared(&discriminant_type, test)
+                            .map_err(|error| format!("switch case: {error}"))?;
                         out.push(HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::EqEqEq,
