@@ -65,6 +65,7 @@
   globalThis.__thaw_instanceof_weakset_dynamic_value = value => value instanceof WeakSet;
   globalThis.__thaw_instanceof_array_dynamic_value = value => value instanceof Array;
   globalThis.__thaw_instanceof_promise_dynamic_value = value => value instanceof Promise;
+  globalThis.__thaw_instanceof_uint8array_dynamic_value = value => value instanceof Uint8Array;
   // General sibling of the Date-only check above, for `value instanceof C`
   // where both sides are live handles (e.g. a decorated class's own
   // "class token", class-transformer's `plainToInstance(User, ...)`

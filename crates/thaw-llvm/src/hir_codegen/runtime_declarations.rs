@@ -1833,6 +1833,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_is_buffer_shape",
+            json_as_bool_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_has_wrapper_key",
             self.context
                 .i8_type()

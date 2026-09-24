@@ -1001,6 +1001,30 @@ fn non_finite_number(value: &Value) -> Option<f64> {
     }
 }
 
+/// A `Buffer`/`Uint8Array` crossing into `any`/`Json` is wrapped as
+/// `{"type":"Buffer","data":[...]}` (`coerce_to_declared`'s `Json`-
+/// target branch, `inference/coercions.rs`), matching real Node's own
+/// `Buffer.prototype.toJSON`. Used by `instanceof Uint8Array` on a
+/// `Json`-typed value -- deliberately *not* the same check `json_array_
+/// or_buffer_data` (used for indexing/`.length`) makes, since that one
+/// also accepts a bare JSON array for read purposes; `instanceof
+/// Uint8Array` must stay `false` for a plain `number[]` the way real
+/// JS's `[1,2,3] instanceof Uint8Array` does, only `true` for the
+/// tagged wrapper shape specifically.
+#[no_mangle]
+pub extern "C" fn thaw_json_is_buffer_shape(value: *const Value) -> u8 {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return 0;
+    };
+    let Value::Object(fields) = value else {
+        return 0;
+    };
+    u8::from(
+        fields.get("type").and_then(Value::as_str) == Some("Buffer")
+            && fields.get("data").is_some_and(Value::is_array),
+    )
+}
+
 /// `Date.prototype.toJSON` is overridden globally (`platform_globals/
 /// dates.js`) to `{ timestamp: this.getTime() }`, so a `Date` returned
 /// from a Fallback call already survives the QuickJS boundary as this

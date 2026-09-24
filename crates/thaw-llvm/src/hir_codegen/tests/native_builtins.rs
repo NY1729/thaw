@@ -3408,6 +3408,59 @@ fn compiles_instanceof_array_and_promise() {
 }
 
 #[test]
+fn compiles_instanceof_uint8array() {
+    // Same bug class again, found in the same follow-up sweep:
+    // `Uint8Array` also isn't registered in `self.signatures`. Unlike
+    // `Array`/`Promise`, this one needs `infer_expr_type_inner` instead
+    // of the ordinary (normalizing) type inference every other check in
+    // this whole function uses, since `HirType::Bytes` (a real Buffer/
+    // Uint8Array) and `HirType::Array(F64)` (a plain `number[]`) share
+    // one native layout and `infer_expr_type` deliberately erases the
+    // distinction for every other consumer. An `any`-typed Buffer/
+    // Uint8Array (wrapped as `{"type":"Buffer","data":[...]}` crossing
+    // that boundary, matching real Node's own `Buffer.prototype.toJSON`)
+    // needed its own bespoke shape check too, `__thaw_json_is_buffer_
+    // shape` -- confirmed via a direct probe that a plain JSON array
+    // must NOT match (`[1,2,3] instanceof Uint8Array` is `false` in
+    // real JS, unlike `Array.isArray`, which accepts either shape for
+    // *reading*).
+    let source = r#"
+        function useIt(buf: Uint8Array): boolean {
+            return buf instanceof Uint8Array;
+        }
+        function useItAsAny(value: any): boolean {
+            return value instanceof Uint8Array;
+        }
+        function main(): void {
+            const buf = new Uint8Array([1, 2, 3]);
+            console.log(useIt(buf));
+            console.log(buf instanceof Array);
+
+            const arr: number[] = [1, 2, 3];
+            console.log(arr instanceof Uint8Array);
+
+            // A *statically*-typed `Uint8Array` (a real `HirType::Bytes`
+            // value) coerced into `any` -- unlike `buf` above (`new
+            // Uint8Array(...)` with no static annotation constructs a
+            // live `JsValue` handle instead, per `Expr::New`'s own
+            // generic dispatch; that handle-to-`any` coercion doesn't
+            // currently carry the underlying object's real Buffer
+            // identity into the resulting `Json` value, so `useItAsAny
+            // (buf)` above is a separate, confirmed, narrower gap this
+            // fix doesn't reach -- not exercised here).
+            const typed: Uint8Array = new Uint8Array([4, 5, 6]);
+            console.log(useItAsAny(typed));
+            const anyArr: any = JSON.parse("[1,2,3]");
+            console.log(anyArr instanceof Uint8Array);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "instanceof_uint8array"),
+        "true\nfalse\nfalse\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
         function printAll(parts: string[]): void {

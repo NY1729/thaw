@@ -695,6 +695,25 @@ impl<'a> FnLowerer<'a> {
                                         vec![value],
                                     ));
                                 }
+                                // A `Buffer`/`Uint8Array` crossing into
+                                // `any` is wrapped as `{"type":"Buffer",
+                                // "data":[...]}`, matching real Node's
+                                // own `Buffer.prototype.toJSON` -- a
+                                // third bespoke shape check, alongside
+                                // `Date`'s and `Array`'s just above,
+                                // rather than a `native_builtin_
+                                // instanceof_json_sentinel` entry, since
+                                // that helper's single-key check doesn't
+                                // fit this two-field shape.
+                                if class.sym == *"Uint8Array" {
+                                    let value = self.lower_expr(&bin.left)?;
+                                    return Ok(HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_json_is_buffer_shape".to_string(),
+                                        )),
+                                        vec![value],
+                                    ));
+                                }
                                 if let Some(key) =
                                     native_builtin_instanceof_json_sentinel(class.sym.as_ref())
                                 {
@@ -712,6 +731,38 @@ impl<'a> FnLowerer<'a> {
                     }
                     let value = self.lower_expr(&bin.left)?;
                     let value_type = self.infer_expr_type(&value)?;
+                    // `instanceof Uint8Array` needs a *third* HirType --
+                    // `HirType::Bytes` (a real Buffer/Uint8Array) and
+                    // `HirType::Array(F64)` (a plain `number[]`) share one
+                    // native layout, so `infer_expr_type` (used for
+                    // `value_type` above, and by every other check in this
+                    // whole function) deliberately normalizes the former
+                    // to the latter for every consumer *except* a
+                    // dispatch that must actually tell them apart --
+                    // exactly this one (see `infer_expr_type`'s own doc
+                    // comment). `infer_expr_type_inner` still sees the
+                    // real, un-normalized tag. Other typed-array
+                    // constructors (`Int8Array`, `Float64Array`, ...)
+                    // have no native `HirType` of their own at all --
+                    // confirmed via a direct probe that even naming one
+                    // as a static parameter type fails outright
+                    // ("generics are not supported yet") -- so `new
+                    // Int8Array(...)` etc. can only ever be a live
+                    // `JsValue` handle (`Expr::New`'s own generic
+                    // `constructDynamicValue` path, above), handled by
+                    // the ordinary dynamic-value dispatch below; only
+                    // `Uint8Array` gets this dedicated native-shape check.
+                    if class.sym == *"Uint8Array"
+                        && self.infer_expr_type_inner(&value)? == HirType::Bytes
+                    {
+                        let name = format!("__thaw_instanceof_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), value_type.clone());
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Lit(HirLit::Bool(true)),
+                            &[(name, value_type.clone(), value)],
+                        );
+                    }
                     // A live `JsValue` left operand against a *decorated*
                     // local class (real trigger: class-transformer's
                     // `plainToInstance(User, plain)` result tested with
@@ -3026,6 +3077,16 @@ fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<b
         // (`static_builtins.rs`).
         "Array" => matches!(ty, HirType::Array(_) | HirType::Tuple(_)),
         "Promise" => matches!(ty, HirType::Promise(_)),
+        // A genuine match (`ty` here is `value_type`, the *normalized*
+        // type -- `Bytes` always reads as `Array(F64)` by this point)
+        // was already handled by a dedicated early check using
+        // `infer_expr_type_inner` instead, right after `value_type` is
+        // first computed -- this residual entry only exists so
+        // `"anything else" instanceof Uint8Array` (a plain `number[]`,
+        // a string, ...) still reads as the correct `false` instead of
+        // hitting "not a known class", now that `Uint8Array` needs to
+        // be recognized as a known class at all.
+        "Uint8Array" => false,
         _ => return None,
     })
 }
@@ -3045,6 +3106,13 @@ fn native_builtin_instanceof_dynamic_global(class: &str) -> Option<&'static str>
         "WeakSet" => "__thaw_instanceof_weakset_dynamic_value",
         "Array" => "__thaw_instanceof_array_dynamic_value",
         "Promise" => "__thaw_instanceof_promise_dynamic_value",
+        // `new Uint8Array(...)`/other typed-array constructors used
+        // with no static type context (`Expr::New`'s generic
+        // `constructDynamicValue` path, above) produce a live `JsValue`
+        // handle, not `HirType::Bytes` -- this covers that case; the
+        // statically-typed one is its own dedicated early check instead
+        // (see where `value_type` is first computed).
+        "Uint8Array" => "__thaw_instanceof_uint8array_dynamic_value",
         _ => return None,
     })
 }
