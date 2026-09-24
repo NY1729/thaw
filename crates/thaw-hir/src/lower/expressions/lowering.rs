@@ -643,7 +643,7 @@ impl<'a> FnLowerer<'a> {
                     //   globally, `platform_globals/dates.js`) --
                     //   `__thaw_json_is_date_shape` recognizes it
                     //   directly, no live handle needed.
-                    // Generalized over all six names `native_builtin_
+                    // Generalized over all eight names `native_builtin_
                     // instanceof_dynamic_global` recognizes -- originally
                     // Date-only (the comment above was written for that
                     // narrower version), now shared by `RegExp`/`Map`/
@@ -676,6 +676,21 @@ impl<'a> FnLowerer<'a> {
                                     return Ok(HirExpr::Call(
                                         Box::new(HirExpr::Var(
                                             "__thaw_json_is_date_shape".to_string(),
+                                        )),
+                                        vec![value],
+                                    ));
+                                }
+                                // `Array.isArray` already has exactly this
+                                // check (`static_builtins.rs`) -- a `Json`
+                                // value is either genuinely a JSON array
+                                // or it isn't, no sentinel tagging needed
+                                // (unlike `RegExp`/`Map`/`Set`, an array
+                                // has no ambiguity to disambiguate).
+                                if class.sym == *"Array" {
+                                    let value = self.lower_expr(&bin.left)?;
+                                    return Ok(HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_json_is_array".to_string(),
                                         )),
                                         vec![value],
                                     ));
@@ -796,7 +811,7 @@ impl<'a> FnLowerer<'a> {
                     // "known class" source, bypassing the gate below, so
                     // e.g. `re instanceof RegExp` for an ordinary,
                     // statically-typed `RegExp` doesn't hit "not a known
-                    // class" the way it did for every one of these six
+                    // class" the way it did for every one of these eight
                     // names before this fix (confirmed via a direct
                     // probe -- this affected the plain static case, not
                     // just the `any`/`JsValue` ones the checks above
@@ -2987,16 +3002,16 @@ impl<'a> FnLowerer<'a> {
 /// them: `RegExp`'s native shape is `{source, flags, lastIndex}` (no
 /// marker field at all), and `Map`/`Set`/`WeakMap`/`WeakSet` aren't even
 /// `HirType::Object` to begin with. Before this, `instanceof` against
-/// any of these six names always hit the "not a known class" error --
+/// any of these eight names always hit the "not a known class" error --
 /// confirmed via a direct probe that this affected even a plainly,
 /// statically-typed `RegExp`/`Map` value, not just the dynamic-value
 /// case `Date`'s own pre-existing special handling (elsewhere in this
 /// file) already covered.
 ///
-/// `None` for a name that isn't one of these six (the caller falls back
+/// `None` for a name that isn't one of these eight (the caller falls back
 /// to the ordinary `self.signatures`/`class_type_has_identity` path).
 /// `Some(bool)` is a compile-time-constant answer -- `ty` already fully
-/// determines it, since none of the six is ever ambiguous at its own
+/// determines it, since none of the eight is ever ambiguous at its own
 /// native, non-`Json`/`JsValue` type.
 fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<bool> {
     Some(match class {
@@ -3006,6 +3021,11 @@ fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<b
         "Set" => matches!(ty, HirType::Set(_)),
         "WeakMap" => matches!(ty, HirType::WeakMap(_, _)),
         "WeakSet" => matches!(ty, HirType::WeakSet(_)),
+        // A TS tuple (`[number, string]`) is a real `Array` at runtime
+        // too -- matches `Array.isArray`'s own identical match arm
+        // (`static_builtins.rs`).
+        "Array" => matches!(ty, HirType::Array(_) | HirType::Tuple(_)),
+        "Promise" => matches!(ty, HirType::Promise(_)),
         _ => return None,
     })
 }
@@ -3023,6 +3043,8 @@ fn native_builtin_instanceof_dynamic_global(class: &str) -> Option<&'static str>
         "Set" => "__thaw_instanceof_set_dynamic_value",
         "WeakMap" => "__thaw_instanceof_weakmap_dynamic_value",
         "WeakSet" => "__thaw_instanceof_weakset_dynamic_value",
+        "Array" => "__thaw_instanceof_array_dynamic_value",
+        "Promise" => "__thaw_instanceof_promise_dynamic_value",
         _ => return None,
     })
 }
