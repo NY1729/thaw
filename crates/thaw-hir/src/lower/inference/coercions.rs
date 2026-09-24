@@ -271,6 +271,31 @@ impl<'a> FnLowerer<'a> {
             // (`compile_dynamic_value_placeholder`'s own `is_int_value()`
             // detection, the args-JSON reviver, ...) treats it exactly
             // like any other live value crossing into a dynamic call.
+            // A generator's own internal "producer" function (thaw's own
+            // ABI, no dedicated `HirType` -- see `is_generator_producer_
+            // type`'s own doc comment, `lower/generators.rs`) is *not* a
+            // plain callable a JS caller could ever legitimately invoke
+            // directly (its first parameter is an internal `i64` resume
+            // point, not a real argument) -- reject it here, before it
+            // falls into the generic native-closure-to-`JsValue`
+            // wrapping path below. That generic path has no way to
+            // expose an `i64` parameter to real JS code and previously
+            // failed confusingly deep inside dynamic-call argument
+            // decoding ("unsupported dynamic result value I64") instead
+            // of at the coercion itself -- `Promise<T>` coerced to `any`
+            // similarly has no dedicated case anywhere in this function
+            // and simply falls through every special case here to the
+            // generic type-mismatch error at the very end, which is at
+            // least an honest "unsupported" rather than a confusing
+            // internal-ABI leak; this is the same fix in spirit for
+            // `Generator`, just needed an explicit early check instead
+            // of falling through cleanly, since the generic `Function`
+            // case right below *would* otherwise (wrongly) accept it.
+            if is_generator_producer_type(&actual) {
+                return Err(
+                    "cannot coerce a Generator to a dynamic (any) value".into(),
+                );
+            }
             if let HirType::Function(_, _) = &actual {
                 // `registerNativeCallback`'s own inferred type is always
                 // `HirType::JsValue` (`inference/types.rs`'s hardcoded

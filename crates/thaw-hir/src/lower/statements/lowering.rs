@@ -1329,7 +1329,7 @@ impl<'a> FnLowerer<'a> {
                         values = producer;
                         values_type = producer_type;
                     }
-                    if let HirType::Function(params, result) = &values_type {
+                    if let HirType::Function(_, result) = &values_type {
                         let (result, async_generator) = match result.as_ref() {
                             HirType::Array(_) => (Some(result.as_ref().clone()), false),
                             HirType::Promise(result)
@@ -1340,11 +1340,9 @@ impl<'a> FnLowerer<'a> {
                             }
                             _ => (None, false),
                         };
-                        if let Some(result) = result.filter(|_| {
-                            params.len() == 6
-                                && params[0] == HirType::I64
-                                && params[1] == HirType::Str
-                        }) {
+                        if let Some(result) =
+                            result.filter(|_| is_generator_producer_type(&values_type))
+                        {
                             let producer_type = values_type.clone();
                             let producer =
                                 format!("__thaw_generator_producer_{}", self.next_binding);
