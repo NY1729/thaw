@@ -1000,6 +1000,37 @@ fn compiles_dynamic_array_flat_map_with_a_union_returning_callback() {
     );
 }
 
+/// A callback returning a fixed-shape mixed-type array literal (e.g.
+/// `(v) => [v, v * 2]` -- `v: any` and `v * 2: number` infers a `Tuple`,
+/// not a homogeneous `Array`) hits `lower_array_flat_map_result`'s new
+/// `HirType::Tuple` arm, which normalizes each tuple to `Json` (tuples
+/// serialize to a genuine JSON array) before reusing
+/// `thaw_any_array_flat`. Previously fell through to the identity
+/// `scalar` fallback and stayed unflattened (`[[1,2],[2,4],[3,6]]`
+/// instead of `[1,2,2,4,3,6]`) since a TS tuple has no separate runtime
+/// representation from an ordinary array.
+#[test]
+fn compiles_dynamic_array_flat_map_with_a_tuple_returning_callback() {
+    let source = r#"
+        function main(): void {
+            const numbers: any[] = [1, 2, 3];
+            console.log(JSON.stringify(numbers.flatMap((v) => [v, v * 2])));
+            const mixed: any[] = [1, "x", 3];
+            console.log(JSON.stringify(mixed.flatMap((v) => [v, typeof v])));
+            const single: any[] = [1];
+            console.log(JSON.stringify(single.flatMap((v) => [v, v, v])));
+            const empty: any[] = [];
+            console.log(JSON.stringify(empty.flatMap((v) => [v, v])));
+            const withNested: any[] = [1, 2];
+            console.log(JSON.stringify(withNested.flatMap((v) => [v, [v]])));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_array_flat_map_tuple_callback"),
+        "[1,2,2,4,3,6]\n[1,\"number\",\"x\",\"string\",3,\"number\"]\n[1,1,1]\n[]\n[1,[1],2,[2]]\n"
+    );
+}
+
 #[test]
 fn compiles_tuple_spreads_for_array_positional_methods() {
     let source = r#"
