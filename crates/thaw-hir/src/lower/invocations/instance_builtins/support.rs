@@ -36,10 +36,22 @@ fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> 
     match key_type {
         HirType::F64 => Ok("num"),
         HirType::Str => Ok("str"),
+        // `Map<any, V>`/`Set<any>` -- a `Json` key can be a real
+        // primitive at runtime, unlike every other "ref" case below, so
+        // it gets its own key kind (`AnyKey`, thaw-runtime's `maps.rs`)
+        // hashing/comparing by value for one, by pointer identity for an
+        // array/object -- exactly like real JavaScript's `SameValueZero`
+        // degenerates to `===` reference equality there. This also
+        // correctly makes `WeakMap<any, _>`/`WeakSet<any>` a compile
+        // error (`weak_key_intrinsic_suffix` below only accepts `"ref"`)
+        // instead of silently compiling with the same by-reference bug a
+        // primitive key would have had under plain `"ref"` treatment --
+        // real `WeakMap`/`WeakSet` require a genuine object key, and a
+        // statically `any`-typed one can't promise that.
+        HirType::Json => Ok("any"),
         HirType::Array(_)
         | HirType::Tuple(_)
         | HirType::Object(_)
-        | HirType::Json
         | HirType::Dictionary(_)
         | HirType::Promise(_)
         | HirType::Map(_, _)
