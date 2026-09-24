@@ -205,6 +205,121 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &bindings)
     }
 
+    /// An object literal with at least one `...spread` whose source
+    /// isn't a compile-time-known-shape `HirType::Object` (a bare `any`/
+    /// `Json` value, or a `Dictionary`) -- `lower_object_lit`'s normal
+    /// path requires every spread source to have a fixed field list it
+    /// can expand at compile time, since it merges spreads directly into
+    /// a static `HirExpr::ObjectLit`'s own field list. There's no field
+    /// list to expand here, so this builds the object at runtime
+    /// instead: start from an empty `Json` object, then walk the
+    /// literal's properties *in source order*, `__thaw_json_object_assign`-
+    /// merging a spread's keys in wholesale or `JsonSet`-ing a single
+    /// key -- the same order real JS evaluates a literal in, so a later
+    /// spread/key correctly overwrites an earlier one's value without
+    /// moving its position (`JsonSet`/`__thaw_json_object_assign` on an
+    /// existing key both update in place, matching `Object.assign`'s own
+    /// semantics; only a genuinely new key gets appended).
+    fn lower_dynamic_spread_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
+        let object_name = format!("__thaw_dynamic_object_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(object_name.clone(), HirType::Json);
+        let mut bindings = Vec::new();
+        let mut body = Vec::new();
+        for property in &obj_lit.props {
+            match property {
+                PropOrSpread::Spread(spread) => {
+                    let source = self.lower_expr(&spread.expr)?;
+                    let source_type = self.infer_expr_type(&source)?;
+                    let source = self.coerce_to_declared(&HirType::Json, source).map_err(
+                        |_| format!(
+                            "cannot spread a value of type {source_type:?} into an object literal"
+                        ),
+                    )?;
+                    let source_name =
+                        format!("__thaw_dynamic_object_spread_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(source_name.clone(), HirType::Json);
+                    bindings.push((source_name.clone(), HirType::Json, source));
+                    body.push(HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
+                        vec![
+                            HirExpr::Var(object_name.clone()),
+                            HirExpr::Var(source_name),
+                        ],
+                    )));
+                }
+                PropOrSpread::Prop(prop) => {
+                    let (key, value) = match prop.as_ref() {
+                        Prop::KeyValue(KeyValueProp { key, value }) => {
+                            let key = match key {
+                                PropName::Ident(key) => key.sym.to_string(),
+                                PropName::Str(key) => {
+                                    key.value.to_string_lossy().into_owned()
+                                }
+                                PropName::Computed(computed) => match computed.expr.as_ref() {
+                                    Expr::Lit(Lit::Str(value)) => {
+                                        value.value.to_string_lossy().into_owned()
+                                    }
+                                    _ => return Err(
+                                        "computed object literal keys must be string literals"
+                                            .to_string(),
+                                    ),
+                                },
+                                _ => return Err("unsupported object literal key".to_string()),
+                            };
+                            (key, self.lower_object_lit_field_value(value, None)?)
+                        }
+                        Prop::Shorthand(ident) => (
+                            ident.sym.to_string(),
+                            self.lower_expr(&Expr::Ident(ident.clone()))?,
+                        ),
+                        _ => {
+                            return Err(
+                                "an object literal with a dynamic spread supports data properties only"
+                                    .to_string(),
+                            )
+                        }
+                    };
+                    let value = self.coerce_to_declared(&HirType::Json, value)?;
+                    let value_name =
+                        format!("__thaw_dynamic_object_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(value_name.clone(), HirType::Json);
+                    bindings.push((value_name.clone(), HirType::Json, value));
+                    body.push(HirStmt::Expr(HirExpr::JsonSet(
+                        Box::new(HirExpr::Var(object_name.clone())),
+                        Box::new(HirExpr::Lit(HirLit::Str(key))),
+                        Box::new(HirExpr::Var(value_name)),
+                        HirType::Json,
+                        false,
+                    )));
+                }
+            }
+        }
+        body.push(HirStmt::Return(Some(HirExpr::Var(object_name.clone()))));
+        let captures = bindings
+            .iter()
+            .map(|(name, ty, _)| HirParam {
+                name: name.clone(),
+                ty: ty.clone(),
+            })
+            .collect();
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                captures,
+                vec![HirParam {
+                    name: object_name,
+                    ty: HirType::Json,
+                }],
+                HirType::Json,
+                Box::new(HirExpr::Block(body)),
+            )),
+            vec![HirExpr::JsonObjectLit(Vec::new(), HirType::Json)],
+        );
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     /// Lowers an object literal's own `key: value` field value -- almost
     /// always just `lower_expr`, with one narrow exception: a method
     /// call whose *receiver* is already known to be `JsValue`-typed
@@ -288,6 +403,22 @@ impl<'a> FnLowerer<'a> {
             })
         {
             return self.lower_computed_dictionary_lit(obj_lit);
+        }
+        if expected_fields.is_none() {
+            let mut dynamic_spread = None;
+            for property in &obj_lit.props {
+                if let PropOrSpread::Spread(spread) = property {
+                    let source = self.lower_expr(&spread.expr)?;
+                    let source_type = self.infer_expr_type(&source)?;
+                    if !matches!(source_type, HirType::Object(_)) {
+                        dynamic_spread = Some(());
+                        break;
+                    }
+                }
+            }
+            if dynamic_spread.is_some() {
+                return self.lower_dynamic_spread_object_lit(obj_lit);
+            }
         }
         struct AwaitFinder(bool);
         impl Visit for AwaitFinder {

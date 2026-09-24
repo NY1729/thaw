@@ -1044,6 +1044,80 @@ fn compiles_dynamic_object_introspection_used_inline_in_console_log() {
     );
 }
 
+/// `{...anyValue, key: value}` (an object literal spreading a
+/// dynamically-shaped source -- `Json` or `Dictionary`, not a
+/// compile-time-known `HirType::Object`) used to hard-error ("cannot
+/// spread a value of type Json into an object literal"):
+/// `lower_object_lit`'s normal path merges a spread directly into a
+/// static `HirExpr::ObjectLit`'s own field list, which needs a
+/// compile-time field set to expand. Fixed with a separate runtime path
+/// (`lower_dynamic_spread_object_lit`, thaw-hir's `objects.rs`): start
+/// from an empty `Json` object and walk the literal's properties *in
+/// source order*, `__thaw_json_object_assign`-merging a spread's keys
+/// wholesale or `JsonSet`-ing a single key -- matching real JS's own
+/// "a later spread/key overwrites an earlier one's value without moving
+/// its position" semantics. Covers override order both directions, a
+/// spread-only literal, multiple spreads, and mixing a genuinely dynamic
+/// spread with a fixed-shape `Object`/`Dictionary` one in the same
+/// literal (the pre-existing path, confirmed unaffected).
+///
+/// Found and fixed along with this: `thaw_json_object_assign` (backing
+/// both `Object.assign` and this new spread path) copied a `null`/
+/// `undefined` source's fields verbatim instead of skipping it (real JS:
+/// both are silently no-ops, never an error) -- for `undefined`
+/// specifically this was a real, severe **data-corruption** bug, not
+/// just a missing no-op: the napi-undefined sentinel value is itself
+/// structurally a `Value::Object` with one internal tracking key
+/// (`$__thaw_napi_undefined$`), so merging it copied that key straight
+/// into the target, making every *later* `is_napi_undefined` check
+/// (`typeof`, `JSON.stringify`, ...) see the **entire merged object** as
+/// itself being `undefined` -- `{...maybeUndefined, b: 2}` silently lost
+/// every field, not just the nullish source's own absence of any. Also
+/// fixed the same function to copy an array source's own enumerable
+/// properties (index keys, not `length`) rather than nothing, matching
+/// `Object.assign({}, [1,2,3])` -> `{0:1,1:2,2:3}`.
+#[test]
+fn compiles_dynamic_object_literal_spread() {
+    let source = r#"
+        interface Fixed { x: number; y: number; }
+        function main(): void {
+            const obj: any = { a: 1, b: "x", c: true };
+            console.log(JSON.stringify({ ...obj, d: 4 }));
+            console.log(JSON.stringify({ ...obj, a: 99 }));
+            console.log(JSON.stringify({ a: 99, ...obj }));
+            console.log(JSON.stringify({ ...obj }));
+            console.log(JSON.stringify({ ...obj, ...{ e: 5, a: 100 } }));
+            const fixed: Fixed = { x: 1, y: 2 };
+            console.log(JSON.stringify({ ...fixed, ...obj, z: 3 }));
+            const dict: Record<string, number> = { p: 10, q: 20 };
+            console.log(JSON.stringify({ ...dict, r: 30 }));
+            const arr: any = [1, 2, 3];
+            console.log(JSON.stringify({ ...arr }));
+            const nullish: any = null;
+            const missing: any = undefined;
+            console.log(JSON.stringify({ a: 1, ...nullish, ...missing, b: 2 }));
+            const target: any = { a: 1 };
+            Object.assign(target, nullish, missing, { b: 2 });
+            console.log(JSON.stringify(target));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_literal_spread"),
+        concat!(
+            "{\"a\":1,\"b\":\"x\",\"c\":true,\"d\":4}\n",
+            "{\"a\":99,\"b\":\"x\",\"c\":true}\n",
+            "{\"a\":1,\"b\":\"x\",\"c\":true}\n",
+            "{\"a\":1,\"b\":\"x\",\"c\":true}\n",
+            "{\"a\":100,\"b\":\"x\",\"c\":true,\"e\":5}\n",
+            "{\"x\":1,\"y\":2,\"a\":1,\"b\":\"x\",\"c\":true,\"z\":3}\n",
+            "{\"p\":10,\"q\":20,\"r\":30}\n",
+            "{\"0\":1,\"1\":2,\"2\":3}\n",
+            "{\"a\":1,\"b\":2}\n",
+            "{\"a\":1,\"b\":2}\n",
+        )
+    );
+}
+
 /// `.includes()`/`.indexOf()`/`.lastIndexOf()` on an `any[]` (`Json`
 /// element) array used to either silently return `false`/`-1` (when the
 /// needle's own natural type, e.g. `number`, differed from the array's
