@@ -3254,6 +3254,30 @@ fn compiles_regex_property_access_and_stringify_crossing_an_any_boundary() {
 }
 
 #[test]
+fn compiles_regex_test_and_exec_with_an_any_typed_receiver() {
+    // Sibling of `compiles_match_and_search_with_a_regex_crossing_an_
+    // any_boundary`/`compiles_regex_property_access_and_stringify_
+    // crossing_an_any_boundary`: `.test()`/`.exec()`'s *receiver*
+    // (`self.expect_type(&regex_type, &receiver, ...)`, a strict
+    // equality check with no coercion) used to hard-reject an `any`-
+    // typed value even when it's dynamically a real RegExp, the same
+    // "any hits a strict equality check" pattern as the pattern-
+    // argument case, just on the other side of the call.
+    let source = r#"
+        function main(): void {
+            const re: any = /(\d+)-(\d+)/;
+            console.log(re.test("56-78"));
+            console.log(re.test("no digits"));
+            console.log(re.exec("12-34"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_test_and_exec_any_receiver"),
+        "true\nfalse\n[\"12-34\",\"12\",\"34\"]\n"
+    );
+}
+
+#[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
         function printAll(parts: string[]): void {
