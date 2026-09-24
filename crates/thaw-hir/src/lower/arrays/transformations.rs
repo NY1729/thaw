@@ -643,19 +643,49 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
                 vec![mapped, HirExpr::Lit(HirLit::F64(1.0))],
             )),
-            // NOTE: a ternary/mixed-return callback (`(v) => Array.
-            // isArray(v) ? v : [v]`) infers as `Union([Json,
-            // Array(Json), ...])`, not plain `Json` -- it falls into the
-            // narrower 2-member case below (or the `scalar` fallback),
-            // neither of which is correct for a member that's already
-            // dynamically-typed, so it stays unflattened. A normalize-
-            // to-Json-then-reuse-the-branch-above attempt segfaulted
-            // (some interaction between `coerce_to_declared(Json, ...)`
-            // on a `Union` member and `lower_array_map`'s own callback
-            // plumbing) and was reverted rather than shipped broken;
-            // narrower than the crash it would otherwise avoid trading
-            // one gap for a worse one. Left as a known, documented,
-            // non-crashing gap.
+            // A ternary/mixed-return callback (`(v) => Array.isArray(v) ?
+            // v : [v]`) infers as `Union([Json, Array(Json), ...])`, not
+            // plain `Json` -- normalize every element to `Json` first
+            // (via a nested `.map()`, reusing `coerce_to_declared`'s
+            // existing Union-to-Json support), then reuse the runtime
+            // flattener above.
+            HirType::Union(members) if members.contains(&HirType::Json) => {
+                let union_type = HirType::Union(members.clone());
+                let parameter = format!("__thaw_flat_map_any_normalize_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(parameter.clone(), union_type.clone());
+                let coerced =
+                    self.coerce_to_declared(&HirType::Json, HirExpr::Var(parameter.clone()))?;
+                let callback = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam { name: parameter, ty: union_type.clone() }],
+                    HirType::Json,
+                    Box::new(coerced),
+                );
+                // `callback_element_type` (the 4th argument) must match
+                // this callback's own *parameter* type (`union_type`),
+                // not its return type (`Json`) -- passing `Json` here
+                // once made `lower_array_map` size its internal "element
+                // read from the source array" scratch variable/alloca
+                // for an 8-byte pointer while actually storing a 16-byte
+                // `{tag, payload}` union struct into it: a stack buffer
+                // overflow that silently corrupted the tag/payload bits
+                // read back, observed as `thaw_json_object_set_json`
+                // segfaulting on a garbage "pointer" that was actually
+                // leftover float bits. Found via `gdb` on a locally
+                // unstripped build (`-Wl,--strip-all` removed from
+                // `thaw-cli`'s linker invocation) plus a scratch
+                // `#[test]` dumping `compiler.print_to_string()`'s LLVM
+                // IR for the crashing case -- tracing the IR by hand
+                // located the undersized alloca precisely.
+                let normalized = self.lower_array_map(
+                    mapped, mapped_type, union_type.clone(), union_type, callback, None,
+                )?;
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
+                    vec![normalized, HirExpr::Lit(HirLit::F64(1.0))],
+                ))
+            }
             HirType::Union(members) if members.len() == 2 => {
                 let Some((array_index, inner)) = members.iter().enumerate().find_map(|(index, member)| {
                     let HirType::Array(inner) = member else { return None };

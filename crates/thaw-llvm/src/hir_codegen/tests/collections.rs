@@ -952,11 +952,7 @@ fn compiles_dynamic_array_flat() {
 /// statically nested `T[][]`) hit `lower_array_flat_map_result`'s final
 /// `scalar` fallback (an identity `.filter(() => true)`, no flattening),
 /// for the same "can't know if it's an array until runtime" reason.
-/// Reuses `thaw_any_array_flat` at depth 1. A callback returning a
-/// *union* involving `Json` (e.g. a ternary picking between a value and
-/// an array literal) is a known, separate, non-crashing gap -- not
-/// covered here, see the `HirType::Union` arm's own comment in
-/// `lower_array_flat_map_result` (thaw-hir's `arrays/transformations.rs`).
+/// Reuses `thaw_any_array_flat` at depth 1.
 #[test]
 fn compiles_dynamic_array_flat_map() {
     let source = r#"
@@ -972,6 +968,35 @@ fn compiles_dynamic_array_flat_map() {
     assert_eq!(
         compile_and_run(source, "any_array_flat_map"),
         "[1,2,3]\n[1,2,3,4]\n[]\n"
+    );
+}
+
+/// A callback returning a *union* involving `Json` (a ternary picking
+/// between a value and an array literal, e.g. `(v) => Array.isArray(v) ?
+/// v : [v]`) hits `lower_array_flat_map_result`'s `HirType::Union` arm,
+/// which normalizes every element to `Json` (via a nested `.map()`
+/// reusing `coerce_to_declared`'s Union-to-Json support) before reusing
+/// `thaw_any_array_flat`. Previously segfaulted: see that arm's own doc
+/// comment (thaw-hir's `arrays/transformations.rs`) for the root cause
+/// (a `lower_array_map` argument-order mistake sizing an internal
+/// element-read alloca for 8 bytes while actually storing a 16-byte
+/// union struct into it). Covers a scalar-only source, an array-only
+/// source, and a mixed source, matching real Node for all three.
+#[test]
+fn compiles_dynamic_array_flat_map_with_a_union_returning_callback() {
+    let source = r#"
+        function main(): void {
+            const scalarOnly: any[] = [1];
+            console.log(JSON.stringify(scalarOnly.flatMap((v) => (Array.isArray(v) ? v : [v]))));
+            const arrayOnly: any[] = [[2, 3]];
+            console.log(JSON.stringify(arrayOnly.flatMap((v) => (Array.isArray(v) ? v : [v]))));
+            const mixed: any[] = [1, [2, 3], 4];
+            console.log(JSON.stringify(mixed.flatMap((v) => (Array.isArray(v) ? v : [v]))));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_array_flat_map_union_callback"),
+        "[1]\n[2,3]\n[1,2,3,4]\n"
     );
 }
 
