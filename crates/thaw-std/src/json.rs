@@ -1865,10 +1865,40 @@ pub unsafe extern "C" fn thaw_json_object_assign(
     let Some(target_fields) = (unsafe { target.as_mut() }).and_then(Value::as_object_mut) else {
         return target;
     };
-    if let Some(source_fields) = (unsafe { source.as_ref() }).and_then(Value::as_object) {
-        for (key, value) in source_fields {
-            target_fields.insert(key.clone(), value.clone());
+    let Some(source) = (unsafe { source.as_ref() }) else {
+        return target;
+    };
+    // Real `Object.assign`/object-literal-spread semantics: `null`/
+    // `undefined` sources are silently skipped (never an error, matching
+    // `Object.assign({}, null, undefined, {a: 1})` -> `{a: 1}`) -- this
+    // wasn't just a `.assign()` gap either: copying the napi-undefined
+    // sentinel (`is_napi_undefined`) object's own `$__thaw_napi_undefined
+    // $` tracking key straight into `target_fields` (previously, since
+    // it *is* structurally a `Value::Object`) corrupted the whole target
+    // into something every other `is_napi_undefined` check then saw as
+    // itself being `undefined` -- observed via `{...maybeUndefined,
+    // b: 2}` silently losing every field, not just the nullish source's
+    // absence of any.
+    if matches!(source, Value::Null) || is_napi_undefined(source) {
+        return target;
+    }
+    match source {
+        Value::Object(source_fields) => {
+            for (key, value) in source_fields {
+                target_fields.insert(key.clone(), value.clone());
+            }
         }
+        // An array's own enumerable properties are its index keys
+        // (`"0"`, `"1"`, ...) -- `length` is non-enumerable and real
+        // `Object.assign`/spread never copies it (confirmed against
+        // Node: `Object.assign({}, [1,2,3])` -> `{0:1,1:2,2:3}`, no
+        // `length` key).
+        Value::Array(items) => {
+            for (index, value) in items.iter().enumerate() {
+                target_fields.insert(index.to_string(), value.clone());
+            }
+        }
+        _ => {}
     }
     target
 }
