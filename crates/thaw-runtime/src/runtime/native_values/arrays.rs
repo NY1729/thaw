@@ -2628,11 +2628,21 @@ fn json_same_value_zero(a: *const serde_json::Value, b: *const serde_json::Value
 /// since a `Json` slot can hold a primitive value (two separately-boxed
 /// occurrences of the same number/string/boolean must compare equal),
 /// unlike a genuine fixed-layout object slot.
+/// `same_value_zero`: `.indexOf()`/`.lastIndexOf()` use real `===`
+/// (never find a `NaN` needle, matching the spec's own `Strict Equality
+/// Comparison`), while `.includes()` uses `SameValueZero` (`NaN` does
+/// find itself) -- the one place these two method families genuinely
+/// disagree. Before `NaN`/`Infinity` gained a real, distinct `Json`
+/// representation (`thaw_json_undefined`'s non-finite sibling,
+/// thaw-std's `json.rs`), both fell back to the same indistinguishable
+/// `Value::Null`, so `thaw_json_strict_equal` happened to "find" a
+/// `NaN` needle too (`null === null`) -- masking this gap until then.
 unsafe fn any_array_search(
     array: *const u8,
     presence: *const u8,
     needle: *const u8,
     from_index: f64,
+    same_value_zero: bool,
 ) -> f64 {
     let Some(length) = (unsafe { native_array_length(array) }) else {
         return -1.0;
@@ -2647,7 +2657,12 @@ unsafe fn any_array_search(
                 .cast::<*const u8>()
                 .read_unaligned()
         };
-        if unsafe { thaw_json_strict_equal(slot.cast(), needle.cast()) } != 0 {
+        let matches = if same_value_zero {
+            json_same_value_zero(slot.cast(), needle.cast())
+        } else {
+            unsafe { thaw_json_strict_equal(slot.cast(), needle.cast()) != 0 }
+        };
+        if matches {
             return index as f64;
         }
     }
@@ -2663,7 +2678,7 @@ pub unsafe extern "C" fn thaw_any_array_index_of(
     needle: *const u8,
     from_index: f64,
 ) -> f64 {
-    unsafe { any_array_search(array, presence, needle, from_index) }
+    unsafe { any_array_search(array, presence, needle, from_index, false) }
 }
 
 #[no_mangle]
@@ -2675,7 +2690,7 @@ pub unsafe extern "C" fn thaw_any_array_includes(
     needle: *const u8,
     from_index: f64,
 ) -> u8 {
-    (unsafe { any_array_search(array, presence, needle, from_index) } >= 0.0).into()
+    (unsafe { any_array_search(array, presence, needle, from_index, true) } >= 0.0).into()
 }
 
 #[no_mangle]
