@@ -713,10 +713,34 @@ impl<'a> FnLowerer<'a> {
                         let assigned = self.lower_optional_index_assignment(
                             array.clone(), index.as_ref().clone(), indexed_rhs, payload.as_ref().clone(),
                         )?;
+                        // A present (non-hole) `any[]` slot can itself
+                        // hold a JS-nullish value (`null`/`undefined`
+                        // written explicitly, not a never-set hole) --
+                        // `OptionalIsNone` only sees the hole/presence
+                        // bit, so `arr[i] ??= y` previously no-op'd for
+                        // `arr[i] === null`. Check the loaded Json value
+                        // itself too when present, same runtime check
+                        // `??`'s own Json branch uses.
+                        let else_branch = if payload.as_ref() == &HirType::Json {
+                            let inner_nullish = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_is_nullish".to_string())),
+                                vec![HirExpr::OptionalValue(
+                                    Box::new(value.clone()),
+                                    payload.as_ref().clone(),
+                                )],
+                            );
+                            vec![HirStmt::If(
+                                inner_nullish,
+                                vec![HirStmt::Return(Some(assigned.clone()))],
+                                vec![HirStmt::Return(Some(value.clone()))],
+                            )]
+                        } else {
+                            vec![HirStmt::Return(Some(value.clone()))]
+                        };
                         let result = HirExpr::Block(vec![HirStmt::If(
-                            HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
+                            HirExpr::OptionalIsNone(Box::new(value), payload.as_ref().clone()),
                             vec![HirStmt::Return(Some(assigned))],
-                            vec![HirStmt::Return(Some(value))],
+                            else_branch,
                         )]);
                         bindings.push((current_name, current_type, current));
                         return self.wrap_call_argument_bindings(result, &bindings);
@@ -785,10 +809,29 @@ impl<'a> FnLowerer<'a> {
                 2 => HirExpr::NullishValue(Box::new(current_value), payload.as_ref().clone()),
                 _ => unreachable!(),
             };
+            // Same "a present slot can itself hold a nullish Json value"
+            // gap as the `TypedIndex`-rhs special case above, reached
+            // here for the far more common shape (`arr[i] ??= <plain
+            // value>` -- `lower_array_index_operand` only transforms an
+            // rhs that's itself an array read, so any other rhs, e.g. a
+            // literal, falls through to this general path instead).
+            let else_branch = if payload.as_ref() == &HirType::Json {
+                let inner_nullish = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_nullish".to_string())),
+                    vec![present.clone()],
+                );
+                vec![HirStmt::If(
+                    inner_nullish,
+                    vec![HirStmt::Return(Some(assigned.clone()))],
+                    vec![HirStmt::Return(Some(present))],
+                )]
+            } else {
+                vec![HirStmt::Return(Some(present))]
+            };
             let result = HirExpr::Block(vec![HirStmt::If(
                 is_none,
                 vec![HirStmt::Return(Some(assigned))],
-                vec![HirStmt::Return(Some(present))],
+                else_branch,
             )]);
             bindings.push((current_name, current_type, current));
             if let Some(name) = assigned_variable {
