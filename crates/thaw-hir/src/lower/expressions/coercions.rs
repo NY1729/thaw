@@ -354,7 +354,15 @@ impl<'a> FnLowerer<'a> {
         }
         match lhs_type.clone() {
             HirType::Optional(payload) => {
-                self.expect_type(payload.as_ref(), &rhs, "destructuring default")?;
+                // A strict type check here rejected a plain-typed default
+                // (e.g. a `1` literal) for a `Json`-payload position --
+                // real trigger: `const [a = 1] = anyArr;` where `anyArr:
+                // any[]` (`array_read_type` wraps a `Json` array element
+                // as `Optional<Json>` the same way it does for any other
+                // element type). Coercing, not just checking, matches
+                // every other "declared-type slot gets a plain value"
+                // site fixed this session.
+                let rhs = self.coerce_to_declared(payload.as_ref(), rhs)?;
                 let name = format!("__thaw_default_left_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), lhs_type.clone());
@@ -370,7 +378,7 @@ impl<'a> FnLowerer<'a> {
                 self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
             }
             HirType::Nullish(payload) => {
-                self.expect_type(payload.as_ref(), &rhs, "destructuring default")?;
+                let rhs = self.coerce_to_declared(payload.as_ref(), rhs)?;
                 let result_type = HirType::Nullable(payload.clone());
                 let name = format!("__thaw_default_left_{}", self.next_binding);
                 self.next_binding += 1;

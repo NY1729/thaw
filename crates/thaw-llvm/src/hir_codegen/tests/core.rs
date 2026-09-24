@@ -557,6 +557,51 @@ fn destructures_nested_homogeneous_arrays() {
     assert_eq!(compile_and_run(source, "nested_array_destructuring"), "42 2\n");
 }
 
+/// `const [a, b, c] = arr;` for a homogeneous `T[]` (dynamic length,
+/// unlike a fixed-arity tuple destructured above) -- previously rejected
+/// outright at `let`/`const` declaration time ("destructuring requires a
+/// fixed-shape object or tuple"), even though `lower_binding_pattern`
+/// (reached the same way a function parameter already does) already
+/// supported it. Destructuring *more* positions than the array actually
+/// has is a real, separate, more serious bug this fix's own
+/// investigation found: it previously read raw, unchecked memory past
+/// the array's own allocation (observed: garbage floats, not
+/// `undefined`, and reproducibly SIGSEGVs) instead of the real spec
+/// answer, `undefined` -- confirmed pre-existing (reachable through
+/// function-parameter destructuring before this fix touched anything),
+/// not introduced by relaxing the `let`/`const` gate. Fixed by routing
+/// each position through the same bounds/presence-checked read ordinary
+/// possibly-sparse `arr[i]` access already uses, so a missing position
+/// is real `undefined` (a `= default` pattern applies correctly) instead
+/// of undefined behavior. Covers both a concrete element type and an
+/// `any[]` (`Json` element) array, and both a `let`/`const` declaration
+/// and a function parameter.
+#[test]
+fn destructures_a_homogeneous_array_past_its_length_safely() {
+    let source = r#"
+        function fromParam([a, b, c]: number[]): void {
+            console.log(a, b, c);
+        }
+        function main(): void {
+            const arr: number[] = [10, 20];
+            const [a, b, c] = arr;
+            console.log(a, b, c);
+            const [x = 1, y = 2, z = 3] = arr;
+            console.log(x, y, z);
+            fromParam(arr);
+            const anyArr: any[] = [100, 200];
+            const [m, n, o] = anyArr;
+            console.log(m, n, o);
+            const [mm = 1, nn = 2, oo = 3] = anyArr;
+            console.log(mm, nn, oo);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_destructuring_past_length"),
+        "10 20 undefined\n10 20 3\n10 20 undefined\n100 200 undefined\n100 200 3\n"
+    );
+}
+
 #[test]
 fn forwards_a_homogeneous_array_to_a_rest_parameter() {
     let source = r#"

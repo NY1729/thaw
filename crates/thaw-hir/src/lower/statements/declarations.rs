@@ -755,9 +755,18 @@ impl<'a> FnLowerer<'a> {
             );
             let destructurable_dictionary =
                 matches!((&decl.name, &ty), (Pat::Object(_), HirType::Dictionary(_)));
+            // `const [a, b] = arr;` for a homogeneous `T[]` (dynamic
+            // length, unlike a fixed-arity `Tuple`) or a bare dynamic
+            // `Json` array -- `lower_binding_pattern` (reached just below)
+            // already supports both for `Pat::Array` (originally added
+            // for a different caller, e.g. a `for`-`of` binding), this
+            // check just never let a `let`/`const` declaration reach it.
+            let destructurable_array = matches!(&decl.name, Pat::Array(_))
+                && matches!(&ty, HirType::Array(_) | HirType::Json);
             if !matches!(ty, HirType::Object(_) | HirType::Tuple(_))
                 && !destructurable_union
                 && !destructurable_dictionary
+                && !destructurable_array
             {
                 return Err(format!(
                     "destructuring requires a fixed-shape object or tuple, got {ty:?}"
