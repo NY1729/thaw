@@ -1,4 +1,49 @@
 impl<'a> FnLowerer<'a> {
+    /// `.match()`/`.matchAll()`/`.search()`'s pattern argument, coerced
+    /// to `regex_object_type()` if it's already a real, statically-typed
+    /// regex, or -- new -- if it's a `Json`-typed (`any`) value that's
+    /// *dynamically* a regex. A `RegExp` crossing into `any`/`Json`
+    /// (`coerce_to_declared`'s own `actual == regex_object_type()` arm,
+    /// `inference/coercions.rs`) gets tagged with a `{"__thaw_regexp__":
+    /// {source, flags, lastIndex}}` sentinel wrapper -- the same
+    /// round-trip-tagging convention `Map`/`Set` also get there, so
+    /// `instanceof RegExp`/etc. can in principle recognize it come back
+    /// out. Nothing currently *reads* that sentinel anywhere in the
+    /// codebase (grepped) -- so a `RegExp` passed through an `any`-typed
+    /// slot into `.match()` (a real, common pattern: an npm package's
+    /// `.d.ts` declaring a parameter `any`) previously hit a hard,
+    /// purely-static "requires a RegExp argument" error even though the
+    /// value genuinely was one at runtime. Unwraps the sentinel key and
+    /// decodes the inner object via the existing generic Json-to-native
+    /// coercion (`JsonAsNative`, the same primitive `structured_clone.rs`
+    /// and the general `Json`-to-anything branch in `coerce_to_declared`
+    /// already use) -- no new codegen. A `Json` value that ISN'T
+    /// actually a wrapped regex (missing key) decodes to empty/default
+    /// fields rather than being rejected with a clear error -- an
+    /// accepted, narrower limitation for now (this doesn't attempt real
+    /// JS's full `Symbol.match`-or-construct-`new RegExp(x)` argument
+    /// coercion), consistent with round5's `Generator`/`Promise`
+    /// "supported for the common case, not the general one" scope calls.
+    fn coerce_regex_argument(
+        &mut self,
+        pattern: &HirExpr,
+        method: &str,
+    ) -> Result<HirExpr, String> {
+        let regex_type = regex_object_type();
+        let pattern_type = self.infer_expr_type(pattern)?;
+        if pattern_type == regex_type {
+            return Ok(pattern.clone());
+        }
+        if pattern_type == HirType::Json {
+            let inner = HirExpr::JsonGet(
+                Box::new(pattern.clone()),
+                "__thaw_regexp__".to_string(),
+            );
+            return self.coerce_to_declared(&regex_type, inner);
+        }
+        Err(format!("native `.{method}()` requires a RegExp argument"))
+    }
+
     fn lower_native_regex_method(
         &mut self,
         member: &MemberExpr,
@@ -501,10 +546,7 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.match()` expects exactly one argument".into());
                     };
                     let regex_type = regex_object_type();
-                    if self.infer_expr_type(pattern)? != regex_type {
-                        return Err("native `.match()` requires a RegExp argument".into());
-                    }
-                    let pattern = pattern.clone();
+                    let pattern = self.coerce_regex_argument(pattern, "match")?;
                     let receiver_name = format!("__thaw_match_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     let pattern_name = format!("__thaw_match_pattern_{}", self.next_binding);
@@ -585,10 +627,7 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.matchAll()` expects exactly one argument".into());
                     };
                     let regex_type = regex_object_type();
-                    if self.infer_expr_type(pattern)? != regex_type {
-                        return Err("native `.matchAll()` requires a RegExp argument".into());
-                    }
-                    let pattern = pattern.clone();
+                    let pattern = self.coerce_regex_argument(pattern, "matchAll")?;
                     let receiver_name = format!("__thaw_match_all_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     let pattern_name = format!("__thaw_match_all_pattern_{}", self.next_binding);
@@ -666,10 +705,7 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.search()` expects exactly one argument".into());
                     };
                     let regex_type = regex_object_type();
-                    if self.infer_expr_type(pattern)? != regex_type {
-                        return Err("native `.search()` requires a RegExp argument".into());
-                    }
-                    let pattern = pattern.clone();
+                    let pattern = self.coerce_regex_argument(pattern, "search")?;
                     let receiver_name = format!("__thaw_search_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     let pattern_name = format!("__thaw_search_pattern_{}", self.next_binding);
