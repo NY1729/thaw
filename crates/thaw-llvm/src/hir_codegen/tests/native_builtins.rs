@@ -3278,6 +3278,46 @@ fn compiles_regex_test_and_exec_with_an_any_typed_receiver() {
 }
 
 #[test]
+fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
+    // A `Date` stored in `any` already round-trips through QuickJS
+    // correctly for property/method access and `instanceof` (native
+    // `Date` methods and `instanceof Date` on a `Json`-typed value
+    // dispatch via `thaw_json_is_date_shape`'s `{"timestamp": N}`
+    // convention, `platform_globals/dates.js`) -- but `JSON.stringify(d)`
+    // and `console.log(d)` previously leaked that raw wire shape instead
+    // of real JS's ISO-string rendering (`Date.prototype.toJSON`/
+    // `toISOString`), since neither of those two paths reads the shape
+    // back at all, only native code that already knows to. An *invalid*
+    // Date (`new Date(NaN)`) needs its own handling throughout: real
+    // `Date.prototype.toJSON` returns `null` (not a string) for one, and
+    // `String(date)`/`console.log` gives `"Invalid Date"` -- both
+    // required first fixing `thaw_json_is_date_shape`/`thaw_json_date_
+    // timestamp` themselves to recognize a NaN timestamp wrapped in the
+    // `$__thaw_non_finite$` sentinel (confirmed via a real probe that
+    // `(new Date(NaN) as any) instanceof Date` was wrongly `false`
+    // before this fix, a bug not unique to stringify/console.log).
+    let source = r#"
+        function main(): void {
+            const d: any = new Date(1704067200500);
+            console.log(d.getUTCFullYear());
+            console.log(d instanceof Date);
+            console.log(JSON.stringify(d));
+            console.log(JSON.stringify({ created: d, count: 3 }));
+            console.log(d);
+
+            const invalid: any = new Date(NaN);
+            console.log(invalid instanceof Date);
+            console.log(JSON.stringify(invalid));
+            console.log(invalid);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_stringify_crossing_any_boundary"),
+        "2024\ntrue\n\"2024-01-01T00:00:00.500Z\"\n{\"created\":\"2024-01-01T00:00:00.500Z\",\"count\":3}\n2024-01-01T00:00:00.500Z\ntrue\nnull\nInvalid Date\n"
+    );
+}
+
+#[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
         function printAll(parts: string[]): void {
