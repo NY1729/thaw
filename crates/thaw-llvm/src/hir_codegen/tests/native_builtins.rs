@@ -4655,6 +4655,55 @@ fn explicit_undefined_in_an_any_array_literal_is_a_safe_present_value() {
     );
 }
 
+/// Follow-up to `explicit_undefined_in_an_any_array_literal_is_a_safe_
+/// present_value`: `mapped[1] === undefined` used *inline* (not via a
+/// local first) gave `false` for a `.map()`-produced `any[]`, even
+/// though `typeof mapped[1] === "undefined"` and a local-var form of
+/// the same comparison were both already correct. Root cause:
+/// `arr[i] === undefined` has a dedicated fast path
+/// (`lower_optional_undefined_equality`, thaw-hir's
+/// `expressions/coercions.rs`) that answers purely from the array's
+/// presence-*state* byte (`1` = present, `0` = hole, `2` = "written via
+/// `__thaw_array_set_undefined`") -- but `.map()`'s generic
+/// `IndexAssign` write path (its "callback type already matches
+/// element type" fast path) always marks state `1` regardless of what
+/// value it's storing, with no way to flag "this write happens to be
+/// `undefined`". So a `Json` slot that's genuinely present with the
+/// real `undefined` sentinel value, but tagged with plain-present state
+/// `1` rather than `2`, was never recognized. Fixed by also checking
+/// the loaded value itself (`__thaw_json_is_undefined`) for a `Json`
+/// element, so the presence-state fast path and a value-based check
+/// (`typeof`, `JSON.stringify`, a local-var comparison) always agree,
+/// regardless of which write path produced the slot. Also covers
+/// bounds/holes/`null` to confirm the widened check didn't regress the
+/// existing state-`0`/state-`1` cases.
+#[test]
+fn inline_index_equality_against_undefined_checks_the_value_not_just_presence_state() {
+    let source = r#"
+        function f(a: any[]): void {
+            console.log(a[1] === undefined);
+        }
+        function main(): void {
+            const arr: any[] = [1, undefined, 3];
+            console.log(arr[0] === undefined, arr[1] === undefined, arr[2] === undefined, arr[10] === undefined, arr[-1] === undefined);
+            const mapped = arr.map((v) => v);
+            console.log(mapped[0] === undefined, mapped[1] === undefined, mapped[2] === undefined, mapped[10] === undefined);
+            const holes: any[] = [1, , 3];
+            console.log(holes[0] === undefined, holes[1] === undefined, holes[2] === undefined);
+            const numHoles: number[] = [1, , 3];
+            console.log(numHoles[0] === undefined, numHoles[1] === undefined, numHoles[10] === undefined);
+            const withNull: any[] = [1, null, 3];
+            console.log(withNull[1] === undefined, withNull[1] === null);
+            f(arr);
+            f(mapped);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "inline_index_equality_undefined_value_check"),
+        "false true false true true\nfalse true false true\nfalse true false\nfalse true true\nfalse true\ntrue\ntrue\n"
+    );
+}
+
 #[test]
 fn compound_assignment_reads_sparse_array_holes_as_undefined() {
     let source = r#"
