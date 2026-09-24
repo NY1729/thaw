@@ -666,6 +666,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 HirType::Bool => self.compile_json_as_bool_value(element_json)?,
                 HirType::Json | HirType::Dictionary(_) => element_json,
+                // A statically `null`/`undefined`-typed tuple position
+                // carries no information beyond its own type -- there's
+                // nothing to read from `element_json`, just the same
+                // fixed dummy-bool sentinel every other `Null`/
+                // `Undefined` value compiles to (see
+                // `values/expressions.rs`'s literal codegen).
+                HirType::Null => self.context.bool_type().const_int(1, false).into(),
+                HirType::Undefined => self.context.bool_type().const_zero().into(),
                 HirType::Optional(payload) => {
                     let (object, key) = self.compile_napi_optional_result_container(element_json)?;
                     self.compile_json_to_optional_field(
