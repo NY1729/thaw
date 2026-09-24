@@ -1837,7 +1837,19 @@ pub unsafe extern "C" fn thaw_json_object_set_json_owned(
 #[no_mangle]
 pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char) -> u8 {
     if let Some(fields) = (unsafe { object.as_mut() }).and_then(Value::as_object_mut) {
-        fields.remove(&to_str(key));
+        // `serde_json::Map::remove` (with the `preserve_order` feature
+        // this crate builds with) is `swap_remove` -- it moves the map's
+        // last entry into the removed slot instead of shifting the
+        // rest down, silently reordering every remaining key. Real JS
+        // objects preserve string-key insertion order (`delete obj.a`
+        // never reorders `b`/`c`/`d`), and this matters to every
+        // consumer that walks the object's own key order: `Object.
+        // keys`/`JSON.stringify`/for-in/the destructuring `...rest`
+        // pattern (`crates/thaw-hir/src/lower/destructuring.rs`'s
+        // `lower_dictionary_object_rest`, which builds its rest object
+        // by deleting the destructured keys from a full copy). Use the
+        // order-preserving removal instead.
+        fields.shift_remove(&to_str(key));
     }
     1
 }

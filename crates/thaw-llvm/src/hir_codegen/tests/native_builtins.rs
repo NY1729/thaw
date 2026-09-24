@@ -4704,6 +4704,36 @@ fn inline_index_equality_against_undefined_checks_the_value_not_just_presence_st
     );
 }
 
+/// `delete obj.key` on an `any`-typed object reordered the *remaining*
+/// keys instead of preserving their original insertion order --
+/// `thaw_json_object_delete` (thaw-std's `json.rs`) called `serde_json
+/// ::Map::remove`, which (under this crate's `preserve_order` feature)
+/// is `swap_remove`: it moves the map's last entry into the removed
+/// slot instead of shifting the rest down. Real JS objects preserve
+/// string-key insertion order across a `delete`. Fixed by using
+/// `shift_remove` instead. This also affects the destructuring `...rest`
+/// pattern on a `Json` object (`lower_dictionary_object_rest`, reused
+/// for `Json` by `destructures_a_bare_dynamic_any_typed_object` above),
+/// which builds its rest object by deleting the destructured keys from
+/// a full copy.
+#[test]
+fn delete_on_a_dynamic_any_object_preserves_remaining_key_order() {
+    let source = r#"
+        function main(): void {
+            const obj: any = { a: 1, b: 2, c: 3, d: 4 };
+            delete obj.a;
+            console.log(JSON.stringify(obj));
+            console.log(Object.keys(obj));
+            delete obj.c;
+            console.log(JSON.stringify(obj));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "delete_preserves_key_order"),
+        "{\"b\":2,\"c\":3,\"d\":4}\n[\"b\",\"c\",\"d\"]\n{\"b\":2,\"d\":4}\n"
+    );
+}
+
 #[test]
 fn compound_assignment_reads_sparse_array_holes_as_undefined() {
     let source = r#"
