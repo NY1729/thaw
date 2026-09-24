@@ -3220,6 +3220,40 @@ fn compiles_match_and_search_with_a_regex_crossing_an_any_boundary() {
 }
 
 #[test]
+fn compiles_regex_property_access_and_stringify_crossing_an_any_boundary() {
+    // Sibling of `compiles_match_and_search_with_a_regex_crossing_an_
+    // any_boundary`: a `RegExp` tagged with the `__thaw_regexp__`
+    // sentinel when it crosses into `any` used to be write-only --
+    // nothing unwrapped it again, so `re.source`/`.flags`/`.global`/
+    // etc. read directly on the `any`-typed value all gave `undefined`,
+    // `JSON.stringify(re)` leaked `{"__thaw_regexp__":{...}}` instead of
+    // real JS's `{}`, and `console.log(re)` printed the same raw
+    // wrapper instead of `/source/flags`.
+    let source = r#"
+        function main(): void {
+            const re: any = /abc/gims;
+            console.log(re.source);
+            console.log(re.flags);
+            console.log(re.global);
+            console.log(re.ignoreCase);
+            console.log(re.multiline);
+            console.log(re.dotAll);
+            console.log(re.sticky);
+            console.log(re.unicode);
+            console.log(re.hasIndices);
+            console.log(re.lastIndex);
+            console.log(JSON.stringify(re));
+            console.log(JSON.stringify({ pattern: re, count: 3 }));
+            console.log(re);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_property_access_crossing_any_boundary"),
+        "abc\ngims\ntrue\ntrue\ntrue\ntrue\nfalse\nfalse\nfalse\n0\n{}\n{\"pattern\":{},\"count\":3}\n/abc/gims\n"
+    );
+}
+
+#[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
         function printAll(parts: string[]): void {
