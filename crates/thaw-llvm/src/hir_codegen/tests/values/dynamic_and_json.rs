@@ -1074,6 +1074,35 @@ fn compiles_union_value_coerced_to_dynamic() {
     );
 }
 
+/// `x ?? y` on a dynamic (`any`-typed) `x` used to silently keep `x`
+/// even when it was `null`/`undefined` at runtime -- unlike `Optional`/
+/// `Nullable`/`Nullish`, whose absent state is a compile-time-known tag,
+/// a `Json` value's nullish-ness is only knowable at runtime
+/// (`__thaw_json_is_nullish`, the same check `==`/`===` against a bare
+/// `null`/`undefined` literal already uses), and this fell through to
+/// the lowering's generic "not a taggable type" fallback instead. A
+/// falsy-but-not-nullish value (`0`, `""`) still correctly keeps `x`,
+/// same as real `??` (unlike `||`).
+#[test]
+fn compiles_dynamic_nullish_coalescing() {
+    let source = r#"
+        function main(): void {
+            const m: any = null;
+            console.log(m ?? "default");
+            const u: any = undefined;
+            console.log(u ?? "default2");
+            const v: any = 0;
+            console.log(v ?? "default3");
+            const s: any = "";
+            console.log(s ?? "default4");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_nullish_coalescing"),
+        "default\ndefault2\n0\n\n"
+    );
+}
+
 #[test]
 fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
     let source = r#"
