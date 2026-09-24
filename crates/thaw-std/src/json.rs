@@ -264,6 +264,11 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
     if non_finite_number(value).is_some() {
         return Value::Null;
     }
+    match date_iso_string(value) {
+        Some(Some(iso)) => return Value::String(iso),
+        Some(None) => return Value::Null,
+        None => {}
+    }
     match value {
         Value::Object(fields) if is_thaw_internal_wrapper(fields) => {
             Value::Object(serde_json::Map::new())
@@ -305,6 +310,17 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
 fn filtered_json_omitting_undefined(value: &Value, keys: &[String]) -> Value {
     if non_finite_number(value).is_some() {
         return Value::Null;
+    }
+    // `Date.prototype.toJSON` runs before the replacer-keys `PropertyList`
+    // filter even applies (the filter only ever narrows an *object*'s own
+    // enumerable keys) -- a `Date` argument (or nested field) stringifies
+    // to its ISO string exactly like the no-replacer form, confirmed
+    // against real Node (`JSON.stringify(date, ["timestamp"])` still
+    // gives the plain ISO string, not `{"timestamp":...}`).
+    match date_iso_string(value) {
+        Some(Some(iso)) => return Value::String(iso),
+        Some(None) => return Value::Null,
+        None => {}
     }
     match value {
         Value::Object(fields) if is_thaw_internal_wrapper(fields) => {
@@ -489,6 +505,14 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
                 .and_then(|value| value.as_str().map(str::to_string))
                 .unwrap_or_default(),
         ),
+        // A `Date` stored in `any` -- without this, `console.log(d)`
+        // would print the raw `{"timestamp":N}` wire shape
+        // (`thaw_json_is_date_shape`, `platform_globals/dates.js`)
+        // instead of real Node's bare (unquoted) ISO string, or, for an
+        // invalid Date, real `String(date)`'s `"Invalid Date"`.
+        other if date_iso_string(other).is_some() => date_iso_string(other)
+            .unwrap()
+            .unwrap_or_else(|| "Invalid Date".to_string()),
         other => serde_json::to_string(&ordered_json_omitting_undefined(other))
             .unwrap_or_else(|_| "null".into()),
     };
@@ -801,6 +825,38 @@ fn json_to_number(value: &Value) -> f64 {
 
 unsafe extern "C" {
     fn thaw_string_to_number(value: *const c_char) -> f64;
+    /// Defined in thaw-runtime's `native_values/date.rs` -- resolved at
+    /// link time the same way `thaw_string_to_number` above already is
+    /// (thaw-std has no direct crate dependency on thaw-runtime; both
+    /// land in the same final linked binary).
+    fn thaw_date_to_iso_string(timestamp: f64) -> *const c_char;
+}
+
+/// A `console.log`/`JSON.stringify`-ready rendering of a `Date`-shaped
+/// `Json` value (`thaw_json_is_date_shape`'s exact `{"timestamp": N}`
+/// convention, `platform_globals/dates.js`'s own wire format) as real
+/// JS's `Date.prototype.toISOString()` text. `None` when `value` isn't
+/// Date-shaped at all -- the caller falls through to its own generic
+/// handling. `Some(None)` when it *is* Date-shaped but the timestamp is
+/// non-finite/out-of-range (an invalid Date, `new Date(NaN)`) -- distinct
+/// from `None` because real `Date.prototype.toJSON` still special-cases
+/// this (returns `null` rather than throwing, and `String(date)`/
+/// `console.log` gives `"Invalid Date"`), so a caller needs to tell
+/// "not a Date" apart from "a Date, but an invalid one" rather than
+/// silently falling through to generic object serialization for the
+/// latter (which previously leaked the raw `{"timestamp":null}` wire
+/// shape instead of either of those).
+fn date_iso_string(value: &Value) -> Option<Option<String>> {
+    if thaw_json_is_date_shape(value as *const Value) == 0 {
+        return None;
+    }
+    let timestamp = thaw_json_date_timestamp(value as *const Value);
+    let text = unsafe { thaw_date_to_iso_string(timestamp) };
+    Some(if text.is_null() {
+        None
+    } else {
+        Some(to_str(text))
+    })
 }
 
 fn javascript_string_to_number(text: &str) -> f64 {
@@ -934,22 +990,42 @@ pub extern "C" fn thaw_json_is_date_shape(value: *const Value) -> u8 {
     let Value::Object(object) = value else {
         return 0;
     };
-    u8::from(object.len() == 1 && matches!(object.get("timestamp"), Some(Value::Number(_))))
+    // A NaN/out-of-range `timestamp` (`new Date(NaN)`, an *invalid* but
+    // still real Date -- `real Date.prototype.toJSON`/`instanceof Date`
+    // both still recognize it as a Date, just one whose every field
+    // getter returns `NaN`) can't be stored as a plain JSON `Number`
+    // (`serde_json::Number` structurally cannot hold a non-finite `f64`)
+    // -- it's wrapped in the same `$__thaw_non_finite$` sentinel every
+    // other non-finite `f64` written into a `Json` value gets
+    // (`non_finite_number`, this same file). Without also matching that
+    // shape here, an invalid Date silently stopped being recognized as
+    // Date-shaped at all -- confirmed via a real probe: `(new Date(NaN)
+    // as any) instanceof Date` gave `false` instead of real JS's `true`.
+    let is_timestamp = |field: Option<&Value>| {
+        matches!(field, Some(Value::Number(_)))
+            || field.is_some_and(|field| non_finite_number(field).is_some())
+    };
+    u8::from(object.len() == 1 && is_timestamp(object.get("timestamp")))
 }
 
 /// Extracts the millisecond timestamp from the `{"timestamp": N}` shape
-/// `thaw_json_is_date_shape` recognizes. Any other shape (a caller that
-/// didn't check first, or a genuinely malformed value): `NaN`, matching
-/// how this file already degrades other malformed/absent numeric reads.
+/// `thaw_json_is_date_shape` recognizes -- including a non-finite one
+/// wrapped in the `$__thaw_non_finite$` sentinel (see that function's
+/// own doc comment). Any other shape (a caller that didn't check first,
+/// or a genuinely malformed value): `NaN`, matching how this file
+/// already degrades other malformed/absent numeric reads.
 #[no_mangle]
 pub extern "C" fn thaw_json_date_timestamp(value: *const Value) -> f64 {
     let Some(value) = (unsafe { value.as_ref() }) else {
         return f64::NAN;
     };
-    value
-        .get("timestamp")
-        .and_then(Value::as_f64)
-        .unwrap_or(f64::NAN)
+    let Some(field) = value.get("timestamp") else {
+        return f64::NAN;
+    };
+    if let Some(non_finite) = non_finite_number(field) {
+        return non_finite;
+    }
+    field.as_f64().unwrap_or(f64::NAN)
 }
 
 /// The same `$__thaw_napi_undefined$`-tagged sentinel object
