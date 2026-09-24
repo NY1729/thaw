@@ -105,6 +105,25 @@ impl<'a> FnLowerer<'a> {
                         statements,
                     );
                 }
+                if ty == &HirType::Json {
+                    // A `Json`-typed (`any`) object has no compile-time-
+                    // known field set, same as `Dictionary(Json)` --
+                    // "every property, whatever its key, reads back as
+                    // `Json`" is exactly what `Dictionary`'s own
+                    // machinery already implements (dynamic `JsonKey`
+                    // reads, `__thaw_json_has_own`-checked defaults, the
+                    // same runtime representation), so reuse it directly
+                    // rather than duplicating it. Previously errored
+                    // outright ("object pattern cannot destructure
+                    // Json") even for the simplest case, `const {a} =
+                    // someAnyValue`.
+                    return self.lower_dictionary_object_binding_pattern(
+                        pattern,
+                        value,
+                        &HirType::Json,
+                        statements,
+                    );
+                }
                 if let HirType::Union(elements) = ty {
                     return self
                         .lower_union_object_binding_pattern(pattern, value, elements, statements);

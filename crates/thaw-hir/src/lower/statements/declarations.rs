@@ -755,6 +755,15 @@ impl<'a> FnLowerer<'a> {
             );
             let destructurable_dictionary =
                 matches!((&decl.name, &ty), (Pat::Object(_), HirType::Dictionary(_)));
+            // `const {a} = anyValue;` for a bare dynamic `Json` object --
+            // same story as `destructurable_array` below, and the same
+            // fix shape: `lower_binding_pattern` (reached just below)
+            // already supports `Pat::Object` against `Json` by reusing
+            // `Dictionary`'s own machinery (every property reads back as
+            // `Json`, exactly `Dictionary(Json)`'s own contract), this
+            // gate just never let a `let`/`const` declaration reach it.
+            let destructurable_json_object =
+                matches!((&decl.name, &ty), (Pat::Object(_), HirType::Json));
             // `const [a, b] = arr;` for a homogeneous `T[]` (dynamic
             // length, unlike a fixed-arity `Tuple`) or a bare dynamic
             // `Json` array -- `lower_binding_pattern` (reached just below)
@@ -766,6 +775,7 @@ impl<'a> FnLowerer<'a> {
             if !matches!(ty, HirType::Object(_) | HirType::Tuple(_))
                 && !destructurable_union
                 && !destructurable_dictionary
+                && !destructurable_json_object
                 && !destructurable_array
             {
                 return Err(format!(

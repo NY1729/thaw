@@ -324,6 +324,40 @@ fn local_dictionary_destructuring_supports_computed_keys_and_rest() {
     );
 }
 
+/// `const {a} = anyValue;` -- destructuring a bare `any`-typed (`Json`)
+/// object -- used to hit a hard compile error at two separate gates:
+/// `let`/`const`'s own "is this destructurable" check (`statements/
+/// declarations.rs`) never let a `Json`-typed value reach
+/// `lower_binding_pattern` at all (only `Dictionary`/`Object`/`Tuple`/a
+/// `Union` of `Object`s were allowed through), and even past that,
+/// `lower_binding_pattern`'s own `Pat::Object` arm had no `Json` case
+/// (`object pattern cannot destructure Json`). Fixed both: `Json` reuses
+/// `Dictionary`'s own destructuring machinery directly (every property
+/// of a `Json` object reads back as `Json`, exactly `Dictionary(Json)`'s
+/// own contract -- dynamic `JsonKey` reads, `__thaw_json_has_own`-
+/// checked defaults, rest via delete-the-destructured-keys-from-a-copy).
+#[test]
+fn destructures_a_bare_dynamic_any_typed_object() {
+    let source = r#"
+        function main(): void {
+            const obj: any = { a: 1, b: "x", c: true };
+            const { a } = obj;
+            console.log(a);
+            const { a: renamed, ...rest } = obj;
+            console.log(renamed, JSON.stringify(rest));
+            const { missing = "default" } = obj;
+            console.log(missing);
+            const nested: any = { outer: { inner: 42 } };
+            const { outer: { inner } } = nested;
+            console.log(inner);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "destructure_dynamic_any_object"),
+        "1\n1 {\"b\":\"x\",\"c\":true}\ndefault\n42\n"
+    );
+}
+
 #[test]
 fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest() {
     let source = r#"
