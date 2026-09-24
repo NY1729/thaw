@@ -4616,6 +4616,45 @@ fn nullish_assignment_updates_a_present_but_nullish_any_array_element() {
     );
 }
 
+/// An explicit `undefined` literal inside an `any[]` array literal (e.g.
+/// `[1, undefined, 3]`) writes a real, present value at that position
+/// (JS: `1 in arr` is `true`, unlike a genuine elided hole `[1, , 3]`
+/// where it's `false`) -- the presence *state* byte was already correct
+/// (`__thaw_array_set_undefined` marks it `2`, distinct from a hole's
+/// `0`), but the slot's own `Json` pointer was left at whatever the
+/// arena allocation zero-initialized it to: a null pointer. Any reader
+/// that doesn't go through a state-aware wrapper before touching the
+/// slot -- ordinary `arr[i]` indexing on a plain (non-Optional/Nullish)
+/// `Json` element, or `.map()`'s "callback type already matches element
+/// type" fast path -- dereferenced that null pointer directly and
+/// segfaulted (`typeof arr[1]`, or even just `const x = arr[1];`
+/// followed by any use of `x`). Fixed by also writing a genuine `Json`
+/// "undefined" sentinel (`thaw_json_undefined`, thaw-std's `json.rs` --
+/// the same `$__thaw_napi_undefined$`-tagged value `typeof`/
+/// `JSON.stringify`/etc. already recognize) into the slot, not just the
+/// presence state.
+#[test]
+fn explicit_undefined_in_an_any_array_literal_is_a_safe_present_value() {
+    let source = r#"
+        function main(): void {
+            const arr: any[] = [1, undefined, 3];
+            console.log(JSON.stringify(arr));
+            console.log(arr.length, 0 in arr, 1 in arr, 2 in arr);
+            const x = arr[1];
+            console.log(typeof x, x === undefined, x === null);
+            const mapped = arr.map((v) => v);
+            console.log(JSON.stringify(mapped));
+            console.log(mapped.length, 1 in mapped);
+            const y = mapped[1];
+            console.log(typeof y, y === undefined);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_array_literal_explicit_undefined"),
+        "[1,null,3]\n3 true true true\nundefined true false\n[1,null,3]\n3 true\nundefined true\n"
+    );
+}
+
 #[test]
 fn compound_assignment_reads_sparse_array_holes_as_undefined() {
     let source = r#"

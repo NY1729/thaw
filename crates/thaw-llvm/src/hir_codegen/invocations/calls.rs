@@ -191,6 +191,32 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_conditional_branch(valid, write, done)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(write);
+                // `thaw_array_presence_set_state` (below) only marks the
+                // presence *state*; unlike a real value write, it never
+                // touches the slot's own bytes. For a scalar element
+                // (F64/Bool/...) that's fine -- "undefined" is encoded
+                // entirely by the state byte, and every reader of this
+                // shape already goes through a state-aware wrapper before
+                // ever looking at the slot. But `Json` (and any other
+                // pointer-based element) has readers that don't: ordinary
+                // `arr[i]` indexing and `.map()`'s "callback type already
+                // matches element type" fast path both read the slot's
+                // raw pointer directly. Left at whatever the arena
+                // allocation zero-initialized it to, that's a null
+                // pointer, dereferenced by the very next consumer (e.g.
+                // `typeof`) -- a real, reproducible segfault, not just a
+                // wrong value. Write a genuine, safe `Json` "undefined"
+                // sentinel into the slot so a raw read is memory-safe too.
+                if name == "__thaw_array_set_undefined" && *element == HirType::Json {
+                    let undefined = self.builder.build_call(
+                        self.module.get_function("thaw_json_undefined").unwrap(),
+                        &[],
+                        "array_undefined_sentinel",
+                    ).map_err(|error| error.to_string())?
+                        .try_as_basic_value().basic()
+                        .ok_or("thaw_json_undefined returned no value")?;
+                    self.builder.build_store(slot, undefined).map_err(|error| error.to_string())?;
+                }
                 let index = self.builder.build_float_to_unsigned_int(
                     index, i64_type, "undefined_write_index",
                 ).map_err(|error| error.to_string())?;
