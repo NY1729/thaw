@@ -1607,6 +1607,23 @@ pub extern "C" fn thaw_json_null() -> *mut Value {
     leak(Value::Null)
 }
 
+/// A genuine, safe-to-dereference `Json` value representing JS
+/// `undefined` (the same `$__thaw_napi_undefined$`-tagged sentinel
+/// object `typeof`/`JSON.stringify`/etc. already recognize throughout
+/// this module) -- distinct from `thaw_json_null()`. Used for a
+/// `Json`-typed array slot whose presence state says "undefined" (see
+/// `__thaw_array_set_undefined`, thaw-llvm's `invocations/calls.rs`):
+/// that codegen only updates the presence bitmap, so a plain-`Json`-
+/// element array previously left the slot's own bytes at whatever the
+/// arena allocation zero-initialized them to -- a null pointer a raw
+/// (non-state-aware) reader like `.map()`'s fast element-read path, or
+/// ordinary `arr[i]` indexing on this element shape, then dereferenced
+/// directly, crashing.
+#[no_mangle]
+pub extern "C" fn thaw_json_undefined() -> *mut Value {
+    leak(napi_undefined_value())
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
     if array.is_null() {
