@@ -955,6 +955,69 @@ fn compiles_dynamic_value_strict_equality() {
     );
 }
 
+/// `NaN`/`Infinity`/`-Infinity` boxed into an `any`-typed (`Json`)
+/// value used to be indistinguishable from a real `null`:
+/// `serde_json::Number` structurally cannot hold a non-finite `f64`, so
+/// `number_value` (thaw-std's `json.rs`) silently fell back to
+/// `Value::Null`. `x === null` was `true`, `typeof x` was `"object"`,
+/// `Number.isNaN(x)` was `false`, and `.includes()` couldn't find a
+/// `NaN` needle -- all wrong. Every one of these consumers
+/// (`thaw_json_typeof`, `json_to_number`, `thaw_json_strict_equal`/
+/// `json_same_value_zero`) was already built to recognize a
+/// `{"$__thaw_non_finite$": "NaN"|"Infinity"|"-Infinity"}` sentinel
+/// object (the same shape `platform_globals/dates.js`'s
+/// `__thaw_json_safe_stringify` JS-side replacer already produces for
+/// values crossing the QuickJS boundary) -- `number_value` just never
+/// produced it for the far more common native-compiled-code path.
+/// Fixed there, plus made the `JSON.stringify`/`console.log`/`String()`
+/// families recognize the sentinel too, matching real JS's own quirk
+/// that `JSON.stringify` collapses a non-finite number to `null` (kept)
+/// while every other consumer must see the real value.
+///
+/// Also closed in the same pass: `.includes()` on an `any[]` used
+/// `thaw_json_strict_equal` (`===`, `NaN` never equals itself) for
+/// searching, same as `.indexOf()`/`.lastIndexOf()` -- correct for
+/// those, but `.includes()`'s own spec uses `SameValueZero` (`NaN`
+/// *does* find itself). Undetectable before this fix, since a `NaN`
+/// needle and a `NaN` haystack element were both just `Value::Null`,
+/// so `===` "found" it by accident either way.
+#[test]
+fn compiles_dynamic_non_finite_number_identity() {
+    let source = r#"
+        function main(): void {
+            const nan: any = NaN;
+            const inf: any = Infinity;
+            const ninf: any = -Infinity;
+            console.log(nan === null, nan === nan, typeof nan);
+            console.log(inf === null, typeof inf, inf === Infinity);
+            console.log(Number.isNaN(nan), Number.isNaN(inf), Number.isNaN(1));
+            console.log(Number.isFinite(nan), Number.isFinite(inf), Number.isFinite(1));
+            console.log(String(nan), String(inf), String(ninf));
+            console.log(JSON.stringify(nan), JSON.stringify({ a: nan }));
+            const arr: any[] = [1, nan, inf, ninf, 5];
+            console.log(arr.indexOf(NaN), arr.includes(NaN));
+            console.log(JSON.stringify(arr));
+            const m = new Map<any, string>();
+            m.set(NaN, "nanvalue");
+            console.log(m.get(NaN), m.has(NaN));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_non_finite_number_identity"),
+        concat!(
+            "false false number\n",
+            "false number true\n",
+            "true false false\n",
+            "false false true\n",
+            "NaN Infinity -Infinity\n",
+            "null {\"a\":null}\n",
+            "-1 true\n",
+            "[1,null,null,null,5]\n",
+            "nanvalue true\n",
+        )
+    );
+}
+
 /// `.includes()`/`.indexOf()`/`.lastIndexOf()` on an `any[]` (`Json`
 /// element) array used to either silently return `false`/`-1` (when the
 /// needle's own natural type, e.g. `number`, differed from the array's

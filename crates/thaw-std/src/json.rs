@@ -153,7 +153,38 @@ fn number_value(value: f64) -> Value {
             return Value::Number((value as u64).into());
         }
     }
-    serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
+    if let Some(number) = serde_json::Number::from_f64(value) {
+        return Value::Number(number);
+    }
+    // `NaN`/`Infinity`/`-Infinity` have no JSON representation --
+    // `serde_json::Number` structurally cannot hold one, so this used to
+    // silently collapse to `Value::Null`, indistinguishable from a real
+    // `null`. That broke every consumer that needs to tell them apart
+    // (`typeof`, `===`, `Number.isNaN`, arithmetic coercion), even
+    // though those consumers were already built to recognize the
+    // sentinel below (`non_finite_number`, `json_to_number`,
+    // `thaw_json_typeof`, `thaw_json_strict_equal`/`json_same_value_
+    // zero` in thaw-runtime) -- it just wasn't being produced by this,
+    // the main native f64-to-`Json` conversion path. Only
+    // `platform_globals/dates.js`'s `__thaw_json_safe_stringify`
+    // replacer (a JS-side `JSON.stringify` round-trip) tagged it,
+    // covering values crossing the QuickJS boundary but not an
+    // ordinary `any`-typed `NaN`/`Infinity` constructed in compiled
+    // code. Tag it here too, the exact same shape, so both paths agree.
+    napi_non_finite_value(value)
+}
+
+fn napi_non_finite_value(value: f64) -> Value {
+    let mut fields = serde_json::Map::new();
+    let tag = if value.is_nan() {
+        "NaN"
+    } else if value > 0.0 {
+        "Infinity"
+    } else {
+        "-Infinity"
+    };
+    fields.insert("$__thaw_non_finite$".to_string(), Value::String(tag.to_string()));
+    Value::Object(fields)
 }
 
 fn array_index_key(key: &str) -> Option<u32> {
@@ -230,19 +261,29 @@ fn ordered_json(value: &Value) -> Value {
 /// before they ever reach here -- see `top_level_undefined_string`'s
 /// own doc comment.
 fn ordered_json_omitting_undefined(value: &Value) -> Value {
+    if non_finite_number(value).is_some() {
+        return Value::Null;
+    }
     match value {
         Value::Object(fields) => Value::Object(
             ordered_object_fields(fields)
                 .into_iter()
                 .filter(|(_, value)| !is_napi_undefined(value))
-                .map(|(key, value)| (key.clone(), ordered_json_omitting_undefined(value)))
+                .map(|(key, value)| {
+                    let value = if non_finite_number(value).is_some() {
+                        Value::Null
+                    } else {
+                        ordered_json_omitting_undefined(value)
+                    };
+                    (key.clone(), value)
+                })
                 .collect(),
         ),
         Value::Array(items) => Value::Array(
             items
                 .iter()
                 .map(|item| {
-                    if is_napi_undefined(item) {
+                    if is_napi_undefined(item) || non_finite_number(item).is_some() {
                         Value::Null
                     } else {
                         ordered_json_omitting_undefined(item)
@@ -259,6 +300,9 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
 /// backs `JSON.stringify(value, [keys])`/`JSON.stringify(value, [keys],
 /// space)`, both exclusively user-facing call forms.
 fn filtered_json_omitting_undefined(value: &Value, keys: &[String]) -> Value {
+    if non_finite_number(value).is_some() {
+        return Value::Null;
+    }
     match value {
         Value::Object(fields) => Value::Object(
             keys.iter()
@@ -267,7 +311,12 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[String]) -> Value {
                     if is_napi_undefined(value) {
                         return None;
                     }
-                    Some((key.clone(), filtered_json_omitting_undefined(value, keys)))
+                    let value = if non_finite_number(value).is_some() {
+                        Value::Null
+                    } else {
+                        filtered_json_omitting_undefined(value, keys)
+                    };
+                    Some((key.clone(), value))
                 })
                 .collect(),
         ),
@@ -275,7 +324,7 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[String]) -> Value {
             items
                 .iter()
                 .map(|item| {
-                    if is_napi_undefined(item) {
+                    if is_napi_undefined(item) || non_finite_number(item).is_some() {
                         Value::Null
                     } else {
                         filtered_json_omitting_undefined(item, keys)
@@ -385,6 +434,20 @@ pub unsafe extern "C" fn thaw_json_callback_error(message: *const c_char) -> *co
         .into_raw()
 }
 
+/// `String(NaN)`/`String(Infinity)`/`String(-Infinity)`, and the same
+/// text real Node's `console.log`/template-literal coercion uses for
+/// them -- shared by `thaw_json_console_string` and `thaw_json_as_string`
+/// so a `NaN`/`Infinity` `any`-typed value reads the same in either.
+fn non_finite_display(value: f64) -> &'static str {
+    if value.is_nan() {
+        "NaN"
+    } else if value > 0.0 {
+        "Infinity"
+    } else {
+        "-Infinity"
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
@@ -395,6 +458,12 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
         // napi-undefined-marshaled one) would print its raw sentinel
         // JSON shape (`{"$__thaw_napi_undefined$":true}`) instead.
         other if is_napi_undefined(other) => "undefined".to_string(),
+        // Same story for `NaN`/`Infinity`/`-Infinity` -- without this,
+        // `console.log(0 / 0)` would print the `$__thaw_non_finite$`
+        // sentinel's raw JSON shape instead of `NaN`.
+        other if non_finite_number(other).is_some() => {
+            non_finite_display(non_finite_number(other).unwrap()).to_string()
+        }
         other => serde_json::to_string(&ordered_json(other)).unwrap_or_else(|_| "null".into()),
     };
     CString::new(text).unwrap_or_default().into_raw()
@@ -724,6 +793,12 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
         // `thaw_jit_dictionary_get`'s string-kind path, which calls this
         // function.
         other if is_napi_undefined(other) => "undefined".to_string(),
+        // Matches real JS `String(NaN)`/`String(Infinity)` -- without
+        // this, `other` below would stringify the `$__thaw_non_finite$`
+        // sentinel's own raw JSON shape instead.
+        other if non_finite_number(other).is_some() => {
+            non_finite_display(non_finite_number(other).unwrap()).to_string()
+        }
         other => other.to_string(),
     };
     CString::new(text).unwrap_or_default().into_raw() as *const c_char
