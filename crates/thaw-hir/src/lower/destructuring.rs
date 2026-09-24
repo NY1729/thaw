@@ -240,6 +240,25 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if let HirType::Array(element) = ty {
+                    // Unlike `HirType::Tuple` below (a fixed, compile-
+                    // time-known arity), a homogeneous `T[]` has no
+                    // statically-known length -- `const [a, b, c] = arr;`
+                    // destructuring more positions than `arr` actually
+                    // has at runtime previously read raw, unchecked
+                    // memory past the array's own allocation via a bare
+                    // `TypedIndex` (real, reproducible: reads garbage,
+                    // not `undefined`, and can segfault) instead of the
+                    // real spec answer, `undefined`. `lower_array_index`
+                    // (already used for an ordinary possibly-sparse
+                    // `arr[i]` read elsewhere) is the same bounds/
+                    // presence-checked read, wrapping the result in
+                    // `array_read_type(element)` (`Optional`/`Nullable`/
+                    // `Nullish`/a `T | undefined` union, whichever
+                    // already fits `element`) so a missing position
+                    // reads as real `undefined` and a `= default`
+                    // pattern (`Pat::Assign`, handled by the recursive
+                    // call below) applies correctly.
+                    let array_type = ty.clone();
                     for (index, element_pattern) in pattern.elems.iter().enumerate() {
                         let Some(element_pattern) = element_pattern else {
                             continue;
@@ -261,14 +280,17 @@ impl<'a> FnLowerer<'a> {
                             )?;
                             break;
                         }
+                        let read_type = Self::array_read_type(element);
+                        let read = self.lower_array_index(
+                            value.clone(),
+                            array_type.clone(),
+                            element.as_ref().clone(),
+                            HirExpr::Lit(HirLit::F64(index as f64)),
+                        )?;
                         self.lower_binding_pattern(
                             element_pattern,
-                            HirExpr::TypedIndex(
-                                Box::new(value.clone()),
-                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-                                element.as_ref().clone(),
-                            ),
-                            element,
+                            read,
+                            &read_type,
                             statements,
                         )?;
                     }
