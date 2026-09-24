@@ -3187,6 +3187,39 @@ fn compiles_string_match() {
 }
 
 #[test]
+fn compiles_match_and_search_with_a_regex_crossing_an_any_boundary() {
+    // A `RegExp` value stored in an `any`-typed slot is tagged with a
+    // `{"__thaw_regexp__": {...}}` sentinel when it crosses into `Json`
+    // (`coerce_to_declared`'s own `actual == regex_object_type()` arm).
+    // `.match()`/`.matchAll()`/`.search()`'s pattern argument used to
+    // reject that with a purely static "requires a RegExp argument"
+    // error even though the value genuinely is a regex at runtime -- a
+    // real pattern with an npm `.d.ts` declaring a parameter `any`.
+    let source = r#"
+        function main(): void {
+            const re: any = /(\d+)-(\d+)/;
+            const s: any = "12-34";
+            const m = s.match(re);
+            console.log(m ? m[0] : null, m ? m[1] : null);
+
+            const g: any = /(\d)-(\d)/g;
+            const all: any = "1-2 3-4";
+            for (const item of all.matchAll(g)) {
+                console.log(item[0], item[1], item[2]);
+            }
+
+            const pat: any = /foo/;
+            const target: any = "xxfooxx";
+            console.log(target.search(pat));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_argument_crossing_any_boundary"),
+        "12-34 12\n1-2 1 2\n3-4 3 4\n2\n"
+    );
+}
+
+#[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
         function printAll(parts: string[]): void {
