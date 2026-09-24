@@ -2550,6 +2550,43 @@ pub unsafe extern "C" fn thaw_json_strict_equal(
     })
 }
 
+/// `SameValueZero` between two dynamic (`Json`-typed) values -- used for
+/// `Map<any, V>`/`Set<any>` key equality (`maps.rs`'s `AnyKey`), unlike
+/// `thaw_json_strict_equal` (`===`): the one real difference is `NaN`,
+/// which `SameValueZero` treats as equal to itself (matching how
+/// `NumKey`'s own `canonical_num_key` already canonicalizes every `NaN`
+/// to one map key).
+fn json_same_value_zero(a: *const serde_json::Value, b: *const serde_json::Value) -> bool {
+    let (Some(a_val), Some(b_val)) = (unsafe { a.as_ref() }, unsafe { b.as_ref() }) else {
+        return std::ptr::eq(a, b);
+    };
+    let a_undefined = json_is_napi_undefined(a_val);
+    let b_undefined = json_is_napi_undefined(b_val);
+    if a_undefined || b_undefined {
+        return a_undefined && b_undefined;
+    }
+    let a_non_finite = json_non_finite_number(a_val);
+    let b_non_finite = json_non_finite_number(b_val);
+    if a_non_finite.is_some() || b_non_finite.is_some() {
+        return match (a_non_finite, b_non_finite) {
+            (Some(x), Some(y)) if x.is_nan() && y.is_nan() => true,
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        };
+    }
+    match (a_val, b_val) {
+        (serde_json::Value::Null, serde_json::Value::Null) => true,
+        (serde_json::Value::Bool(x), serde_json::Value::Bool(y)) => x == y,
+        (serde_json::Value::Number(x), serde_json::Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (serde_json::Value::String(x), serde_json::Value::String(y)) => x == y,
+        (serde_json::Value::Array(_), serde_json::Value::Array(_))
+        | (serde_json::Value::Object(_), serde_json::Value::Object(_)) => {
+            std::ptr::eq(a_val, b_val)
+        }
+        _ => false,
+    }
+}
+
 /// Like `object_array_search`, but for `.indexOf()`/`.includes()` on a
 /// `Json` (`any`-typed) array element -- comparing slots by real Strict
 /// Equality (`thaw_json_strict_equal`) instead of raw pointer identity,

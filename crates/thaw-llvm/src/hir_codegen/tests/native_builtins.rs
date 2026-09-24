@@ -7289,6 +7289,47 @@ fn compiles_map_any_value_accepts_literals() {
     );
 }
 
+/// `Set<any>`/`Map<any, V>` as a *key* family -- previously rejected
+/// outright ("Map/Set key has type F64, expected Json"). A `Json`-boxed
+/// primitive key now hashes/compares by value (`AnyKey`, thaw-runtime's
+/// `maps.rs`), not by its own fresh pointer, so `s.add(1); s.add(1)`
+/// dedupes and `s.has(1)` finds it, matching real `Set<any>`; an
+/// object/array key still compares by reference, matching real
+/// `SameValueZero` degenerating to `===` there (so `s.has({x: 1})` for a
+/// structurally-identical but distinct object literal stays `false`,
+/// same as a real `Set`).
+#[test]
+fn compiles_set_and_map_any_key() {
+    let source = r#"
+        function main(): void {
+            const s = new Set<any>();
+            s.add(1);
+            s.add(1);
+            s.add("two");
+            s.add(true);
+            s.add(null);
+            console.log(s.size);
+            console.log(s.has(1), s.has(2), s.has("two"));
+
+            const m = new Map<any, string>();
+            m.set(1, "one");
+            m.set("1", "str-one");
+            m.set(1, "one-again");
+            console.log(m.size);
+            console.log(m.get(1), m.get("1"));
+
+            const objKey: any = { x: 1 };
+            const s2 = new Set<any>();
+            s2.add(objKey);
+            console.log(s2.has({ x: 1 }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_and_map_any_key"),
+        "4\ntrue false true\n2\none-again str-one\nfalse\n"
+    );
+}
+
 /// `Math.sumPrecise` and the deprecated `Date.getYear`/`setYear`.
 #[test]
 fn compiles_math_sum_precise_and_date_year() {

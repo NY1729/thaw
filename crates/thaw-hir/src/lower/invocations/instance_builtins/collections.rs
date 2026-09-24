@@ -127,6 +127,13 @@ impl<'a> FnLowerer<'a> {
         match key_type {
             HirType::F64 => self.coerce_primitive_to_number(key),
             HirType::Str => self.coerce_primitive_to_string(key),
+            // `Map<any, V>`/`Set<any>` -- a literal argument
+            // (`s.add(1)`) needs the same declared-type coercion an
+            // ordinary call argument gets, same as the `F64`/`Str`
+            // cases above; safe now that `AnyKey` (thaw-runtime's
+            // `maps.rs`) hashes/compares a primitive by value, not by
+            // its own fresh pointer.
+            HirType::Json => self.coerce_to_declared(&HirType::Json, key),
             _ => {
                 self.expect_type(key_type, &key, "Map/Set key")?;
                 Ok(key)
