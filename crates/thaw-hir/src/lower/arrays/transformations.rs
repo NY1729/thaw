@@ -686,6 +686,43 @@ impl<'a> FnLowerer<'a> {
                     vec![normalized, HirExpr::Lit(HirLit::F64(1.0))],
                 ))
             }
+            // A callback returning a fixed-shape mixed-type array literal
+            // (e.g. `(v) => [v, v * 2]` where `v: any` and `v * 2:
+            // number`) infers as a `Tuple`, not a homogeneous `Array` --
+            // `HirType::Array(inner)` above never matches, so this fell
+            // through to the final `scalar` fallback (an identity
+            // `.filter(() => true)`, no flattening) even though the
+            // *runtime* value is an ordinary JS array like any other
+            // (TS tuples have no separate runtime representation). Same
+            // normalize-to-Json-then-reuse-the-runtime-flattener fix as
+            // the `Union` arm above; every tuple position is already
+            // Json-convertible (`json_convertible_native_type`,
+            // thaw-hir's `static_builtins.rs`), and `coerce_to_declared`
+            // already knows how to serialize a `Tuple` into a genuine
+            // JSON array (verified directly: `const t: [any, number] =
+            // [j, 10]; const a: any = t;` -- `JSON.stringify(a)` gives
+            // `[5,10]`, not an object).
+            HirType::Tuple(elements) => {
+                let tuple_type = HirType::Tuple(elements);
+                let parameter = format!("__thaw_flat_map_tuple_normalize_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(parameter.clone(), tuple_type.clone());
+                let coerced =
+                    self.coerce_to_declared(&HirType::Json, HirExpr::Var(parameter.clone()))?;
+                let callback = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam { name: parameter, ty: tuple_type.clone() }],
+                    HirType::Json,
+                    Box::new(coerced),
+                );
+                let normalized = self.lower_array_map(
+                    mapped, mapped_type, tuple_type.clone(), tuple_type, callback, None,
+                )?;
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
+                    vec![normalized, HirExpr::Lit(HirLit::F64(1.0))],
+                ))
+            }
             HirType::Union(members) if members.len() == 2 => {
                 let Some((array_index, inner)) = members.iter().enumerate().find_map(|(index, member)| {
                     let HirType::Array(inner) = member else { return None };
