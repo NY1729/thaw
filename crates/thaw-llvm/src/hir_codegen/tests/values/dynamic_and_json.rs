@@ -1018,6 +1018,32 @@ fn compiles_dynamic_non_finite_number_identity() {
     );
 }
 
+/// `Object.keys`/`Object.values`/`Object.entries` (and `Reflect.
+/// ownKeys`/the typed-`Dictionary` variants) on a `Json` value were
+/// never registered in `expr_hir_type` (thaw-llvm's own mirror of
+/// thaw-hir's `infer_expr_type`, which *does* have them) -- harmless
+/// when the result is bound to a `let`/`const` first, but
+/// `console.log(Object.keys(x))` used directly inline hit `expr_hir_
+/// type` returning `None` for that argument, and `compile_console_arg`'s
+/// `None` fallback treated the resulting array handle as an *error*
+/// value to report via `thaw_error_message` instead of formatting it as
+/// an array -- observed printing garbage/replacement-character bytes.
+#[test]
+fn compiles_dynamic_object_introspection_used_inline_in_console_log() {
+    let source = r#"
+        function main(): void {
+            const obj: any = { a: 1, b: 2 };
+            console.log(Object.keys(obj));
+            console.log(Object.values(obj));
+            console.log(Object.entries(obj));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_introspection_inline_console_log"),
+        "[\"a\",\"b\"]\n[1,2]\n[[\"a\",1],[\"b\",2]]\n"
+    );
+}
+
 /// `.includes()`/`.indexOf()`/`.lastIndexOf()` on an `any[]` (`Json`
 /// element) array used to either silently return `false`/`-1` (when the
 /// needle's own natural type, e.g. `number`, differed from the array's

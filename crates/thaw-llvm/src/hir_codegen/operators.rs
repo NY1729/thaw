@@ -211,6 +211,60 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_index_get_mut"
                         | "__thaw_json_get_prototype"
                         | "__thaw_json_set_prototype" => return Some(HirType::Json),
+                        // `Object.keys`/`Object.getOwnPropertyNames`/
+                        // `Reflect.ownKeys` on a `Json`/`Dictionary`/
+                        // array receiver, and the array-receiver variant
+                        // of the same (thaw-hir's own `infer_expr_type`,
+                        // `lower/inference/types.rs`, already has these
+                        // -- this mirror was simply never extended to
+                        // match). Missing here meant `expr_hir_type`
+                        // returned `None` for e.g. `console.log(Object.
+                        // keys(x))` used inline (not through a `let`
+                        // first), and `compile_console_arg`'s `None`
+                        // fallback treated the resulting array handle as
+                        // an *error* value to report via
+                        // `thaw_error_message`, not a value to format --
+                        // observed printing garbage/replacement-character
+                        // bytes instead of the array's own text.
+                        "__thaw_json_keys" | "__thaw_json_own_keys" | "__thaw_array_keys" => {
+                            return Some(HirType::Array(Box::new(HirType::Str)))
+                        }
+                        "__thaw_json_values" => {
+                            return Some(HirType::Array(Box::new(HirType::Json)))
+                        }
+                        "__thaw_json_number_values" => {
+                            return Some(HirType::Array(Box::new(HirType::F64)))
+                        }
+                        "__thaw_json_string_values" => {
+                            return Some(HirType::Array(Box::new(HirType::Str)))
+                        }
+                        "__thaw_json_bool_values" => {
+                            return Some(HirType::Array(Box::new(HirType::Bool)))
+                        }
+                        "__thaw_json_entries" => {
+                            return Some(HirType::Array(Box::new(HirType::Tuple(vec![
+                                HirType::Str,
+                                HirType::Json,
+                            ]))))
+                        }
+                        "__thaw_json_number_entries" => {
+                            return Some(HirType::Array(Box::new(HirType::Tuple(vec![
+                                HirType::Str,
+                                HirType::F64,
+                            ]))))
+                        }
+                        "__thaw_json_string_entries" => {
+                            return Some(HirType::Array(Box::new(HirType::Tuple(vec![
+                                HirType::Str,
+                                HirType::Str,
+                            ]))))
+                        }
+                        "__thaw_json_bool_entries" => {
+                            return Some(HirType::Array(Box::new(HirType::Tuple(vec![
+                                HirType::Str,
+                                HirType::Bool,
+                            ]))))
+                        }
                         "JSON.stringify"
                         | "__thaw_json_stringify_number_space"
                         | "__thaw_json_stringify_string_space"
