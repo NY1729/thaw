@@ -1860,6 +1860,27 @@ impl<'a> FnLowerer<'a> {
                             if expected != &actual && expected != &HirType::Optional(Box::new(actual.clone()))
                                 && &actual != &HirType::Optional(Box::new(expected.clone())) {
                                 if matches!(expected, HirType::Union(members) if members.contains(&actual))
+                                    // A plain element following a `...spread`
+                                    // of an `any[]` array -- `[...anyArr, 3]`
+                                    // -- needs the same declared-type coercion
+                                    // an ordinary array-literal element
+                                    // already gets, not a strict type match;
+                                    // `expected` is only ever `Json` here
+                                    // because the spread source's element
+                                    // type was `Json`, so any `actual` type
+                                    // is coercible. Only covers this order
+                                    // (`expected` already `Json` by the time
+                                    // a differently-typed plain element is
+                                    // seen) -- the reverse (`[0, ...anyArr]`,
+                                    // a concrete-typed literal establishing
+                                    // `expected` *before* the `any[]` spread)
+                                    // still hits the sibling "array spread
+                                    // element type ... does not match" error
+                                    // above, since retroactively widening
+                                    // already-compiled earlier elements would
+                                    // need a real two-pass rewrite of this
+                                    // function.
+                                    || expected == &HirType::Json
                                 {
                                     value = self.coerce_to_declared(expected, value)?;
                                 } else {

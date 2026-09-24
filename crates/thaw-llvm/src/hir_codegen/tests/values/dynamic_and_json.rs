@@ -1046,6 +1046,27 @@ fn compiles_dynamic_default_array_sort() {
     );
 }
 
+/// A plain literal following a `...spread` of an `any[]` array in an
+/// array literal (`[...anyArr, "x", true, 0]`) used to hit a hard
+/// compile error ("array element type F64 does not match Json") -- once
+/// the spread source fixed the literal's own inferred element type to
+/// `Json`, each subsequent plain element only got a strict type check
+/// against it, not the same declared-type coercion an ordinary element
+/// already gets.
+#[test]
+fn compiles_array_literal_spreads_any_then_mixed_literals() {
+    let source = r#"
+        function main(): void {
+            const arrSpread: any[] = [1, 2];
+            console.log(JSON.stringify([...arrSpread, "x", true, 0]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_literal_spreads_any_then_mixed_literals"),
+        "[1,2,\"x\",true,0]\n"
+    );
+}
+
 /// A `Union`-typed value (e.g. a ternary/`if`-`else` naturally inferring a
 /// union of its branch types) assigned to an `any`-typed slot used to hit
 /// a hard compile error ("value has type Union([...]), expected Json") --
