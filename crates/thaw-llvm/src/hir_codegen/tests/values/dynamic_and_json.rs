@@ -1046,6 +1046,34 @@ fn compiles_dynamic_default_array_sort() {
     );
 }
 
+/// A `Union`-typed value (e.g. a ternary/`if`-`else` naturally inferring a
+/// union of its branch types) assigned to an `any`-typed slot used to hit
+/// a hard compile error ("value has type Union([...]), expected Json") --
+/// `json_convertible_native_type`'s own list of native types the generic
+/// `Json` coercion knows how to encode was missing `Union`, even though
+/// the actual encoder it gates (`compile_json_object_set_union`,
+/// thaw-llvm) already recursively re-dispatches to whichever member is
+/// actually tagged active, so no new codegen was needed, just the gate.
+#[test]
+fn compiles_union_value_coerced_to_dynamic() {
+    let source = r#"
+        function returnsEither(flag: boolean): any {
+            return flag ? 1 : "x";
+        }
+        function main(): void {
+            const cond: any = true ? 1 : "str";
+            console.log(cond);
+            console.log(returnsEither(true), returnsEither(false));
+            const tuple: [any, any] = [1, "x"];
+            console.log(tuple[0], tuple[1]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_value_coerced_to_dynamic"),
+        "1\n1 x\n1 x\n"
+    );
+}
+
 #[test]
 fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
     let source = r#"

@@ -2,8 +2,13 @@
 /// (thaw-llvm's `json_bridge.rs`, reached below through `HirExpr::JsonSet`)
 /// already knows how to encode as an object field, and so can also encode
 /// as a `JSON.stringify` argument via `wrap_native_value_as_json`. Anything
-/// else (`Function`, `Promise`, `Map`/`Set`, `Union`, ...) has no such
-/// encoding and is rejected exactly as before.
+/// else (`Function`, `Promise`, `Map`/`Set`, ...) has no such encoding and
+/// is rejected exactly as before. `Union` *is* one of these (`compile_
+/// json_object_set_union` recursively dispatches back into this same
+/// per-member encoder for whichever member is actually tagged active) --
+/// real trigger: `const x: any = cond ? 1 : "str";`, a ternary/ if-else
+/// naturally inferring a union of its branch types, assigned to an
+/// `any`-typed slot.
 fn json_convertible_native_type(ty: &HirType) -> bool {
     matches!(
         ty,
@@ -20,6 +25,7 @@ fn json_convertible_native_type(ty: &HirType) -> bool {
             | HirType::Optional(_)
             | HirType::Nullable(_)
             | HirType::Nullish(_)
+            | HirType::Union(_)
     )
 }
 
