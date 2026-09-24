@@ -914,6 +914,78 @@ fn json_stringify_calls_function_replacers() {
     );
 }
 
+/// `===` between two dynamic (`Json`-typed) values used to always compare
+/// unequal for a primitive (`const a: any = 1; const b: any = 1; a === b`
+/// was `false`): both are separate heap allocations, and the native
+/// `===` codegen otherwise falls back to a raw pointer compare for any
+/// non-string pointer-shaped operand. Real Strict Equality Comparison
+/// compares a number/string/boolean by value; an array/object still
+/// compares by reference (`{} === {}` stays `false`).
+///
+/// Doesn't cover `NaN` assigned through `any`: `number_value` (thaw-std)
+/// falls back to `Value::Null` for any non-finite `f64` (`serde_json::
+/// Number` structurally can't hold one), so a `Json`-typed `NaN` is
+/// already indistinguishable from real `null` well before this equality
+/// fix -- confirmed pre-existing and separate (`typeof` on it already
+/// said `"object"`, `=== null` was already `true`). Left as a documented,
+/// separate, un-fixed gap; asserting today's `NaN === NaN` behavior here
+/// would enshrine that existing bug as if it were this fix's contract.
+#[test]
+fn compiles_dynamic_value_strict_equality() {
+    let source = r#"
+        function main(): void {
+            const a: any = 1;
+            const b: any = 1;
+            console.log(a === b);
+            const c: any = "x";
+            const d: any = "x";
+            console.log(c === d);
+            const e: any = true;
+            const f: any = true;
+            console.log(e === f);
+            const h: any = {};
+            const i: any = {};
+            console.log(h === i);
+            console.log(h === h);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_value_strict_equality"),
+        "true\ntrue\ntrue\nfalse\ntrue\n"
+    );
+}
+
+/// `.includes()`/`.indexOf()`/`.lastIndexOf()` on an `any[]` (`Json`
+/// element) array used to either silently return `false`/`-1` (when the
+/// needle's own natural type, e.g. `number`, differed from the array's
+/// declared `any` element type) or hit a hard compile error ("array
+/// search does not support element type Json", when the needle was
+/// already `any`-typed) -- the element-type dispatch this shares with
+/// `number[]`/`string[]`/etc. had no `Json` case at all. Comparison is
+/// real Strict Equality (`thaw_json_strict_equal`, same as `===` above),
+/// not pointer identity, since a `Json` slot can hold a primitive.
+#[test]
+fn compiles_dynamic_array_search_methods() {
+    let source = r#"
+        function main(): void {
+            const a: any[] = [1, "two", true, 1, null];
+            console.log(a.includes(1));
+            console.log(a.includes(2));
+            console.log(a.indexOf(1));
+            console.log(a.lastIndexOf(1));
+            console.log(a.indexOf("two"));
+            console.log(a.includes(null));
+            console.log(a.includes(undefined));
+            const needle: any = 1;
+            console.log(a.includes(needle));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_array_search_methods"),
+        "true\nfalse\n0\n3\n1\ntrue\nfalse\ntrue\n"
+    );
+}
+
 #[test]
 fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
     let source = r#"

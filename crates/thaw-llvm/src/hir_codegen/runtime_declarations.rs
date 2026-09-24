@@ -152,6 +152,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_function("strcmp", strcmp_type, Some(Linkage::External));
         self.module
             .add_function("thaw_string_compare", strcmp_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_json_strict_equal",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         let memcpy_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false);
         self.module
             .add_function("memcpy", memcpy_type, Some(Linkage::External));
@@ -808,6 +813,8 @@ impl<'ctx> HirCompiler<'ctx> {
             ("thaw_bool_array_includes", i8_type.into(), i8_type.into()),
             ("thaw_object_array_index_of", i8_ptr.into(), f64_type.into()),
             ("thaw_object_array_includes", i8_ptr.into(), i8_type.into()),
+            ("thaw_any_array_index_of", i8_ptr.into(), f64_type.into()),
+            ("thaw_any_array_includes", i8_ptr.into(), i8_type.into()),
             (
                 "thaw_number_array_last_index_of",
                 f64_type.into(),
@@ -825,6 +832,11 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             (
                 "thaw_object_array_last_index_of",
+                i8_ptr.into(),
+                f64_type.into(),
+            ),
+            (
+                "thaw_any_array_last_index_of",
                 i8_ptr.into(),
                 f64_type.into(),
             ),

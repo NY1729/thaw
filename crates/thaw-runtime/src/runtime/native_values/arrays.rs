@@ -2477,3 +2477,163 @@ pub unsafe extern "C" fn thaw_object_array_last_index_of(
     }
     -1.0
 }
+
+fn json_is_napi_undefined(value: &serde_json::Value) -> bool {
+    matches!(
+        value,
+        serde_json::Value::Object(object)
+            if object.get("$__thaw_napi_undefined$") == Some(&serde_json::Value::Bool(true))
+    )
+}
+
+fn json_non_finite_number(value: &serde_json::Value) -> Option<f64> {
+    let serde_json::Value::Object(object) = value else {
+        return None;
+    };
+    match object.get("$__thaw_non_finite$")?.as_str()? {
+        "NaN" => Some(f64::NAN),
+        "Infinity" => Some(f64::INFINITY),
+        "-Infinity" => Some(f64::NEG_INFINITY),
+        _ => None,
+    }
+}
+
+/// `===` between two dynamic (`Json`-typed) values -- real ECMAScript
+/// Strict Equality Comparison: `undefined`/`null` compare by their own
+/// kind, a number/string/boolean by value (a real `NaN` is unequal to
+/// itself, matching spec, since it's excluded before the `Number` arm
+/// below), and an array/object by reference -- *not* by structurally
+/// comparing their fields, so two separately-allocated `Json` values
+/// that happen to hold identical array/object content stay unequal,
+/// matching real `{} === {}` being `false`. Without this, two `any`-
+/// typed variables holding the same primitive (`const a: any = 1; const
+/// b: any = 1; a === b`) always compared unequal, since both are
+/// separate heap allocations and the native `===` codegen otherwise
+/// falls back to comparing their pointers for any non-string pointer-
+/// shaped operand. Lives in `thaw-runtime` (not alongside the rest of
+/// the `Json` value helpers in `thaw-std`) because this crate's own
+/// `.indexOf()`/`.includes()` support for a `Json`-element array
+/// (below) needs it too, and `thaw-std` depends on `thaw-runtime`, not
+/// the other way around -- `thaw-runtime`'s own archive is what's
+/// always linked, `thaw-std`'s only when a program actually needs it.
+///
+/// # Safety
+/// `a` and `b` must each be null or point to a valid JSON `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_strict_equal(
+    a: *const serde_json::Value,
+    b: *const serde_json::Value,
+) -> u8 {
+    let (Some(a_val), Some(b_val)) = (unsafe { a.as_ref() }, unsafe { b.as_ref() }) else {
+        return u8::from(std::ptr::eq(a, b));
+    };
+    let a_undefined = json_is_napi_undefined(a_val);
+    let b_undefined = json_is_napi_undefined(b_val);
+    if a_undefined || b_undefined {
+        return u8::from(a_undefined && b_undefined);
+    }
+    let a_non_finite = json_non_finite_number(a_val);
+    let b_non_finite = json_non_finite_number(b_val);
+    if a_non_finite.is_some() || b_non_finite.is_some() {
+        return u8::from(a_non_finite.is_some() && a_non_finite == b_non_finite);
+    }
+    u8::from(match (a_val, b_val) {
+        (serde_json::Value::Null, serde_json::Value::Null) => true,
+        (serde_json::Value::Bool(x), serde_json::Value::Bool(y)) => x == y,
+        (serde_json::Value::Number(x), serde_json::Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (serde_json::Value::String(x), serde_json::Value::String(y)) => x == y,
+        (serde_json::Value::Array(_), serde_json::Value::Array(_))
+        | (serde_json::Value::Object(_), serde_json::Value::Object(_)) => {
+            std::ptr::eq(a_val, b_val)
+        }
+        _ => false,
+    })
+}
+
+/// Like `object_array_search`, but for `.indexOf()`/`.includes()` on a
+/// `Json` (`any`-typed) array element -- comparing slots by real Strict
+/// Equality (`thaw_json_strict_equal`) instead of raw pointer identity,
+/// since a `Json` slot can hold a primitive value (two separately-boxed
+/// occurrences of the same number/string/boolean must compare equal),
+/// unlike a genuine fixed-layout object slot.
+unsafe fn any_array_search(
+    array: *const u8,
+    presence: *const u8,
+    needle: *const u8,
+    from_index: f64,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    for index in array_search_start(length, from_index)..length {
+        if !unsafe { array_index_present(presence, index) } {
+            continue;
+        }
+        let slot = unsafe {
+            array
+                .add(8 + index * 8)
+                .cast::<*const u8>()
+                .read_unaligned()
+        };
+        if unsafe { thaw_json_strict_equal(slot.cast(), needle.cast()) } != 0 {
+            return index as f64;
+        }
+    }
+    -1.0
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing `Json` pointer slots.
+pub unsafe extern "C" fn thaw_any_array_index_of(
+    array: *const u8,
+    presence: *const u8,
+    needle: *const u8,
+    from_index: f64,
+) -> f64 {
+    unsafe { any_array_search(array, presence, needle, from_index) }
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing `Json` pointer slots.
+pub unsafe extern "C" fn thaw_any_array_includes(
+    array: *const u8,
+    presence: *const u8,
+    needle: *const u8,
+    from_index: f64,
+) -> u8 {
+    (unsafe { any_array_search(array, presence, needle, from_index) } >= 0.0).into()
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing `Json` pointer slots.
+pub unsafe extern "C" fn thaw_any_array_last_index_of(
+    array: *const u8,
+    presence: *const u8,
+    needle: *const u8,
+    from_index: f64,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    let Some(start) = array_search_end(length, from_index) else {
+        return -1.0;
+    };
+    for index in (0..=start).rev() {
+        if !unsafe { array_index_present(presence, index) } {
+            continue;
+        }
+        let slot = unsafe {
+            array
+                .add(8 + index * 8)
+                .cast::<*const u8>()
+                .read_unaligned()
+        };
+        if unsafe { thaw_json_strict_equal(slot.cast(), needle.cast()) } != 0 {
+            return index as f64;
+        }
+    }
+    -1.0
+}

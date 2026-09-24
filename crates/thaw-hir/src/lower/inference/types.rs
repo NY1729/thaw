@@ -872,14 +872,17 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_string_array_index_of"
                     | "__thaw_bool_array_index_of"
                     | "__thaw_object_array_index_of"
+                    | "__thaw_any_array_index_of"
                     | "__thaw_number_array_last_index_of"
                     | "__thaw_string_array_last_index_of"
                     | "__thaw_bool_array_last_index_of"
                     | "__thaw_object_array_last_index_of"
+                    | "__thaw_any_array_last_index_of"
                     | "__thaw_number_array_includes"
                     | "__thaw_string_array_includes"
                     | "__thaw_bool_array_includes"
-                    | "__thaw_object_array_includes" => {
+                    | "__thaw_object_array_includes"
+                    | "__thaw_any_array_includes" => {
                         if args.len() != 3 {
                             return Err("array search expects three operands".into());
                         }
