@@ -166,7 +166,7 @@ impl<'a> FnLowerer<'a> {
         element_type: HirType,
         copy: bool,
     ) -> Result<HirExpr, String> {
-        if matches!(element_type, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Undefined | HirType::Null | HirType::Union(_)) {
+        if matches!(element_type, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Undefined | HirType::Null | HirType::Union(_) | HirType::Json) {
             return self.lower_array_sort_default_tagged(receiver, array_type, element_type, copy);
         }
         let prefix = match element_type {
