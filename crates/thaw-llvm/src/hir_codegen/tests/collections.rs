@@ -1572,3 +1572,25 @@ fn iterator_from_forwards_structured_generator_values() {
         "7\ntrue\ntrue\nmissing\ntrue\ntext\ntrue\n"
     );
 }
+
+#[test]
+fn stringifies_a_map_or_set_crossing_an_any_boundary_as_an_empty_object() {
+    // Sibling of the RegExp case (`native_builtins.rs`'s `compiles_
+    // regex_property_access_and_stringify_crossing_an_any_boundary`): a
+    // `Map`/`Set` value stored in `any` is tagged with a
+    // `__thaw_map_entries__`/`__thaw_set_values__` sentinel that used to
+    // leak straight through `JSON.stringify` instead of matching real
+    // JS's `{}` (neither type has its own enumerable properties).
+    let source = r#"
+        function main(): void {
+            const m: any = new Map<string, number>([["a", 1]]);
+            console.log(JSON.stringify(m));
+            const s: any = new Set<number>([1, 2]);
+            console.log(JSON.stringify(s));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_and_set_stringify_crossing_any_boundary"),
+        "{}\n{}\n"
+    );
+}

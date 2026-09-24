@@ -265,6 +265,9 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
         return Value::Null;
     }
     match value {
+        Value::Object(fields) if is_thaw_internal_wrapper(fields) => {
+            Value::Object(serde_json::Map::new())
+        }
         Value::Object(fields) => Value::Object(
             ordered_object_fields(fields)
                 .into_iter()
@@ -304,6 +307,9 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[String]) -> Value {
         return Value::Null;
     }
     match value {
+        Value::Object(fields) if is_thaw_internal_wrapper(fields) => {
+            Value::Object(serde_json::Map::new())
+        }
         Value::Object(fields) => Value::Object(
             keys.iter()
                 .filter_map(|key| {
@@ -464,7 +470,27 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
         other if non_finite_number(other).is_some() => {
             non_finite_display(non_finite_number(other).unwrap()).to_string()
         }
-        other => serde_json::to_string(&ordered_json(other)).unwrap_or_else(|_| "null".into()),
+        // A `RegExp` stored in `any` -- without this, `console.log(re)`
+        // would print the raw `{"__thaw_regexp__":{...}}` wrapper
+        // instead of real Node's `/source/flags` rendering. `Map`/`Set`
+        // wrapped the same way still fall through to the generic branch
+        // below -- matching their *own* `Map(n) { ... }`/`Set(n) { ... }`
+        // `util.inspect` rendering exactly would need real inspect-style
+        // formatting this compiler's `console.log` doesn't have for any
+        // object (a plain `any`-typed object already prints JSON-style,
+        // `{"a":1}`, not Node's `{ a: 1 }` -- a separate, pre-existing,
+        // much larger gap), so it's left as the same accepted limitation.
+        other if regexp_wrapper_property(other, "source").is_some() => format!(
+            "/{}/{}",
+            regexp_wrapper_property(other, "source")
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            regexp_wrapper_property(other, "flags")
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        ),
+        other => serde_json::to_string(&ordered_json_omitting_undefined(other))
+            .unwrap_or_else(|_| "null".into()),
     };
     CString::new(text).unwrap_or_default().into_raw()
 }
@@ -570,6 +596,9 @@ pub extern "C" fn thaw_json_stringify_keys_string_space(
 pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut Value {
     let value = unsafe { &*value };
     let key = to_str(key);
+    if let Some(result) = regexp_wrapper_property(value, &key) {
+        return leak(result);
+    }
     // `.length` on a JSON array (or a Buffer-shaped object, `{"type":
     // "Buffer","data":[...]}` -- see `json_array_or_buffer_data`'s own
     // doc comment for why a real Buffer crossing into a native callback
@@ -848,6 +877,23 @@ fn is_napi_undefined(value: &Value) -> bool {
         Value::Object(object)
             if object.get("$__thaw_napi_undefined$") == Some(&Value::Bool(true))
     )
+}
+
+/// True for the write-only sentinel wrapper `coerce_to_declared`'s
+/// `Json`-target branch produces for a `RegExp`/`Map`/`Set` value
+/// crossing into `any` (`inference/coercions.rs`): `{"__thaw_regexp__":
+/// {...}}` / `{"__thaw_map_entries__": [...]}` / `{"__thaw_set_values__":
+/// [...]}`, always the object's one and only field. Real JS gives `{}`
+/// for `JSON.stringify(/re/)` / `JSON.stringify(new Map())` /
+/// `JSON.stringify(new Set())` (none of the three have their own
+/// enumerable properties), so the wrapper should stringify the same way
+/// instead of leaking its internal representation.
+fn is_thaw_internal_wrapper(fields: &serde_json::Map<String, Value>) -> bool {
+    fields.len() == 1
+        && matches!(
+            fields.keys().next().map(String::as_str),
+            Some("__thaw_regexp__" | "__thaw_map_entries__" | "__thaw_set_values__")
+        )
 }
 
 /// `NaN`/`Infinity`/`-Infinity` have no JSON representation at all --
@@ -1732,6 +1778,40 @@ pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
 /// JSON object as "not an array" and fall back to their own empty/
 /// key-lookup defaults) -- no error, just missing data (found via a real
 /// `req.pipe(nativeCallbackDestination)`, busboy's own `defaultStreamHandler`).
+/// `.source`/`.flags`/`.lastIndex`/`.global`/etc. read directly on a
+/// `RegExp` value stored in an `any`-typed slot -- the wrapper
+/// `is_thaw_internal_wrapper` recognizes for `JSON.stringify` also
+/// makes every other read of the value opaque, since nothing else in
+/// the codebase unwraps `__thaw_regexp__` outside the one place that
+/// crosses back into real QuickJS (`__thaw_json_date_reviver`,
+/// `platform_globals/dates.js`) -- direct native-compiled property
+/// access on an `any`-typed regex never reaches QuickJS at all, so it
+/// previously read straight off the wrapper object and got `undefined`
+/// for every real regex property. `global`/`ignoreCase`/etc. aren't
+/// stored fields on the inner `{source, flags, lastIndex}` object --
+/// each is "does `flags` contain this one character", mirroring the
+/// identical match table for the statically-typed case
+/// (`lower_member_read`, `thaw-hir/src/lower/objects.rs`).
+fn regexp_wrapper_property(value: &Value, key: &str) -> Option<Value> {
+    let inner = value.as_object()?.get("__thaw_regexp__")?.as_object()?;
+    if matches!(key, "source" | "flags" | "lastIndex") {
+        return Some(inner.get(key).cloned().unwrap_or(Value::Null));
+    }
+    let flag_char = match key {
+        "global" => "g",
+        "ignoreCase" => "i",
+        "multiline" => "m",
+        "dotAll" => "s",
+        "sticky" => "y",
+        "unicode" => "u",
+        "unicodeSets" => "v",
+        "hasIndices" => "d",
+        _ => return None,
+    };
+    let flags = inner.get("flags").and_then(Value::as_str).unwrap_or("");
+    Some(Value::Bool(flags.contains(flag_char)))
+}
+
 fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {
     if let Some(array) = value.as_array() {
         return Some(array);
