@@ -1384,6 +1384,7 @@ impl<'a> FnLowerer<'a> {
                     if !matches!(element.as_ref(), HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined)
                         && !matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined))
                     {
+                    let is_json_element = *element == HirType::Json;
                     let array_expr = array.as_ref().clone();
                     let index_expr = index.as_ref().clone();
                     let array_name = format!("__thaw_index_array_{}", self.next_binding);
@@ -1426,7 +1427,7 @@ impl<'a> FnLowerer<'a> {
                             BinOp::EqEqEq,
                             Box::new(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_array_index_state".into())),
-                                vec![array, index],
+                                vec![array.clone(), index.clone()],
                             )),
                             Box::new(HirExpr::Lit(HirLit::F64(1.0))),
                         ),
@@ -1437,6 +1438,32 @@ impl<'a> FnLowerer<'a> {
                         Box::new(present),
                         Box::new(HirExpr::Lit(HirLit::Bool(false))),
                     );
+                    // A present (state `1`, not the `2` a literal/
+                    // `OptionalNone(Json)` write marks) slot can still
+                    // *hold* the real `Json` "undefined" sentinel
+                    // (`thaw_json_undefined`) -- e.g. `.map()`'s generic
+                    // `IndexAssign` write path (`lower_array_map`'s
+                    // "callback type already matches element type" fast
+                    // path) marks state `1` unconditionally, with no
+                    // concept of "the value I'm storing happens to be
+                    // undefined". The presence-state check above can't
+                    // see that; also check the loaded value itself for a
+                    // `Json` element, so `mapped[i] === undefined` agrees
+                    // with `typeof mapped[i] === "undefined"` regardless
+                    // of which write path produced the slot.
+                    let missing = if is_json_element {
+                        let value_is_undefined = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                            vec![HirExpr::TypedIndex(
+                                Box::new(array),
+                                Box::new(index),
+                                HirType::Json,
+                            )],
+                        );
+                        self.lower_logical_expr(missing, value_is_undefined, false)?
+                    } else {
+                        missing
+                    };
                     return self
                         .wrap_call_argument_bindings(
                             missing,
