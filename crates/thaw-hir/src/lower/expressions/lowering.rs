@@ -643,26 +643,54 @@ impl<'a> FnLowerer<'a> {
                     //   globally, `platform_globals/dates.js`) --
                     //   `__thaw_json_is_date_shape` recognizes it
                     //   directly, no live handle needed.
-                    if class.sym == *"Date" {
+                    // Generalized over all six names `native_builtin_
+                    // instanceof_dynamic_global` recognizes -- originally
+                    // Date-only (the comment above was written for that
+                    // narrower version), now shared by `RegExp`/`Map`/
+                    // `Set`/`WeakMap`/`WeakSet` too, which need the exact
+                    // same "peek before lowering, dispatch a `JsValue`
+                    // into QuickJS or a `Json` value's sentinel/shape
+                    // check natively" treatment.
+                    if let Some(dynamic_global) =
+                        native_builtin_instanceof_dynamic_global(class.sym.as_ref())
+                    {
                         match self.peek_type_without_lowering(&bin.left) {
                             Some(HirType::JsValue) => {
                                 let value = self.lower_expr_with_expected_type(
                                     &bin.left,
                                     Some(&HirType::JsValue),
                                 )?;
-                                return Ok(self.dynamic_value_check(
-                                    "__thaw_instanceof_date_dynamic_value",
-                                    value,
-                                ));
+                                return Ok(self.dynamic_value_check(dynamic_global, value));
                             }
+                            // `bin.left` is only ever lowered *inside* a
+                            // branch that immediately returns -- `WeakMap`/
+                            // `WeakSet` (no `Json` representation to check
+                            // at all) fall all the way through to the
+                            // ordinary path below instead, which lowers
+                            // `bin.left` itself exactly once; lowering it
+                            // here unconditionally and *then* falling
+                            // through would lower it a second time there.
                             Some(HirType::Json) => {
-                                let value = self.lower_expr(&bin.left)?;
-                                return Ok(HirExpr::Call(
-                                    Box::new(HirExpr::Var(
-                                        "__thaw_json_is_date_shape".to_string(),
-                                    )),
-                                    vec![value],
-                                ));
+                                if class.sym == *"Date" {
+                                    let value = self.lower_expr(&bin.left)?;
+                                    return Ok(HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_json_is_date_shape".to_string(),
+                                        )),
+                                        vec![value],
+                                    ));
+                                }
+                                if let Some(key) =
+                                    native_builtin_instanceof_json_sentinel(class.sym.as_ref())
+                                {
+                                    let value = self.lower_expr(&bin.left)?;
+                                    return Ok(HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_json_has_wrapper_key".to_string(),
+                                        )),
+                                        vec![value, HirExpr::Lit(HirLit::Str(key.to_string()))],
+                                    ));
+                                }
                             }
                             _ => {}
                         }
@@ -741,26 +769,42 @@ impl<'a> FnLowerer<'a> {
                             &[(name, value_type, value)],
                         );
                     }
-                    // Fallback for the same `Date`-against-a-dynamic-value
-                    // case the early `peek_type_without_lowering` check
-                    // above already handles for the common case (a
-                    // property-access chain) -- this catches a `JsValue`
-                    // receiver that peek couldn't determine without
-                    // lowering (e.g. itself a call expression), now that
-                    // `value` has already been lowered normally above. A
-                    // `Json`-typed `value` here can't be retroactively
-                    // coerced into a real handle (a JSON snapshot has
-                    // already lost whatever live identity it had), so
-                    // only `JsValue` is handled -- a `Json` value peek
-                    // couldn't catch falls through to the same "not a
-                    // known class" error as before, same as any other
-                    // unrecognized class.
-                    if class.sym == *"Date" && value_type == HirType::JsValue {
-                        return Ok(
-                            self.dynamic_value_check("__thaw_instanceof_date_dynamic_value", value)
-                        );
+                    // Fallback for the same dynamic-value case the early
+                    // `peek_type_without_lowering` check above already
+                    // handles for the common case (a property-access
+                    // chain) -- this catches a `JsValue` receiver that
+                    // peek couldn't determine without lowering (e.g.
+                    // itself a call expression), now that `value` has
+                    // already been lowered normally above. A `Json`-typed
+                    // `value` here can't be retroactively coerced into a
+                    // real handle (a JSON snapshot has already lost
+                    // whatever live identity it had), so only `JsValue`
+                    // is handled -- a `Json` value peek couldn't catch
+                    // falls through to the static-match check below, same
+                    // as any other unrecognized class.
+                    if let Some(dynamic_global) =
+                        native_builtin_instanceof_dynamic_global(class.sym.as_ref())
+                    {
+                        if value_type == HirType::JsValue {
+                            return Ok(self.dynamic_value_check(dynamic_global, value));
+                        }
                     }
+                    // `Date`/`RegExp`/`Map`/`Set`/`WeakMap`/`WeakSet`
+                    // aren't registered in `self.signatures` (see
+                    // `native_builtin_instanceof_static_match`'s own doc
+                    // comment) -- recognized here as an alternative
+                    // "known class" source, bypassing the gate below, so
+                    // e.g. `re instanceof RegExp` for an ordinary,
+                    // statically-typed `RegExp` doesn't hit "not a known
+                    // class" the way it did for every one of these six
+                    // names before this fix (confirmed via a direct
+                    // probe -- this affected the plain static case, not
+                    // just the `any`/`JsValue` ones the checks above
+                    // handle).
+                    let native_builtin_match =
+                        native_builtin_instanceof_static_match(class.sym.as_ref(), &value_type);
                     if !extends_error_family
+                        && native_builtin_match.is_none()
                         && !self
                             .signatures
                             .contains_key(&class_constructor_symbol(class.sym.as_ref()))
@@ -770,7 +814,8 @@ impl<'a> FnLowerer<'a> {
                             class.sym
                         ));
                     }
-                    let result = class_type_has_identity(&value_type, class.sym.as_ref());
+                    let result = native_builtin_match
+                        .unwrap_or_else(|| class_type_has_identity(&value_type, class.sym.as_ref()));
                     let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(name.clone(), value_type.clone());
@@ -2931,4 +2976,74 @@ impl<'a> FnLowerer<'a> {
         self.expected_arrow_return_hint = None;
         result
     }
+}
+
+/// `Date`/`RegExp`/`Map`/`Set`/`WeakMap`/`WeakSet` are all native,
+/// non-generic-class shapes -- none has an entry in `self.signatures`
+/// (each has its own bespoke method-dispatch file, not a real
+/// `self.interfaces`/constructor-signature registration the way a real
+/// user or npm-declared class does), so `class_type_has_identity`'s
+/// `__thaw_class_identity_`-marker-field check can never match any of
+/// them: `RegExp`'s native shape is `{source, flags, lastIndex}` (no
+/// marker field at all), and `Map`/`Set`/`WeakMap`/`WeakSet` aren't even
+/// `HirType::Object` to begin with. Before this, `instanceof` against
+/// any of these six names always hit the "not a known class" error --
+/// confirmed via a direct probe that this affected even a plainly,
+/// statically-typed `RegExp`/`Map` value, not just the dynamic-value
+/// case `Date`'s own pre-existing special handling (elsewhere in this
+/// file) already covered.
+///
+/// `None` for a name that isn't one of these six (the caller falls back
+/// to the ordinary `self.signatures`/`class_type_has_identity` path).
+/// `Some(bool)` is a compile-time-constant answer -- `ty` already fully
+/// determines it, since none of the six is ever ambiguous at its own
+/// native, non-`Json`/`JsValue` type.
+fn native_builtin_instanceof_static_match(class: &str, ty: &HirType) -> Option<bool> {
+    Some(match class {
+        "Date" => *ty == date_object_type(),
+        "RegExp" => *ty == regex_object_type(),
+        "Map" => matches!(ty, HirType::Map(_, _)),
+        "Set" => matches!(ty, HirType::Set(_)),
+        "WeakMap" => matches!(ty, HirType::WeakMap(_, _)),
+        "WeakSet" => matches!(ty, HirType::WeakSet(_)),
+        _ => return None,
+    })
+}
+
+/// The `platform_globals/runtime.js` global backing `instanceof` for a
+/// live `JsValue` (opaque QuickJS handle) receiver against one of the
+/// same six names `native_builtin_instanceof_static_match` recognizes --
+/// each is a one-line `value => value instanceof X` global, the same
+/// shape `__thaw_instanceof_date_dynamic_value` already used alone.
+fn native_builtin_instanceof_dynamic_global(class: &str) -> Option<&'static str> {
+    Some(match class {
+        "Date" => "__thaw_instanceof_date_dynamic_value",
+        "RegExp" => "__thaw_instanceof_regexp_dynamic_value",
+        "Map" => "__thaw_instanceof_map_dynamic_value",
+        "Set" => "__thaw_instanceof_set_dynamic_value",
+        "WeakMap" => "__thaw_instanceof_weakmap_dynamic_value",
+        "WeakSet" => "__thaw_instanceof_weakset_dynamic_value",
+        _ => return None,
+    })
+}
+
+/// The sentinel key `coerce_to_declared`'s `Json`-target branch
+/// (`inference/coercions.rs`) tags a `RegExp`/`Map`/`Set` value with
+/// when it crosses into `any` -- used to recognize it again for
+/// `instanceof` against a `Json`-typed receiver, the same wrapper
+/// `regexp_wrapper_property`/`map_or_set_wrapper_size` (thaw-std's
+/// `json.rs`) already unwrap for property reads. `None` for `Date`
+/// (which uses its own, non-sentinel `__thaw_json_is_date_shape` check
+/// instead -- its `{"timestamp": N}` wire shape isn't a tagged wrapper)
+/// and for `WeakMap`/`WeakSet` (native table entries live only until
+/// the request arena resets and never get a `Json`-crossing
+/// representation at all, so a `WeakMap`/`WeakSet` can't actually reach
+/// this call with a `Json`-typed receiver in practice).
+fn native_builtin_instanceof_json_sentinel(class: &str) -> Option<&'static str> {
+    Some(match class {
+        "RegExp" => "__thaw_regexp__",
+        "Map" => "__thaw_map_entries__",
+        "Set" => "__thaw_set_values__",
+        _ => return None,
+    })
 }

@@ -3318,6 +3318,60 @@ fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
 }
 
 #[test]
+fn compiles_instanceof_and_size_for_native_collections() {
+    // `Date`/`RegExp`/`Map`/`Set` aren't registered in `self.signatures`
+    // (each has its own bespoke method-dispatch file, not a real class
+    // identity marker field) -- `instanceof` against any of them
+    // previously hit "not a known class" even for a plainly,
+    // statically-typed value (not just an `any`-typed one), confirmed
+    // via a direct probe before this fix (`re instanceof RegExp`,
+    // `m instanceof Map`, `d instanceof Date` -- all five of
+    // Date/RegExp/Map/Set/WeakMap/WeakSet were affected; WeakMap/WeakSet
+    // aren't separately exercised here since they support no other
+    // operations this suite already covers).
+    //
+    // `.size` on an `any`-typed Map/Set was also previously `undefined`
+    // -- the `__thaw_map_entries__`/`__thaw_set_values__` sentinel
+    // wrapper (`coerce_to_declared`, `inference/coercions.rs`) is
+    // write-only the same way `__thaw_regexp__` was before
+    // `regexp_wrapper_property` (round 7) -- fixed via the sibling
+    // `map_or_set_wrapper_size` helper in the same file. Full method
+    // dispatch (`.get()`/`.set()`/`.has()`/iteration) on an `any`-typed
+    // Map/Set remains unsupported -- `Map<K, V>`/`Set<T>` are generic,
+    // and a bare `any` receiver carries no record of what `K`/`V`
+    // originally were, unlike `RegExp`'s fixed shape -- an accepted,
+    // deliberately out-of-scope limitation, not attempted here.
+    let source = r#"
+        function main(): void {
+            const re: RegExp = /abc/;
+            console.log(re instanceof RegExp);
+            const m = new Map<string, number>();
+            console.log(m instanceof Map);
+            const s = new Set<number>();
+            console.log(s instanceof Set);
+            const d: Date = new Date();
+            console.log(d instanceof Date);
+
+            const anyRe: any = /abc/;
+            console.log(anyRe instanceof RegExp);
+            const anyStr: any = "not a regex";
+            console.log(anyStr instanceof RegExp);
+
+            const anyMap: any = new Map<string, number>([["a", 1], ["b", 2]]);
+            console.log(anyMap instanceof Map);
+            console.log(anyMap.size);
+            const anySet: any = new Set<number>([1, 2, 3]);
+            console.log(anySet instanceof Set);
+            console.log(anySet.size);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "instanceof_and_size_for_native_collections"),
+        "true\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\n2\ntrue\n3\n"
+    );
+}
+
+#[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
         function printAll(parts: string[]): void {
