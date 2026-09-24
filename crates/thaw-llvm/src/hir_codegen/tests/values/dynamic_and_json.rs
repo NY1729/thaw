@@ -1103,6 +1103,38 @@ fn compiles_dynamic_nullish_coalescing() {
     );
 }
 
+/// `x ??= y` on a dynamic (`any`-typed) variable/property target used to
+/// silently never assign, even when `x` was really `null`/`undefined`
+/// (same root cause as plain `??` above: only `Optional`/`Nullable`/
+/// `Nullish` were recognized as possibly-nullish, and `Json`'s nullish-
+/// ness is only knowable at runtime). Also confirms real `??=`'s own
+/// short-circuit: the RHS (with a side effect) is never evaluated when
+/// the target isn't nullish.
+#[test]
+fn compiles_dynamic_nullish_assignment() {
+    let source = r#"
+        function main(): void {
+            let m: any = null;
+            m ??= "default";
+            console.log(m);
+            let u: any = undefined;
+            u ??= "default2";
+            console.log(u);
+            const obj: { v: any } = { v: null };
+            obj.v ??= "prop-default";
+            console.log(obj.v);
+            let side = 0;
+            let already: any = 5;
+            already ??= (side = 1, "unused");
+            console.log(already, side);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_nullish_assignment"),
+        "default\ndefault2\nprop-default\n5 0\n"
+    );
+}
+
 #[test]
 fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
     let source = r#"

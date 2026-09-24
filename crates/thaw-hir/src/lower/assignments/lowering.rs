@@ -653,6 +653,49 @@ impl<'a> FnLowerer<'a> {
         if assign.op == AssignOp::NullishAssign {
             let current = self.lower_assignment_target_read(&target)?;
             let current_type = self.infer_expr_type(&current)?;
+            // `x ??= y` where `x` is a dynamic (`any`-typed) target --
+            // unlike `Optional`/`Nullable`/`Nullish` below, whose absent
+            // state is a compile-time-known tag, a `Json` value's
+            // nullish-ness is only knowable at runtime
+            // (`__thaw_json_is_nullish`, the same check `??`'s own
+            // lowering uses). Previously fell straight through to this
+            // match's `_` arm, silently never assigning even when `x`
+            // was really `null`/`undefined` (real trigger: `let m: any =
+            // null; m ??= "default";` leaving `m` as `null`).
+            //
+            // Scoped to a plain `Json`-typed target (a variable or
+            // `.field`) -- an `any[]` array element read as an
+            // assignment target comes back `Optional<Json>` instead (the
+            // conservative-sparse-array tagging every array read target
+            // gets), a different, untagged-here combination; still
+            // silently no-ops for `arr[i] ??= y`.
+            if current_type == HirType::Json {
+                let rhs = self.coerce_to_declared(&HirType::Json, rhs)?;
+                let current_name = format!("__thaw_nullish_assign_current_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(current_name.clone(), HirType::Json);
+                let rhs_name = format!("__thaw_nullish_assign_rhs_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(rhs_name.clone(), HirType::Json);
+                let assigned = HirExpr::Block(vec![
+                    HirStmt::Expr(build_assign(target, HirExpr::Var(rhs_name.clone()))),
+                    HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
+                ]);
+                let assigned = self
+                    .wrap_call_argument_bindings(assigned, &[(rhs_name, HirType::Json, rhs)])?;
+                let current_value = HirExpr::Var(current_name.clone());
+                let is_nullish = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_nullish".to_string())),
+                    vec![current_value.clone()],
+                );
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    is_nullish,
+                    vec![HirStmt::Return(Some(assigned))],
+                    vec![HirStmt::Return(Some(current_value))],
+                )]);
+                bindings.push((current_name, HirType::Json, current));
+                return self.wrap_call_argument_bindings(result, &bindings);
+            }
             let (payload, absence_kind) = match current_type.clone() {
                 HirType::Optional(payload) => (payload, 0),
                 HirType::Nullable(payload) => (payload, 1),
