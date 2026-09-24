@@ -4582,6 +4582,40 @@ fn nullish_assignment_reads_sparse_array_holes_as_undefined() {
     assert_eq!(compile_and_run(source, "nullish_sparse_array_element"), "3 2 3,2\nnew ok new,ok\n3 2\nundefined 9\ntrue true 9\ntrue true\n8 0\n");
 }
 
+/// Sibling of `nullish_assignment_reads_sparse_array_holes_as_undefined`,
+/// but for an `any[]` (Json-element) array. `arr[i] ??= y` reads the
+/// target through `lower_array_index`, which comes back tagged
+/// `Optional<Json>` -- the tag's "none" state means "this slot is a
+/// never-written hole", not "the value is JS-nullish". A *present* slot
+/// that itself holds `null`/`undefined` (written explicitly, e.g. from
+/// an array literal or a prior assignment) was previously left
+/// unchanged: `OptionalIsNone` said "present" and `??=` stopped there,
+/// without checking whether the Json value it held was itself nullish.
+/// Fixed by also running `__thaw_json_is_nullish` on a present slot's
+/// value before deciding to skip the assignment.
+#[test]
+fn nullish_assignment_updates_a_present_but_nullish_any_array_element() {
+    let source = r#"
+        function main(): void {
+            const arr: any[] = [null, undefined, 0, "", false, { a: 1 }, [1, 2]];
+            arr[0] ??= "z0";
+            arr[1] ??= "z1";
+            arr[2] ??= "z2";
+            arr[3] ??= "z3";
+            arr[4] ??= "z4";
+            console.log(arr[0], arr[1], arr[2], JSON.stringify(arr[3]), arr[4]);
+            console.log(JSON.stringify(arr[5]), JSON.stringify(arr[6]));
+            const single: any[] = [null];
+            const returned = (single[0] ??= "assigned");
+            console.log(single[0], returned);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_array_nullish_assign_present_null"),
+        "z0 z1 0 \"\" false\n{\"a\":1} [1,2]\nassigned assigned\n"
+    );
+}
+
 #[test]
 fn compound_assignment_reads_sparse_array_holes_as_undefined() {
     let source = r#"
