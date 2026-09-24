@@ -3372,6 +3372,42 @@ fn compiles_instanceof_and_size_for_native_collections() {
 }
 
 #[test]
+fn compiles_instanceof_array_and_promise() {
+    // Same "not a known class" bug as `compiles_instanceof_and_size_
+    // for_native_collections`, found in the same follow-up pass: `Array`
+    // and `Promise` aren't registered in `self.signatures` either, so
+    // `instanceof` against them failed the same way, for both a
+    // statically-typed value and (for `Array`, via the existing
+    // `__thaw_json_is_array` intrinsic `Array.isArray` already uses) an
+    // `any`-typed one holding real parsed JSON data. `Promise<T>`
+    // coerced into `any` is already rejected entirely elsewhere (see
+    // round5), so it has no analogous `any`-typed case to test here.
+    let source = r#"
+        async function main(): Promise<void> {
+            const arr: number[] = [1, 2, 3];
+            console.log(arr instanceof Array);
+            const tuple: [number, string] = [1, "a"];
+            console.log(tuple instanceof Array);
+
+            const anyArr: any = JSON.parse("[1,2,3]");
+            console.log(anyArr instanceof Array);
+            const anyObj: any = JSON.parse('{"a":1}');
+            console.log(anyObj instanceof Array);
+
+            const p: Promise<number> = Promise.resolve(1);
+            console.log(p instanceof Promise);
+            const notP: any = "not a promise";
+            console.log(notP instanceof Promise);
+            await p;
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "instanceof_array_and_promise"),
+        "true\ntrue\ntrue\nfalse\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
         function printAll(parts: string[]): void {
