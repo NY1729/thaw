@@ -484,6 +484,41 @@ pub unsafe extern "C" fn thaw_array_presence_set_state(
     presence
 }
 
+/// 16 zeroed bytes wide enough for any array element slot (`ASYNC_SLOT_BYTES`
+/// in thaw-llvm), returned in place of a real element pointer for an
+/// out-of-bounds/negative/non-integer read so a typed load past the end of
+/// an array's arena allocation can't happen -- `arr[oob]` reads garbage
+/// heap bytes instead of `undefined` (a wider-callers gap tracked
+/// separately), but it must never read outside the array's own buffer.
+static ARRAY_READ_SCRATCH: [u8; 16] = [0; 16];
+
+#[no_mangle]
+/// Returns a pointer to `array`'s element at `index`, or to a zeroed
+/// scratch slot when `index` is out of bounds, negative, or non-integer.
+/// Used for reads only; see `thaw_array_ensure_index` for the write path,
+/// which grows the array instead.
+///
+/// # Safety
+/// `array` must be null or point to a valid `[length][elem...]` native
+/// array buffer.
+pub unsafe extern "C" fn thaw_array_read_ptr(
+    array: *const u8,
+    element_width: usize,
+    index: f64,
+) -> *const u8 {
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 {
+        return ARRAY_READ_SCRATCH.as_ptr();
+    }
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return ARRAY_READ_SCRATCH.as_ptr();
+    };
+    let index = index as usize;
+    if index >= length {
+        return ARRAY_READ_SCRATCH.as_ptr();
+    }
+    unsafe { array.add(8 + index * element_width) }
+}
+
 #[no_mangle]
 /// Ensures an indexed write has storage, leaving skipped slots as holes.
 ///
@@ -2673,4 +2708,43 @@ pub unsafe extern "C" fn thaw_any_array_last_index_of(
         }
     }
     -1.0
+}
+
+#[cfg(test)]
+mod array_read_ptr_tests {
+    use super::*;
+
+    fn build_array(elements: &[f64]) -> *mut u8 {
+        let bytes = 8 + elements.len() * 8;
+        let array = thaw_arena::thaw_arena_alloc(bytes, 8);
+        unsafe {
+            array.cast::<u64>().write(elements.len() as u64);
+            for (index, &value) in elements.iter().enumerate() {
+                array.add(8 + index * 8).cast::<f64>().write(value);
+            }
+        }
+        array
+    }
+
+    #[test]
+    fn in_bounds_index_reads_the_real_element() {
+        let array = build_array(&[10.0, 20.0, 30.0]);
+        let ptr = unsafe { thaw_array_read_ptr(array, 8, 1.0) };
+        assert_eq!(unsafe { ptr.cast::<f64>().read() }, 20.0);
+    }
+
+    #[test]
+    fn out_of_range_negative_and_non_integer_indices_read_a_zeroed_slot_not_foreign_memory() {
+        let array = build_array(&[10.0, 20.0, 30.0]);
+        for index in [100.0, -5.0, 1.5, f64::NAN, f64::INFINITY] {
+            let ptr = unsafe { thaw_array_read_ptr(array, 8, index) };
+            assert_eq!(unsafe { ptr.cast::<f64>().read() }, 0.0);
+        }
+    }
+
+    #[test]
+    fn null_array_reads_a_zeroed_slot() {
+        let ptr = unsafe { thaw_array_read_ptr(std::ptr::null(), 8, 0.0) };
+        assert_eq!(unsafe { ptr.cast::<f64>().read() }, 0.0);
+    }
 }

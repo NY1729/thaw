@@ -631,25 +631,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 .unwrap_or(ARRAY_ELEM_BYTES),
             _ => ARRAY_ELEM_BYTES,
         };
-        let elem_size = i64_type.const_int(element_bytes, false);
-        let byte_offset = self
+        // Bounds/negative/non-integer-checked in `thaw_array_read_ptr`
+        // itself rather than with raw pointer arithmetic here, so an
+        // out-of-range index (e.g. a scalar-element array read that skips
+        // `lower_array_index`'s HIR-level presence/bounds check for a
+        // "conservative" parameter) reads a zeroed scratch slot instead of
+        // memory outside the array's own arena allocation.
+        let element = self
             .builder
-            .build_int_mul(idx_int, elem_size, "byteoff")
-            .map_err(|e| e.to_string())?;
-        let byte_offset = self
-            .builder
-            .build_int_add(
-                byte_offset,
-                i64_type.const_int(ARRAY_HEADER_BYTES, false),
-                "byteoff_hdr",
+            .build_call(
+                self.module.get_function("thaw_array_read_ptr").unwrap(),
+                &[
+                    arr_ptr.into(),
+                    i64_type.const_int(element_bytes, false).into(),
+                    idx_val.into(),
+                ],
+                "elem_ptr",
             )
-            .map_err(|e| e.to_string())?;
-
-        let element = unsafe {
-            self.builder
-                .build_in_bounds_gep(self.context.i8_type(), arr_ptr, &[byte_offset], "elem_ptr")
-                .map_err(|e| e.to_string())
-        }?;
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_array_read_ptr did not return a pointer")?
+            .into_pointer_value();
         Ok((element, handle, idx_int))
     }
 
