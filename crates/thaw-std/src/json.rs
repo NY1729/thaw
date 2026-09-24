@@ -623,6 +623,11 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
     if let Some(result) = regexp_wrapper_property(value, &key) {
         return leak(result);
     }
+    if key == "size" {
+        if let Some(result) = map_or_set_wrapper_size(value) {
+            return leak(result);
+        }
+    }
     // `.length` on a JSON array (or a Buffer-shaped object, `{"type":
     // "Buffer","data":[...]}` -- see `json_array_or_buffer_data`'s own
     // doc comment for why a real Buffer crossing into a native callback
@@ -950,6 +955,28 @@ fn is_thaw_internal_wrapper(fields: &serde_json::Map<String, Value>) -> bool {
             fields.keys().next().map(String::as_str),
             Some("__thaw_regexp__" | "__thaw_map_entries__" | "__thaw_set_values__")
         )
+}
+
+/// General form of `is_thaw_internal_wrapper`'s own key check -- true
+/// when `value` is an object whose one and only field is named `key`.
+/// Backs `RegExp`/`Map`/`Set`'s own `instanceof` check against a
+/// `Json`-typed (`any`) value (`lower_bin_expr`'s `InstanceOf` case,
+/// `thaw-hir`'s `expressions/lowering.rs`): a value tagged with e.g.
+/// `__thaw_regexp__` when it crossed into `any` is recognized as one
+/// again the same way `regexp_wrapper_property`/`is_thaw_internal_
+/// wrapper` already do for property reads and `JSON.stringify`, just
+/// generalized to take the key as a runtime argument instead of a
+/// fixed set.
+#[no_mangle]
+pub extern "C" fn thaw_json_has_wrapper_key(value: *const Value, key: *const c_char) -> u8 {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return 0;
+    };
+    let Value::Object(fields) = value else {
+        return 0;
+    };
+    let key = to_str(key);
+    u8::from(fields.len() == 1 && fields.keys().next().is_some_and(|field| *field == key))
 }
 
 /// `NaN`/`Infinity`/`-Infinity` have no JSON representation at all --
@@ -1886,6 +1913,25 @@ fn regexp_wrapper_property(value: &Value, key: &str) -> Option<Value> {
     };
     let flags = inner.get("flags").and_then(Value::as_str).unwrap_or("");
     Some(Value::Bool(flags.contains(flag_char)))
+}
+
+/// `.size` read directly on a `Map`/`Set` value stored in an `any`-typed
+/// slot -- the same "sentinel wrapper is write-only" gap
+/// `regexp_wrapper_property` fixes for `RegExp`, just for the one
+/// property `Map`/`Set` share that doesn't need decoding a whole
+/// element/entry back into a native `K`/`V` (which the wrapper alone
+/// can't do -- `Map<K, V>`/`Set<T>` are generic, and a bare `Json`-typed
+/// receiver carries no record of what `K`/`V` originally were, unlike
+/// `RegExp`'s fixed `{source, flags, lastIndex}` shape -- so full method
+/// dispatch, `.get()`/`.set()`/`.has()`/iteration, stays unsupported;
+/// `.size` alone just needs the wrapped array's length).
+fn map_or_set_wrapper_size(value: &Value) -> Option<Value> {
+    let fields = value.as_object()?;
+    let entries = fields
+        .get("__thaw_map_entries__")
+        .or_else(|| fields.get("__thaw_set_values__"))?
+        .as_array()?;
+    Some(Value::Number(entries.len().into()))
 }
 
 fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {

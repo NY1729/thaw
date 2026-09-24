@@ -54,6 +54,15 @@
     return Iterator.from(iterator);
   };
   globalThis.__thaw_instanceof_date_dynamic_value = value => value instanceof Date;
+  // Siblings of the Date check above, for `RegExp`/`Map`/`Set`/`WeakMap`/
+  // `WeakSet` -- see `native_builtin_instanceof_dynamic_global`
+  // (thaw-hir's `expressions/lowering.rs`), which dispatches to these by
+  // name for a live `JsValue` (opaque QuickJS handle) left operand.
+  globalThis.__thaw_instanceof_regexp_dynamic_value = value => value instanceof RegExp;
+  globalThis.__thaw_instanceof_map_dynamic_value = value => value instanceof Map;
+  globalThis.__thaw_instanceof_set_dynamic_value = value => value instanceof Set;
+  globalThis.__thaw_instanceof_weakmap_dynamic_value = value => value instanceof WeakMap;
+  globalThis.__thaw_instanceof_weakset_dynamic_value = value => value instanceof WeakSet;
   // General sibling of the Date-only check above, for `value instanceof C`
   // where both sides are live handles (e.g. a decorated class's own
   // "class token", class-transformer's `plainToInstance(User, ...)`

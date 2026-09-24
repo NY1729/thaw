@@ -70,6 +70,29 @@ impl<'ctx> HirCompiler<'ctx> {
                     "JSON date timestamp",
                 )
             }
+            "__thaw_json_has_wrapper_key" => {
+                let [value, key] = args else {
+                    return Err("__thaw_json_has_wrapper_key expects two arguments".into());
+                };
+                let value = self.compile_expr(value)?;
+                let key = self.compile_expr(key)?;
+                let function = self.module.get_function("thaw_json_has_wrapper_key").unwrap();
+                let call = self
+                    .builder
+                    .build_call(function, &[value.into(), key.into()], "json_has_wrapper_key_u8")
+                    .map_err(|error| error.to_string())?;
+                let u8_val = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_has_wrapper_key did not return a value")?
+                    .into_int_value();
+                let zero = self.context.i8_type().const_int(0, false);
+                return self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_has_wrapper_key")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_json_stringify_number_space" => {
                 let [value, space] = args else {
                     return Err("JSON.stringify expects value and number space".into());
