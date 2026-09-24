@@ -634,6 +634,28 @@ impl<'a> FnLowerer<'a> {
             HirType::Array(inner) => {
                 self.lower_array_flat_one(mapped, mapped_type, *inner)
             }
+            // Same runtime-only "is this element itself an array" gap
+            // `.flat()` has for a `Json`-typed element -- the callback's
+            // return value could be a JS array or not, only knowable once
+            // it actually runs. `lower_array_flat_one` only handles a
+            // statically nested `T[][]` shape.
+            HirType::Json => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
+                vec![mapped, HirExpr::Lit(HirLit::F64(1.0))],
+            )),
+            // NOTE: a ternary/mixed-return callback (`(v) => Array.
+            // isArray(v) ? v : [v]`) infers as `Union([Json,
+            // Array(Json), ...])`, not plain `Json` -- it falls into the
+            // narrower 2-member case below (or the `scalar` fallback),
+            // neither of which is correct for a member that's already
+            // dynamically-typed, so it stays unflattened. A normalize-
+            // to-Json-then-reuse-the-branch-above attempt segfaulted
+            // (some interaction between `coerce_to_declared(Json, ...)`
+            // on a `Union` member and `lower_array_map`'s own callback
+            // plumbing) and was reverted rather than shipped broken;
+            // narrower than the crash it would otherwise avoid trading
+            // one gap for a worse one. Left as a known, documented,
+            // non-crashing gap.
             HirType::Union(members) if members.len() == 2 => {
                 let Some((array_index, inner)) = members.iter().enumerate().find_map(|(index, member)| {
                     let HirType::Array(inner) = member else { return None };

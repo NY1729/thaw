@@ -588,6 +588,37 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         1
                     };
+                    let HirType::Array(receiver_element) = &current_type else {
+                        unreachable!()
+                    };
+                    if receiver_element.as_ref() == &HirType::Json {
+                        // Whether a `Json`-typed element is itself an
+                        // array is only knowable at runtime -- the loop
+                        // below unwraps a *statically* nested `T[][]`
+                        // shape one level at a time, which can't express
+                        // this, so it silently never flattens (`element`
+                        // is `Json`, never `Array(_)`, so it `break`s
+                        // immediately regardless of `depth`). Delegate to
+                        // a native helper that walks the boxed JSON tree
+                        // instead; see `thaw_any_array_flat`'s doc
+                        // comment (thaw-std's `json.rs`) for why only
+                        // this element type needs it.
+                        let depth_value = if depth == usize::MAX {
+                            f64::INFINITY
+                        } else {
+                            depth as f64
+                        };
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_any_array_flat".to_string())),
+                            vec![
+                                HirExpr::Var(source_name.clone()),
+                                HirExpr::Lit(HirLit::F64(depth_value)),
+                            ],
+                        );
+                        let mut bindings = vec![(source_name, source_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     let mut result = HirExpr::Var(source_name.clone());
                     let mut flattened = false;
                     for _ in 0..depth {

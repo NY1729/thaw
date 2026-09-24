@@ -632,6 +632,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_any_array_flat",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_array_resize",
             i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), f64_type.into()], false),
             Some(Linkage::External),
