@@ -53,19 +53,19 @@
     }
     return Iterator.from(iterator);
   };
-  globalThis.__thaw_instanceof_date_dynamic_value = value => value instanceof Date;
-  // Siblings of the Date check above, for `RegExp`/`Map`/`Set`/`WeakMap`/
-  // `WeakSet` -- see `native_builtin_instanceof_dynamic_global`
-  // (thaw-hir's `expressions/lowering.rs`), which dispatches to these by
-  // name for a live `JsValue` (opaque QuickJS handle) left operand.
-  globalThis.__thaw_instanceof_regexp_dynamic_value = value => value instanceof RegExp;
-  globalThis.__thaw_instanceof_map_dynamic_value = value => value instanceof Map;
-  globalThis.__thaw_instanceof_set_dynamic_value = value => value instanceof Set;
-  globalThis.__thaw_instanceof_weakmap_dynamic_value = value => value instanceof WeakMap;
-  globalThis.__thaw_instanceof_weakset_dynamic_value = value => value instanceof WeakSet;
-  globalThis.__thaw_instanceof_array_dynamic_value = value => value instanceof Array;
-  globalThis.__thaw_instanceof_promise_dynamic_value = value => value instanceof Promise;
-  globalThis.__thaw_instanceof_uint8array_dynamic_value = value => value instanceof Uint8Array;
+  // Generic `instanceof` check for a live `JsValue` (opaque QuickJS
+  // handle) left operand against *any* named global constructor --
+  // `dynamic_value_check_by_name` (thaw-hir's `expressions/
+  // coercions.rs`) passes the class name across the boundary as a
+  // positional JSON argument rather than needing one hardcoded
+  // `value => value instanceof X` global per class name. A name that
+  // doesn't resolve to a callable (a typo, or a global this runtime
+  // doesn't define) answers `false` rather than throwing, matching how
+  // every native-builtin-specific check this replaced already degraded.
+  globalThis.__thaw_instanceof_dynamic_value_by_name = (name, value) => {
+    const ctor = globalThis[name];
+    return typeof ctor === 'function' && value instanceof ctor;
+  };
   // General sibling of the Date-only check above, for `value instanceof C`
   // where both sides are live handles (e.g. a decorated class's own
   // "class token", class-transformer's `plainToInstance(User, ...)`

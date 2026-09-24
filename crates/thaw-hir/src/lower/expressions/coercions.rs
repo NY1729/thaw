@@ -1649,6 +1649,47 @@ impl<'a> FnLowerer<'a> {
         )))
     }
 
+    /// `value instanceof <arbitrary named global>` for a live `JsValue`
+    /// receiver against a class name this compiler has no dedicated
+    /// native representation or hardcoded dynamic-value global for
+    /// (`ArrayBuffer`, `DataView`, `Headers`, `ReadableStream`, ... --
+    /// anything not in `native_builtin_instanceof_dynamic_global`'s own
+    /// fixed table). Generalizes that whole mechanism: rather than
+    /// adding one more hardcoded `value => value instanceof X` global
+    /// per class name, this passes the name itself across the boundary
+    /// and looks it up as `globalThis[name]` on the JS side
+    /// (`__thaw_instanceof_dynamic_value_by_name`, `platform_globals/
+    /// runtime.js`) -- safe for any string (a non-existent or non-
+    /// callable name just answers `false`, not a thrown error), so it
+    /// covers every real JS/Node global uniformly with no further table
+    /// maintenance. Uses `callDynamicValueMixed` (like `dynamic_value_
+    /// instanceof` above) rather than `dynamic_value_check`'s simpler
+    /// one-handle call, since this needs *two* arguments of different
+    /// kinds: `class_name` (positional JSON) and `value` (a live
+    /// handle) -- `invoke_mixed` (thaw-quickjs's `api.rs`) appends
+    /// JSON-parsed positional arguments before handle arguments, so the
+    /// JS side's own parameter order is `(name, value)`.
+    fn dynamic_value_check_by_name(
+        &mut self,
+        class_name: &str,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let callable = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(
+                "__thaw_instanceof_dynamic_value_by_name".into(),
+            ))],
+        );
+        let json_args = self.wrap_native_value_as_json(
+            HirExpr::ArrayLit(vec![HirExpr::Lit(HirLit::Str(class_name.to_string()))]),
+            HirType::Array(Box::new(HirType::Str)),
+        )?;
+        Ok(HirExpr::JsonAsBool(Box::new(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixed".into())),
+            vec![callable, json_args, HirExpr::ArrayLit(vec![value])],
+        ))))
+    }
+
     /// `value instanceof target` for two live `JsValue` handles -- a real
     /// runtime `instanceof` between a dynamic result and a class's own
     /// decorator "class token". Used when the left operand is a `JsValue`

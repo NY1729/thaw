@@ -3449,6 +3449,14 @@ fn compiles_instanceof_uint8array() {
             // (buf)` above is a separate, confirmed, narrower gap this
             // fix doesn't reach -- not exercised here).
             const typed: Uint8Array = new Uint8Array([4, 5, 6]);
+            // `typed` is genuinely `HirType::Bytes` (a static type
+            // annotation, unlike `buf` above) -- exercises the actual
+            // static-shape check `native_builtin_instanceof_static_
+            // match`'s own `"Array"` arm would otherwise wrongly match
+            // (it only sees the *normalized* `Array(F64)` type), caught
+            // by testing this combination directly against Node rather
+            // than by reasoning alone.
+            console.log(typed instanceof Array);
             console.log(useItAsAny(typed));
             const anyArr: any = JSON.parse("[1,2,3]");
             console.log(anyArr instanceof Uint8Array);
@@ -3456,7 +3464,44 @@ fn compiles_instanceof_uint8array() {
     "#;
     assert_eq!(
         compile_and_run(source, "instanceof_uint8array"),
-        "true\nfalse\nfalse\ntrue\nfalse\n"
+        "true\nfalse\nfalse\nfalse\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn compiles_instanceof_against_an_arbitrary_named_global() {
+    // Generalizes every instanceof fix above: rather than adding one
+    // more hardcoded `value => value instanceof X` dynamic-value global
+    // per native class (the approach every earlier fix in this thread
+    // took), a live `JsValue` receiver's `instanceof` check against
+    // *any* class name now dispatches generically by passing the name
+    // itself across the QuickJS boundary (`dynamic_value_check_by_name`,
+    // thaw-hir's `expressions/coercions.rs`) -- fixes `ArrayBuffer`/
+    // `DataView`/`TextDecoder`/`AbortController`/every other exotic
+    // global this compiler has no dedicated native representation for,
+    // with no further table entries needed. `new ArrayBuffer(...)`/
+    // `new DataView(...)`/etc. all construct a live handle via
+    // `Expr::New`'s own generic `constructDynamicValue` path, so this
+    // exercises the same `JsValue` tier the six-then-eight-then-nine
+    // named classes above already used, just for names that were never
+    // specifically hardcoded at all.
+    let source = r#"
+        function main(): void {
+            const ab = new ArrayBuffer(8);
+            console.log(ab instanceof ArrayBuffer);
+            console.log(ab instanceof DataView);
+
+            const dv = new DataView(ab);
+            console.log(dv instanceof DataView);
+            console.log(dv instanceof ArrayBuffer);
+
+            const ac = new AbortController();
+            console.log(ac instanceof AbortController);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "instanceof_arbitrary_named_global"),
+        "true\nfalse\ntrue\nfalse\ntrue\n"
     );
 }
 
