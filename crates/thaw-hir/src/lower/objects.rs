@@ -711,6 +711,41 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                 element.as_ref().clone(),
             )),
+            // Never actually read (this whole branch only exists to
+            // type-check a signature that's structurally unreachable at
+            // runtime, e.g. an instance method's declared return type
+            // when compiled for a context with no real `this` receiver)
+            // -- an empty `Json`/`Dictionary` object is as good a
+            // placeholder as `Object`'s own `ObjectAlloc` above.
+            //
+            // `HirExpr::JsonObjectLit(_, element)`'s own `infer_expr_type`
+            // *always* wraps its second argument in another `Dictionary`
+            // (`inference/types.rs`) -- so for `Dictionary(element)` this
+            // must pass the *inner* `element`, not `ty` itself (which is
+            // already `Dictionary(element)`), or the placeholder's own
+            // inferred type comes out double-wrapped
+            // (`Dictionary(Dictionary(element))`) instead of matching
+            // `ty`. Caught by a real, if narrow, repro: a class with both
+            // a `Record<string, number>`-typed field *and* a method
+            // returning that same type -- unrelated code (a constructor
+            // call's own `Record<string, number>` argument, coerced via
+            // `coerce_to_declared`'s stricter `HirType::Dictionary`
+            // target branch, which requires an exact type match or a raw
+            // `ObjectLit`) started failing ("dictionary value must be an
+            // object literal with F64 values") once the double-wrapped
+            // type from *this* unrelated placeholder leaked into shared
+            // class-member type inference. `Json` itself has no such
+            // inner type to unwrap to and is unaffected in every case
+            // this was tested against (`coerce_to_declared`'s `Json`
+            // target branch, unlike `Dictionary`'s, accepts any
+            // `json_convertible_native_type` source including
+            // `Dictionary(_)` and wraps it) -- left as `HirType::Json`,
+            // not chased further since nothing currently exercises the
+            // stricter path `Dictionary` just hit.
+            HirType::Json => Ok(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
+            HirType::Dictionary(element) => {
+                Ok(HirExpr::JsonObjectLit(Vec::new(), element.as_ref().clone()))
+            }
             HirType::Optional(payload) => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
             HirType::Nullable(payload) => Ok(HirExpr::NullableNone(payload.as_ref().clone())),
             HirType::Nullish(payload) => Ok(HirExpr::NullishUndefined(payload.as_ref().clone())),

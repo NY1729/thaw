@@ -2121,3 +2121,78 @@ fn decorator_class_tokens_are_distinct_per_class() {
         "true\ntrue\nfalse\n"
     );
 }
+
+/// A class declaration with an instance method returning `any`/`Json`
+/// (or a `Record<string, T>`/`Dictionary`) hard-errored at compile time
+/// -- even with no instantiation or call anywhere in the program --
+/// "unbound `this` cannot synthesize unreachable value of type Json".
+/// `unreachable_value` (thaw-hir's `objects.rs`) builds a placeholder
+/// value matching a method's declared return type for a context with no
+/// real `this` receiver (e.g. type-checking the method's own signature
+/// in isolation); it's never actually read at runtime (the whole branch
+/// only exists to make a structurally-unreachable path type-check), but
+/// had no case for `Json`/`Dictionary` among its `F64`/`Bool`/`Str`/
+/// `Object`/`Array`/`Optional`/... cases. Fixed with an empty
+/// `JsonObjectLit` placeholder for both, the same convention `Object`'s
+/// own case already uses (`ObjectAlloc`).
+#[test]
+fn class_method_returning_dynamic_any_compiles() {
+    let source = r#"
+        class Box {
+            value: any;
+            constructor(v: any) {
+                this.value = v;
+            }
+            get(): any {
+                return this.value;
+            }
+        }
+        function main(): void {
+            const b = new Box({ a: 1 });
+            console.log(JSON.stringify(b.get()));
+            b.value = [1, 2, 3];
+            console.log(JSON.stringify(b.value));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "class_method_returns_any"),
+        "{\"a\":1}\n[1,2,3]\n"
+    );
+}
+
+/// Sibling of `class_method_returning_dynamic_any_compiles` for
+/// `Dictionary` (`Record<string, T>`) instead of bare `any`: a class
+/// with both a `Record<string, number>`-typed field *and* a method
+/// returning that same type. `unreachable_value`'s `HirType::
+/// Dictionary(element)` case originally passed `ty` (already
+/// `Dictionary(element)`) to `HirExpr::JsonObjectLit`, whose own type
+/// inference *always* wraps its argument in another `Dictionary` --
+/// producing a doubly-wrapped `Dictionary(Dictionary(element))`
+/// placeholder instead of matching `ty`. That type mismatch, from a
+/// placeholder that's never actually read, leaked into unrelated
+/// class-member type inference and broke the constructor's own
+/// `Record<string, number>` argument coercion elsewhere in the same
+/// class ("dictionary value must be an object literal with F64
+/// values") -- fixed by passing the *inner* `element` instead.
+#[test]
+fn class_method_returning_dictionary_compiles() {
+    let source = r#"
+        class Bag {
+            data: Record<string, number>;
+            constructor(d: Record<string, number>) {
+                this.data = d;
+            }
+            get(): Record<string, number> {
+                return this.data;
+            }
+        }
+        function main(): void {
+            const b = new Bag({ x: 5 });
+            console.log(JSON.stringify(b.get()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "class_method_returns_dictionary"),
+        "{\"x\":5}\n"
+    );
+}
