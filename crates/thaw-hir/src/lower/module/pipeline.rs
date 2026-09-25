@@ -852,6 +852,33 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             &generic_interfaces,
                             &HashMap::new(),
                         )?
+                    } else if method.function.return_type.is_none()
+                        && !method.is_abstract
+                        && !(class_decl.class.is_abstract && !method.is_static)
+                    {
+                        // Mirrors the identical free-function case just
+                        // above (`func.return_type.is_none() && !is_extern
+                        // => HirType::Dynamic`) -- an unannotated method
+                        // previously always got `lower_fn_return_type`'s
+                        // own `None => HirType::Void` default *permanently
+                        // baked into its signature*, with no path to ever
+                        // correct it once the body is actually lowered
+                        // (unlike a free function, whose signature-
+                        // building pass already deferred to `Dynamic` for
+                        // exactly this reason). Confirmed via a real
+                        // probe: an unannotated method returning a plain
+                        // object literal hard-errored ("unsupported
+                        // property access on a value of type Void") and
+                        // one returning a number/string/array *silently*
+                        // produced a wrong value at runtime (`0` in every
+                        // case) instead of either -- the same underlying
+                        // bug surfacing two different ways depending on
+                        // what the caller does with the bogus `Void`.
+                        // Excludes an abstract method (no body of its own
+                        // exists to later infer *from* -- an abstract
+                        // method genuinely does need an explicit
+                        // annotation, matching real TS convention).
+                        HirType::Dynamic
                     } else {
                         lower_fn_return_type(
                             method.function.is_async,

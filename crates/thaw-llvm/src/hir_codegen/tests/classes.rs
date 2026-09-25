@@ -2196,3 +2196,69 @@ fn class_method_returning_dictionary_compiles() {
         "{\"x\":5}\n"
     );
 }
+
+/// A class method with no explicit return type annotation previously
+/// always got `HirType::Void` baked permanently into its signature
+/// (`lower_fn_return_type`'s own `None => HirType::Void` default,
+/// `declarations.rs`), unlike a free function -- which already deferred
+/// to `HirType::Dynamic` when unannotated, resolved later by inferring
+/// the real type from the body (`module/pipeline.rs`'s own `func.
+/// return_type.is_none() && !is_extern => HirType::Dynamic` case, with
+/// nothing analogous for methods). Confirmed via a direct probe this
+/// was a real, silent correctness bug, not just a compile error: a
+/// method returning a number/string/array *compiled successfully* but
+/// returned the wrong value at runtime (`0` for every case) since
+/// nothing ever read the real return value out of a `Void`-typed
+/// call; a method returning a plain object literal instead hard-erred
+/// ("unsupported property access on a value of type Void"). Fixed by
+/// giving methods the identical `Dynamic`-deferral free functions
+/// already had, resolved from the lowered body the same way
+/// (`declarations.rs`'s `method_ret`), including the separate
+/// "unbound" (detached, `.bind()`-style) variant a `this`-using method
+/// also gets.
+#[test]
+fn unannotated_class_methods_infer_their_return_type() {
+    let source = r#"
+        class Box {
+            value: number;
+            constructor(value: number) {
+                this.value = value;
+            }
+            getValue() {
+                return this.value * 2;
+            }
+            getInfo() {
+                return { value: this.value, doubled: this.value * 2 };
+            }
+        }
+        class Plain {
+            makeNum() {
+                return 42;
+            }
+            makeStr() {
+                return "hi";
+            }
+            makeObj() {
+                return { a: 1, b: "hi" };
+            }
+        }
+        function main(): void {
+            const b = new Box(21);
+            console.log(b.getValue());
+            const info = b.getInfo();
+            console.log(info.value, info.doubled);
+            const fn = b.getValue.bind(b);
+            console.log(fn());
+
+            const p = new Plain();
+            console.log(p.makeNum());
+            console.log(p.makeStr());
+            const obj = p.makeObj();
+            console.log(obj.a, obj.b);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "unannotated_class_methods_infer_return_type"),
+        "42\n21 42\n42\n42\nhi\n1 hi\n"
+    );
+}
