@@ -521,7 +521,7 @@ impl<'a> FnLowerer<'a> {
                             ),
                             vec![
                                 set_last_index(HirExpr::Lit(HirLit::F64(0.0))),
-                                HirStmt::Return(Some(HirExpr::OptionalNone(array_type.clone()))),
+                                HirStmt::Return(Some(HirExpr::NullableNone(array_type.clone()))),
                             ],
                             vec![
                                 HirStmt::Let(
@@ -538,7 +538,7 @@ impl<'a> FnLowerer<'a> {
                                     ),
                                 ),
                                 set_last_index(var(&next_name)),
-                                HirStmt::Return(Some(HirExpr::OptionalSome(
+                                HirStmt::Return(Some(HirExpr::NullableSome(
                                     Box::new(var(&raw_name)),
                                     array_type.clone(),
                                 ))),
@@ -569,12 +569,12 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(var("__thaw_array_is_null")),
                                 vec![var(&non_stateful_raw_name)],
                             ),
-                            vec![HirStmt::Return(Some(HirExpr::OptionalNone(
+                            vec![HirStmt::Return(Some(HirExpr::NullableNone(
                                 array_type.clone(),
                             )))],
                             Vec::new(),
                         ),
-                        HirStmt::Return(Some(HirExpr::OptionalSome(
+                        HirStmt::Return(Some(HirExpr::NullableSome(
                             Box::new(var(&non_stateful_raw_name)),
                             array_type.clone(),
                         ))),
@@ -584,7 +584,7 @@ impl<'a> FnLowerer<'a> {
                         stateful_branch.clone(),
                         vec![HirStmt::If(is_sticky, stateful_branch, non_stateful_branch)],
                     )]);
-                    let result_type = HirType::Optional(Box::new(array_type));
+                    let result_type = HirType::Nullable(Box::new(array_type));
                     let mut referenced = BTreeSet::new();
                     collect_referenced_bindings(&body, &mut referenced);
                     let captures = referenced
@@ -663,17 +663,17 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Var("__thaw_array_is_null".into())),
                                 vec![var(&raw_name)],
                             ),
-                            vec![HirStmt::Return(Some(HirExpr::OptionalNone(
+                            vec![HirStmt::Return(Some(HirExpr::NullableNone(
                                 array_type.clone(),
                             )))],
                             Vec::new(),
                         ),
-                        HirStmt::Return(Some(HirExpr::OptionalSome(
+                        HirStmt::Return(Some(HirExpr::NullableSome(
                             Box::new(var(&raw_name)),
                             array_type.clone(),
                         ))),
                     ]);
-                    let result_type = HirType::Optional(Box::new(array_type));
+                    let result_type = HirType::Nullable(Box::new(array_type));
                     let mut referenced = BTreeSet::new();
                     collect_referenced_bindings(&body, &mut referenced);
                     let captures = referenced
