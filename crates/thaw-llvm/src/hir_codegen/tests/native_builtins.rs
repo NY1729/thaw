@@ -3366,6 +3366,46 @@ fn compiles_regex_test_and_exec_with_an_any_typed_receiver() {
     );
 }
 
+/// round8's own deferred limitation: `.test()`/`.exec()` on an `any`-typed
+/// receiver used to decode a *fresh* native `RegExp` snapshot on every
+/// call, so `lastIndex` mutations on a global/sticky pattern never made
+/// it back into the original `any`-typed value's own storage -- a
+/// `while (anyRe.test(s))`-style loop relying on `lastIndex` persisting
+/// across separate `any`-typed calls never advanced. Fixed by writing
+/// the whole decoded regex (now carrying the updated `lastIndex`) back
+/// onto the receiver as a fresh `__thaw_regexp__` sentinel, but only
+/// when the receiver is a plain local variable (same scope line as
+/// Stage B's Map/Set mutating methods) -- a non-global/non-sticky
+/// pattern never touches `lastIndex` at all and is unaffected.
+#[test]
+fn any_typed_regex_persists_last_index_across_calls() {
+    let source = r#"
+        function main(): void {
+            const re: any = /\d+/g;
+            const s = "12 34 56";
+            console.log(re.test(s), re.lastIndex);
+            console.log(re.test(s), re.lastIndex);
+            console.log(re.test(s), re.lastIndex);
+            console.log(re.test(s), re.lastIndex);
+
+            const ex: any = /\d+/g;
+            console.log(ex.exec(s)[0], ex.lastIndex);
+            console.log(ex.exec(s)[0], ex.lastIndex);
+            console.log(ex.exec(s)[0], ex.lastIndex);
+
+            const plain: any = /abc/;
+            console.log(plain.test("xabcx"), plain.lastIndex);
+            console.log(plain.test("xabcx"), plain.lastIndex);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_typed_regex_last_index"),
+        "true 2\ntrue 5\ntrue 8\nfalse 0\n\
+         12 2\n34 5\n56 8\n\
+         true 0\ntrue 0\n"
+    );
+}
+
 #[test]
 fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
     // A `Date` stored in `any` already round-trips through QuickJS
