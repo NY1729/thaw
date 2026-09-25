@@ -3178,7 +3178,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &split,
         ),
-        Some("expr:s0,s1,c7ff0000000000000,split,arrayvalue".into())
+        Some("expr:s0,s1,cbff0000000000000,split,arrayvalue".into())
     );
     let split_limit = thaw_bridge::DtsFunction {
         params: vec![

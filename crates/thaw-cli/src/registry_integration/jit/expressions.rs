@@ -3212,7 +3212,7 @@ macro_rules! jit_expressions {
                     )?;
                     append_string(encoded, output)?;
                     match limit {
-                        [] => output.push("c7ff0000000000000".into()),
+                        [] => output.push("cbff0000000000000".into()),
                         [limit] => encode_number(
                             limit.expr.as_ref(),
                             parameters,
