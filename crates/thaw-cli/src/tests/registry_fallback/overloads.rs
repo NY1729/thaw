@@ -762,7 +762,7 @@ fn fallback_function_with_a_generic_date_argument_and_return_builds_and_runs() {
         &entry,
         r#"import { format, addDays } from "temporal-kit";
 function main(): void {
-    const d = new Date(2024, 0, 15);
+    const d = new Date(Date.UTC(2024, 0, 15));
     console.log(format(d, "yyyy-MM-dd"));
     const later: Date = addDays(d, 10);
     console.log(format(later, "yyyy-MM-dd"));
