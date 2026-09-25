@@ -1558,6 +1558,28 @@ impl<'a> FnLowerer<'a> {
                             HirType::Str,
                         )))));
                     }
+                    "__thaw_regex_exec_index" => {
+                        let [matches] = args.as_slice() else {
+                            return Err("RegExp index expects one operand".into());
+                        };
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::Str)),
+                            matches,
+                            "RegExp index result",
+                        )?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_regex_exec_input" => {
+                        let [matches] = args.as_slice() else {
+                            return Err("RegExp input expects one operand".into());
+                        };
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::Str)),
+                            matches,
+                            "RegExp input result",
+                        )?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_regex_exec_advance" => {
                         let [value, source, flags, last_index] = args.as_slice() else {
                             return Err("RegExp.exec lastIndex advance expects four operands".into());

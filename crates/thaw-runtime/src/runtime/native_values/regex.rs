@@ -1,8 +1,19 @@
 thread_local! {
     static REGEX_CACHE: RefCell<std::collections::HashMap<(String, String), CompiledRegex>> =
         RefCell::new(std::collections::HashMap::new());
-    static REGEX_GROUPS: RefCell<std::collections::HashMap<usize, Box<serde_json::Value>>> =
+    /// Match metadata (named groups, UTF-16 match index, and input string)
+    /// keyed by the raw `[length][elem...]` buffer a successful
+    /// `exec`/`match`/`matchAll` produced. The generated code reads these
+    /// back through `.groups`/`.index`/`.input`; the buffer is the stable
+    /// identity every accessor can recover from its array handle.
+    static REGEX_META: RefCell<std::collections::HashMap<usize, RegexMatchMeta>> =
         RefCell::new(std::collections::HashMap::new());
+}
+
+struct RegexMatchMeta {
+    groups: serde_json::Value,
+    index: f64,
+    input: String,
 }
 
 /// A compiled pattern: the `regex` crate when it can compile the pattern,
@@ -444,18 +455,6 @@ pub unsafe extern "C" fn thaw_regex_split(
     arena_string_array(parts)
 }
 
-/// Returns the whole match followed by each capture group's text, or an
-/// empty vector when nothing matches. A group that did not participate in
-/// the match (for example one inside an unmatched alternative) is reported
-/// as an empty string rather than `undefined`, since the native array
-/// element type is a plain `string`.
-fn capture_strings(regex: &CompiledRegex, value: &str) -> Vec<String> {
-    regex
-        .captures(value)
-        .map(RegexCaptures::into_positional)
-        .unwrap_or_default()
-}
-
 /// Converts a JavaScript `lastIndex` value (`ToLength` semantics: `NaN` and
 /// negative values clamp to `0`) into a UTF-16 code-unit count, matching how
 /// `thaw_regex_search` already reports match positions in UTF-16 units for
@@ -519,18 +518,19 @@ pub unsafe extern "C" fn thaw_regex_exec(
     else {
         return std::ptr::null_mut();
     };
-    let Some((matches, groups)) = with_compiled_regex(&source, &flags, |regex| {
+    let Some((matches, groups, index)) = with_compiled_regex(&source, &flags, |regex| {
         regex.captures_at(&value, byte_start).and_then(|captures| {
             if flags.contains('y') && captures.start != byte_start {
                 return None;
             }
+            let index = value[..captures.start].encode_utf16().count() as f64;
             let groups = regex
                 .capture_names()
                 .into_iter()
                 .enumerate()
-                .filter_map(|(index, name)| {
+                .filter_map(|(group_index, name)| {
                     let name = name?;
-                    captures.get(index).map(|capture| {
+                    captures.get(group_index).map(|capture| {
                         (
                             name.to_string(),
                             serde_json::Value::String(capture.to_string()),
@@ -538,7 +538,11 @@ pub unsafe extern "C" fn thaw_regex_exec(
                     })
                 })
                 .collect();
-            Some((captures.into_positional(), serde_json::Value::Object(groups)))
+            Some((
+                captures.into_positional(),
+                serde_json::Value::Object(groups),
+                index,
+            ))
         })
     })
     .flatten() else {
@@ -549,8 +553,15 @@ pub unsafe extern "C" fn thaw_regex_exec(
     }
     let result = arena_string_array(matches);
     if !result.is_null() {
-        REGEX_GROUPS.with(|stored| {
-            stored.borrow_mut().insert(result as usize, Box::new(groups));
+        REGEX_META.with(|stored| {
+            stored.borrow_mut().insert(
+                result as usize,
+                RegexMatchMeta {
+                    groups,
+                    index,
+                    input: value.to_string(),
+                },
+            );
         });
     }
     result
@@ -570,12 +581,63 @@ pub unsafe extern "C" fn thaw_regex_exec_groups(matches: *const u8) -> *mut serd
     if matches.is_null() {
         return std::ptr::null_mut();
     }
-    REGEX_GROUPS.with(|stored| {
+    REGEX_META.with(|stored| {
         stored
             .borrow_mut()
             .get_mut(&(matches as usize))
-            .map_or(std::ptr::null_mut(), |groups| groups.as_mut())
+            .map_or(std::ptr::null_mut(), |meta| &mut meta.groups)
     })
+}
+
+#[no_mangle]
+/// Returns the UTF-16 code-unit index of the match associated with a
+/// successful `exec`/`match`/`matchAll` result, matching the array's own
+/// `.index` property. `-1` for an unrelated array (the generated code only
+/// reaches this for a regex result, but a plain `string[]` shares the same
+/// native type).
+///
+/// # Safety
+/// `matches` must be null or an array handle returned by Thaw.
+pub unsafe extern "C" fn thaw_regex_exec_index(matches: *const u8) -> f64 {
+    if matches.is_null() {
+        return -1.0;
+    }
+    let matches = unsafe { matches.cast::<*const u8>().read_unaligned() };
+    if matches.is_null() {
+        return -1.0;
+    }
+    REGEX_META.with(|stored| {
+        stored
+            .borrow()
+            .get(&(matches as usize))
+            .map_or(-1.0, |meta| meta.index)
+    })
+}
+
+#[no_mangle]
+/// Returns the input string the match associated with a successful
+/// `exec`/`match`/`matchAll` result searched, matching the array's own
+/// `.input` property. Returns null for an unrelated array.
+///
+/// # Safety
+/// `matches` must be null or an array handle returned by Thaw.
+pub unsafe extern "C" fn thaw_regex_exec_input(matches: *const u8) -> *const c_char {
+    if matches.is_null() {
+        return std::ptr::null();
+    }
+    let matches = unsafe { matches.cast::<*const u8>().read_unaligned() };
+    if matches.is_null() {
+        return std::ptr::null();
+    }
+    let input = REGEX_META.with(|stored| {
+        stored
+            .borrow()
+            .get(&(matches as usize))
+            .map(|meta| meta.input.clone())
+    });
+    input
+        .and_then(|input| arena_c_string(&input))
+        .map_or(std::ptr::null(), |pointer| pointer.cast())
 }
 
 #[no_mangle]
@@ -633,8 +695,10 @@ pub unsafe extern "C" fn thaw_regex_exec_advance(
 /// otherwise -- a group that did not participate in the match (for example
 /// one inside an unmatched alternative) is reported as an empty string
 /// rather than `undefined`, since the native array element type is a plain
-/// `string`. `.index` and `.input` are not exposed either way. Returns a
-/// null pointer both when nothing matches and when `source`/`flags` fails
+/// `string`. For the non-global form the result's `.index`/`.input`/`.groups`
+/// metadata is recorded with `REGEX_META`, matching `RegExpBuiltinExec`;
+/// the global form exposes none of it, matching `.match()` with `g`. Returns
+/// a null pointer both when nothing matches and when `source`/`flags` fails
 /// to compile; the generated code distinguishes these only in that both
 /// report "no match" (`undefined`), matching what a caller observes for
 /// either case.
@@ -654,11 +718,33 @@ pub unsafe extern "C" fn thaw_regex_match(
     let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
     let global = flags.contains('g');
+    let mut meta = None;
     let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
         if global {
             regex.find_iter(&value)
         } else {
-            capture_strings(regex, &value)
+            match regex.captures(&value) {
+                Some(captures) => {
+                    let index = value[..captures.start].encode_utf16().count() as f64;
+                    let groups = regex
+                        .capture_names()
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(group_index, name)| {
+                            let name = name?;
+                            captures.get(group_index).map(|capture| {
+                                (
+                                    name.to_string(),
+                                    serde_json::Value::String(capture.to_string()),
+                                )
+                            })
+                        })
+                        .collect();
+                    meta = Some((serde_json::Value::Object(groups), index));
+                    captures.into_positional()
+                }
+                None => Vec::new(),
+            }
         }
     }) else {
         return std::ptr::null_mut();
@@ -666,7 +752,22 @@ pub unsafe extern "C" fn thaw_regex_match(
     if matches.is_empty() {
         return std::ptr::null_mut();
     }
-    arena_string_array(matches)
+    let result = arena_string_array(matches);
+    if !result.is_null() {
+        if let Some((groups, index)) = meta {
+            REGEX_META.with(|stored| {
+                stored.borrow_mut().insert(
+                    result as usize,
+                    RegexMatchMeta {
+                        groups,
+                        index,
+                        input: value.to_string(),
+                    },
+                );
+            });
+        }
+    }
+    result
 }
 
 /// Writes `pointers` into a fresh arena-allocated array of raw pointers
@@ -724,19 +825,53 @@ pub unsafe extern "C" fn thaw_regex_match_all(
         return std::ptr::null_mut();
     }
     let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
+        let names = regex.capture_names();
         regex
             .captures_iter(&value)
             .into_iter()
-            .map(RegexCaptures::into_positional)
+            .map(|captures| {
+                let index = value[..captures.start].encode_utf16().count() as f64;
+                let groups = names
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(group_index, name)| {
+                        let name = (*name)?;
+                        captures.get(group_index).map(|capture| {
+                            (
+                                name.to_string(),
+                                serde_json::Value::String(capture.to_string()),
+                            )
+                        })
+                    })
+                    .collect();
+                (
+                    captures.into_positional(),
+                    serde_json::Value::Object(groups),
+                    index,
+                )
+            })
             .collect::<Vec<_>>()
     }) else {
         return std::ptr::null_mut();
     };
     let mut inner_arrays = Vec::with_capacity(matches.len());
-    for captures in matches {
-        let inner = wrap_array_handle(arena_string_array(captures));
+    for (captures, groups, index) in matches {
+        let buffer = arena_string_array(captures);
+        let inner = wrap_array_handle(buffer);
         if inner.is_null() {
             return std::ptr::null_mut();
+        }
+        if !buffer.is_null() {
+            REGEX_META.with(|stored| {
+                stored.borrow_mut().insert(
+                    buffer as usize,
+                    RegexMatchMeta {
+                        groups,
+                        index,
+                        input: value.to_string(),
+                    },
+                );
+            });
         }
         inner_arrays.push(inner);
     }

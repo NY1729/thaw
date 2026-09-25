@@ -1559,6 +1559,30 @@ impl<'a> FnLowerer<'a> {
                     HirType::Array(_) | HirType::Tuple(_) if prop.sym == *"length" => {
                         Ok(HirExpr::ArrayLen(Box::new(obj)))
                     }
+                    // `RegExp.prototype.exec`/`String.prototype.match` result
+                    // arrays carry `.index`/`.input`/`.groups` as extra
+                    // properties (they're a plain `string[]` otherwise). The
+                    // runtime records them per result buffer; a plain string
+                    // array has no metadata, so these read as `-1`/null/empty.
+                    HirType::Array(element)
+                        if element.as_ref() == &HirType::Str
+                            && matches!(prop.sym.as_ref(), "groups" | "index" | "input") =>
+                    {
+                        Ok(match prop.sym.as_ref() {
+                            "groups" => HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_regex_exec_groups".into())),
+                                vec![obj],
+                            ),
+                            "index" => HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_regex_exec_index".into())),
+                                vec![obj],
+                            ),
+                            _ => HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_regex_exec_input".into())),
+                                vec![obj],
+                            ),
+                        })
+                    }
                     HirType::Str if prop.sym == *"length" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_string_length".to_string())),
                         vec![obj],
@@ -1759,6 +1783,28 @@ impl<'a> FnLowerer<'a> {
                             vec![unwrapped],
                         ),
                         ty,
+                    )
+                }
+                MemberProp::Ident(property)
+                    if property.sym == *"index" && element.as_ref() == &HirType::Str =>
+                {
+                    (
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_regex_exec_index".into())),
+                            vec![unwrapped],
+                        ),
+                        HirType::F64,
+                    )
+                }
+                MemberProp::Ident(property)
+                    if property.sym == *"input" && element.as_ref() == &HirType::Str =>
+                {
+                    (
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_regex_exec_input".into())),
+                            vec![unwrapped],
+                        ),
+                        HirType::Str,
                     )
                 }
                 MemberProp::Computed(computed) => {
