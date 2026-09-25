@@ -1333,6 +1333,31 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        // A receiver that's itself a call/new (`new C().x`, `factory().x`)
+        // can't be seen through by the class-getter dispatch above, which
+        // only recognizes identifier/`this` receivers -- so
+        // `new C().getter` used to fail with "object has no field".
+        // Lower the receiver once into a local and re-dispatch on that
+        // binding, so a class getter still fires and the receiver is
+        // evaluated exactly once (never once for the getter check and
+        // again for the ordinary read).
+        if matches!(member.obj.as_ref(), Expr::New(_) | Expr::Call(_)) {
+            if let MemberProp::Ident(_) = &member.prop {
+                let receiver = self.lower_member_receiver(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                let name = format!("__thaw_member_receiver_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), receiver_type.clone());
+                let mut rebound = member.clone();
+                *rebound.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    name.clone().into(),
+                    member.span,
+                ));
+                let value = self.lower_member_read(&rebound)?;
+                return self
+                    .wrap_call_argument_bindings(value, &[(name, receiver_type, receiver)]);
+            }
+        }
 
         match &member.prop {
             MemberProp::Computed(computed) => {
