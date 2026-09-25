@@ -564,6 +564,41 @@ fn compiles_captured_and_nested_arrow_functions() {
     assert_eq!(compile_and_run(source, "captured_arrow"), "42\n42\n");
 }
 
+/// A `function name(...) {...}` declared inside a function body or a block is
+/// lowered as a local closure: it captures the enclosing scope, can be
+/// self-recursive, and is visible to a nested declaration of its own.
+#[test]
+fn compiles_nested_function_declarations() {
+    let source = r#"
+        function outer(prefix: string): string {
+            function inner(suffix: string): string {
+                return prefix + suffix;
+            }
+            return inner("!");
+        }
+        function main(): void {
+            console.log(outer("hi"));
+            function factorial(n: number): number {
+                return n <= 1 ? 1 : n * factorial(n - 1);
+            }
+            console.log(factorial(5));
+            if (true) {
+                function blockScoped(): number { return 7; }
+                console.log(blockScoped());
+            }
+            function a(): number {
+                function b(): number { return 2; }
+                return b() + 1;
+            }
+            console.log(a());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_function_declarations"),
+        "hi!\n120\n7\n3\n"
+    );
+}
+
 #[test]
 fn immediately_invokes_a_returned_capturing_closure() {
     let source = r#"
