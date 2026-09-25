@@ -616,14 +616,59 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?
                         .into_int_value();
                 }
-                let payload = self
+                let mut payload = self
                     .builder
                     .build_load(
                         self.context.i64_type(),
                         payload_pointer,
                         "jit_union_payload",
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                // A JIT array member's payload is a tagged raw buffer
+                // (`buffer | 1`) or a handle cell; app array values are
+                // `{buffer, presence}` handles, so normalize it to a
+                // fresh handle whenever the runtime tag selects an array
+                // member.
+                if elements
+                    .iter()
+                    .any(|ty| matches!(ty, HirType::Array(_)))
+                {
+                    let normalized = self.compile_jit_array_result(payload)?;
+                    let normalized = self
+                        .builder
+                        .build_ptr_to_int(
+                            normalized,
+                            self.context.i64_type(),
+                            "jit_union_array_handle",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    for ty in elements.iter() {
+                        let HirType::Array(_) = ty else {
+                            continue;
+                        };
+                        let runtime = jit_union_member_tag(ty).unwrap();
+                        let selected = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                runtime_tag,
+                                self.context.i64_type().const_int(runtime, false),
+                                "jit_union_array_selected",
+                            )
+                            .map_err(|error| error.to_string())?;
+                        payload = self
+                            .builder
+                            .build_select(
+                                selected,
+                                normalized,
+                                payload,
+                                "jit_union_array_payload",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .into_int_value();
+                    }
+                }
                 let union_type = self.basic_type(return_type)?.into_struct_type();
                 let union = self
                     .builder
@@ -656,6 +701,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 if matches!(return_type, HirType::Array(_)) {
+                    // A direct array return has already had its
+                    // `ARRAY_RESULT_TAG` stripped by the JIT machine
+                    // (`thaw_jit`'s `returns_tagged_array`), so `pointer`
+                    // is the raw buffer to wrap.
                     self.compile_array_wrap(pointer)?.into()
                 } else {
                     pointer.into()

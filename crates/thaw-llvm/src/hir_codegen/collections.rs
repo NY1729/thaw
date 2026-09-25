@@ -58,6 +58,88 @@ impl<'ctx> HirCompiler<'ctx> {
         )
     }
 
+    /// Normalizes an `HirType::Array` value returned across the residual
+    /// JIT boundary into the app's `{buffer, presence}` handle. thaw-jit
+    /// represents an array as *either* a tagged raw buffer
+    /// (`buffer | ARRAY_RESULT_TAG`, tag bit `1`) *or* a handle cell
+    /// holding the buffer pointer -- see thaw-jit's `array_data`. App
+    /// array values are always handles, so both forms are unwrapped to
+    /// the raw `[length][elem...]` buffer and re-wrapped here; passing a
+    /// tagged buffer (or JIT handle) straight through made app presence
+    /// checks dereference the array length as a mask pointer.
+    fn compile_jit_array_result(
+        &mut self,
+        bits: IntValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let tag = self
+            .builder
+            .build_and(bits, i64_type.const_int(1, false), "jit_array_tag")
+            .map_err(|error| error.to_string())?;
+        let tagged = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                tag,
+                i64_type.const_zero(),
+                "jit_array_is_tagged",
+            )
+            .map_err(|error| error.to_string())?;
+        let tagged_buffer = self
+            .builder
+            .build_and(
+                bits,
+                i64_type.const_int(!1u64, false),
+                "jit_array_strip_tag",
+            )
+            .map_err(|error| error.to_string())?;
+        let tagged_buffer = self
+            .builder
+            .build_int_to_ptr(tagged_buffer, ptr_type, "jit_array_tagged_buffer")
+            .map_err(|error| error.to_string())?;
+        let guard = self
+            .builder
+            .build_alloca(i64_type, "jit_array_null_guard")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(guard, i64_type.const_zero())
+            .map_err(|error| error.to_string())?;
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                bits,
+                i64_type.const_zero(),
+                "jit_array_is_null",
+            )
+            .map_err(|error| error.to_string())?;
+        let handle_pointer = self
+            .builder
+            .build_select(
+                is_null,
+                guard,
+                self.builder
+                    .build_int_to_ptr(bits, ptr_type, "jit_array_handle")
+                    .map_err(|error| error.to_string())?,
+                "jit_array_handle_pointer",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let handle_buffer = self.compile_array_data(handle_pointer)?;
+        let buffer = self
+            .builder
+            .build_select(
+                tagged,
+                tagged_buffer,
+                handle_buffer,
+                "jit_array_buffer",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        self.compile_array_wrap(buffer)
+    }
+
     /// Loads the current raw `[length][elem...]` buffer pointer out of an
     /// array/tuple handle. See `compile_array_wrap`.
     fn compile_array_data(

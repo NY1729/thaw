@@ -417,9 +417,13 @@ extern "C" fn mutable_array_handle(value: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     };
+    // The app reads this boxed handle as its own `{buffer, presence}` array
+    // value (e.g. an array stored in a fixed-object field), so reserve the
+    // presence word and leave it null -- JIT arrays are always dense. The
+    // JIT itself only reads the buffer pointer in the first word.
     let handle = unsafe {
         allocate(
-            std::mem::size_of::<*mut u8>(),
+            std::mem::size_of::<*mut u8>() * 2,
             std::mem::align_of::<*mut u8>(),
         )
     };
@@ -427,7 +431,11 @@ extern "C" fn mutable_array_handle(value: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
         return 0.0;
     }
-    unsafe { handle.cast::<*const u8>().write(data) };
+    unsafe {
+        let slots = handle.cast::<*const u8>();
+        slots.write(data);
+        slots.add(1).write(std::ptr::null());
+    }
     f64::from_bits(handle as usize as u64)
 }
 
