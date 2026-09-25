@@ -355,22 +355,20 @@ impl<'a> FnLowerer<'a> {
         if bare {
             return Err("function mixes value-returning and bare `return` statements".into());
         }
-        let first = self.infer_expr_type(values[0])?;
-        if first == HirType::Dynamic {
-            return Ok(HirType::Dynamic);
-        }
-        for value in &values[1..] {
+        let mut members = Vec::new();
+        for value in &values {
             let ty = self.infer_expr_type(value)?;
             if ty == HirType::Dynamic {
                 return Ok(HirType::Dynamic);
             }
-            if ty != first {
-                return Err(format!(
-                    "function returns incompatible types {first:?} and {ty:?}"
-                ));
+            if !members.contains(&ty) {
+                members.push(ty);
             }
         }
-        Ok(first)
+        match members.len() {
+            1 => Ok(members.into_iter().next().unwrap()),
+            _ => Ok(HirType::Union(members)),
+        }
     }
 
     fn infer_generator_types(

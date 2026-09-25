@@ -56,42 +56,43 @@ fn infers_void_for_expression_bodied_console_log_arrow() {
     ));
 }
 
+/// An unannotated function whose `return` statements disagree on type
+/// infers a `Union` of the distinct types seen (matching real
+/// TypeScript's own inference for such a function -- it happily infers
+/// `number | string`, no error), rather than rejecting the function
+/// outright. See `infer_return_type` (`statements/narrowing.rs`).
 #[test]
-fn rejects_incompatible_return_types() {
-    let module = thaw_parser::parse_typescript(
-        "function choose(flag: boolean) { if (flag) return 1; return \"no\"; }",
-    )
-    .unwrap();
-    let error = lower_module(&module).unwrap_err();
-    assert!(
-        error.contains("incompatible types"),
-        "unexpected error: {error}"
+fn infers_a_union_return_type_for_disagreeing_return_statements() {
+    let program = lower(
+        "function choose(flag: boolean) { if (flag) return 1; return \"no\"; }
+         function main(): void { console.log(choose(true)); }",
     );
+    let choose = program
+        .functions
+        .iter()
+        .find(|function| function.name == "choose")
+        .expect("expected a lowered `choose` function");
+    assert_eq!(choose.ret, HirType::Union(vec![HirType::F64, HirType::Str]));
 }
 
-/// Sibling of `rejects_incompatible_return_types`, for a class method
-/// instead of a free function -- the fixed-point convergence loop
-/// (`module/pipeline.rs`) that resolves an unannotated return type
-/// tolerates *any* failure while converging (an ordinary out-of-order
-/// dependency looks identical to a genuine bug from the loop's own
-/// point of view), so a naive fix risked downgrading this into the far
-/// vaguer "cannot infer the return type... add an explicit return
-/// annotation" instead of the real, specific problem -- confirmed as a
-/// real regression against this exact test while implementing the
-/// convergence-loop tolerance fix, then fixed by re-attempting the
-/// actual offending declaration for real (propagating its honest error)
-/// before ever falling back to the generic message.
+/// Sibling of `infers_a_union_return_type_for_disagreeing_return_
+/// statements`, for a class method instead of a free function -- the
+/// fixed-point convergence loop (`module/pipeline.rs`) that resolves an
+/// unannotated return type re-reads the signature fresh on every
+/// re-lowering pass, so a method's own inferred `Union` converges the
+/// same way a free function's does, with no separate handling needed.
 #[test]
-fn rejects_incompatible_return_types_in_a_class_method() {
-    let module = thaw_parser::parse_typescript(
-        "class Choice { pick(flag: boolean) { if (flag) return 1; return \"no\"; } }",
-    )
-    .unwrap();
-    let error = lower_module(&module).unwrap_err();
-    assert!(
-        error.contains("incompatible types"),
-        "unexpected error: {error}"
+fn infers_a_union_return_type_for_a_class_method() {
+    let program = lower(
+        "class Choice { pick(flag: boolean) { if (flag) return 1; return \"no\"; } }
+         function main(): void { console.log(new Choice().pick(true)); }",
     );
+    let pick = program
+        .functions
+        .iter()
+        .find(|function| function.name.contains("pick"))
+        .expect("expected a lowered `Choice.pick` method");
+    assert_eq!(pick.ret, HirType::Union(vec![HirType::F64, HirType::Str]));
 }
 
 /// Genuinely unresolvable mutual recursion between two unannotated

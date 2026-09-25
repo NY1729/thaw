@@ -2325,10 +2325,10 @@ fn dynamic_return_type_convergence_tolerates_out_of_order_callers() {
 /// deliberately returns one uniform shape (`{value: number, done:
 /// boolean}` in both branches) rather than TS's own idiomatic
 /// discriminated-union `IteratorResult<T>` shape (`{value: T, done:
-/// false} | {value: undefined, done: true}`) -- the latter hits a
-/// separate, narrower, confirmed-but-unfixed gap in this compiler's
-/// return-type inference (no union-widening across divergent `return`
-/// statements), out of scope here.
+/// false} | {value: undefined, done: true}`) -- the latter now works
+/// too (return-type union inference), see
+/// `custom_symbol_iterator_returns_a_discriminated_iterator_result`
+/// below.
 #[test]
 fn custom_symbol_iterator_on_a_class_works_with_for_of() {
     let source = r#"
@@ -2362,5 +2362,56 @@ fn custom_symbol_iterator_on_a_class_works_with_for_of() {
     assert_eq!(
         compile_and_run(source, "custom_symbol_iterator_class_for_of"),
         "1\n2\n3\n4\n"
+    );
+}
+
+/// The literal idiomatic case the comment above used to defer: an
+/// unannotated method returning TS's own discriminated-union
+/// `IteratorResult<T>` shape (`{value: T, done: false}` on one branch,
+/// `{value: undefined, done: true}` on the other) instead of one
+/// uniform object shape -- now compiles and produces the right values
+/// (return-type union inference, `infer_return_type` in `statements/
+/// narrowing.rs`, plus the already-existing `lower_union_property_
+/// read` for reading `.value`/`.done` back off the union). Named
+/// `step` rather than `next` to go through an ordinary method call --
+/// `next`/`throw`/`return` are dispatched to generator-specific
+/// handling regardless of receiver, and separately, `for...of`'s own
+/// dispatch (`iterator_object_adapter`) still requires a single
+/// uniform object shape for a real `next()`'s return type, not yet a
+/// `Union` of shapes -- a narrower, still-open gap (see memory), not
+/// what this test is after.
+#[test]
+fn method_returns_a_discriminated_iterator_result_union() {
+    let source = r#"
+        class Range {
+            start: number;
+            end: number;
+            constructor(start: number, end: number) {
+                this.start = start;
+                this.end = end;
+            }
+            step() {
+                let current = this.start;
+                const end = this.end;
+                if (current < end) {
+                    this.start = current + 1;
+                    return { value: current, done: false };
+                }
+                return { value: undefined, done: true };
+            }
+        }
+        function main(): void {
+            const r = new Range(1, 3);
+            let result = r.step();
+            while (!result.done) {
+                console.log(result.value);
+                result = r.step();
+            }
+            console.log("done", result.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "method_discriminated_iterator_result_union"),
+        "1\n2\ndone undefined\n"
     );
 }
