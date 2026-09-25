@@ -76,6 +76,10 @@ unsafe fn thaw_string_to_locale_case(
 }
 
 #[no_mangle]
+/// `String.prototype.toLocaleLowerCase(locale)`.
+///
+/// # Safety
+/// `value` / `locale` must be null or valid NUL-terminated C strings.
 pub unsafe extern "C" fn thaw_string_to_locale_lower_case(
     value: *const c_char,
     locale: *const c_char,
@@ -84,6 +88,10 @@ pub unsafe extern "C" fn thaw_string_to_locale_lower_case(
 }
 
 #[no_mangle]
+/// `String.prototype.toLocaleUpperCase(locale)`.
+///
+/// # Safety
+/// `value` / `locale` must be null or valid NUL-terminated C strings.
 pub unsafe extern "C" fn thaw_string_to_locale_upper_case(
     value: *const c_char,
     locale: *const c_char,

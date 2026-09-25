@@ -244,13 +244,13 @@ pub unsafe extern "C" fn thaw_array_presence_tagged_sort(
         return presence;
     };
     let mask_len = if presence.is_null() { 0 } else { unsafe { presence.cast::<u64>().read() as usize } };
-    if presence.is_null() {
-        if mode == 0
+    if presence.is_null()
+        && (mode == 0
             || (mode == 1
-                && !(0..length).any(|index| unsafe { array.add(8 + index * 16).read() } == undefined_tag))
-        {
-            return presence;
-        }
+                && !(0..length)
+                    .any(|index| unsafe { array.add(8 + index * 16).read() } == undefined_tag)))
+    {
+        return presence;
     }
     if mask_len < length {
         let previous = presence;
@@ -2007,7 +2007,9 @@ pub unsafe extern "C" fn thaw_array_has_property(
     let Ok(index) = key.parse::<u32>() else {
         return 0;
     };
-    if key != index.to_string() || !unsafe { native_array_length(array) }.is_some_and(|length| (index as usize) < length) {
+    if key != index.to_string()
+        || unsafe { native_array_length(array) }.is_none_or(|length| (index as usize) >= length)
+    {
         return 0;
     }
     let index = index as usize;

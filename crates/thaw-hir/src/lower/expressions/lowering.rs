@@ -1981,7 +1981,7 @@ impl<'a> FnLowerer<'a> {
                         let actual = self.infer_expr_type(&value)?;
                         if let Some(expected) = &element_type {
                             if expected != &actual && expected != &HirType::Optional(Box::new(actual.clone()))
-                                && &actual != &HirType::Optional(Box::new(expected.clone())) {
+                                && actual != HirType::Optional(Box::new(expected.clone())) {
                                 if matches!(expected, HirType::Union(members) if members.contains(&actual))
                                     // A plain element following a `...spread`
                                     // of an `any[]` array -- `[...anyArr, 3]`

@@ -183,7 +183,10 @@ fn napi_non_finite_value(value: f64) -> Value {
     } else {
         "-Infinity"
     };
-    fields.insert("$__thaw_non_finite$".to_string(), Value::String(tag.to_string()));
+    fields.insert(
+        "$__thaw_non_finite$".to_string(),
+        Value::String(tag.to_string()),
+    );
     Value::Object(fields)
 }
 
@@ -2147,8 +2150,8 @@ pub extern "C" fn thaw_json_map_or_set_delete(
             .iter()
             .filter(|entry| {
                 let entry_key = entry.as_array().and_then(|pair| pair.first());
-                !entry_key
-                    .is_some_and(|entry_key| unsafe { thaw_json_object_is(entry_key, key) } != 0)
+                entry_key
+                    .is_none_or(|entry_key| unsafe { thaw_json_object_is(entry_key, key) } == 0)
             })
             .cloned()
             .collect();

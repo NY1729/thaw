@@ -2204,7 +2204,7 @@ impl<'a> FnLowerer<'a> {
                                 value = self.lower_array_index_operand(value)?;
                                 let ty = self.infer_expr_type(&value)?;
                                 if let Some(expected) = &element_type {
-                                    if expected != &ty && &ty != &HirType::Optional(Box::new(expected.clone())) {
+                                    if expected != &ty && ty != HirType::Optional(Box::new(expected.clone())) {
                                         return Err(format!(
                                             "`Array.of` element has type {ty:?}, expected {expected:?}"
                                         ));
