@@ -408,6 +408,170 @@ impl<'a> FnLowerer<'a> {
                         wrapper_args,
                     ));
                 }
+                // `.forEach()` on a `Map`/`Set` value stored in `any` --
+                // same rationale as `.get`/`.has`'s own `Json` branches
+                // (`map_set_methods.rs`): no static K/V to decode into,
+                // so this unwraps to the uniform `[key, value]` pairs
+                // `.entries()` already produces
+                // (`__thaw_json_map_or_set_entries_view` -- a Set's
+                // pairs are `[v, v]`) and invokes the callback once per
+                // pair with plain `any`/`Json` arguments, matching what
+                // a real dynamic `.forEach()` genuinely passes.
+                if property.sym == *"forEach"
+                    && self.peek_type_without_lowering(&member.obj) == Some(HirType::Json)
+                {
+                    let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err(
+                            "native `.forEach()` does not support spread arguments on a Map/Set"
+                                .into(),
+                        );
+                    }
+                    let [argument] = call.args.as_slice() else {
+                        return Err("native `.forEach()` expects exactly one argument".into());
+                    };
+                    let arity = match argument.expr.as_ref() {
+                        Expr::Arrow(arrow) => arrow.params.len(),
+                        Expr::Fn(function) => function.function.params.len(),
+                        Expr::Ident(ident) => {
+                            let name = self.resolve_binding(ident.sym.as_ref());
+                            let HirType::Function(params, _) = self
+                                .scope
+                                .get(&name)
+                                .ok_or_else(|| format!("unknown Map/Set forEach callback `{name}`"))?
+                            else {
+                                return Err(format!(
+                                    "Map/Set forEach callback `{name}` is not a function value"
+                                ));
+                            };
+                            params.len()
+                        }
+                        _ => {
+                            return Err(
+                                "Map/Set forEach callback must be an arrow or function value".into(),
+                            )
+                        }
+                    };
+                    if arity > 3 {
+                        return Err(format!(
+                            "Map/Set forEach callback accepts at most three parameters, got {arity}"
+                        ));
+                    }
+                    let available = [HirType::Json, HirType::Json, HirType::Json];
+                    let callback = self.lower_promise_callback(
+                        &argument.expr,
+                        &available[..arity],
+                        Some(&HirType::Void),
+                    )?;
+                    let callback_type = self.infer_expr_type(&callback)?;
+                    let HirType::Function(params, _) = &callback_type else {
+                        unreachable!("Map/Set forEach callback was validated as a function")
+                    };
+                    let params_len = params.len();
+
+                    let receiver_name = format!("__thaw_map_for_each_any_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let callback_name = format!("__thaw_map_for_each_any_callback_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let pairs_name = format!("__thaw_map_for_each_any_pairs_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let length_name = format!("__thaw_map_for_each_any_length_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let index_name = format!("__thaw_map_for_each_any_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let pair_name = format!("__thaw_map_for_each_any_pair_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let key_name = format!("__thaw_map_for_each_any_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let value_name = format!("__thaw_map_for_each_any_value_{}", self.next_binding);
+                    self.next_binding += 1;
+
+                    let receiver_type = HirType::Json;
+                    let pairs_type = HirType::Array(Box::new(HirType::Json));
+                    self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                    self.scope.insert(callback_name.clone(), callback_type.clone());
+                    self.scope.insert(pairs_name.clone(), pairs_type.clone());
+                    self.scope.insert(length_name.clone(), HirType::F64);
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    self.scope.insert(pair_name.clone(), HirType::Json);
+                    self.scope.insert(key_name.clone(), HirType::Json);
+                    self.scope.insert(value_name.clone(), HirType::Json);
+
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let available_vars = [var(&value_name), var(&key_name), var(&receiver_name)];
+                    let callback_call = HirExpr::Call(
+                        Box::new(var(&callback_name)),
+                        available_vars[..params_len].to_vec(),
+                    );
+
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(
+                            pairs_name.clone(),
+                            pairs_type.clone(),
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var(
+                                    "__thaw_json_map_or_set_entries_view".to_string(),
+                                )),
+                                vec![var(&receiver_name)],
+                            ),
+                        ),
+                        HirStmt::Let(
+                            length_name.clone(),
+                            HirType::F64,
+                            HirExpr::ArrayLen(Box::new(var(&pairs_name))),
+                        ),
+                        HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+                        HirStmt::While(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(var(&index_name)),
+                                Box::new(var(&length_name)),
+                            ),
+                            vec![
+                                HirStmt::Let(
+                                    pair_name.clone(),
+                                    HirType::Json,
+                                    HirExpr::TypedIndex(
+                                        Box::new(var(&pairs_name)),
+                                        Box::new(var(&index_name)),
+                                        HirType::Json,
+                                    ),
+                                ),
+                                HirStmt::Let(
+                                    key_name.clone(),
+                                    HirType::Json,
+                                    HirExpr::JsonIndex(
+                                        Box::new(var(&pair_name)),
+                                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                    ),
+                                ),
+                                HirStmt::Let(
+                                    value_name.clone(),
+                                    HirType::Json,
+                                    HirExpr::JsonIndex(
+                                        Box::new(var(&pair_name)),
+                                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                                    ),
+                                ),
+                                HirStmt::Expr(callback_call),
+                                HirStmt::Expr(HirExpr::Assign(
+                                    index_name.clone(),
+                                    Box::new(HirExpr::BinOp(
+                                        BinOp::Add,
+                                        Box::new(var(&index_name)),
+                                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                                    )),
+                                )),
+                            ],
+                        ),
+                        HirStmt::Return(None),
+                    ]);
+                    let bindings = vec![
+                        (receiver_name, receiver_type, receiver),
+                        (callback_name, callback_type, callback),
+                    ];
+                    return self.wrap_call_argument_bindings(body, &bindings);
+                }
                 if property.sym == *"forEach" && self.receiver_is_map_or_set(&member.obj) {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;

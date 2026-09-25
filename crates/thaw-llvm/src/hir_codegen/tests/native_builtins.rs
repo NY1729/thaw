@@ -3480,6 +3480,49 @@ fn compiles_map_or_set_keys_values_entries_for_any_typed_receivers() {
     );
 }
 
+/// `.forEach()`, the last piece of Stage A round17 didn't reach.
+/// Unwraps to the uniform `[key, value]` pairs `.entries()` already
+/// produces (`__thaw_json_map_or_set_entries_view` -- a Set's pairs
+/// are `[v, v]`) and invokes the callback per pair with plain
+/// `any`/`Json` arguments (Map: `(value, key, map)`, Set: `(value,
+/// value, set)`), matching a real dynamic `.forEach()`'s own untyped
+/// argument shape.
+///
+/// A real bug caught here, not by reasoning: the generated temporary
+/// binding names were first prefixed `__thaw_json_for_each_*`, and
+/// `compile_json_named_call`'s own dispatch gate matches *any* call
+/// name starting with `__thaw_json_` -- including the callback
+/// variable's own name once it became the callee of a plain closure
+/// call, not a JSON intrinsic at all. Renamed the temporaries to
+/// `__thaw_map_for_each_any_*` to get out of that prefix's way.
+#[test]
+fn compiles_map_or_set_for_each_for_any_typed_receivers() {
+    let source = r#"
+        function main(): void {
+            const m: any = new Map<string, number>([["a", 1], ["b", 2]]);
+            m.forEach((v: any, k: any, mm: any) => {
+                console.log(JSON.stringify([k, v, mm === m]));
+            });
+
+            const s: any = new Set<number>([10, 20, 30]);
+            s.forEach((v: any, k: any, ss: any) => {
+                console.log(JSON.stringify([v, k, ss === s]));
+            });
+
+            const m2: any = new Map<string, number>([["x", 1]]);
+            m2.forEach((v: any) => {
+                console.log(JSON.stringify(v));
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_or_set_for_each_any"),
+        "[\"a\",1,true]\n[\"b\",2,true]\n\
+         [10,10,true]\n[20,20,true]\n[30,30,true]\n\
+         1\n"
+    );
+}
+
 #[test]
 fn compiles_instanceof_array_and_promise() {
     // Same "not a known class" bug as `compiles_instanceof_and_size_
