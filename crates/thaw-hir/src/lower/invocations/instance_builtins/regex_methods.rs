@@ -60,6 +60,53 @@ impl<'a> FnLowerer<'a> {
         Err(format!("native `.{method}()` requires a RegExp {role}"))
     }
 
+    /// After `.test()`/`.exec()` compute their result on the decoded
+    /// `regex_type` snapshot (`receiver_name`, mutated in place by
+    /// `set_last_index` for a global/sticky pattern), an `any`-typed
+    /// receiver's `lastIndex` change lands only on that throwaway snapshot
+    /// -- unless the receiver is a plain local variable, in which case the
+    /// whole decoded regex (now carrying the updated `lastIndex`) can be
+    /// written back onto it as a fresh `__thaw_regexp__` sentinel, the
+    /// exact shape `coerce_to_declared` already builds when a real RegExp
+    /// crosses into `any` (`inference/coercions.rs`). A property-chain
+    /// receiver (or any other non-identifier expression) is a narrower,
+    /// documented limitation -- same precedent as Stage B's Map/Set
+    /// mutating methods (`map_set_methods.rs`) and round8's original scope
+    /// call on this exact gap.
+    fn wrap_regex_method_result_with_last_index_write_back(
+        &mut self,
+        member_obj: &Expr,
+        receiver_original_type: &HirType,
+        receiver_name: &str,
+        regex_type: &HirType,
+        method_result: HirExpr,
+        result_type: &HirType,
+    ) -> Result<HirExpr, String> {
+        if *receiver_original_type != HirType::Json {
+            return Ok(method_result);
+        }
+        let Expr::Ident(ident) = member_obj else {
+            return Ok(method_result);
+        };
+        let var_name = self.resolve_binding(ident.sym.as_ref());
+        let result_name = format!("__thaw_regex_last_index_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(result_name.clone(), result_type.clone());
+        let wrapped = self.wrap_native_value_as_json(
+            HirExpr::Var(receiver_name.to_string()),
+            regex_type.clone(),
+        )?;
+        let sentinel = HirExpr::JsonObjectLit(
+            vec![("__thaw_regexp__".to_string(), wrapped)],
+            HirType::Json,
+        );
+        Ok(HirExpr::Block(vec![
+            HirStmt::Let(result_name.clone(), result_type.clone(), method_result),
+            HirStmt::Expr(HirExpr::Assign(var_name, Box::new(sentinel))),
+            HirStmt::Return(Some(HirExpr::Var(result_name))),
+        ]))
+    }
+
     fn lower_native_regex_method(
         &mut self,
         member: &MemberExpr,
@@ -223,6 +270,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"test" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+                    let receiver_original_type = self.infer_expr_type(&receiver)?;
                     let regex_type = regex_object_type();
                     let receiver = self.coerce_regex_argument(&receiver, "test", "receiver")?;
                     let (arguments, spread_bindings) =
@@ -366,6 +414,14 @@ impl<'a> FnLowerer<'a> {
                         )),
                         Vec::new(),
                     );
+                    let result = self.wrap_regex_method_result_with_last_index_write_back(
+                        &member.obj,
+                        &receiver_original_type,
+                        &receiver_name,
+                        &regex_type,
+                        result,
+                        &HirType::Bool,
+                    )?;
                     let mut bindings = vec![(receiver_name, regex_type, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((value_name, HirType::Str, value));
@@ -373,6 +429,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"exec" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+                    let receiver_original_type = self.infer_expr_type(&receiver)?;
                     let regex_type = regex_object_type();
                     let receiver = self.coerce_regex_argument(&receiver, "exec", "receiver")?;
                     let (arguments, spread_bindings) =
@@ -543,11 +600,19 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Lambda(
                             captures,
                             Vec::new(),
-                            result_type,
+                            result_type.clone(),
                             Box::new(body),
                         )),
                         Vec::new(),
                     );
+                    let result = self.wrap_regex_method_result_with_last_index_write_back(
+                        &member.obj,
+                        &receiver_original_type,
+                        &receiver_name,
+                        &regex_type,
+                        result,
+                        &result_type,
+                    )?;
                     let mut bindings = vec![(receiver_name, regex_type, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((value_name, HirType::Str, value));
