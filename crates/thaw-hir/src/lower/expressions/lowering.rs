@@ -39,6 +39,8 @@ impl<'a> FnLowerer<'a> {
                 empty_channel(forced),
             ],
         );
+        let value = format!("__thaw_spread_value_{}", self.next_binding);
+        self.next_binding += 1;
         let body = HirExpr::Block(vec![
             HirStmt::Let(output.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
             HirStmt::Let(chunk.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
@@ -55,10 +57,39 @@ impl<'a> FnLowerer<'a> {
                         vec![HirStmt::Break],
                         Vec::new(),
                     ),
+                    // The producer's own resumption check (`lower_generator_
+                    // state_machine`, thaw-hir's `declarations.rs`) treats a
+                    // *non-empty* `values` capture as "a value is still
+                    // waiting to be collected" and short-circuits straight
+                    // back to it on the *next* call, without ever advancing
+                    // past it -- it never re-dispatches on `state`. A
+                    // resume() call's returned array chunk *is* that same
+                    // captured `values` array (returned by reference, not a
+                    // copy), so the caller is required to *drain* it (not
+                    // just read it) before calling again, exactly like
+                    // `for...of`'s `resume_generator`/`.next()`'s own
+                    // dispatch already do via `__thaw_array_shift`. Reading
+                    // via `ArrayConcat` alone (the original, buggy version
+                    // of this fix) never drained it, leaving `values`
+                    // permanently non-empty after the first yield and
+                    // hanging forever, re-yielding the same first value on
+                    // every subsequent call (a real, confirmed infinite-
+                    // loop/OOM bug -- see round20 in memory).
+                    HirStmt::Let(
+                        value.clone(),
+                        element.clone(),
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_shift".to_string())),
+                            vec![HirExpr::Var(chunk.clone())],
+                        ),
+                    ),
                     HirStmt::Expr(HirExpr::Assign(
                         output.clone(),
                         Box::new(HirExpr::ArrayConcat(
-                            vec![HirExpr::Var(output.clone()), HirExpr::Var(chunk.clone())],
+                            vec![
+                                HirExpr::Var(output.clone()),
+                                HirExpr::ArrayLit(vec![HirExpr::Var(value.clone())]),
+                            ],
                             element.clone(),
                         )),
                     )),

@@ -2098,6 +2098,45 @@ fn compiles_generator_next_results() {
     );
 }
 
+/// `[...aGenerator()]` -- a real, severe bug found via manual node-diff
+/// probing (not a test-suite regression): a resume() call's returned
+/// array chunk *is* the generator's own captured `values` array,
+/// returned by reference, not a copy (confirmed with `gdb` watchpoints
+/// on the producer's captured-variable memory across two builds with
+/// identical compiled producer code). The producer's own state machine
+/// (`lower_generator_state_machine`, thaw-hir's `declarations.rs`)
+/// treats a still-non-empty `values` as "a value is waiting, return it
+/// immediately" and never re-dispatches on `state` in that case -- so
+/// the caller is required to *drain* (not just read) the returned
+/// chunk before calling again. `for...of`'s `resume_generator` and
+/// `.next()`'s own dispatch both already do this via
+/// `__thaw_array_shift` (needed anyway, to extract the single yielded
+/// value); the array-spread collector originally only read via
+/// `ArrayConcat`, never draining `values` -- leaving it permanently
+/// non-empty after the first yield, which hung forever (confirmed via
+/// `ps -o rss=`: unbounded growth, ~650MB -> 4.8GB in 2 seconds) always
+/// re-yielding the first value. Fixed by shifting the chunk (extracting
+/// its one element) instead of reading it directly.
+#[test]
+fn compiles_array_spread_of_a_generator() {
+    let source = r#"
+        function* gen(): Generator<number> { yield 1; yield 2; yield 3; }
+        function* empty(): Generator<number> {}
+        function* one(): Generator<string> { yield "solo"; }
+        function main(): void {
+            console.log(JSON.stringify([...gen()]));
+            console.log(JSON.stringify([...empty()]));
+            console.log(JSON.stringify([...one()]));
+            console.log(JSON.stringify([0, ...gen(), 99]));
+            console.log(JSON.stringify([...gen(), ...gen()]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_spread_of_a_generator"),
+        "[1,2,3]\n[]\n[\"solo\"]\n[0,1,2,3,99]\n[1,2,3,1,2,3]\n"
+    );
+}
+
 #[test]
 fn generator_next_returns_the_generators_natural_completion_value() {
     let source = r#"
