@@ -1423,6 +1423,26 @@ fn compiles_map_and_set_constructors_with_initial_data() {
     );
 }
 
+/// A method called directly on a `new` expression
+/// (`new Map(...).get(...)`, `new Intl.NumberFormat(...).format(...)`) --
+/// both a native receiver and a live `JsValue` one.
+#[test]
+fn compiles_method_calls_chained_on_new() {
+    let source = r#"
+        function main(): void {
+            console.log(new Map<string, number>([["a", 1]]).get("a"));
+            console.log(new Set<number>([1, 2]).has(2));
+            console.log(new Map<string, number>([["a", 1]]).size);
+            console.log(new Intl.NumberFormat("en-US").format(1234.5));
+            console.log(new TextDecoder("utf-8").decode(new Uint8Array([104, 105])));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "method_calls_chained_on_new"),
+        "1\ntrue\n1\n1,234.5\nhi\n"
+    );
+}
+
 #[test]
 fn compiles_regex_match_all() {
     let source = r#"

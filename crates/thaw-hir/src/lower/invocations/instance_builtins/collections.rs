@@ -105,15 +105,29 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    fn receiver_is_map_or_set(&self, expr: &Expr) -> bool {
+    fn receiver_is_map_or_set(&mut self, expr: &Expr) -> bool {
+        // `peek_type_without_lowering` only recognizes a simple binding; a
+        // receiver that's itself a call/new (`new Map([...]).get(...)`) or a
+        // member chain is lowered (purely) and inferred instead, so the
+        // result can still dispatch to the native Map/Set path. Lowering a
+        // non-Map receiver here is discarded, not emitted, so the ordinary
+        // path re-lowering it below is safe.
+        let ty = match self.peek_type_without_lowering(expr) {
+            Some(ty) => ty,
+            None => match self.lower_expr(expr) {
+                Ok(value) => match self.infer_expr_type(&value) {
+                    Ok(ty) => ty,
+                    Err(_) => return false,
+                },
+                Err(_) => return false,
+            },
+        };
         matches!(
-            self.peek_type_without_lowering(expr),
-            Some(
-                HirType::Map(_, _)
-                    | HirType::WeakMap(_, _)
-                    | HirType::Set(_)
-                    | HirType::WeakSet(_)
-            )
+            ty,
+            HirType::Map(_, _)
+                | HirType::WeakMap(_, _)
+                | HirType::Set(_)
+                | HirType::WeakSet(_)
         )
     }
 
