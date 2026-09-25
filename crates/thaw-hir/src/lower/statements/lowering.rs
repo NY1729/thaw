@@ -1,6 +1,31 @@
 type GeneratorYieldEmission = (Vec<HirStmt>, Option<(HirExpr, HirType)>);
 
+/// Reads the `value`/`done` field off a `next()` result. A single object
+/// shape uses a plain `PropAccess`; a `Union` of object shapes (TypeScript's
+/// own discriminated `IteratorResult<T>`, reachable now that an unannotated
+/// function's divergent `return`s infer a union) goes through
+/// `lower_union_property_read`, which dispatches on the runtime tag.
+fn read_iterator_result_field(
+    lowerer: &mut FnLowerer<'_>,
+    result_name: &Symbol,
+    result_type: &HirType,
+    union_elements: &Option<Vec<HirType>>,
+    field: &str,
+) -> Option<HirExpr> {
+    match union_elements {
+        Some(elements) => lowerer
+            .lower_union_property_read(HirExpr::Var(result_name.clone()), elements, field)
+            .ok(),
+        None => Some(HirExpr::PropAccess(
+            Box::new(HirExpr::Var(result_name.clone())),
+            result_type.clone(),
+            field.to_string(),
+        )),
+    }
+}
+
 fn iterator_object_adapter(
+    lowerer: &mut FnLowerer<'_>,
     iterator: HirExpr,
     iterator_type: &HirType,
     iterator_name: Symbol,
@@ -17,20 +42,42 @@ fn iterator_object_adapter(
     if !params.is_empty() {
         return None;
     }
-    let HirType::Object(result_fields) = result_type.as_ref() else {
-        return None;
+    // Accept either a single `{ value, done }` object result or a union of
+    // them (a discriminated `IteratorResult<T>`): every member must expose a
+    // `value` field and a boolean `done`, and the yielded element type is the
+    // union of every member's `value` type.
+    let union_elements = match result_type.as_ref() {
+        HirType::Union(elements) if !elements.is_empty() => Some(elements.clone()),
+        _ => None,
     };
-    let value_type = result_fields
-        .iter()
-        .find_map(|(name, ty)| (name == "value").then_some(ty))?
-        .clone();
-    if result_fields
-        .iter()
-        .find_map(|(name, ty)| (name == "done").then_some(ty))
-        != Some(&HirType::Bool)
-    {
-        return None;
+    let members: Vec<&HirType> = match &union_elements {
+        Some(elements) => elements.iter().collect(),
+        None => vec![result_type.as_ref()],
+    };
+    let mut value_types = Vec::new();
+    for member in members {
+        let HirType::Object(result_fields) = member else {
+            return None;
+        };
+        let value = result_fields
+            .iter()
+            .find_map(|(name, ty)| (name == "value").then_some(ty))?
+            .clone();
+        if result_fields
+            .iter()
+            .find_map(|(name, ty)| (name == "done").then_some(ty))
+            != Some(&HirType::Bool)
+        {
+            return None;
+        }
+        if !value_types.contains(&value) {
+            value_types.push(value);
+        }
     }
+    let value_type = match value_types.as_slice() {
+        [single] => single.clone(),
+        _ => HirType::Union(value_types),
+    };
     let result_name = format!("{iterator_name}_result");
     let control = format!("{iterator_name}_control");
     let error = format!("{iterator_name}_error");
@@ -54,25 +101,32 @@ fn iterator_object_adapter(
             args,
         )
     };
-    let result_statements = |name: Symbol, call: HirExpr| {
-        vec![
-            HirStmt::Let(name.clone(), result_type.as_ref().clone(), call),
-            HirStmt::If(
-                HirExpr::PropAccess(
-                    Box::new(HirExpr::Var(name.clone())),
-                    result_type.as_ref().clone(),
-                    "done".into(),
+    let result_statements =
+        |lowerer: &mut FnLowerer<'_>, name: Symbol, call: HirExpr| -> Option<Vec<HirStmt>> {
+            let done = read_iterator_result_field(
+                lowerer,
+                &name,
+                result_type.as_ref(),
+                &union_elements,
+                "done",
+            )?;
+            let value = read_iterator_result_field(
+                lowerer,
+                &name,
+                result_type.as_ref(),
+                &union_elements,
+                "value",
+            )?;
+            Some(vec![
+                HirStmt::Let(name.clone(), result_type.as_ref().clone(), call),
+                HirStmt::If(
+                    done,
+                    vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
+                    Vec::new(),
                 ),
-                vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
-                Vec::new(),
-            ),
-            HirStmt::Return(Some(HirExpr::ArrayLit(vec![HirExpr::PropAccess(
-                Box::new(HirExpr::Var(name)),
-                result_type.as_ref().clone(),
-                "value".into(),
-            )]))),
-        ]
-    };
+                HirStmt::Return(Some(HirExpr::ArrayLit(vec![value]))),
+            ])
+        };
     let return_method = fields.iter().any(|(name, ty)| {
         name == "return"
             && matches!(ty, HirType::Function(params, result) if params.is_empty() && result.as_ref() == result_type.as_ref())
@@ -90,9 +144,10 @@ fn iterator_object_adapter(
         ),
         if throw_method {
             result_statements(
+                lowerer,
                 format!("{result_name}_throw"),
                 call_method("throw", vec![HirExpr::Var(error.clone())]),
-            )
+            )?
         } else {
             vec![HirStmt::Throw(HirExpr::Var(error.clone()))]
         },
@@ -101,6 +156,20 @@ fn iterator_object_adapter(
     let mut return_body = Vec::new();
     if return_method {
         let name = format!("{result_name}_return");
+        let done = read_iterator_result_field(
+            lowerer,
+            &name,
+            result_type.as_ref(),
+            &union_elements,
+            "done",
+        )?;
+        let value = read_iterator_result_field(
+            lowerer,
+            &name,
+            result_type.as_ref(),
+            &union_elements,
+            "value",
+        )?;
         return_body.extend([
             HirStmt::Let(
                 name.clone(),
@@ -108,32 +177,17 @@ fn iterator_object_adapter(
                 call_method("return", Vec::new()),
             ),
             HirStmt::If(
-                HirExpr::PropAccess(
-                    Box::new(HirExpr::Var(name.clone())),
-                    result_type.as_ref().clone(),
-                    "done".into(),
-                ),
+                done,
                 vec![
                     HirStmt::Expr(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_array_push".into())),
-                        vec![
-                            HirExpr::Var(returns.clone()),
-                            HirExpr::PropAccess(
-                                Box::new(HirExpr::Var(name.clone())),
-                                result_type.as_ref().clone(),
-                                "value".into(),
-                            ),
-                        ],
+                        vec![HirExpr::Var(returns.clone()), value.clone()],
                     )),
                     HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))),
                 ],
                 Vec::new(),
             ),
-            HirStmt::Return(Some(HirExpr::ArrayLit(vec![HirExpr::PropAccess(
-                Box::new(HirExpr::Var(name)),
-                result_type.as_ref().clone(),
-                "value".into(),
-            )]))),
+            HirStmt::Return(Some(HirExpr::ArrayLit(vec![value]))),
         ]);
     }
     return_body.push(HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))));
@@ -147,9 +201,10 @@ fn iterator_object_adapter(
         Vec::new(),
     ));
     producer_body.extend(result_statements(
+        lowerer,
         result_name,
         call_method("next", Vec::new()),
-    ));
+    )?);
     let producer = HirExpr::Lambda(
         vec![HirParam {
             name: iterator_name.clone(),
@@ -530,7 +585,7 @@ impl<'a> FnLowerer<'a> {
                 let name = format!("__thaw_iterator_{}", self.next_binding);
                 self.next_binding += 1;
                 if let Some((producer, producer_type)) =
-                    iterator_object_adapter(value.clone(), &value_type, name)
+                    iterator_object_adapter(self, value.clone(), &value_type, name)
                 {
                     value = producer;
                     value_type = producer_type;
@@ -1336,7 +1391,7 @@ impl<'a> FnLowerer<'a> {
                         let name = format!("__thaw_iterator_{}", self.next_binding);
                         self.next_binding += 1;
                         if let Some((producer, producer_type)) =
-                            iterator_object_adapter(values.clone(), &values_type, name)
+                            iterator_object_adapter(self, values.clone(), &values_type, name)
                         {
                             values = producer;
                             values_type = producer_type;
