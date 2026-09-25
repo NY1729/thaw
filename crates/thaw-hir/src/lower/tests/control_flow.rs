@@ -69,6 +69,52 @@ fn rejects_incompatible_return_types() {
     );
 }
 
+/// Sibling of `rejects_incompatible_return_types`, for a class method
+/// instead of a free function -- the fixed-point convergence loop
+/// (`module/pipeline.rs`) that resolves an unannotated return type
+/// tolerates *any* failure while converging (an ordinary out-of-order
+/// dependency looks identical to a genuine bug from the loop's own
+/// point of view), so a naive fix risked downgrading this into the far
+/// vaguer "cannot infer the return type... add an explicit return
+/// annotation" instead of the real, specific problem -- confirmed as a
+/// real regression against this exact test while implementing the
+/// convergence-loop tolerance fix, then fixed by re-attempting the
+/// actual offending declaration for real (propagating its honest error)
+/// before ever falling back to the generic message.
+#[test]
+fn rejects_incompatible_return_types_in_a_class_method() {
+    let module = thaw_parser::parse_typescript(
+        "class Choice { pick(flag: boolean) { if (flag) return 1; return \"no\"; } }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(
+        error.contains("incompatible types"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Genuinely unresolvable mutual recursion between two unannotated
+/// functions (neither has a non-recursive call site to bootstrap a
+/// concrete type from) still gives the honest "cannot infer... add an
+/// explicit return annotation" fallback -- confirms the convergence-
+/// loop tolerance fix (above) doesn't paper over a real, permanent
+/// non-convergence by looping forever or silently accepting a bogus
+/// type.
+#[test]
+fn mutual_recursion_between_unannotated_functions_reports_a_clear_error() {
+    let module = thaw_parser::parse_typescript(
+        "function isEven(n: number) { if (n === 0) return true; return isOdd(n - 1); }
+         function isOdd(n: number) { if (n === 0) return false; return isEven(n - 1); }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(
+        error.contains("cannot infer the return type"),
+        "unexpected error: {error}"
+    );
+}
+
 #[test]
 fn lowers_boolean_logical_operators_to_short_circuit_closures() {
     let program = lower(
