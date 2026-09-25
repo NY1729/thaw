@@ -2469,6 +2469,31 @@ impl<'a> FnLowerer<'a> {
                                 );
                                 (source, array_type, element_type)
                             }
+                            // A real, statically-typed `Generator<T>`
+                            // producer (as opposed to the `JsValue` case
+                            // just above, a *dynamic* npm-class iterator).
+                            // Reuses `collect_generator_for_array_spread`
+                            // (`expressions/lowering.rs`, round20/21's own
+                            // fixed `[...generator()]` collector) directly
+                            // -- its own drain-to-completion loop already
+                            // produces exactly the array `Array.from`
+                            // wants, element type and all.
+                            HirType::Function(..) if is_generator_producer_type(&source_type) => {
+                                match self
+                                    .collect_generator_for_array_spread(source.clone(), &source_type)?
+                                {
+                                    Some((collected, element_type)) => {
+                                        let array_type =
+                                            HirType::Array(Box::new(element_type.clone()));
+                                        (collected, array_type, element_type)
+                                    }
+                                    None => {
+                                        return Err(format!(
+                                            "native `Array.from` requires a homogeneous array, string, Map, Set, or Generator, got {source_type:?}"
+                                        ))
+                                    }
+                                }
+                            }
                             other => {
                                 return Err(format!(
                                     "native `Array.from` requires a homogeneous array, string, Map, or Set, got {other:?}"
