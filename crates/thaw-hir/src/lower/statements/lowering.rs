@@ -1007,6 +1007,27 @@ impl<'a> FnLowerer<'a> {
             Stmt::Block(block) => self.lower_scoped_stmts(&block.stmts),
             Stmt::Decl(Decl::Var(var_decl)) => self.lower_var_decl(var_decl),
             Stmt::Decl(Decl::Using(using_decl)) => self.lower_using_decl(using_decl),
+            // A nested `function name(...) {...}` declaration. Top-level ones
+            // are hoisted into the module's function table; an inner one is
+            // lowered in place as a local closure, capturing the enclosing
+            // scope the same way `let name = function name(...) {...}` does
+            // (reusing the recursive/named function-expression path).
+            Stmt::Decl(Decl::Fn(fn_decl)) => {
+                let name = fn_decl.ident.sym.to_string();
+                let expression = swc_ecma_ast::FnExpr {
+                    ident: Some(fn_decl.ident.clone()),
+                    function: fn_decl.function.clone(),
+                };
+                if let Some((hir_name, ty, value)) =
+                    self.lower_recursive_function_expression(&name, &expression, None)?
+                {
+                    return Ok(vec![HirStmt::Let(hir_name, ty, value)]);
+                }
+                let value = self.lower_expr(&Expr::Fn(expression))?;
+                let ty = self.infer_expr_type(&value)?;
+                let hir_name = self.bind_local(&name, ty.clone());
+                Ok(vec![HirStmt::Let(hir_name, ty, value)])
+            }
 
             Stmt::If(if_stmt) => {
                 let narrowing = self.optional_undefined_narrowing(&if_stmt.test);
