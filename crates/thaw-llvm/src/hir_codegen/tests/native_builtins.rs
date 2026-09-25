@@ -3475,6 +3475,45 @@ fn any_typed_regex_persists_last_index_across_calls() {
     );
 }
 
+/// A closure that mutates a captured variable and is constructed *only*
+/// while compiling a `while` loop's own condition (not its body) used to
+/// see that variable "freeze" at its pre-loop value: `compile_while`
+/// compiles the body before the condition, and once the condition's
+/// closure needed the mutated variable promoted to a shared arena cell
+/// for the first time, the promotion machinery treated `header_bb` like
+/// any other one-shot compile site and re-snapshotted the still-stale
+/// original variable at the top of *every* iteration -- discarding the
+/// previous iteration's write before anything ever read it back. Since
+/// `header_bb` is actually re-entered every iteration (unlike a Lambda
+/// compiled once outside any loop), that capture needs the same
+/// preheader-hoisted, load-once treatment `loop_promotion_scopes`
+/// already gives closures built while compiling the body. Concretely:
+/// `any`-typed RegExp `.exec()`'s `lastIndex` write-back
+/// (`wrap_regex_method_result_with_last_index_write_back`) is exactly
+/// such a closure, and the canonical `while ((m = re.exec(s)) !== null)`
+/// idiom is exactly this shape -- so this used to loop forever, always
+/// reporting the first match, for an `any`-typed pattern (a *statically*
+/// typed pattern was unaffected, see `compiles_regex_exec_last_index_
+/// state`, since it never needs a captured-variable write-back at all).
+#[test]
+fn any_typed_regex_exec_advances_inside_a_while_condition() {
+    let source = r#"
+        function main(): void {
+            const re: any = /\d+/g;
+            const s = "7 8 9";
+            let m;
+            while ((m = re.exec(s)) !== null) {
+                console.log(m[0]);
+            }
+            console.log("done");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_typed_regex_exec_while_condition"),
+        "7\n8\n9\ndone\n"
+    );
+}
+
 #[test]
 fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
     // A `Date` stored in `any` already round-trips through QuickJS

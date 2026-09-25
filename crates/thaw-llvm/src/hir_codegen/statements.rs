@@ -292,7 +292,6 @@ impl<'ctx> HirCompiler<'ctx> {
             variables_before_body.keys().cloned().collect(),
         ));
         let body_terminated = self.compile_block(body)?;
-        self.loop_promotion_scopes.pop();
         self.loop_stack.pop();
         if !body_terminated {
             self.builder
@@ -314,7 +313,18 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         self.builder.position_at_end(header_bb);
+        // The condition block, like the body, is re-entered on every
+        // iteration via the backward branch below -- so a closure built
+        // while compiling `cond` that captures a pre-loop variable needs
+        // the same loop-promotion treatment as one built in the body
+        // (`loop_promotion_scopes` must still be active here). Otherwise
+        // a mutating capture (e.g. `any`-typed RegExp `.exec()`'s
+        // `lastIndex` write-back) gets re-snapshotted from the
+        // still-stale original variable at the top of every iteration,
+        // discarding the previous iteration's write before it's ever
+        // read back.
         let cond_val = self.compile_expr(cond)?.into_int_value();
+        self.loop_promotion_scopes.pop();
         self.builder
             .build_conditional_branch(cond_val, body_bb, after_bb)
             .map_err(|e| e.to_string())?;
