@@ -1147,6 +1147,16 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_regex_exec_index",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_regex_exec_input",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_regex_exec_advance",
             f64_type.fn_type(
                 &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into()],

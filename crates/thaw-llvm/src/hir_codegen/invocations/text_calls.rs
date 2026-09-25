@@ -327,6 +327,40 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("RegExp groups returned no value".into());
             }
+            "__thaw_regex_exec_index" => {
+                let [matches] = args else {
+                    return Err("RegExp index expects one operand".into());
+                };
+                let matches = self.compile_expr(matches)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_regex_exec_index").unwrap(),
+                        &[matches.into()],
+                        "regex_exec_index",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("RegExp index returned no value".into());
+            }
+            "__thaw_regex_exec_input" => {
+                let [matches] = args else {
+                    return Err("RegExp input expects one operand".into());
+                };
+                let matches = self.compile_expr(matches)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_regex_exec_input").unwrap(),
+                        &[matches.into()],
+                        "regex_exec_input",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("RegExp input returned no value".into());
+            }
             "__thaw_regex_exec_advance" => {
                 let [value, source, flags, last_index] = args else {
                     return Err("RegExp.exec lastIndex advance expects four operands".into());

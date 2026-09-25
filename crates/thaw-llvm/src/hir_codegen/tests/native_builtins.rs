@@ -1781,6 +1781,36 @@ fn compiles_regex_exec_named_groups() {
     );
 }
 
+/// `exec`/`match`/`matchAll` result arrays expose `.index`/`.input`/`.groups`
+/// on the narrowed (non-optional) receiver too, not only through `?.`.
+#[test]
+fn compiles_regex_match_index_and_input() {
+    let source = r#"
+        function main(): void {
+            const match = /(?<word>[a-z]+)-(\d+)/.exec("xx item-42 yy");
+            if (match !== null) {
+                console.log(match.index);
+                console.log(match.input);
+                console.log(JSON.stringify(match.groups));
+                console.log(match[0], match[1], match[2]);
+            }
+            const found = "xx item-42 yy".match(/(?<word>[a-z]+)-(\d+)/);
+            if (found !== null) {
+                console.log(found.index);
+                console.log(found.input);
+            }
+            const all = "a1 b2".matchAll(/(?<letter>[a-z])(\d)/g);
+            for (const item of all) {
+                console.log(item.index, item[1], item[2], JSON.stringify(item.groups));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_match_index_and_input"),
+        "3\nxx item-42 yy\n{\"word\":\"item\"}\nitem-42 item 42\n3\nxx item-42 yy\n0 a 1 {\"letter\":\"a\"}\n3 b 2 {\"letter\":\"b\"}\n"
+    );
+}
+
 #[test]
 fn compiles_signed_bigint_arithmetic() {
     let source = r#"
