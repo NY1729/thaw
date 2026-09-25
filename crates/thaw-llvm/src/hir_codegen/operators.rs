@@ -212,7 +212,11 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_get_prototype"
                         | "__thaw_json_set_prototype"
                         | "__thaw_json_map_or_set_entries"
-                        | "__thaw_json_map_or_set_get" => return Some(HirType::Json),
+                        | "__thaw_json_map_or_set_get"
+                        | "__thaw_json_map_or_set_set"
+                        | "__thaw_json_map_or_set_add"
+                        | "__thaw_json_map_or_set_delete"
+                        | "__thaw_json_map_or_set_clear" => return Some(HirType::Json),
                         // `Object.keys`/`Object.getOwnPropertyNames`/
                         // `Reflect.ownKeys` on a `Json`/`Dictionary`/
                         // array receiver, and the array-receiver variant

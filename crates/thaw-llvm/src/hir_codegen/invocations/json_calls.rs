@@ -187,6 +187,63 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_json_map_or_set_set" => {
+                let [value, key, new_value] = args else {
+                    return Err("__thaw_json_map_or_set_set expects three arguments".into());
+                };
+                let value = self.compile_expr(value)?;
+                let key = self.compile_expr(key)?;
+                let new_value = self.compile_expr(new_value)?;
+                let function = self.module.get_function("thaw_json_map_or_set_set").unwrap();
+                return self
+                    .builder
+                    .build_call(
+                        function,
+                        &[value.into(), key.into(), new_value.into()],
+                        "json_map_or_set_set",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "thaw_json_map_or_set_set did not return a value".into());
+            }
+            "__thaw_json_map_or_set_add" => {
+                let [value, element] = args else {
+                    return Err("__thaw_json_map_or_set_add expects two arguments".into());
+                };
+                let value = self.compile_expr(value)?;
+                let element = self.compile_expr(element)?;
+                let function = self.module.get_function("thaw_json_map_or_set_add").unwrap();
+                return self
+                    .builder
+                    .build_call(function, &[value.into(), element.into()], "json_map_or_set_add")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "thaw_json_map_or_set_add did not return a value".into());
+            }
+            "__thaw_json_map_or_set_delete" => {
+                let [value, key] = args else {
+                    return Err("__thaw_json_map_or_set_delete expects two arguments".into());
+                };
+                let value = self.compile_expr(value)?;
+                let key = self.compile_expr(key)?;
+                let function = self.module.get_function("thaw_json_map_or_set_delete").unwrap();
+                return self
+                    .builder
+                    .build_call(function, &[value.into(), key.into()], "json_map_or_set_delete")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "thaw_json_map_or_set_delete did not return a value".into());
+            }
+            "__thaw_json_map_or_set_clear" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_map_or_set_clear",
+                    args,
+                    "Map/Set clear",
+                )
+            }
             "__thaw_json_stringify_number_space" => {
                 let [value, space] = args else {
                     return Err("JSON.stringify expects value and number space".into());

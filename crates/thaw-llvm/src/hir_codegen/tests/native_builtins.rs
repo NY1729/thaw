@@ -3523,6 +3523,87 @@ fn compiles_map_or_set_for_each_for_any_typed_receivers() {
     );
 }
 
+/// Stage B: `.set()`/`.add()`/`.delete()`/`.clear()` on an `any`-typed
+/// `Map`/`Set` -- the mutating methods Stage A (rounds 16-18) left as
+/// read-only. `Json`/`any` values in this compiler are snapshots, not
+/// references, so each of these computes a whole new sentinel object
+/// (`thaw-std/json.rs`'s `thaw_json_map_or_set_set`/`_add`/`_delete`/
+/// `_clear`) and writes it straight back onto the receiver's own local
+/// binding -- only supported when the receiver is a plain identifier
+/// (a bare local variable), not a property chain, per the plan's own
+/// scope line (`~/.claude/plans/proud-nibbling-whisper.md`); a closure
+/// capturing a local variable retains that local's real storage cell
+/// (`allocate_lambda_environment`, thaw-llvm's `closures.rs`), which is
+/// what makes the write-back genuinely visible to every later reader of
+/// the same variable, not just a copy inside the method call itself.
+#[test]
+fn compiles_map_or_set_mutating_methods_for_any_typed_receivers() {
+    let source = r#"
+        function main(): void {
+            const m: any = new Map<string, number>([["a", 1]]);
+            const setReturnedSelf = m.set("b", 2) === m;
+            console.log(setReturnedSelf);
+            console.log(JSON.stringify([...m.entries()]));
+            m.set("a", 99);
+            console.log(JSON.stringify([...m.entries()]));
+
+            const s: any = new Set<number>([1, 2]);
+            const addReturnedSelf = s.add(3) === s;
+            console.log(addReturnedSelf);
+            s.add(2);
+            console.log(JSON.stringify([...s.values()]));
+
+            console.log(m.delete("a"));
+            console.log(m.delete("zzz"));
+            console.log(JSON.stringify([...m.entries()]));
+
+            console.log(s.delete(2));
+            console.log(JSON.stringify([...s.values()]));
+
+            m.clear();
+            console.log(JSON.stringify([...m.entries()]));
+            s.clear();
+            console.log(JSON.stringify([...s.values()]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_or_set_mutating_any"),
+        "true\n\
+         [[\"a\",1],[\"b\",2]]\n\
+         [[\"a\",99],[\"b\",2]]\n\
+         true\n\
+         [1,2,3]\n\
+         true\n\
+         false\n\
+         [[\"b\",2]]\n\
+         true\n\
+         [1,3]\n\
+         []\n\
+         []\n"
+    );
+}
+
+/// `.set()` on a `Map` stored in `any` behind a property chain (not a
+/// bare local variable) is a documented, narrower limitation, not a
+/// silent no-op or a crash -- see the doc comment on
+/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`.
+#[test]
+fn map_set_on_an_any_typed_property_chain_receiver_errors_clearly() {
+    let source = r#"
+        function main(): void {
+            const holder: { m: any } = { m: new Map<string, number>([["a", 1]]) };
+            holder.m.set("b", 2);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let error =
+        thaw_hir::lower_module(&module).expect_err("property-chain receiver should error");
+    assert!(
+        error.contains("plain local variable"),
+        "unexpected error: {error}"
+    );
+}
+
 #[test]
 fn compiles_instanceof_array_and_promise() {
     // Same "not a known class" bug as `compiles_instanceof_and_size_
