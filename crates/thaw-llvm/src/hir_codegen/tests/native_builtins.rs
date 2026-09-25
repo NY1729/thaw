@@ -3428,6 +3428,58 @@ fn compiles_map_or_set_read_only_methods_for_any_typed_receivers() {
     );
 }
 
+/// `.keys()`/`.values()`/`.entries()`, the rest of Stage A round16 left
+/// undone ("not implemented this round only for lack of time"). Each
+/// eagerly returns a plain `any[]` (`thaw_json_map_or_set_keys`/
+/// `_values`/`_entries_view`, thaw-std's `json.rs`) rather than a real
+/// lazy iterator object the way the statically-typed case's `.keys()`/
+/// etc. do -- an accepted "ponytail" simplification (see that file's
+/// own doc comment), good enough for `for...of`/spread, which only
+/// need something iterable.
+///
+/// A real, severe bug caught here, not by reasoning alone (an hour of
+/// dead-end hypotheses about type-registration tables, binding
+/// wrappers, and dispatch routing all turned out to be red herrings):
+/// the very first working version of this fix **segfaulted**.
+/// `gdb`'s disassembly at the crash site showed a *double*
+/// dereference of the returned buffer pointer -- `Array`/`Tuple`
+/// values in this compiler are always a one-word "handle" (a pointer
+/// *to* the real `[length][elem...]` buffer, matching thaw-llvm's own
+/// `compile_array_wrap`/thaw-std's sibling `wrap_array_handle`, see
+/// their own doc comments), and every *other* `Array`-returning
+/// intrinsic's own codegen dispatch (`__thaw_json_values`, the exact
+/// function this one was modeled after) explicitly wraps its raw
+/// buffer pointer with `self.compile_array_wrap(result)?` after the
+/// call -- a step this fix's own dispatch (`json_calls.rs`) had
+/// omitted, since the *other* new intrinsics added in this same round
+/// (`.get`/`.has`, both scalar-returning) genuinely didn't need it,
+/// and neither did the `F64`-returning `__thaw_json_date_timestamp`
+/// this one was *actually* copy-pasted from instead.
+#[test]
+fn compiles_map_or_set_keys_values_entries_for_any_typed_receivers() {
+    let source = r#"
+        function main(): void {
+            const m: any = new Map<string, number>([["a", 1], ["b", 2]]);
+            console.log(JSON.stringify([...m.keys()]));
+            console.log(JSON.stringify([...m.values()]));
+            for (const [k, v] of m.entries()) {
+                console.log(k, v);
+            }
+
+            const s: any = new Set<number>([1, 2, 3]);
+            console.log(JSON.stringify([...s.keys()]));
+            console.log(JSON.stringify([...s.values()]));
+            for (const [a, b] of s.entries()) {
+                console.log(a, b);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_or_set_keys_values_entries_any"),
+        "[\"a\",\"b\"]\n[1,2]\na 1\nb 2\n[1,2,3]\n[1,2,3]\n1 1\n2 2\n3 3\n"
+    );
+}
+
 #[test]
 fn compiles_instanceof_array_and_promise() {
     // Same "not a known class" bug as `compiles_instanceof_and_size_

@@ -127,6 +127,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     "JSON map/set entries",
                 )
             }
+            "__thaw_json_map_or_set_keys" => {
+                let result = self
+                    .compile_single_arg_call("thaw_json_map_or_set_keys", args, "Map/Set keys")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_json_map_or_set_values" => {
+                let result = self
+                    .compile_single_arg_call("thaw_json_map_or_set_values", args, "Map/Set values")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_json_map_or_set_entries_view" => {
+                let result = self
+                    .compile_single_arg_call(
+                        "thaw_json_map_or_set_entries_view",
+                        args,
+                        "Map/Set entries",
+                    )?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
             "__thaw_json_map_or_set_get" => {
                 let [value, key] = args else {
                     return Err("__thaw_json_map_or_set_get expects two arguments".into());

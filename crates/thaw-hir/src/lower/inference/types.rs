@@ -1854,6 +1854,11 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Json)
                     }
                     "__thaw_json_map_or_set_has" => return Ok(HirType::Bool),
+                    "__thaw_json_map_or_set_keys"
+                    | "__thaw_json_map_or_set_values"
+                    | "__thaw_json_map_or_set_entries_view" => {
+                        return Ok(HirType::Array(Box::new(HirType::Json)))
+                    }
                     "__thaw_json_object_is"
                     | "__thaw_json_object_is_number"
                     | "__thaw_json_object_is_string"
