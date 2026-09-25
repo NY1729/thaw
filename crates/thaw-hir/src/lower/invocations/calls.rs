@@ -759,6 +759,19 @@ impl<'a> FnLowerer<'a> {
                             }),
                         _ => None,
                     };
+                    // A live `JsValue` receiver that only became visible by
+                    // lowering it (``new Intl.NumberFormat(...).format(...)``,
+                    // a chained dynamic call) has no compiled field table;
+                    // dispatch to the dynamic method call the same way a
+                    // peekable `JsValue` binding already does above.
+                    if callable.is_none() && object_ty == HirType::JsValue {
+                        return self.lower_dynamic_value_method_call(
+                            &member.obj,
+                            &property,
+                            &call.args,
+                            expected_return_hint.as_ref(),
+                        );
+                    }
                     if let Some((params, _, rest, optional)) = callable {
                         // Compile-time marker: keep ordinary function-valued
                         // properties distinct from receiver-aware methods.
@@ -2344,7 +2357,6 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &argument_bindings);
         }
 
-        let mut args = args;
         let lowered_name = if let Some(types) = generic_types
             .as_ref()
             .filter(|types| !types.contains(&HirType::Dynamic))
