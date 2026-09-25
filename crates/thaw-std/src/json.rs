@@ -1946,9 +1946,13 @@ fn regexp_wrapper_property(value: &Value, key: &str) -> Option<Value> {
 /// element/entry back into a native `K`/`V` (which the wrapper alone
 /// can't do -- `Map<K, V>`/`Set<T>` are generic, and a bare `Json`-typed
 /// receiver carries no record of what `K`/`V` originally were, unlike
-/// `RegExp`'s fixed `{source, flags, lastIndex}` shape -- so full method
-/// dispatch, `.get()`/`.set()`/`.has()`/iteration, stays unsupported;
-/// `.size` alone just needs the wrapped array's length).
+/// `RegExp`'s fixed `{source, flags, lastIndex}` shape -- so full,
+/// generic method dispatch (`new HirType::Map`/`Set` reconstruction)
+/// stays out of reach; `.size` alone just needs the wrapped array's
+/// length. (Read-only methods that only need the *array itself*, not
+/// a real reconstructed `Map`/`Set`, are a separate story -- see
+/// `thaw_json_map_or_set_entries`/`thaw_json_map_or_set_get`/
+/// `thaw_json_map_or_set_has`, below.)
 fn map_or_set_wrapper_size(value: &Value) -> Option<Value> {
     let fields = value.as_object()?;
     let entries = fields
@@ -1956,6 +1960,113 @@ fn map_or_set_wrapper_size(value: &Value) -> Option<Value> {
         .or_else(|| fields.get("__thaw_set_values__"))?
         .as_array()?;
     Some(Value::Number(entries.len().into()))
+}
+
+/// True when `value` is `Map`-shaped (holds `__thaw_map_entries__`, an
+/// array of `[key, value]` pairs) rather than `Set`-shaped -- most
+/// Stage A read-only methods below (`.get`/`.keys`/`.values`/
+/// `.entries`) need to know which of the two conventions applies,
+/// since the *shape* of the wrapped array is the same JSON array either
+/// way but its *meaning* differs (a flat list of values for a `Set`, a
+/// list of pairs for a `Map`).
+fn is_map_wrapper(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|fields| fields.contains_key("__thaw_map_entries__"))
+}
+
+/// The plain JSON array underlying a `Map`/`Set` value stored in an
+/// `any`-typed slot -- `for (const x of anyMapOrSet)` and every Stage A
+/// read-only method below build on this single unwrap. Returns a clone
+/// of `value` itself, unchanged, for anything that isn't one of the two
+/// sentinel shapes (matching this file's established "degrade instead
+/// of crash" policy) -- a `for...of` over an ordinary `Json` array is
+/// already supported on its own, so this transparently extends that
+/// same path to a wrapped one without needing a separate dispatch.
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_entries(value: *mut Value) -> *mut Value {
+    let value = unsafe { &*value };
+    let Some(fields) = value.as_object() else {
+        return leak(value.clone());
+    };
+    let Some(entries) = fields
+        .get("__thaw_map_entries__")
+        .or_else(|| fields.get("__thaw_set_values__"))
+    else {
+        return leak(value.clone());
+    };
+    leak(entries.clone())
+}
+
+/// `Map.prototype.get`/`.has` (and `Set.prototype.has`) on an `any`-
+/// typed receiver -- a linear scan over the unwrapped entries/values
+/// array, comparing keys with `thaw_json_object_is`'s own SameValue
+/// semantics (the closest existing primitive; real `Map`/`Set` key
+/// comparison is SameValueZero, differing from SameValue only for
+/// `+0`/`-0`, an edge case not worth a bespoke comparator here). `.get`
+/// returns the matched value or the napi-undefined sentinel every
+/// other missing-key read in this file already uses; `.has` a plain
+/// bool. Both silently answer "not found" for a value that isn't
+/// actually Map/Set-shaped (or, for `.get`, one that's Set- rather than
+/// Map-shaped, since a real Set has no `.get`), matching this file's
+/// established degrade-instead-of-crash policy.
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_get(value: *const Value, key: *const Value) -> *mut Value {
+    let value = unsafe { &*value };
+    let key = unsafe { &*key };
+    if !is_map_wrapper(value) {
+        return leak(napi_undefined_value());
+    }
+    let Some(entries) = value
+        .as_object()
+        .and_then(|fields| fields.get("__thaw_map_entries__"))
+        .and_then(Value::as_array)
+    else {
+        return leak(napi_undefined_value());
+    };
+    for entry in entries {
+        let Some([entry_key, entry_value]) = entry
+            .as_array()
+            .and_then(|pair| <&[Value; 2]>::try_from(pair.as_slice()).ok())
+        else {
+            continue;
+        };
+        if unsafe { thaw_json_object_is(entry_key, key) } != 0 {
+            return leak(entry_value.clone());
+        }
+    }
+    leak(napi_undefined_value())
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_has(value: *const Value, key: *const Value) -> u8 {
+    let value = unsafe { &*value };
+    let key = unsafe { &*key };
+    let Some(fields) = value.as_object() else {
+        return 0;
+    };
+    let entries = fields
+        .get("__thaw_map_entries__")
+        .or_else(|| fields.get("__thaw_set_values__"))
+        .and_then(Value::as_array);
+    let Some(entries) = entries else {
+        return 0;
+    };
+    let is_map = fields.contains_key("__thaw_map_entries__");
+    u8::from(entries.iter().any(|entry| {
+        let candidate = if is_map {
+            let Some(pair) = entry.as_array() else {
+                return false;
+            };
+            let Some(entry_key) = pair.first() else {
+                return false;
+            };
+            entry_key
+        } else {
+            entry
+        };
+        (unsafe { thaw_json_object_is(candidate, key) }) != 0
+    }))
 }
 
 fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {

@@ -665,6 +665,16 @@ impl<'a> FnLowerer<'a> {
                 if Self::is_native_instance_builtin(property.sym.as_ref()) && !receiver_is_dynamic {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
+                // `.get()`/`.has()` on a `Json`-typed (`any`) receiver
+                // reach the same dispatch too, for the read-only subset
+                // that's actually implemented for the `__thaw_map_
+                // entries__`/`__thaw_set_values__` sentinel wrapper --
+                // `lower_native_map_set_method` degrades the rest
+                // (`.set`/`.delete`/`.add`/`.clear`/...) to a clear
+                // "not supported on any" error instead of leaving them
+                // to a far vaguer "call to unknown function" (this was
+                // already true for a *statically* mismatched receiver
+                // before this addition; a `Json` one is no different).
                 if matches!(
                     property.sym.as_ref(),
                     "get"
@@ -675,7 +685,8 @@ impl<'a> FnLowerer<'a> {
                         | "clear"
                         | "getOrInsert"
                         | "getOrInsertComputed"
-                ) && self.receiver_is_map_or_set(&member.obj)
+                ) && (self.receiver_is_map_or_set(&member.obj)
+                    || self.peek_type_without_lowering(&member.obj) == Some(HirType::Json))
                 {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
