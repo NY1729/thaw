@@ -2069,6 +2069,101 @@ pub extern "C" fn thaw_json_map_or_set_has(value: *const Value, key: *const Valu
     }))
 }
 
+/// `.keys()`/`.values()`/`.entries()` on a `Map`/`Set` value stored in
+/// `any`. Unlike the real, lazy iterator objects the statically-typed
+/// case builds (`lower_map_iterator`, thaw-hir's `map_set_methods.rs`),
+/// these three return a plain JSON array *eagerly*.
+///
+/// ponytail: a real lazy iterator (supporting early termination via
+/// `.next()`/`.return()`) isn't built for the `any`-typed case -- the
+/// upgrade path is the same generator-producer machinery `lower_map_
+/// iterator` already has, built from this same unwrapped array instead
+/// of typed native fields. This is enough for the overwhelmingly
+/// common `for (const k of m.keys())`/`[...m.values()]` usage, which
+/// only needs *something* iterable, and an eager array is one.
+fn map_or_set_keys(value: &Value) -> Vec<Value> {
+    let Some(fields) = value.as_object() else {
+        return Vec::new();
+    };
+    if let Some(entries) = fields.get("__thaw_map_entries__").and_then(Value::as_array) {
+        return entries
+            .iter()
+            .filter_map(|entry| entry.as_array()?.first().cloned())
+            .collect();
+    }
+    fields
+        .get("__thaw_set_values__")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn map_or_set_values(value: &Value) -> Vec<Value> {
+    let Some(fields) = value.as_object() else {
+        return Vec::new();
+    };
+    if let Some(entries) = fields.get("__thaw_map_entries__").and_then(Value::as_array) {
+        return entries
+            .iter()
+            .filter_map(|entry| entry.as_array()?.get(1).cloned())
+            .collect();
+    }
+    fields
+        .get("__thaw_set_values__")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn map_or_set_entries_view(value: &Value) -> Vec<Value> {
+    let Some(fields) = value.as_object() else {
+        return Vec::new();
+    };
+    if let Some(entries) = fields.get("__thaw_map_entries__").and_then(Value::as_array) {
+        return entries.clone();
+    }
+    fields
+        .get("__thaw_set_values__")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| Value::Array(vec![value.clone(), value.clone()]))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_keys(value: *const Value) -> *mut u8 {
+    alloc_pointer_array(
+        map_or_set_keys(unsafe { &*value })
+            .into_iter()
+            .map(|value| Box::into_raw(Box::new(value)).cast())
+            .collect(),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_values(value: *const Value) -> *mut u8 {
+    alloc_pointer_array(
+        map_or_set_values(unsafe { &*value })
+            .into_iter()
+            .map(|value| Box::into_raw(Box::new(value)).cast())
+            .collect(),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_entries_view(value: *const Value) -> *mut u8 {
+    alloc_pointer_array(
+        map_or_set_entries_view(unsafe { &*value })
+            .into_iter()
+            .map(|value| Box::into_raw(Box::new(value)).cast())
+            .collect(),
+    )
+}
+
 fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {
     if let Some(array) = value.as_array() {
         return Some(array);

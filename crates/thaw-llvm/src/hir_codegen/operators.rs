@@ -231,7 +231,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         "__thaw_json_keys" | "__thaw_json_own_keys" | "__thaw_array_keys" => {
                             return Some(HirType::Array(Box::new(HirType::Str)))
                         }
-                        "__thaw_json_values" => {
+                        "__thaw_json_values"
+                        | "__thaw_json_map_or_set_keys"
+                        | "__thaw_json_map_or_set_values"
+                        | "__thaw_json_map_or_set_entries_view" => {
                             return Some(HirType::Array(Box::new(HirType::Json)))
                         }
                         "__thaw_json_number_values" => {

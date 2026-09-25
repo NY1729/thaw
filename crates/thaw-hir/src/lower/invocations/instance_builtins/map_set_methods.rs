@@ -504,6 +504,20 @@ impl<'a> FnLowerer<'a> {
                     if let HirType::Array(_) = &receiver_type {
                         return self.lower_array_keys(receiver, receiver_type);
                     }
+                    // A `Map`/`Set` value stored in `any` -- unlike the
+                    // static case's real lazy iterator (`lower_map_
+                    // iterator`, below), this returns a plain `any[]`
+                    // eagerly (`thaw_json_map_or_set_keys`, thaw-std's
+                    // `json.rs` -- see its own doc comment for the
+                    // "ponytail" scope note). Good enough for `for
+                    // (const k of m.keys())`/`[...m.keys()]`, which
+                    // only need something iterable.
+                    if receiver_type == HirType::Json {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_keys".to_string())),
+                            vec![receiver],
+                        ));
+                    }
                     let key_type = match &receiver_type {
                         HirType::Map(key_type, _) => key_type.as_ref().clone(),
                         HirType::Set(element_type) => element_type.as_ref().clone(),
@@ -527,6 +541,12 @@ impl<'a> FnLowerer<'a> {
                             receiver_type.clone(),
                             element_type.as_ref().clone(),
                         );
+                    }
+                    if receiver_type == HirType::Json {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_values".to_string())),
+                            vec![receiver],
+                        ));
                     }
                     let (value_type, mode) = match &receiver_type {
                         HirType::Map(_, value_type) => (value_type.as_ref().clone(), 1.0),
@@ -552,6 +572,14 @@ impl<'a> FnLowerer<'a> {
                     if let HirType::Array(element_type) = &receiver_type {
                         let element_type = element_type.as_ref().clone();
                         return self.lower_array_entries(receiver, receiver_type, element_type);
+                    }
+                    if receiver_type == HirType::Json {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_json_map_or_set_entries_view".to_string(),
+                            )),
+                            vec![receiver],
+                        ));
                     }
                     let (pair_type, mode) = match &receiver_type {
                         HirType::Map(key_type, value_type) => (
