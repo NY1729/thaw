@@ -863,6 +863,15 @@ fn lower_class_methods(
             && hir_type_contains_dynamic(&signature.ret)
         {
             lowerer.ret_type.clone()
+        } else if signature.ret == HirType::Dynamic {
+            // Mirrors the identical free-function case (`declared_ret ==
+            // HirType::Dynamic => lowerer.infer_return_type(&body)`,
+            // above in this same file) -- an unannotated method's
+            // signature now defers to `Dynamic` too (see `module/
+            // pipeline.rs`'s matching fix), so this is where that
+            // deferral finally gets resolved, from the body that was
+            // just lowered.
+            lowerer.infer_return_type(&lowered_body)?
         } else {
             signature.ret.clone()
         };
@@ -930,10 +939,21 @@ fn lower_class_methods(
                 method.function.is_generator,
                 &mut unbound_body,
             )?;
+            // Same `Dynamic`-deferral resolution as the bound variant
+            // above -- the unbound signature is the same underlying
+            // table entry (`signatures.get(&unbound_symbol).unwrap_or(
+            // signature)`), so an unannotated method using `this` needs
+            // its detached form's `ret` resolved here too, or it's left
+            // as an unresolved `Dynamic` forever.
+            let unbound_ret = if unbound_signature.ret == HirType::Dynamic {
+                unbound.infer_return_type(&unbound_body)?
+            } else {
+                unbound_signature.ret.clone()
+            };
             functions.push(HirFunction {
                 name: unbound_symbol,
                 params: unbound_params,
-                ret: unbound_signature.ret.clone(),
+                ret: unbound_ret,
                 is_async: unbound_signature.is_async,
                 body: unbound_body,
             });
