@@ -2178,6 +2178,34 @@ fn compiles_array_spread_of_a_generator() {
     );
 }
 
+/// `Array.from(aGenerator())` -- found while investigating the array-
+/// spread fix above (round20): `Array.from`'s own dispatch
+/// (`invocations/static_builtins.rs`) had no case for a real,
+/// statically-typed `Generator<T>` producer (`HirType::Function`,
+/// recognized via `is_generator_producer_type`), only for a *dynamic*
+/// `JsValue` iterator (a real npm class's method return type, e.g.
+/// `lru-cache`'s `LRUCache.keys()`). Reuses
+/// `collect_generator_for_array_spread` directly -- its own drain-to-
+/// completion loop already produces exactly the array `Array.from`
+/// wants, so this is purely additive: the existing `mapper`/`thisArg`
+/// handling after the source-type `match` applies unchanged.
+#[test]
+fn compiles_array_from_a_generator() {
+    let source = r#"
+        function* gen(): Generator<number> { yield 1; yield 2; yield 3; }
+        function* empty(): Generator<string> {}
+        function main(): void {
+            console.log(JSON.stringify(Array.from(gen())));
+            console.log(JSON.stringify(Array.from(empty())));
+            console.log(JSON.stringify(Array.from(gen(), (x: number) => x * 10)));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_a_generator"),
+        "[1,2,3]\n[]\n[10,20,30]\n"
+    );
+}
+
 #[test]
 fn generator_next_returns_the_generators_natural_completion_value() {
     let source = r#"
