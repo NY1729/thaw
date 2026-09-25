@@ -29,6 +29,85 @@ fn is_error_family_name(name: &str) -> bool {
     )
 }
 
+/// Standard library / Web API type names thaw does not model natively. An
+/// annotation naming one is treated as an opaque `JsValue` -- at runtime the
+/// value is a real QuickJS object (thaw's platform globals provide these) --
+/// rather than failing the build with the generic "unsupported type
+/// reference" error. `.d.ts` files and user annotations reference
+/// `URL`/`Response`/`AbortSignal`/... constantly.
+fn is_opaque_global_type(name: &str) -> bool {
+    matches!(
+        name,
+        // Web / WHATWG APIs.
+        "URL"
+            | "URLSearchParams"
+            | "Headers"
+            | "HeadersInit"
+            | "Request"
+            | "RequestInit"
+            | "RequestInfo"
+            | "RequestRedirect"
+            | "Response"
+            | "ResponseInit"
+            | "ResponseType"
+            | "BodyInit"
+            | "Blob"
+            | "BlobPart"
+            | "File"
+            | "FileList"
+            | "FormData"
+            | "FormDataEntryValue"
+            | "Event"
+            | "EventInit"
+            | "EventTarget"
+            | "CustomEvent"
+            | "MessageEvent"
+            | "MessageEventInit"
+            | "MessagePort"
+            | "MessageChannel"
+            | "BroadcastChannel"
+            | "CloseEvent"
+            | "ErrorEvent"
+            | "ProgressEvent"
+            | "DOMException"
+            | "AbortSignal"
+            | "AbortController"
+            | "ReadableStream"
+            | "ReadableStreamDefaultReader"
+            | "ReadableStreamReadResult"
+            | "WritableStream"
+            | "TransformStream"
+            | "WebSocket"
+            | "XMLHttpRequest"
+            | "Worker"
+            | "SharedWorker"
+            | "Storage"
+            | "Location"
+            | "Navigator"
+            | "Document"
+            | "Window"
+            | "ImageData"
+            | "Performance"
+            | "PerformanceEntry"
+            | "DOMHighResTimeStamp"
+            | "Crypto"
+            | "CryptoKey"
+            | "SubtleCrypto"
+            | "CryptoKeyPair"
+            | "Transferable"
+            | "StructuredSerializeOptions"
+            | "TextEncoder"
+            | "TextDecoder"
+            // Buffers / views outside the `Uint8Array`/`Buffer` bytes path.
+            | "ArrayBuffer"
+            | "ArrayBufferLike"
+            | "ArrayBufferView"
+            | "SharedArrayBuffer"
+            | "DataView"
+            | "BufferSource"
+    )
+}
+
 /// Whether an object type's identity chain (see `module/classes.rs`) makes
 /// it an `Error`-family instance -- the built-ins themselves, or any user
 /// class transitively `extends`ing one of them.

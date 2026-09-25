@@ -253,7 +253,35 @@ impl<'a> FnLowerer<'a> {
                         // name directly, which never routes through this
                         // bare-identifier expression lowering at all.
                         global @ ("Atomics" | "crypto" | "process" | "AbortSignal" | "String"
-                        | "Number" | "Boolean" | "globalThis") => {
+                        | "Number" | "Boolean" | "globalThis"
+                        // Web / WHATWG globals (thaw's QuickJS platform
+                        // globals provide them). Naming one bare --
+                        // `typeof Headers`, `const Ctor = URL` -- yields the
+                        // real global as an opaque dynamic value; the
+                        // `new`/call positions are intercepted earlier.
+                        | "structuredClone"
+                        | "queueMicrotask"
+                        | "URL"
+                        | "URLSearchParams"
+                        | "Headers"
+                        | "Request"
+                        | "Response"
+                        | "Blob"
+                        | "File"
+                        | "FormData"
+                        | "Event"
+                        | "EventTarget"
+                        | "MessageEvent"
+                        | "MessageChannel"
+                        | "MessagePort"
+                        | "BroadcastChannel"
+                        | "DOMException"
+                        | "ReadableStream"
+                        | "WritableStream"
+                        | "TransformStream"
+                        | "TextEncoder"
+                        | "TextDecoder"
+                        | "AbortController") => {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
                                 vec![HirExpr::Lit(HirLit::Str(global.to_string()))],
@@ -2783,6 +2811,30 @@ impl<'a> FnLowerer<'a> {
                             | "Proxy"
                             | "DisposableStack"
                             | "AsyncDisposableStack"
+                            // Web / WHATWG constructors with no compiled
+                            // layout: build the real QuickJS global (thaw's
+                            // platform globals provide these) and keep it as
+                            // an opaque dynamic handle, so `new URL(...)`,
+                            // `new Headers(...)`, `new Response(...)`, ...
+                            // work and their methods read back dynamically.
+                            | "URL"
+                            | "URLSearchParams"
+                            | "Headers"
+                            | "Request"
+                            | "Response"
+                            | "Blob"
+                            | "File"
+                            | "FormData"
+                            | "Event"
+                            | "EventTarget"
+                            | "MessageEvent"
+                            | "MessageChannel"
+                            | "MessagePort"
+                            | "BroadcastChannel"
+                            | "DOMException"
+                            | "ReadableStream"
+                            | "WritableStream"
+                            | "TransformStream"
                     ) {
                         // No compiled object model exists for these, so
                         // construct the real QuickJS global and keep it as
