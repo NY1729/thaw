@@ -387,6 +387,14 @@ fn lower_ts_type(
             if ref_name.is_some_and(|name| name.starts_with("__thaw_")) {
                 return Ok(HirType::JsValue);
             }
+            // A standard-library / Web API type (`URL`, `Response`,
+            // `AbortSignal`, `ReadableStream<T>`, ...) has no compiled layout;
+            // its value is a real QuickJS object at runtime, so an annotation
+            // naming one is an opaque `JsValue`. Type arguments, if any, are
+            // ignored.
+            if ref_name.is_some_and(is_opaque_global_type) {
+                return Ok(HirType::JsValue);
+            }
             // The built-in error classes have no `interface` entry of their
             // own (`new Error(m)` is lowered to a tagged string, see
             // `expressions/lowering.rs`), so an annotation naming one --
