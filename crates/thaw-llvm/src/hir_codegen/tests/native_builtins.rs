@@ -571,6 +571,47 @@ fn compiles_tagged_template_evaluation_order_and_async() {
     );
 }
 
+/// `TemplateStringsArray.raw` (round20's other deferred gap) -- the
+/// cooked-strings array a tag function receives also carries `.raw`,
+/// its unescaped sibling, recorded in a runtime side table keyed by the
+/// cooked array's own buffer address (`thaw_template_strings_register`/
+/// `_raw`, thaw-runtime's `template_strings.rs`), the same pattern
+/// `.index`/`.input`/`.groups` use for a RegExp match result
+/// (`regex.rs`). `String.raw` (a special-cased, separate code path) and
+/// a no-interpolation tag are unaffected.
+///
+/// Fixing this surfaced a real, *pre-existing*, separate bug (not
+/// specific to `.raw`): a tagged template never went through
+/// `lower_call`'s own rest-parameter packing (`Expr::TaggedTpl` builds
+/// its `HirExpr::Call` directly, with no `CallExpr` AST node to feed
+/// `lower_call`), so the overwhelmingly common tag signature --
+/// `(strings, ...values: any[])` -- hit an LLVM "incorrect number of
+/// arguments" module-verification failure for more than one
+/// interpolation. Fixed alongside `.raw` by packing the trailing
+/// interpolated values into one native array here too, mirroring
+/// `lower_call`'s own `native_rest_array` use.
+#[test]
+fn compiles_tagged_template_raw_strings() {
+    let source = r#"
+        function tag(strings: TemplateStringsArray, ...values: any[]): string {
+            return strings.raw.join("|") + "::" + strings.join(",") + "::" + values.join(",");
+        }
+        function noSub(strings: TemplateStringsArray): string {
+            return JSON.stringify(strings.raw);
+        }
+        function main(): void {
+            const name = "world";
+            console.log(tag`hello\n${name} number\t${42}`);
+            console.log(String.raw`a\nb`);
+            console.log(noSub`plain\ttext`);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tagged_template_raw_strings"),
+        "hello\\n| number\\t|::hello\n, number\t,::world,42\na\\nb\n[\"plain\\\\ttext\"]\n"
+    );
+}
+
 #[test]
 fn compiles_native_string_split() {
     let source = r#"

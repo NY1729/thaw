@@ -1583,6 +1583,21 @@ impl<'a> FnLowerer<'a> {
                             ),
                         })
                     }
+                    // A tagged template's cooked-strings array (also a
+                    // plain `string[]`) carries `.raw`, its unescaped
+                    // sibling, the same "metadata keyed by the array's own
+                    // buffer identity" pattern as `.index`/`.input`/
+                    // `.groups` just above -- see `thaw_template_strings_
+                    // register`/`_raw`, thaw-runtime's `template_strings.rs`.
+                    // An unrelated `string[]` degrades to an empty array.
+                    HirType::Array(element)
+                        if element.as_ref() == &HirType::Str && prop.sym == *"raw" =>
+                    {
+                        Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_template_strings_raw".into())),
+                            vec![obj],
+                        ))
+                    }
                     HirType::Str if prop.sym == *"length" => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_string_length".to_string())),
                         vec![obj],
