@@ -3371,6 +3371,63 @@ fn compiles_instanceof_and_size_for_native_collections() {
     );
 }
 
+/// Stage A (read-only) of the `any`-typed `Map`/`Set` method surface
+/// round10 left entirely unimplemented ("call to unknown function"
+/// for `.get()`/`.set()`/`.has()`/`.delete()`/`.forEach()`/`.keys()`/
+/// `.values()`/`.entries()`/`for...of`) -- `for...of` iteration and
+/// `.get()`/`.has()` now work, reusing the same `__thaw_map_entries__`/
+/// `__thaw_set_values__` sentinel wrapper `.size` (round10) already
+/// reads, since it's already a plain JSON array underneath (a Map's
+/// entries are already `[key, value]` pairs, matching its own default
+/// iterator; a Set's values need no transformation at all). No live
+/// QuickJS round-trip needed for any of these -- all pure reads over
+/// that one array. `.set()`/`.delete()`/`.clear()`/`.add()`/`.keys()`/
+/// `.values()`/`.entries()`/`.forEach()` remain unimplemented (the
+/// former four need a write-back mechanism to persist a mutation into
+/// the original `any`-typed value's own storage, not attempted yet;
+/// the latter four are cheap array-projections not implemented this
+/// round only for lack of time, not any deeper difficulty).
+///
+/// A real bug caught here, not by reasoning alone: the very first
+/// build of this fix produced a *correct* return value from the new
+/// native helper (confirmed via temporary debug `eprintln!`s in the
+/// runtime function itself) but `console.log` printed a blank line
+/// instead -- `expr_hir_type` (`thaw-llvm`'s `operators.rs`) keeps its
+/// own, *separate* allowlist of which `__thaw_json_*`-named intrinsic
+/// calls return `Json`, independent of `thaw-hir`'s own `infer_expr_
+/// type`; a name missing from *this* table falls through to `None`,
+/// and `console.log`'s own dynamic-value codegen treats that as an
+/// error handle to report, not a value to format -- the exact same
+/// bug class documented in this table's own comment for `Object.keys`
+/// (round4). Fixed by adding the two new `Json`-returning intrinsic
+/// names to this table too.
+#[test]
+fn compiles_map_or_set_read_only_methods_for_any_typed_receivers() {
+    let source = r#"
+        function main(): void {
+            const m: any = new Map<string, number>([["a", 1], ["b", 2]]);
+            for (const entry of m) {
+                console.log(entry[0], entry[1]);
+            }
+            console.log(m.get("a"));
+            console.log(m.get("z"));
+            console.log(m.has("a"));
+            console.log(m.has("z"));
+
+            const s: any = new Set<number>([1, 2, 3]);
+            for (const v of s) {
+                console.log(v);
+            }
+            console.log(s.has(2));
+            console.log(s.has(99));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_or_set_read_only_methods_any"),
+        "a 1\nb 2\n1\nundefined\ntrue\nfalse\n1\n2\n3\ntrue\nfalse\n"
+    );
+}
+
 #[test]
 fn compiles_instanceof_array_and_promise() {
     // Same "not a known class" bug as `compiles_instanceof_and_size_

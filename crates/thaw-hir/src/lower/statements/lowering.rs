@@ -1354,6 +1354,23 @@ impl<'a> FnLowerer<'a> {
                             values = HirExpr::ArrayLit(Vec::new());
                         }
                     }
+                    // A `Map`/`Set` value stored in `any` is wrapped as
+                    // `{"__thaw_map_entries__"/"__thaw_set_values__":
+                    // [...]}` (`coerce_to_declared`, `inference/
+                    // coercions.rs`) -- unwrap it to the plain JSON
+                    // array underneath before falling into the
+                    // existing bare-JSON-array `for...of` case just
+                    // below, matching its own default iterator (`Map`
+                    // yields `[key, value]` pairs, already this array's
+                    // own shape; `Set` yields its values, likewise).
+                    // A no-op for anything that isn't one of those two
+                    // sentinel shapes (returns the value unchanged).
+                    if values_type == HirType::Json {
+                        values = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_entries".to_string())),
+                            vec![values],
+                        );
+                    }
                     let (element, json_array) = match &values_type {
                         HirType::Array(element) => (element.as_ref().clone(), false),
                         HirType::Json if !for_of.is_await => (HirType::Json, true),

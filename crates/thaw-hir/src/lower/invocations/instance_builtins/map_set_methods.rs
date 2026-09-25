@@ -8,6 +8,32 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"get" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    // A `Map` value stored in `any` -- `Map<K, V>` is
+                    // generic and a bare `any` receiver carries no
+                    // record of what `K`/`V` originally were, so this
+                    // can't decode into a real native `HirType::Map`
+                    // the way `RegExp`'s fixed shape does. Instead
+                    // reads the wrapped `__thaw_map_entries__` array
+                    // directly at runtime (`thaw_json_map_or_set_get`,
+                    // thaw-std's `json.rs`) -- a linear scan, same
+                    // SameValue-based key comparison every other
+                    // JSON-value-equality check in this codebase uses.
+                    // Result is `any`/`Json` (no static `V` to decode
+                    // into), matching what a real dynamic `.get()`
+                    // genuinely returns.
+                    if receiver_type == HirType::Json {
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Map.get")?;
+                        let [key] = arguments.as_slice() else {
+                            return Err("native `.get()` expects exactly one argument".into());
+                        };
+                        let key = self.coerce_to_declared(&HirType::Json, key.clone())?;
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_get".to_string())),
+                            vec![receiver, key],
+                        );
+                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                    }
                     let (key_type, value_type) = match &receiver_type {
                         HirType::Map(key_type, value_type)
                         | HirType::WeakMap(key_type, value_type) => (key_type, value_type),
@@ -290,6 +316,27 @@ impl<'a> FnLowerer<'a> {
                 if matches!(property.sym.as_ref(), "has" | "delete") {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    // `.has()` on a `Map`/`Set` value stored in `any` --
+                    // same rationale as `.get()`'s own `Json` branch
+                    // just above: a linear scan over whichever sentinel
+                    // array is present (`thaw_json_map_or_set_has`,
+                    // thaw-std's `json.rs`), checking a Map's own keys
+                    // or a Set's own values as appropriate. `.delete()`
+                    // (mutating) isn't supported this way -- it still
+                    // falls through to the generic error below.
+                    if property.sym == *"has" && receiver_type == HirType::Json {
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Map/Set.has")?;
+                        let [key] = arguments.as_slice() else {
+                            return Err("native `.has()` expects exactly one argument".into());
+                        };
+                        let key = self.coerce_to_declared(&HirType::Json, key.clone())?;
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_has".to_string())),
+                            vec![receiver, key],
+                        );
+                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                    }
                     let key_type = match &receiver_type {
                         HirType::Map(key_type, _) => key_type.as_ref().clone(),
                         HirType::WeakMap(key_type, _) => key_type.as_ref().clone(),
