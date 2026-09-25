@@ -854,7 +854,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         )?
                     } else if method.function.return_type.is_none()
                         && !method.is_abstract
-                        && !(class_decl.class.is_abstract && !method.is_static)
+                        && (!class_decl.class.is_abstract || method.is_static)
                     {
                         // Mirrors the identical free-function case just
                         // above (`func.return_type.is_none() && !is_extern
@@ -1771,7 +1771,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             )?;
         } else if let Some(fn_decl) = fn_decls
             .iter()
-            .find(|fn_decl| fn_decl.ident.sym.to_string() == *name)
+            .find(|fn_decl| fn_decl.ident.sym.as_ref() == name.as_str())
         {
             lower_fn_decl(
                 fn_decl,
@@ -1832,7 +1832,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             )?;
         } else if let Some(fn_decl) = fn_decls
             .iter()
-            .find(|fn_decl| fn_decl.ident.sym.to_string() == *name)
+            .find(|fn_decl| fn_decl.ident.sym.as_ref() == name.as_str())
         {
             lower_fn_decl(
                 fn_decl,

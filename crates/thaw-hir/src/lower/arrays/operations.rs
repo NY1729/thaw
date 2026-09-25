@@ -247,6 +247,7 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(HirExpr::Block(statements), &bindings)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_array_reduce(
         &mut self,
         receiver: HirExpr,
@@ -471,6 +472,7 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(HirExpr::Block(statements), &bindings)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_array_predicate_method(
         &mut self,
         receiver: HirExpr,
