@@ -2262,3 +2262,105 @@ fn unannotated_class_methods_infer_their_return_type() {
         "42\n21 42\n42\n42\nhi\n1 hi\n"
     );
 }
+
+/// A caller processed *before* its callee's own signature has converged
+/// used to hard-abort the whole compile: the fixed-point convergence
+/// loop that resolves an unannotated function/method's return type
+/// (`module/pipeline.rs`) tried each function/method every iteration and
+/// propagated the first hard failure immediately via `?`, so a caller
+/// whose own lowering hit a strict, up-front type check (`JSON.
+/// stringify`'s own argument validation is the confirmed real trigger --
+/// it hard-errors on seeing `HirType::Dynamic` instead of tolerating it)
+/// aborted before the loop ever got a *second* iteration where the
+/// callee's real type would have been patched in. Confirmed via a real
+/// probe that this reproduces with two plain top-level functions with no
+/// classes involved at all, and separately with a class method calling
+/// another method the same way -- fixed by making each function/
+/// method's lowering attempt *within* the trial loop tolerant of
+/// failure (skip and retry next iteration) instead of instantly fatal,
+/// since the loop's own output is discarded anyway except for patching
+/// signatures; the real, error-propagating final lowering pass runs
+/// unchanged after the loop converges.
+#[test]
+fn dynamic_return_type_convergence_tolerates_out_of_order_callers() {
+    let source = r#"
+        function main(): void {
+            console.log(JSON.stringify(makeObj()));
+        }
+        function makeObj() {
+            return { a: 1, b: "hi" };
+        }
+        class Box {
+            value: number;
+            constructor(value: number) {
+                this.value = value;
+            }
+            getInfo() {
+                return { value: this.value, doubled: this.value * 2 };
+            }
+        }
+        function useBox(): void {
+            const b = new Box(21);
+            console.log(JSON.stringify(b.getInfo()));
+        }
+        useBox();
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_return_type_convergence_out_of_order"),
+        "{\"value\":21,\"doubled\":42}\n{\"a\":1,\"b\":\"hi\"}\n"
+    );
+}
+
+/// A user class's own `[Symbol.iterator]()` method (unannotated, like
+/// the idiomatic real-world pattern) now works with `for...of`, once its
+/// return type actually converges (the fix above) -- previously hit
+/// `` `for...of` currently requires a typed array `` even though the
+/// identical pattern on a plain object literal already worked, since
+/// `for...of`'s own dispatch synthesizes a call to the renamed
+/// `__thaw_symbol_iterator` method and needs *that* call's inferred
+/// type to be the `{next: () => {value, done}}` shape `iterator_object_
+/// adapter` (`statements/lowering.rs`) recognizes -- previously always
+/// `Dynamic` at the point `main()` itself was lowered, for exactly the
+/// same out-of-order reason as the test above. Each `next()` call here
+/// deliberately returns one uniform shape (`{value: number, done:
+/// boolean}` in both branches) rather than TS's own idiomatic
+/// discriminated-union `IteratorResult<T>` shape (`{value: T, done:
+/// false} | {value: undefined, done: true}`) -- the latter hits a
+/// separate, narrower, confirmed-but-unfixed gap in this compiler's
+/// return-type inference (no union-widening across divergent `return`
+/// statements), out of scope here.
+#[test]
+fn custom_symbol_iterator_on_a_class_works_with_for_of() {
+    let source = r#"
+        class Range {
+            start: number;
+            end: number;
+            constructor(start: number, end: number) {
+                this.start = start;
+                this.end = end;
+            }
+            [Symbol.iterator]() {
+                let current = this.start;
+                const end = this.end;
+                return {
+                    next() {
+                        const value = current;
+                        const done = current >= end;
+                        current++;
+                        return { value: value, done: done };
+                    }
+                };
+            }
+        }
+        function main(): void {
+            const r = new Range(1, 5);
+            for (const x of r) {
+                console.log(x);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "custom_symbol_iterator_class_for_of"),
+        "1\n2\n3\n4\n"
+    );
+}

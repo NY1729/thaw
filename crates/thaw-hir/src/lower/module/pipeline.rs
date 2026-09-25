@@ -1586,7 +1586,28 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         )?;
         for fn_decl in &fn_decls {
             let name = fn_decl.ident.sym.to_string();
-            let function = lower_fn_decl(
+            // This whole loop is a *trial* pass whose only purpose is
+            // converging `signatures` -- its own lowered output is
+            // otherwise discarded (the real, final lowering happens
+            // later, once every signature that can converge has). A
+            // hard error here doesn't necessarily mean this function is
+            // broken: it can just as easily mean one of *its own*
+            // callees hasn't had its `Dynamic`-deferred return type
+            // resolved yet (a strict, up-front check like `JSON.
+            // stringify`'s own argument validation hard-errors on an
+            // unresolved `Dynamic` instead of tolerating it -- see
+            // `project_ecmascript_gaps_round14.md`). Previously this `?`
+            // aborted the *entire* compile on the very first such
+            // ordering mismatch, even though a later iteration -- after
+            // the callee's own entry in `fn_decls`/the class loop below
+            // runs -- would have resolved it. Skipping a failed attempt
+            // for this iteration and retrying it next time is safe: the
+            // final pass (below, outside this loop) re-lowers everything
+            // for real once this loop reaches a fixed point, so a
+            // genuinely unresolvable case (not just "hasn't converged
+            // yet") still surfaces its real, honest error there instead
+            // of a misleading one from a too-early attempt here.
+            let Ok(function) = lower_fn_decl(
                 fn_decl,
                 &signatures,
                 &interfaces,
@@ -1596,7 +1617,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 &global_types,
                 &immutable_globals,
                 Some(&call_constraints),
-            )?;
+            ) else {
+                continue;
+            };
             if hir_type_contains_dynamic(&signatures[&name].ret)
                 && function.ret != signatures[&name].ret
             {
@@ -1609,7 +1632,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             .copied()
             .chain(inherited_virtual_class_decls.iter())
         {
-            let methods = lower_class_methods(
+            // Same tolerance as the free-function loop just above, and
+            // for the identical reason -- a method's own body can
+            // reference another not-yet-converged signature (its own
+            // class's sibling method, a free function, ...) and hard-
+            // error on a strict check instead of just seeing `Dynamic`.
+            let Ok(methods) = lower_class_methods(
                 declaration,
                 &signatures,
                 &interfaces,
@@ -1618,7 +1646,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 &enum_reverse_values,
                 &global_types,
                 &immutable_globals,
-            )?;
+            ) else {
+                continue;
+            };
             for function in methods {
                 let Some(signature) = signatures.get(&function.name) else {
                     continue;
@@ -1713,6 +1743,48 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             .iter()
             .position(|ty| *ty == HirType::Dynamic)
             .unwrap();
+        // Same re-attribution as the return-type check just below --
+        // a parameter can stay `Dynamic` here either because no call
+        // site was ever *reachable* enough to constrain it, or because
+        // some caller that would have constrained it never itself
+        // finished lowering during the trial loop above (tolerated as
+        // a possible ordering issue, same as any other failure there).
+        // Retry the actual declaration for real before falling back to
+        // this generic message.
+        let owning_class = class_decls
+            .iter()
+            .copied()
+            .chain(inherited_virtual_class_decls.iter())
+            .find(|declaration| {
+                name.starts_with(&format!("__thaw_class_{}_", declaration.ident.sym))
+            });
+        if let Some(declaration) = owning_class {
+            lower_class_methods(
+                declaration,
+                &signatures,
+                &interfaces,
+                &generic_interfaces,
+                &enum_values,
+                &enum_reverse_values,
+                &global_types,
+                &immutable_globals,
+            )?;
+        } else if let Some(fn_decl) = fn_decls
+            .iter()
+            .find(|fn_decl| fn_decl.ident.sym.to_string() == *name)
+        {
+            lower_fn_decl(
+                fn_decl,
+                &signatures,
+                &interfaces,
+                &generic_interfaces,
+                &enum_values,
+                &enum_reverse_values,
+                &global_types,
+                &immutable_globals,
+                None,
+            )?;
+        }
         return Err(format!(
             "cannot infer parameter {} of function `{name}` from its call sites; add an explicit type annotation at bytes {}..{}",
             index + 1,
@@ -1726,6 +1798,54 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             && hir_type_contains_dynamic(&signature.ret)
     });
     if let Some((name, signature)) = unresolved {
+        // Reaching here means this signature's return type never
+        // converged away from `Dynamic` during the trial loop above --
+        // but that's equally true whether the real cause is "this
+        // program never actually calls it in a way that reveals a
+        // concrete type" (this generic message) or "its own body is
+        // simply broken" (e.g. `function f() { if (x) return 1; return
+        // "no"; }` -- `infer_return_type`'s own "incompatible types"
+        // error). The trial loop tolerates *any* failure while
+        // converging (an ordinary ordering issue looks identical to a
+        // genuine bug from the loop's point of view), so before
+        // reporting the generic fallback, retry the actual offending
+        // declaration one more time without tolerating failure this
+        // time -- if it has a real, specific problem, surface that
+        // instead of this far vaguer message.
+        let owning_class = class_decls
+            .iter()
+            .copied()
+            .chain(inherited_virtual_class_decls.iter())
+            .find(|declaration| {
+                name.starts_with(&format!("__thaw_class_{}_", declaration.ident.sym))
+            });
+        if let Some(declaration) = owning_class {
+            lower_class_methods(
+                declaration,
+                &signatures,
+                &interfaces,
+                &generic_interfaces,
+                &enum_values,
+                &enum_reverse_values,
+                &global_types,
+                &immutable_globals,
+            )?;
+        } else if let Some(fn_decl) = fn_decls
+            .iter()
+            .find(|fn_decl| fn_decl.ident.sym.to_string() == *name)
+        {
+            lower_fn_decl(
+                fn_decl,
+                &signatures,
+                &interfaces,
+                &generic_interfaces,
+                &enum_values,
+                &enum_reverse_values,
+                &global_types,
+                &immutable_globals,
+                None,
+            )?;
+        }
         return Err(format!(
             "cannot infer the return type of function `{name}`; add an explicit return annotation at bytes {}..{}",
             signature.source_range.0,
