@@ -2323,12 +2323,11 @@ fn dynamic_return_type_convergence_tolerates_out_of_order_callers() {
 /// `Dynamic` at the point `main()` itself was lowered, for exactly the
 /// same out-of-order reason as the test above. Each `next()` call here
 /// deliberately returns one uniform shape (`{value: number, done:
-/// boolean}` in both branches) rather than TS's own idiomatic
-/// discriminated-union `IteratorResult<T>` shape (`{value: T, done:
-/// false} | {value: undefined, done: true}`) -- the latter now works
-/// too (return-type union inference), see
-/// `custom_symbol_iterator_returns_a_discriminated_iterator_result`
-/// below.
+/// boolean}` in both branches); TS's own idiomatic discriminated-union
+/// `IteratorResult<T>` shape (`{value: T, done: false} | {value:
+/// undefined, done: true}`) is covered by
+/// `custom_symbol_iterator_with_a_discriminated_iterator_result` below,
+/// which `iterator_object_adapter` now accepts as a `Union` of shapes.
 #[test]
 fn custom_symbol_iterator_on_a_class_works_with_for_of() {
     let source = r#"
@@ -2373,13 +2372,11 @@ fn custom_symbol_iterator_on_a_class_works_with_for_of() {
 /// (return-type union inference, `infer_return_type` in `statements/
 /// narrowing.rs`, plus the already-existing `lower_union_property_
 /// read` for reading `.value`/`.done` back off the union). Named
-/// `step` rather than `next` to go through an ordinary method call --
-/// `next`/`throw`/`return` are dispatched to generator-specific
-/// handling regardless of receiver, and separately, `for...of`'s own
-/// dispatch (`iterator_object_adapter`) still requires a single
-/// uniform object shape for a real `next()`'s return type, not yet a
-/// `Union` of shapes -- a narrower, still-open gap (see memory), not
-/// what this test is after.
+/// `step` rather than `next` to go through an ordinary method call, so
+/// the read-back is exercised directly rather than through the
+/// iterator protocol; the equivalent real `next()` via `for...of` is
+/// covered by `custom_symbol_iterator_with_a_discriminated_iterator_
+/// result` below.
 #[test]
 fn method_returns_a_discriminated_iterator_result_union() {
     let source = r#"
@@ -2413,5 +2410,49 @@ fn method_returns_a_discriminated_iterator_result_union() {
     assert_eq!(
         compile_and_run(source, "method_discriminated_iterator_result_union"),
         "1\n2\ndone undefined\n"
+    );
+}
+
+/// The real `for...of` case for TS's idiomatic discriminated
+/// `IteratorResult<T>`: an unannotated `[Symbol.iterator]` whose `next()`
+/// returns `{value: T, done: false}` on one branch and `{value: undefined,
+/// done: true}` on the other. Requires both the union return inference
+/// (`infer_return_type`) and `iterator_object_adapter`'s own union
+/// handling (`read_iterator_result_field`, `statements/lowering.rs`).
+#[test]
+fn custom_symbol_iterator_with_a_discriminated_iterator_result() {
+    let source = r#"
+        class Range {
+            start: number;
+            end: number;
+            constructor(start: number, end: number) {
+                this.start = start;
+                this.end = end;
+            }
+            [Symbol.iterator]() {
+                let current = this.start;
+                const end = this.end;
+                return {
+                    next() {
+                        if (current < end) {
+                            const value = current;
+                            current++;
+                            return { value: value, done: false };
+                        }
+                        return { value: undefined, done: true };
+                    }
+                };
+            }
+        }
+        function main(): void {
+            const r = new Range(1, 5);
+            for (const x of r) {
+                console.log(x);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "custom_symbol_iterator_discriminated_result"),
+        "1\n2\n3\n4\n"
     );
 }
