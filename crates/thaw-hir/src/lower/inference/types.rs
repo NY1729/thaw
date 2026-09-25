@@ -1850,7 +1850,12 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_json_is_buffer_shape" => return Ok(HirType::Bool),
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_has_wrapper_key" => return Ok(HirType::Bool),
-                    "__thaw_json_map_or_set_entries" | "__thaw_json_map_or_set_get" => {
+                    "__thaw_json_map_or_set_entries"
+                    | "__thaw_json_map_or_set_get"
+                    | "__thaw_json_map_or_set_set"
+                    | "__thaw_json_map_or_set_add"
+                    | "__thaw_json_map_or_set_delete"
+                    | "__thaw_json_map_or_set_clear" => {
                         return Ok(HirType::Json)
                     }
                     "__thaw_json_map_or_set_has" => return Ok(HirType::Bool),

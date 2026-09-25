@@ -2069,6 +2069,123 @@ pub extern "C" fn thaw_json_map_or_set_has(value: *const Value, key: *const Valu
     }))
 }
 
+/// Stage B: `.set()`/`.add()`/`.delete()`/`.clear()` on a `Map`/`Set`
+/// value stored in `any`. Each one computes and returns a *whole new*
+/// sentinel object -- `Json`/`any` values in this compiler are
+/// snapshots, not references, so the caller (`map_set_methods.rs`)
+/// is the one that writes this back onto the original lvalue; these
+/// helpers are pure functions with no mutation of their own. Key/
+/// element comparison is `thaw_json_object_is`'s SameValue, same
+/// approximation Stage A's `.get`/`.has` already made (real Map/Set
+/// use SameValueZero, differing only for `+0`/`-0`).
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_set(
+    value: *const Value,
+    key: *const Value,
+    new_value: *const Value,
+) -> *mut Value {
+    let value = unsafe { &*value };
+    let key = unsafe { &*key };
+    let new_value = unsafe { &*new_value };
+    let mut entries = value
+        .as_object()
+        .and_then(|fields| fields.get("__thaw_map_entries__"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let existing = entries.iter_mut().find(|entry| {
+        entry
+            .as_array()
+            .and_then(|pair| pair.first())
+            .is_some_and(|entry_key| unsafe { thaw_json_object_is(entry_key, key) } != 0)
+    });
+    match existing {
+        Some(entry) => *entry = Value::Array(vec![key.clone(), new_value.clone()]),
+        None => entries.push(Value::Array(vec![key.clone(), new_value.clone()])),
+    }
+    let mut fields = serde_json::Map::new();
+    fields.insert("__thaw_map_entries__".to_string(), Value::Array(entries));
+    leak(Value::Object(fields))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_add(
+    value: *const Value,
+    element: *const Value,
+) -> *mut Value {
+    let value = unsafe { &*value };
+    let element = unsafe { &*element };
+    let mut values = value
+        .as_object()
+        .and_then(|fields| fields.get("__thaw_set_values__"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let already_present = values
+        .iter()
+        .any(|candidate| unsafe { thaw_json_object_is(candidate, element) } != 0);
+    if !already_present {
+        values.push(element.clone());
+    }
+    let mut fields = serde_json::Map::new();
+    fields.insert("__thaw_set_values__".to_string(), Value::Array(values));
+    leak(Value::Object(fields))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_delete(
+    value: *const Value,
+    key: *const Value,
+) -> *mut Value {
+    let value = unsafe { &*value };
+    let key = unsafe { &*key };
+    let Some(fields) = value.as_object() else {
+        return leak(value.clone());
+    };
+    if let Some(entries) = fields.get("__thaw_map_entries__").and_then(Value::as_array) {
+        let entries: Vec<Value> = entries
+            .iter()
+            .filter(|entry| {
+                let entry_key = entry.as_array().and_then(|pair| pair.first());
+                !entry_key
+                    .is_some_and(|entry_key| unsafe { thaw_json_object_is(entry_key, key) } != 0)
+            })
+            .cloned()
+            .collect();
+        let mut fields = serde_json::Map::new();
+        fields.insert("__thaw_map_entries__".to_string(), Value::Array(entries));
+        return leak(Value::Object(fields));
+    }
+    if let Some(values) = fields.get("__thaw_set_values__").and_then(Value::as_array) {
+        let values: Vec<Value> = values
+            .iter()
+            .filter(|candidate| unsafe { thaw_json_object_is(*candidate, key) } == 0)
+            .cloned()
+            .collect();
+        let mut fields = serde_json::Map::new();
+        fields.insert("__thaw_set_values__".to_string(), Value::Array(values));
+        return leak(Value::Object(fields));
+    }
+    leak(value.clone())
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_map_or_set_clear(value: *const Value) -> *mut Value {
+    let value = unsafe { &*value };
+    let mut fields = serde_json::Map::new();
+    if let Some(object) = value.as_object() {
+        if object.contains_key("__thaw_map_entries__") {
+            fields.insert("__thaw_map_entries__".to_string(), Value::Array(Vec::new()));
+            return leak(Value::Object(fields));
+        }
+        if object.contains_key("__thaw_set_values__") {
+            fields.insert("__thaw_set_values__".to_string(), Value::Array(Vec::new()));
+            return leak(Value::Object(fields));
+        }
+    }
+    leak(value.clone())
+}
+
 /// `.keys()`/`.values()`/`.entries()` on a `Map`/`Set` value stored in
 /// `any`. Unlike the real, lazy iterator objects the statically-typed
 /// case builds (`lower_map_iterator`, thaw-hir's `map_set_methods.rs`),

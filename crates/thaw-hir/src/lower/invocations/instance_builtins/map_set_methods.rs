@@ -116,6 +116,61 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"set" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    // `.set()` on a `Map` value stored in `any` -- Stage
+                    // B. Unlike Stage A's read-only methods, a mutation
+                    // has to be visible to every other reader of the
+                    // same variable afterward, but `Json`/`any` values
+                    // in this compiler are snapshots, not references.
+                    // Only supported when the receiver is a plain local
+                    // variable: computes the whole new sentinel object
+                    // (`__thaw_json_map_or_set_set`, thaw-std's
+                    // `json.rs`) and assigns it straight back onto that
+                    // variable's own binding -- a closure capturing a
+                    // local retains that local's real storage cell
+                    // (`allocate_lambda_environment`'s own doc comment,
+                    // thaw-llvm's `closures.rs`), so the `Assign` below
+                    // genuinely writes back, not just to a copy. A
+                    // receiver that's a property chain (or any other
+                    // non-identifier expression) is a narrower,
+                    // documented limitation, matching this session's
+                    // established scope-drawing precedent (round8's
+                    // RegExp `lastIndex`).
+                    if receiver_type == HirType::Json {
+                        let Expr::Ident(ident) = member.obj.as_ref() else {
+                            return Err(
+                                "`.set()` on a Map stored in `any` is only supported when the \
+                                 receiver is a plain local variable, not a property chain"
+                                    .into(),
+                            );
+                        };
+                        let var_name = self.resolve_binding(ident.sym.as_ref());
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Map.set")?;
+                        let [key, value] = arguments.as_slice() else {
+                            return Err("native `.set()` expects exactly two arguments".into());
+                        };
+                        let key = self.coerce_to_declared(&HirType::Json, key.clone())?;
+                        let value = self.coerce_to_declared(&HirType::Json, value.clone())?;
+                        let key_name = format!("__thaw_map_set_any_key_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let value_name = format!("__thaw_map_set_any_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(key_name.clone(), HirType::Json);
+                        self.scope.insert(value_name.clone(), HirType::Json);
+                        let var = |name: &str| HirExpr::Var(name.to_string());
+                        let new_value = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_set".to_string())),
+                            vec![var(&var_name), var(&key_name), var(&value_name)],
+                        );
+                        let body = HirExpr::Block(vec![
+                            HirStmt::Expr(HirExpr::Assign(var_name.clone(), Box::new(new_value))),
+                            HirStmt::Return(Some(var(&var_name))),
+                        ]);
+                        let mut bindings = vec![(key_name, HirType::Json, key)];
+                        bindings.push((value_name, HirType::Json, value));
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(body, &bindings);
+                    }
                     let (key_type, value_type) = match &receiver_type {
                         HirType::Map(key_type, value_type)
                         | HirType::WeakMap(key_type, value_type) => (key_type, value_type),
@@ -278,6 +333,40 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"add" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    // `.add()` on a Set stored in `any` -- same
+                    // lvalue-write-back rationale as `.set()`'s own
+                    // `Json` branch just above.
+                    if receiver_type == HirType::Json {
+                        let Expr::Ident(ident) = member.obj.as_ref() else {
+                            return Err(
+                                "`.add()` on a Set stored in `any` is only supported when the \
+                                 receiver is a plain local variable, not a property chain"
+                                    .into(),
+                            );
+                        };
+                        let var_name = self.resolve_binding(ident.sym.as_ref());
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Set.add")?;
+                        let [element] = arguments.as_slice() else {
+                            return Err("native `.add()` expects exactly one argument".into());
+                        };
+                        let element = self.coerce_to_declared(&HirType::Json, element.clone())?;
+                        let element_name = format!("__thaw_set_add_any_element_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(element_name.clone(), HirType::Json);
+                        let var = |name: &str| HirExpr::Var(name.to_string());
+                        let new_value = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_add".to_string())),
+                            vec![var(&var_name), var(&element_name)],
+                        );
+                        let body = HirExpr::Block(vec![
+                            HirStmt::Expr(HirExpr::Assign(var_name.clone(), Box::new(new_value))),
+                            HirStmt::Return(Some(var(&var_name))),
+                        ]);
+                        let mut bindings = vec![(element_name, HirType::Json, element)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(body, &bindings);
+                    }
                     let element_type = match &receiver_type {
                         HirType::Set(element_type) | HirType::WeakSet(element_type) => element_type,
                         _ => {
@@ -321,9 +410,7 @@ impl<'a> FnLowerer<'a> {
                     // just above: a linear scan over whichever sentinel
                     // array is present (`thaw_json_map_or_set_has`,
                     // thaw-std's `json.rs`), checking a Map's own keys
-                    // or a Set's own values as appropriate. `.delete()`
-                    // (mutating) isn't supported this way -- it still
-                    // falls through to the generic error below.
+                    // or a Set's own values as appropriate.
                     if property.sym == *"has" && receiver_type == HirType::Json {
                         let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, "Map/Set.has")?;
@@ -336,6 +423,52 @@ impl<'a> FnLowerer<'a> {
                             vec![receiver, key],
                         );
                         return self.wrap_call_argument_bindings(result, &spread_bindings);
+                    }
+                    // `.delete()` (mutating) -- Stage B, same
+                    // lvalue-write-back rationale as `.set()`/`.add()`.
+                    // Returns whether a matching key/element was
+                    // actually present (`.has()`, evaluated on the
+                    // *original* value before the write-back), matching
+                    // real `Map.prototype.delete`/`Set.prototype.delete`.
+                    if property.sym == *"delete" && receiver_type == HirType::Json {
+                        let Expr::Ident(ident) = member.obj.as_ref() else {
+                            return Err(
+                                "`.delete()` on a Map/Set stored in `any` is only supported when \
+                                 the receiver is a plain local variable, not a property chain"
+                                    .into(),
+                            );
+                        };
+                        let var_name = self.resolve_binding(ident.sym.as_ref());
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Map/Set.delete")?;
+                        let [key] = arguments.as_slice() else {
+                            return Err("native `.delete()` expects exactly one argument".into());
+                        };
+                        let key = self.coerce_to_declared(&HirType::Json, key.clone())?;
+                        let key_name = format!("__thaw_map_delete_any_key_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let existed_name =
+                            format!("__thaw_map_delete_any_existed_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(key_name.clone(), HirType::Json);
+                        self.scope.insert(existed_name.clone(), HirType::Bool);
+                        let var = |name: &str| HirExpr::Var(name.to_string());
+                        let had_key = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_has".to_string())),
+                            vec![var(&var_name), var(&key_name)],
+                        );
+                        let new_value = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_delete".to_string())),
+                            vec![var(&var_name), var(&key_name)],
+                        );
+                        let body = HirExpr::Block(vec![
+                            HirStmt::Let(existed_name.clone(), HirType::Bool, had_key),
+                            HirStmt::Expr(HirExpr::Assign(var_name.clone(), Box::new(new_value))),
+                            HirStmt::Return(Some(var(&existed_name))),
+                        ]);
+                        let mut bindings = vec![(key_name, HirType::Json, key)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(body, &bindings);
                     }
                     let key_type = match &receiver_type {
                         HirType::Map(key_type, _) => key_type.as_ref().clone(),
@@ -388,6 +521,27 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"clear" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    // `.clear()` on a Map/Set stored in `any` -- same
+                    // lvalue-write-back rationale as `.set()`/`.add()`/
+                    // `.delete()`.
+                    if receiver_type == HirType::Json {
+                        let Expr::Ident(ident) = member.obj.as_ref() else {
+                            return Err(
+                                "`.clear()` on a Map/Set stored in `any` is only supported when \
+                                 the receiver is a plain local variable, not a property chain"
+                                    .into(),
+                            );
+                        };
+                        if !call.args.is_empty() {
+                            return Err("native `.clear()` expects no arguments".into());
+                        }
+                        let var_name = self.resolve_binding(ident.sym.as_ref());
+                        let new_value = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_clear".to_string())),
+                            vec![HirExpr::Var(var_name.clone())],
+                        );
+                        return Ok(HirExpr::Assign(var_name, Box::new(new_value)));
+                    }
                     if !matches!(receiver_type, HirType::Map(_, _) | HirType::Set(_)) {
                         return Err(format!(
                             "native `.clear()` requires a Map or Set receiver, got {receiver_type:?}"
