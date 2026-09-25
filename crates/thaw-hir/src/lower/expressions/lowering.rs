@@ -636,21 +636,122 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 let template = &tagged.tpl;
-                let mut strings = Vec::with_capacity(template.quasis.len());
+                let mut cooked_strings = Vec::with_capacity(template.quasis.len());
+                let mut raw_strings = Vec::with_capacity(template.quasis.len());
                 for quasi in &template.quasis {
-                    let text = quasi
+                    let cooked_text = quasi
                         .cooked
                         .as_ref()
                         .map(|cooked| cooked.to_string_lossy().into_owned())
                         .unwrap_or_else(|| quasi.raw.to_string());
-                    strings.push(HirExpr::Lit(HirLit::Str(text)));
+                    cooked_strings.push(HirExpr::Lit(HirLit::Str(cooked_text)));
+                    raw_strings.push(HirExpr::Lit(HirLit::Str(quasi.raw.to_string())));
                 }
-                let mut args = vec![HirExpr::ArrayLit(strings)];
+                // The tag function receives `cooked` -- `strings.raw` is a
+                // real Web-platform requirement of that same array, not a
+                // separate argument, so its raw sibling has to be reachable
+                // *from* the cooked array's own identity: register it in a
+                // runtime side table keyed by the cooked array's buffer
+                // address (`thaw_template_strings_register`, thaw-runtime's
+                // `template_strings.rs`), the same "metadata keyed by a
+                // stable buffer identity" pattern `RegexMatchMeta` uses for
+                // `.index`/`.input`/`.groups` (`regex.rs`) -- before calling
+                // the tag, so a `.raw` read inside the tag function's own
+                // body (or after it returns) can recover it.
+                let cooked_name = format!("__thaw_template_cooked_{}", self.next_binding);
+                self.next_binding += 1;
+                let array_type = HirType::Array(Box::new(HirType::Str));
+                self.scope.insert(cooked_name.clone(), array_type.clone());
+                let mut args = vec![HirExpr::Var(cooked_name.clone())];
                 for expression in &template.exprs {
                     args.push(self.lower_expr(expression)?);
                 }
                 let tag = self.lower_expr(&tagged.tag)?;
-                Ok(HirExpr::Call(Box::new(tag), args))
+                // A tagged-template call is built directly here rather than
+                // through `lower_call` (`invocations/calls.rs`, which a
+                // tagged template has no `CallExpr` AST node to feed), so
+                // it never went through that function's own rest-parameter
+                // packing -- the overwhelmingly common tag signature,
+                // `(strings, ...values: any[])`, hit an LLVM "incorrect
+                // number of arguments" verification failure for more than
+                // one interpolation (a pre-existing bug, found while
+                // testing `.raw` against a realistic signature, not caused
+                // by it). Packs the trailing interpolated values into one
+                // native array here too, mirroring `lower_call`'s own
+                // `native_rest_array` use, whenever the tag resolves to a
+                // named function whose signature declares a rest
+                // parameter.
+                let tag_name = match &tag {
+                    HirExpr::Var(name) | HirExpr::FunctionRef(name, _, _) => Some(name.as_str()),
+                    _ => None,
+                };
+                let args = if let Some(name) = tag_name {
+                    match self.signatures.get(name).map(|signature| {
+                        (signature.params.len(), signature.native_rest.clone())
+                    }) {
+                        // `signature.params` already counts the rest
+                        // parameter's own packed-array slot as its last
+                        // entry (matching `lower_call`'s own
+                        // `param_types = signature.params.clone()` after
+                        // packing) -- the number of *positional* arguments
+                        // before that slot is one less.
+                        Some((total_params, Some(element)))
+                            if total_params > 0 && args.len() >= total_params - 1 =>
+                        {
+                            let positional = total_params - 1;
+                            let mut args = args;
+                            let trailing = args.split_off(positional);
+                            let trailing = trailing
+                                .into_iter()
+                                .map(|value| self.coerce_to_declared(&element, value))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            args.push(native_rest_array(trailing, &element));
+                            args
+                        }
+                        _ => args,
+                    }
+                } else {
+                    args
+                };
+                let call = HirExpr::Call(Box::new(tag), args);
+                // `infer_expr_type` (not the simpler `_inner` variant
+                // `wrap_call_argument_bindings` uses for its own upfront
+                // type check) is what special-cases a bare `Var` callee to
+                // route through the named-function/rest-parameter-aware
+                // dispatch (`inference/types.rs`'s `HirExpr::Call` arm) --
+                // computing `call_type` here and building the wrapping
+                // lambda directly (matching Stage A/B's own `.get()`/
+                // `.set()`-style pattern) avoids ever running `call`
+                // through that simpler inference, which doesn't know how
+                // to arity-check a rest-parameter tag function and
+                // rejected a valid call outright.
+                let call_type = self.infer_expr_type(&call)?;
+                let register = HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_template_strings_register".to_string())),
+                    vec![HirExpr::Var(cooked_name.clone()), HirExpr::ArrayLit(raw_strings)],
+                ));
+                let body = HirExpr::Block(vec![register, HirStmt::Return(Some(call))]);
+                let mut referenced = BTreeSet::new();
+                collect_referenced_bindings(&body, &mut referenced);
+                let captures = referenced
+                    .into_iter()
+                    .filter(|name| name != &cooked_name)
+                    .filter_map(|captured| {
+                        self.scope
+                            .get(&captured)
+                            .cloned()
+                            .map(|ty| HirParam { name: captured, ty })
+                    })
+                    .collect();
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        captures,
+                        vec![HirParam { name: cooked_name, ty: array_type }],
+                        call_type,
+                        Box::new(body),
+                    )),
+                    vec![HirExpr::ArrayLit(cooked_strings)],
+                ))
             }
 
             Expr::Bin(bin) => {

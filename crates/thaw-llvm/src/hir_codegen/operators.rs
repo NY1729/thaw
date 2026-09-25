@@ -232,7 +232,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         // `thaw_error_message`, not a value to format --
                         // observed printing garbage/replacement-character
                         // bytes instead of the array's own text.
-                        "__thaw_json_keys" | "__thaw_json_own_keys" | "__thaw_array_keys" => {
+                        "__thaw_json_keys" | "__thaw_json_own_keys" | "__thaw_array_keys"
+                        | "__thaw_template_strings_raw" => {
                             return Some(HirType::Array(Box::new(HirType::Str)))
                         }
                         "__thaw_json_values"

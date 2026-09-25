@@ -1580,6 +1580,28 @@ impl<'a> FnLowerer<'a> {
                         )?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_template_strings_register" => {
+                        let [cooked, raw] = args.as_slice() else {
+                            return Err(
+                                "template strings registration expects two operands".into(),
+                            );
+                        };
+                        let array_type = HirType::Array(Box::new(HirType::Str));
+                        self.expect_type(&array_type, cooked, "tagged template cooked strings")?;
+                        self.expect_type(&array_type, raw, "tagged template raw strings")?;
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_template_strings_raw" => {
+                        let [cooked] = args.as_slice() else {
+                            return Err("template strings .raw expects one operand".into());
+                        };
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::Str)),
+                            cooked,
+                            "tagged template .raw receiver",
+                        )?;
+                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
                     "__thaw_regex_exec_advance" => {
                         let [value, source, flags, last_index] = args.as_slice() else {
                             return Err("RegExp.exec lastIndex advance expects four operands".into());

@@ -34,6 +34,7 @@ include!("runtime/native_values/numbers.rs");
 include!("runtime/native_values/strings.rs");
 include!("runtime/native_values/arrays.rs");
 include!("runtime/native_values/regex.rs");
+include!("runtime/native_values/template_strings.rs");
 include!("runtime/native_values/date.rs");
 include!("runtime/native_values/temporal.rs");
 include!("runtime/native_values/maps.rs");

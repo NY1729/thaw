@@ -24,6 +24,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     | "__thaw_btoa"
                     | "__thaw_escape"
                     | "__thaw_unescape"
+                    | "__thaw_template_strings_register"
+                    | "__thaw_template_strings_raw"
             );
         if !text_call {
             return None;
@@ -360,6 +362,42 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("RegExp input returned no value".into());
+            }
+            "__thaw_template_strings_register" => {
+                let [cooked, raw] = args else {
+                    return Err("template strings registration expects two operands".into());
+                };
+                let cooked = self.compile_expr(cooked)?;
+                let raw = self.compile_expr(raw)?;
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_template_strings_register")
+                            .unwrap(),
+                        &[cooked.into(), raw.into()],
+                        "template_strings_register",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.f64_type().const_zero().into());
+            }
+            "__thaw_template_strings_raw" => {
+                let [cooked] = args else {
+                    return Err("template strings .raw expects one operand".into());
+                };
+                let cooked = self.compile_expr(cooked)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_template_strings_raw").unwrap(),
+                        &[cooked.into()],
+                        "template_strings_raw",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("template strings .raw returned no value")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_regex_exec_advance" => {
                 let [value, source, flags, last_index] = args else {
