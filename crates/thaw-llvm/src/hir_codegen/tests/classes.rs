@@ -1751,6 +1751,29 @@ fn compiles_and_runs_native_class_getters() {
     assert_eq!(compile_and_run(source, "native_class_getters"), "42\nv1\n");
 }
 
+/// A getter read off a receiver that isn't a plain identifier -- `new
+/// Box(21).doubled`, `factory().doubled` -- which the class-getter
+/// dispatch originally didn't see through.
+#[test]
+fn compiles_and_runs_getters_on_a_non_identifier_receiver() {
+    let source = r#"
+        class Box {
+            value: number;
+            constructor(value: number) { this.value = value; }
+            get doubled(): number { return this.value * 2; }
+            rebuild(): Box { return new Box(this.value); }
+        }
+        function main(): void {
+            console.log(new Box(21).doubled);
+            console.log(new Box(20).rebuild().doubled);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "getters_on_non_identifier_receiver"),
+        "42\n40\n"
+    );
+}
+
 #[test]
 fn compiles_and_runs_native_class_setters() {
     let source = r#"
