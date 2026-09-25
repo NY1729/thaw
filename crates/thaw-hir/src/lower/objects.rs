@@ -829,35 +829,60 @@ impl<'a> FnLowerer<'a> {
         obj_ty: HirType,
         property: &str,
     ) -> (HirExpr, HirType) {
-        let HirType::Optional(payload) = &obj_ty else {
-            return (obj, obj_ty);
+        let payload = match &obj_ty {
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                payload.as_ref().clone()
+            }
+            _ => return (obj, obj_ty),
         };
-        let optional_type = obj_ty.clone();
-        let payload = payload.as_ref().clone();
+        let wrapper_type = obj_ty.clone();
         let name = format!("__thaw_required_receiver_{}", self.next_binding);
         self.next_binding += 1;
         let bound = HirExpr::Var(name.clone());
+        let undefined_throw = || {
+            HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                "\u{1}TypeError\u{1}Cannot read properties of undefined (reading '{property}')"
+            ))))
+        };
+        let null_throw = || {
+            HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                "\u{1}TypeError\u{1}Cannot read properties of null (reading '{property}')"
+            ))))
+        };
+        let (is_none, on_none, value) = match &obj_ty {
+            HirType::Optional(_) => (
+                HirExpr::OptionalIsNone(Box::new(bound.clone()), payload.clone()),
+                vec![undefined_throw()],
+                HirExpr::OptionalValue(Box::new(bound.clone()), payload.clone()),
+            ),
+            HirType::Nullable(_) => (
+                HirExpr::NullableIsNone(Box::new(bound.clone()), payload.clone()),
+                vec![null_throw()],
+                HirExpr::NullableValue(Box::new(bound.clone()), payload.clone()),
+            ),
+            HirType::Nullish(_) => (
+                HirExpr::NullishIsNone(Box::new(bound.clone()), payload.clone()),
+                vec![HirStmt::If(
+                    HirExpr::NullishIsNull(Box::new(bound.clone()), payload.clone()),
+                    vec![null_throw()],
+                    vec![undefined_throw()],
+                )],
+                HirExpr::NullishValue(Box::new(bound.clone()), payload.clone()),
+            ),
+            _ => unreachable!(),
+        };
         (
             HirExpr::Call(
                 Box::new(HirExpr::Lambda(
                     Vec::new(),
                     vec![HirParam {
                         name,
-                        ty: optional_type,
+                        ty: wrapper_type,
                     }],
                     payload.clone(),
                     Box::new(HirExpr::Block(vec![
-                        HirStmt::If(
-                            HirExpr::OptionalIsNone(Box::new(bound.clone()), payload.clone()),
-                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
-                                "\u{1}TypeError\u{1}Cannot read properties of undefined (reading '{property}')"
-                            ))))],
-                            Vec::new(),
-                        ),
-                        HirStmt::Return(Some(HirExpr::OptionalValue(
-                            Box::new(bound),
-                            payload.clone(),
-                        ))),
+                        HirStmt::If(is_none, on_none, Vec::new()),
+                        HirStmt::Return(Some(value)),
                     ])),
                 )),
                 vec![obj],

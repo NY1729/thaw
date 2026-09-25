@@ -1776,8 +1776,8 @@ fn compiles_regex_test_last_index_state() {
 #[test]
 fn compiles_regex_exec() {
     let source = r#"
-        function printMatch(result: string[] | undefined): void {
-            if (result !== undefined) {
+        function printMatch(result: string[] | null): void {
+            if (result !== null) {
                 for (const part of result) {
                     console.log(part);
                 }
@@ -3253,8 +3253,8 @@ fn compiles_class_generator_methods() {
 #[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
-        function printMatch(result: string[] | undefined): void {
-            if (result !== undefined) {
+        function printMatch(result: string[] | null): void {
+            if (result !== null) {
                 console.log(result[0]);
             } else {
                 console.log("no match");
@@ -3270,12 +3270,12 @@ fn compiles_regex_exec_last_index_state() {
             console.log(global.lastIndex);
 
             const sticky = /\d+/y;
-            console.log(sticky.exec("12abc") !== undefined);
-            console.log(sticky.exec("12abc") !== undefined);
+            console.log(sticky.exec("12abc") !== null);
+            console.log(sticky.exec("12abc") !== null);
             sticky.lastIndex = 0;
-            console.log(sticky.exec("12abc") !== undefined);
+            console.log(sticky.exec("12abc") !== null);
             const misplaced = /\d/y;
-            console.log(misplaced.exec("a1") !== undefined);
+            console.log(misplaced.exec("a1") !== null);
             console.log(misplaced.lastIndex);
 
             const plain = /\d+/;
@@ -3286,7 +3286,7 @@ fn compiles_regex_exec_last_index_state() {
             const empty = /x*/g;
             let count = 0;
             let current = empty.exec("abc");
-            while (current !== undefined) {
+            while (current !== null) {
                 count++;
                 if (count > 10) {
                     break;
@@ -3305,8 +3305,8 @@ fn compiles_regex_exec_last_index_state() {
 #[test]
 fn compiles_string_match() {
     let source = r#"
-        function printMatch(result: string[] | undefined): void {
-            if (result !== undefined) {
+        function printMatch(result: string[] | null): void {
+            if (result !== null) {
                 for (const part of result) {
                     console.log(part);
                 }
