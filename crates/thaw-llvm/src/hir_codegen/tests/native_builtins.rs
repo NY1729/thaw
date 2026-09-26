@@ -5233,6 +5233,24 @@ fn array_mapping_callbacks_return_sparse_values_as_present_undefined() {
 }
 
 #[test]
+fn mapping_index_reads_coerces_optional_elements_to_declared_array() {
+    let source = r#"
+        function main(): void {
+            const rows: string[][] = [["a", "b"], ["c"]];
+            const first: string[] = rows.map((row) => row[0]);
+            console.log(first.join(","));
+            const numbers: number[][] = [[1], [2, 3]];
+            const heads: number[] = numbers.map((row) => row[0]);
+            console.log(heads.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_index_read_coercion"),
+        "a,c\n1,2\n"
+    );
+}
+
+#[test]
 fn array_methods_preserve_sparse_values_after_spread_arguments() {
     let source = r#"
         function main(): void {
