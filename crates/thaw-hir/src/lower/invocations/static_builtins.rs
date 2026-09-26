@@ -2273,12 +2273,18 @@ impl<'a> FnLowerer<'a> {
                         if explicit_types.len() > 2 {
                             return Err("`Array.from` expects at most two type arguments".into());
                         }
-                        let source = if has_spread {
+                        let mut source = if has_spread {
                             spread_arguments[0].clone()
                         } else {
                             self.lower_expr(&call.args[0].expr)?
                         };
-                        let source_type = self.infer_expr_type(&source)?;
+                        let mut source_type = self.infer_expr_type(&source)?;
+                        if let HirType::Union(members) = &source_type {
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                (source, source_type) =
+                                    self.lower_union_array_sequence(source, members)?;
+                            }
+                        }
                         if let HirType::Object(fields) = &source_type {
                             if let [(field_name, HirType::F64)] = fields.as_slice() {
                                 if field_name == "length" {

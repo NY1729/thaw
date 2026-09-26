@@ -236,3 +236,51 @@ fn compiles_call_argument_spreads_in_left_to_right_order() {
     );
 }
 
+#[test]
+fn consumes_union_array_sequences_across_both_tags() {
+    let source = r#"
+        let calls = 0;
+        function values(numbers: boolean): number[] | string[] {
+            calls++;
+            if (numbers) return [1, , 3];
+            return ["a", , "c"];
+        }
+        async function main(): Promise<void> {
+            let seen = "";
+            for (const value of values(true)) seen += String(value) + ":";
+            console.log(seen);
+
+            let awaited = "";
+            for await (const value of values(false)) awaited += String(value) + ":";
+            console.log(awaited);
+
+            console.log([...values(true)].join("|"));
+            console.log([...values(false)].join("|"));
+            console.log(Array.from(values(true)).join("|"));
+            console.log(Array.from(values(false)).join("|"));
+
+            let keys = "";
+            for (const key of values(false).keys()) keys += String(key);
+            console.log(keys);
+            let iteratedValues = "";
+            for (const value of values(true).values()) iteratedValues += String(value) + ":";
+            console.log(iteratedValues);
+            let entries = "";
+            for (const [index, value] of values(false).entries()) {
+                entries += String(index) + "=" + String(value) + ":";
+            }
+            console.log(entries);
+
+            let symbols = "";
+            for (const value of values(true)[Symbol.iterator]()) {
+                symbols += String(value) + ":";
+            }
+            console.log(symbols);
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_sequences"),
+        "1:undefined:3:\na:undefined:c:\n1||3\na||c\n1||3\na||c\n012\n1:undefined:3:\n0=a:1=undefined:2=c:\n1:undefined:3:\n10\n"
+    );
+}

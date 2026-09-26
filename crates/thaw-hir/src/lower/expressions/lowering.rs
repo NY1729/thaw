@@ -2063,7 +2063,15 @@ impl<'a> FnLowerer<'a> {
                         // snapshot to an array up front via the exact same
                         // conversions that path uses, rather than requiring
                         // a typed array up front.
-                        let spread_source_type = self.infer_expr_type(&value)?;
+                        let mut spread_source_type = self.infer_expr_type(&value)?;
+                        if let HirType::Union(members) = &spread_source_type {
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                let (flattened, flattened_type) =
+                                    self.lower_union_array_sequence(value, members)?;
+                                value = flattened;
+                                spread_source_type = flattened_type;
+                            }
+                        }
                         if let Some((collected, _)) = self
                             .collect_generator_for_array_spread(value.clone(), &spread_source_type)?
                         {

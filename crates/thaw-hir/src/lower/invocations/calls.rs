@@ -2422,6 +2422,20 @@ impl<'a> FnLowerer<'a> {
                 if !call.args.is_empty() {
                     return Err("`[Symbol.iterator]()` expects no arguments".into());
                 }
+                let receiver = self.lower_expr(&member.obj)?;
+                let receiver_type = self.infer_expr_type(&receiver)?;
+                if let HirType::Union(members) = &receiver_type {
+                    if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                        let (receiver, array_type) =
+                            self.lower_union_array_sequence(receiver, members)?;
+                        let HirType::Array(element) = &array_type else { unreachable!() };
+                        return self.lower_array_values(
+                            receiver,
+                            array_type.clone(),
+                            element.as_ref().clone(),
+                        );
+                    }
+                }
                 // `obj[Symbol.iterator]()` reuses `Iterator.from(obj)`,
                 // which already produces a native iterator for every
                 // receiver thaw models.

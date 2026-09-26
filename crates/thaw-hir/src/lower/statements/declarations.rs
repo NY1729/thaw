@@ -750,8 +750,10 @@ impl<'a> FnLowerer<'a> {
             let destructurable_union = matches!(
                 &ty,
                 HirType::Union(elements)
-                    if matches!(&decl.name, Pat::Object(_))
-                        && elements.iter().all(|element| matches!(element, HirType::Object(_)))
+                    if (matches!(&decl.name, Pat::Object(_))
+                        && elements.iter().all(|element| matches!(element, HirType::Object(_))))
+                        || (matches!(&decl.name, Pat::Array(_))
+                            && elements.iter().all(|element| matches!(element, HirType::Tuple(_) | HirType::Array(_))))
             );
             let destructurable_dictionary =
                 matches!((&decl.name, &ty), (Pat::Object(_), HirType::Dictionary(_)));

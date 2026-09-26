@@ -394,11 +394,11 @@ impl<'a> FnLowerer<'a> {
                     if (matches!(pattern, Pat::Object(_))
                         && elements.iter().all(|element| matches!(element, HirType::Object(_))))
                         || (matches!(pattern, Pat::Array(_))
-                            && elements.iter().all(|element| matches!(element, HirType::Tuple(_))))
+                            && elements.iter().all(|element| matches!(element, HirType::Tuple(_) | HirType::Array(_))))
             );
             let destructurable_dictionary =
                 matches!((&pattern, &ty), (Pat::Object(_), HirType::Dictionary(_)));
-            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_))
+            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_) | HirType::Array(_))
                 && !destructurable_union
                 && !destructurable_dictionary
             {
@@ -1304,6 +1304,60 @@ impl<'a> FnLowerer<'a> {
                             pattern, value, elements, statements,
                         );
                     }
+                    if elements
+                        .iter()
+                        .all(|element| matches!(element, HirType::Array(_)))
+                    {
+                        let (flattened, flattened_type) =
+                            self.lower_union_array_sequence(value, elements)?;
+                        let name = format!("__thaw_assign_union_array_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), flattened_type.clone());
+                        statements.push(HirStmt::Let(name.clone(), flattened_type.clone(), flattened));
+                        return self.lower_assignment_pattern(
+                            &Pat::Array(pattern.clone()),
+                            HirExpr::Var(name),
+                            &flattened_type,
+                            statements,
+                        );
+                    }
+                }
+                if let HirType::Array(element) = ty {
+                    let array_type = ty.clone();
+                    for (index, element_pattern) in pattern.elems.iter().enumerate() {
+                        let Some(element_pattern) = element_pattern else { continue };
+                        if let Pat::Rest(rest) = element_pattern {
+                            let rest_value = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                                vec![
+                                    value.clone(),
+                                    HirExpr::Lit(HirLit::F64(index as f64)),
+                                    HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                                ],
+                            );
+                            self.lower_assignment_pattern(
+                                &rest.arg,
+                                rest_value,
+                                ty,
+                                statements,
+                            )?;
+                            break;
+                        }
+                        let read_type = Self::array_read_type(element);
+                        let read = self.lower_array_index(
+                            value.clone(),
+                            array_type.clone(),
+                            element.as_ref().clone(),
+                            HirExpr::Lit(HirLit::F64(index as f64)),
+                        )?;
+                        self.lower_assignment_pattern(
+                            element_pattern,
+                            read,
+                            &read_type,
+                            statements,
+                        )?;
+                    }
+                    return Ok(());
                 }
                 // Same `Json`-array-pattern accommodation as `lower_
                 // binding_pattern` (`destructuring.rs`) -- see its own
