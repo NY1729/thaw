@@ -1855,6 +1855,14 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(target_type);
                     }
+                    "__thaw_json_array_slice" => {
+                        let [value, start] = args.as_slice() else {
+                            return Err("dynamic array rest expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "dynamic array rest source")?;
+                        self.expect_type(&HirType::F64, start, "dynamic array rest start")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_has_own" => {
                         let [value, key] = args.as_slice() else {
                             return Err("Object.hasOwn expects two operands".into());

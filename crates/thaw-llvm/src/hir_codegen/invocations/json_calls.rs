@@ -539,6 +539,32 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Object.assign returned no value".into());
             }
+            "__thaw_json_array_slice" => {
+                let [value, start] = args else {
+                    return Err("dynamic array rest expects two operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let start = self.compile_expr(start)?.into_float_value();
+                let start = self
+                    .builder
+                    .build_float_to_signed_int(
+                        start,
+                        self.context.i64_type(),
+                        "json_array_slice_start",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_array_slice").unwrap(),
+                        &[value.into(), start.into()],
+                        "json_array_slice",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_array_slice returned no value".into());
+            }
             "__thaw_json_has_own" => {
                 let [value, key] = args else {
                     return Err("Object.hasOwn expects two operands".to_string());
