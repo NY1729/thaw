@@ -1,10 +1,59 @@
 impl<'a> FnLowerer<'a> {
+    /// `.length` of a union whose members are all arrays: every native array
+    /// stores its own length, and the member layouts differ, so dispatch on
+    /// the runtime tag and take the selected member's length.
+    fn lower_union_array_length(
+        &mut self,
+        object: HirExpr,
+        elements: &[HirType],
+    ) -> Result<HirExpr, String> {
+        let name = format!("__thaw_union_array_{}", self.next_binding);
+        self.next_binding += 1;
+        let object_type = HirType::Union(elements.to_vec());
+        self.scope.insert(name.clone(), object_type.clone());
+        let bound = HirExpr::Var(name.clone());
+        let mut result: Option<HirExpr> = None;
+        for (index, element) in elements.iter().enumerate().rev() {
+            let HirType::Array(_) = element else {
+                return Err(format!(
+                    "cannot take `.length`: union member {element:?} is not an array"
+                ));
+            };
+            let length = HirExpr::ArrayLen(Box::new(HirExpr::UnionValue(
+                Box::new(bound.clone()),
+                index,
+                elements.to_vec(),
+            )));
+            result = Some(match result {
+                None => length,
+                Some(rest) => HirExpr::Conditional(
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(
+                            Box::new(bound.clone()),
+                            elements.to_vec(),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    )),
+                    Box::new(length),
+                    Box::new(rest),
+                    HirType::F64,
+                ),
+            });
+        }
+        let result = result.ok_or("cannot take `.length` of an empty union")?;
+        self.wrap_call_argument_bindings(result, &[(name, object_type, object)])
+    }
+
     fn lower_union_property_read(
         &mut self,
         object: HirExpr,
         elements: &[HirType],
         property: &str,
     ) -> Result<HirExpr, String> {
+        if property == "length" && elements.iter().all(|e| matches!(e, HirType::Array(_))) {
+            return self.lower_union_array_length(object, elements);
+        }
         let mut field_types = Vec::with_capacity(elements.len());
         for element in elements {
             if matches!(element, HirType::Undefined | HirType::Null) {

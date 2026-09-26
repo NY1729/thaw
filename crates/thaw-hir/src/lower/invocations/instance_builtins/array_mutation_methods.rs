@@ -750,6 +750,90 @@ impl<'a> FnLowerer<'a> {
                     let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
+                    // A union whose members are all arrays (`number[] |
+                    // string[]`): the member layouts differ, so dispatch on
+                    // the runtime tag and run the loop for the selected
+                    // member, coercing its element into the callback's
+                    // (union) parameter type.
+                    if let HirType::Union(union_elements) = &array_type {
+                        if union_elements.iter().all(|element| matches!(element, HirType::Array(_)))
+                        {
+                            if !(1..=2).contains(&call.args.len()) {
+                                return Err(
+                                    "native `.forEach()` expects a callback and optional thisArg"
+                                        .into(),
+                                );
+                            }
+                            let mut element_types = Vec::new();
+                            for element in union_elements {
+                                let HirType::Array(inner) = element else {
+                                    unreachable!("checked above")
+                                };
+                                if !element_types.contains(inner.as_ref()) {
+                                    element_types.push(inner.as_ref().clone());
+                                }
+                            }
+                            let union_element_type = match element_types.as_slice() {
+                                [single] => single.clone(),
+                                _ => HirType::Union(element_types),
+                            };
+                            let callback = self.lower_array_callback(
+                                &call.args[0].expr,
+                                &union_element_type,
+                                &array_type,
+                                Some(&HirType::Void),
+                            )?;
+                            let this_arg = call
+                                .args
+                                .get(1)
+                                .map(|argument| self.lower_expr(&argument.expr))
+                                .transpose()?;
+                            let name = format!("__thaw_union_for_each_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), array_type.clone());
+                            let bound = HirExpr::Var(name.clone());
+                            let mut statements: Vec<HirStmt> = Vec::new();
+                            for (index, element) in union_elements.iter().enumerate().rev() {
+                                let HirType::Array(inner) = element else {
+                                    unreachable!("checked above")
+                                };
+                                let member_value = HirExpr::UnionValue(
+                                    Box::new(bound.clone()),
+                                    index,
+                                    union_elements.clone(),
+                                );
+                                let loop_expr = self.lower_array_for_each(
+                                    member_value,
+                                    HirType::Array(inner.clone()),
+                                    inner.as_ref().clone(),
+                                    inner.as_ref().clone(),
+                                    callback.clone(),
+                                    this_arg.clone(),
+                                )?;
+                                if statements.is_empty() {
+                                    statements = vec![HirStmt::Expr(loop_expr)];
+                                } else {
+                                    statements = vec![HirStmt::If(
+                                        HirExpr::BinOp(
+                                            BinOp::EqEqEq,
+                                            Box::new(HirExpr::UnionTag(
+                                                Box::new(bound.clone()),
+                                                union_elements.clone(),
+                                            )),
+                                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                        ),
+                                        vec![HirStmt::Expr(loop_expr)],
+                                        statements,
+                                    )];
+                                }
+                            }
+                            let result = HirExpr::Block(statements);
+                            return self.wrap_call_argument_bindings(
+                                result,
+                                &[(name, array_type.clone(), receiver)],
+                            );
+                        }
+                    }
                     let element_type = match &array_type {
                         HirType::Array(element) => element.as_ref().clone(),
                         HirType::Tuple(elements) => elements
