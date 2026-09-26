@@ -344,6 +344,80 @@ fn observes_native_accessor_descriptors_and_json_replacers() {
 }
 
 #[test]
+fn redefines_existing_native_accessors_from_descriptors() {
+    let source = r#"
+        function main(): void {
+            const source = {
+                base: 1,
+                get value(): number { return this.base; },
+                set value(next: number) { this.base = next; },
+            };
+            const same = Object.defineProperty(source, "value", {
+                get(): number { return this.base + 10; },
+                set(next: number) { this.base = next * 2; },
+            });
+            console.log(same === source, source.value);
+            source.value = 3;
+            console.log(source.base, source.value);
+
+            console.log(Reflect.defineProperty(source, "value", {
+                get: (): number => source.base + 20,
+                set: (next: number): void => { source.base = next + 1; },
+            }));
+            console.log(source.value);
+            source.value = 4;
+            console.log(source.base, source.value);
+
+            Object.defineProperties(source, {
+                value: {
+                    get(): number { return this.base + 30; },
+                    set(next: number) { this.base = next + 2; },
+                },
+            });
+            source.value = 8;
+            console.log(source.base, source.value);
+            const descriptor = Object.getOwnPropertyDescriptor(source, "value")!;
+            console.log(descriptor.get.call(source));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_accessor_descriptor_redefinition"),
+        "true 11\n6 16\ntrue\n26\n5 25\n10 40\n40\n"
+    );
+}
+
+#[test]
+fn rejects_fixed_layout_descriptor_shape_changes() {
+    for (source, expected) in [
+        (
+            r#"function main(): void {
+                const source = { value: 1 };
+                Object.defineProperty(source, "value", { get: (): number => 2 });
+            }"#,
+            "cannot add an accessor slot to fixed field `value`",
+        ),
+        (
+            r#"function main(): void {
+                const source = { get value(): number { return 1; } };
+                Object.defineProperty(source, "value", { value: 2 });
+            }"#,
+            "cannot convert accessor `value` to a data property on a fixed object",
+        ),
+        (
+            r#"function main(): void {
+                const source = { get value(): number { return 1; } };
+                Object.defineProperty(source, "value", { set: (next: number): void => {} });
+            }"#,
+            "cannot add an accessor slot to fixed field `value`",
+        ),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = thaw_hir::lower_module(&module).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn compiles_object_from_typed_entries() {
     let source = r#"
         function numberEntries(): [string, number][] {

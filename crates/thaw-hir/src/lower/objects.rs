@@ -2375,40 +2375,66 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn fixed_object_property_descriptor(
+        &mut self,
         target: HirExpr,
         target_type: &HirType,
         fields: &[(Symbol, HirType)],
         property: &str,
-    ) -> HirExpr {
+    ) -> Result<HirExpr, String> {
+        let source_name = format!("__thaw_descriptor_source_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), target_type.clone());
+        let source = HirExpr::Var(source_name.clone());
         let getter = format!("__thaw_getter_{property}");
         let setter = format!("__thaw_setter_{property}");
-        let accessor = |hidden: String| {
-            let (_, ty) = fields.iter().find(|(name, _)| name == &hidden)?;
-            let logical = match ty {
-                HirType::Function(params, ret) => {
-                    HirType::Function(params[1..].to_vec(), ret.clone())
-                }
-                HirType::CallableFunction(params, optional, rest, ret) => HirType::CallableFunction(
-                    params[1..].to_vec(),
-                    optional.clone(),
-                    rest.clone(),
-                    ret.clone(),
-                ),
-                _ => return None,
+        let mut accessor = |hidden: String| -> Result<Option<HirExpr>, String> {
+            let Some((_, ty)) = fields.iter().find(|(name, _)| name == &hidden) else {
+                return Ok(None);
             };
-            Some(HirExpr::TypedClosure(
-                logical,
+            let (params, ret) = match ty {
+                HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => {
+                    (params, ret.as_ref().clone())
+                }
+                other => return Err(format!("object accessor `{property}` has type {other:?}")),
+            };
+            let Some((_, forwarded)) = params.split_first() else {
+                return Err(format!("object accessor `{property}` has no receiver"));
+            };
+            let mut adapter_params = Vec::with_capacity(forwarded.len());
+            for (index, ty) in forwarded.iter().enumerate() {
+                let name = format!("__thaw_descriptor_argument_{}_{}", index, self.next_binding);
+                self.scope.insert(name.clone(), ty.clone());
+                adapter_params.push(HirParam { name, ty: ty.clone() });
+            }
+            self.next_binding += 1;
+            let mut arguments = vec![source.clone()];
+            arguments.extend(
+                adapter_params
+                    .iter()
+                    .map(|parameter| HirExpr::Var(parameter.name.clone())),
+            );
+            let call = HirExpr::Call(
                 Box::new(HirExpr::PropAccess(
-                    Box::new(target.clone()),
+                    Box::new(source.clone()),
                     target_type.clone(),
                     hidden,
                 )),
-            ))
+                arguments,
+            );
+            Ok(Some(HirExpr::Lambda(
+                vec![HirParam {
+                    name: source_name.clone(),
+                    ty: target_type.clone(),
+                }],
+                adapter_params,
+                ret,
+                Box::new(call),
+            )))
         };
-        let getter = accessor(getter);
-        let setter = accessor(setter);
+        let getter = accessor(getter)?;
+        let setter = accessor(setter)?;
         if getter.is_some() || setter.is_some() {
-            return HirExpr::ObjectLit(vec![
+            let descriptor = HirExpr::ObjectLit(vec![
                 (
                     "get".into(),
                     getter.unwrap_or(HirExpr::Lit(HirLit::Undefined)),
@@ -2420,12 +2446,16 @@ impl<'a> FnLowerer<'a> {
                 ("enumerable".into(), HirExpr::Lit(HirLit::Bool(true))),
                 ("configurable".into(), HirExpr::Lit(HirLit::Bool(true))),
             ]);
+            return self.wrap_call_argument_bindings(
+                descriptor,
+                &[(source_name, target_type.clone(), target)],
+            );
         }
-        HirExpr::ObjectLit(vec![
+        let descriptor = HirExpr::ObjectLit(vec![
             (
                 "value".into(),
                 HirExpr::PropAccess(
-                    Box::new(target),
+                    Box::new(source),
                     target_type.clone(),
                     property.into(),
                 ),
@@ -2433,7 +2463,11 @@ impl<'a> FnLowerer<'a> {
             ("writable".into(), HirExpr::Lit(HirLit::Bool(true))),
             ("enumerable".into(), HirExpr::Lit(HirLit::Bool(true))),
             ("configurable".into(), HirExpr::Lit(HirLit::Bool(true))),
-        ])
+        ]);
+        self.wrap_call_argument_bindings(
+            descriptor,
+            &[(source_name, target_type.clone(), target)],
+        )
     }
 
     fn fixed_object_contains_accessor(fields: &[(Symbol, HirType)]) -> bool {
@@ -2518,6 +2552,226 @@ impl<'a> FnLowerer<'a> {
             ],
         );
         self.wrap_call_argument_bindings(result, &[(source_name, source_type, value)])
+    }
+
+    fn lower_native_accessor_definition(
+        &mut self,
+        property: &swc_ecma_ast::Prop,
+        accessor_type: &HirType,
+        label: &str,
+    ) -> Result<HirExpr, String> {
+        let (accessor_params, accessor_ret) = match accessor_type {
+            HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => {
+                (params, ret.as_ref().clone())
+            }
+            _ => return Err(format!("`{label}` accessor slot is not callable")),
+        };
+        let Some((receiver, forwarded)) = accessor_params.split_first() else {
+            return Err(format!("`{label}` accessor slot has no receiver"));
+        };
+        if let swc_ecma_ast::Prop::Method(method) = property {
+            return self.lower_object_function(
+                &method.function,
+                receiver.clone(),
+                Some(accessor_type),
+                true,
+            );
+        }
+        let swc_ecma_ast::Prop::KeyValue(property) = property else {
+            return Err(format!("`{label}` accessor must be a function value or method"));
+        };
+        if let Expr::Fn(function) = property.value.as_ref() {
+            return self.lower_object_function(
+                &function.function,
+                receiver.clone(),
+                Some(accessor_type),
+                true,
+            );
+        }
+        let callback = self.lower_expr(&property.value)?;
+        let callback_type = self.infer_expr_type(&callback)?;
+        let (callback_params, callback_ret) = match &callback_type {
+            HirType::Function(params, ret) => (params.clone(), ret.as_ref().clone()),
+            HirType::CallableFunction(params, _, None, ret) => {
+                (params.clone(), ret.as_ref().clone())
+            }
+            _ => return Err(format!("`{label}` accessor must be callable")),
+        };
+        if callback_params.len() != forwarded.len() {
+            return Err(format!(
+                "`{label}` accessor expects {} argument(s), got {}",
+                forwarded.len(),
+                callback_params.len()
+            ));
+        }
+        let callback_name = format!("__thaw_descriptor_accessor_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope
+            .insert(callback_name.clone(), callback_type.clone());
+        let mut params = Vec::with_capacity(accessor_params.len());
+        for (index, ty) in accessor_params.iter().enumerate() {
+            let name = format!("__thaw_descriptor_parameter_{}_{}", index, self.next_binding);
+            self.scope.insert(name.clone(), ty.clone());
+            params.push(HirParam { name, ty: ty.clone() });
+        }
+        self.next_binding += 1;
+        let arguments = params[1..]
+            .iter()
+            .zip(&callback_params)
+            .map(|(parameter, expected)| {
+                self.coerce_to_declared(expected, HirExpr::Var(parameter.name.clone()))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let call = HirExpr::FunctionCallWithThis(
+            Box::new(HirExpr::Var(callback_name.clone())),
+            Box::new(HirExpr::Var(params[0].name.clone())),
+            arguments,
+            callback_params,
+            callback_ret.clone(),
+        );
+        let body = if forwarded.is_empty() {
+            self.coerce_to_declared(&accessor_ret, call)?
+        } else {
+            HirExpr::Block(vec![HirStmt::Expr(call), HirStmt::Return(None)])
+        };
+        let adapter = HirExpr::Lambda(
+            vec![HirParam {
+                name: callback_name.clone(),
+                ty: callback_type.clone(),
+            }],
+            params,
+            accessor_ret,
+            Box::new(body),
+        );
+        self.wrap_call_argument_bindings(adapter, &[(callback_name, callback_type, callback)])
+    }
+
+    fn lower_native_property_descriptor(
+        &mut self,
+        target: HirExpr,
+        target_type: &HirType,
+        key: &str,
+        descriptor: &swc_ecma_ast::ObjectLit,
+        label: &str,
+    ) -> Result<Vec<HirExpr>, String> {
+        let mut value = None;
+        let mut getter = None;
+        let mut setter = None;
+        for entry in &descriptor.props {
+            let swc_ecma_ast::PropOrSpread::Prop(entry) = entry else {
+                return Err(format!("`{label}` descriptor must not spread"));
+            };
+            let name = match entry.as_ref() {
+                swc_ecma_ast::Prop::KeyValue(property) => match &property.key {
+                    swc_ecma_ast::PropName::Ident(ident) => ident.sym.to_string(),
+                    swc_ecma_ast::PropName::Str(value) => {
+                        value.value.to_string_lossy().into_owned()
+                    }
+                    _ => continue,
+                },
+                swc_ecma_ast::Prop::Method(method) => match &method.key {
+                    swc_ecma_ast::PropName::Ident(ident) => ident.sym.to_string(),
+                    swc_ecma_ast::PropName::Str(value) => {
+                        value.value.to_string_lossy().into_owned()
+                    }
+                    _ => continue,
+                },
+                _ => {
+                    return Err(format!(
+                        "`{label}` descriptor must use `key: value` entries or methods"
+                    ))
+                }
+            };
+            match name.as_str() {
+                "value" => {
+                    let swc_ecma_ast::Prop::KeyValue(property) = entry.as_ref() else {
+                        return Err(format!("`{label}` descriptor value must be an expression"));
+                    };
+                    value = Some(property.value.as_ref());
+                }
+                "get" => getter = Some(entry.as_ref()),
+                "set" => setter = Some(entry.as_ref()),
+                "writable" | "enumerable" | "configurable" => {}
+                _ => {}
+            }
+        }
+        if value.is_some() && (getter.is_some() || setter.is_some()) {
+            return Err(format!(
+                "`{label}` descriptor cannot mix value and accessor entries"
+            ));
+        }
+        match target_type {
+            HirType::Object(fields) => {
+                let Some((_, field_type)) = fields.iter().find(|(name, _)| name == key) else {
+                    return Err(format!(
+                        "`{label}` cannot add the new field `{key}` to a fixed object"
+                    ));
+                };
+                let getter_name = format!("__thaw_getter_{key}");
+                let setter_name = format!("__thaw_setter_{key}");
+                let existing_getter = fields.iter().find(|(name, _)| name == &getter_name);
+                let existing_setter = fields.iter().find(|(name, _)| name == &setter_name);
+                if let Some(value) = value {
+                    if existing_getter.is_some() || existing_setter.is_some() {
+                        return Err(format!(
+                            "`{label}` cannot convert accessor `{key}` to a data property on a fixed object"
+                        ));
+                    }
+                    let value = self.lower_expr(value)?;
+                    let value = self.coerce_to_declared(field_type, value)?;
+                    return Ok(vec![HirExpr::PropAssign(
+                        Box::new(target),
+                        target_type.clone(),
+                        key.into(),
+                        Box::new(value),
+                    )]);
+                }
+                let mut assignments = Vec::new();
+                for (entry, hidden, existing) in [
+                    (getter, getter_name, existing_getter),
+                    (setter, setter_name, existing_setter),
+                ] {
+                    let Some(entry) = entry else { continue };
+                    let Some((_, accessor_type)) = existing else {
+                        return Err(format!(
+                            "`{label}` cannot add an accessor slot to fixed field `{key}`"
+                        ));
+                    };
+                    let value = self.lower_native_accessor_definition(
+                        entry,
+                        accessor_type,
+                        label,
+                    )?;
+                    assignments.push(HirExpr::PropAssign(
+                        Box::new(target.clone()),
+                        target_type.clone(),
+                        hidden,
+                        Box::new(value),
+                    ));
+                }
+                Ok(assignments)
+            }
+            HirType::Json => {
+                if getter.is_some() || setter.is_some() {
+                    return Err(format!(
+                        "`{label}` accessors require a live dynamic object"
+                    ));
+                }
+                let Some(value) = value else { return Ok(Vec::new()) };
+                let value = self.lower_expr(value)?;
+                let value_type = self.infer_expr_type(&value)?;
+                Ok(vec![HirExpr::JsonSet(
+                    Box::new(target),
+                    Box::new(HirExpr::Lit(HirLit::Str(key.into()))),
+                    Box::new(value),
+                    value_type,
+                    true,
+                )])
+            }
+            other => Err(format!(
+                "`{label}` currently requires a fixed object or JSON receiver, got {other:?}"
+            )),
+        }
     }
 
 }
