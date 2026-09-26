@@ -420,6 +420,12 @@ impl<'a> FnLowerer<'a> {
                                  object, got {target_type:?}"
                             ));
                         };
+                        if fields.iter().any(|(name, _)| is_hidden_accessor_field(name)) {
+                            return Err(
+                                "property descriptor inspection is not supported for native accessor objects"
+                                    .into(),
+                            );
+                        }
                         if !fields.iter().any(|(name, _)| name == &key) {
                             return self.wrap_call_argument_bindings(
                                 HirExpr::Lit(HirLit::Undefined),
@@ -870,6 +876,12 @@ impl<'a> FnLowerer<'a> {
                                  object, got {target_type:?}"
                             ));
                         };
+                        if fields.iter().any(|(name, _)| is_hidden_accessor_field(name)) {
+                            return Err(
+                                "property descriptor inspection is not supported for native accessor objects"
+                                    .into(),
+                            );
+                        }
                         let descriptors = fields
                             .iter()
                             .map(|(name, _)| {
@@ -1782,20 +1794,6 @@ impl<'a> FnLowerer<'a> {
                             )));
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
-                        let value = if value_type == HirType::JsValue {
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("readDynamicValue".into())),
-                                vec![value],
-                            )
-                        } else if matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
-                            value
-                        } else if json_convertible_native_type(&value_type) {
-                            self.wrap_native_value_as_json(value, value_type.clone())?
-                        } else {
-                            return Err(format!(
-                                "`JSON.stringify` requires a JSON or dictionary value, got {value_type:?}"
-                            ));
-                        };
                         let mut replacer_array = None;
                         let mut replacer_function = None;
                         if let Some(replacer) = arguments.get(1) {
@@ -1824,6 +1822,59 @@ impl<'a> FnLowerer<'a> {
                                 ),
                             }
                         }
+                        let native_accessor_object = matches!(&value_type, HirType::Object(fields)
+                            if fields.iter().any(|(name, _)| is_hidden_accessor_field(name)));
+                        if native_accessor_object && replacer_function.is_some() {
+                            return Err(
+                                "`JSON.stringify` function replacers are not supported for native accessor objects"
+                                    .into(),
+                            );
+                        }
+                        if native_accessor_object
+                            && replacer_array
+                                .as_ref()
+                                .is_some_and(|replacer| !matches!(replacer, HirExpr::ArrayLit(_)))
+                        {
+                            return Err(
+                                "`JSON.stringify` runtime replacer arrays are not supported for native accessor objects"
+                                    .into(),
+                            );
+                        }
+                        let value = if let (HirType::Object(fields), Some(HirExpr::ArrayLit(keys))) =
+                            (&value_type, &replacer_array)
+                        {
+                            let mut property_list = Vec::new();
+                            for key in keys {
+                                let HirExpr::Lit(HirLit::Str(key)) = key else {
+                                    continue;
+                                };
+                                if !property_list.contains(key) {
+                                    property_list.push(key.clone());
+                                }
+                            }
+                            self.materialize_fixed_object_for_json_replacer(
+                                value,
+                                fields,
+                                &property_list,
+                            )?
+                        } else {
+                            value
+                        };
+                        let value_type = self.infer_expr_type(&value)?;
+                        let value = if value_type == HirType::JsValue {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("readDynamicValue".into())),
+                                vec![value],
+                            )
+                        } else if matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
+                            value
+                        } else if json_convertible_native_type(&value_type) {
+                            self.wrap_native_value_as_json(value, value_type.clone())?
+                        } else {
+                            return Err(format!(
+                                "`JSON.stringify` requires a JSON or dictionary value, got {value_type:?}"
+                            ));
+                        };
                         let space = match arguments.get(2) {
                             None => None,
                             Some(space) => match self.infer_expr_type(space)? {
@@ -2838,10 +2889,9 @@ impl<'a> FnLowerer<'a> {
                             ));
                         };
                         let keys = HirExpr::ArrayLit(
-                            fields
-                                .iter()
-                                .filter(|(name, _)| !is_hidden_accessor_field(name))
-                                .map(|(name, _)| HirExpr::Lit(HirLit::Str(name.clone())))
+                            ecmascript_field_order(fields)
+                                .into_iter()
+                                .map(|index| HirExpr::Lit(HirLit::Str(fields[index].0.clone())))
                                 .collect(),
                         );
                         let name = format!("__thaw_object_keys_{}", self.next_binding);
@@ -2929,19 +2979,9 @@ impl<'a> FnLowerer<'a> {
                                 "`Object.values` currently requires a fixed object, got {ty:?}"
                             ));
                         };
-                        // Accessor properties are omitted here (their value
-                        // isn't a stored field); a direct read still invokes
-                        // the getter.
-                        let field_names = fields
-                            .iter()
-                            .map(|(name, _)| name.clone())
-                            .filter(|name| !is_hidden_accessor_field(name))
-                            .filter(|name| {
-                                !fields.iter().any(|(field, _)| {
-                                    field == &format!("__thaw_getter_{name}")
-                                        || field == &format!("__thaw_setter_{name}")
-                                })
-                            })
+                        let field_names = ecmascript_field_order(fields)
+                            .into_iter()
+                            .map(|index| fields[index].0.clone())
                             .collect::<Vec<_>>();
                         let name = format!("__thaw_object_values_{}", self.next_binding);
                         self.next_binding += 1;
@@ -2950,11 +2990,12 @@ impl<'a> FnLowerer<'a> {
                             field_names
                                 .into_iter()
                                 .map(|field| {
-                                    HirExpr::PropAccess(
-                                        Box::new(HirExpr::Var(name.clone())),
-                                        ty.clone(),
-                                        field,
+                                    self.lower_fixed_object_property_read(
+                                        HirExpr::Var(name.clone()),
+                                        fields,
+                                        &field,
                                     )
+                                    .expect("value field was taken from its source type")
                                 })
                                 .collect(),
                         );
@@ -3066,17 +3107,14 @@ impl<'a> FnLowerer<'a> {
                                 "`Object.entries` currently requires a fixed object, got {ty:?}"
                             ));
                         };
-                        // Accessor properties are omitted (see `Object.values`).
-                        let entry_fields = fields
-                            .iter()
-                            .filter(|(name, _)| {
-                                !is_hidden_accessor_field(name)
-                                    && !fields.iter().any(|(field, _)| {
-                                        field == &format!("__thaw_getter_{name}")
-                                            || field == &format!("__thaw_setter_{name}")
-                                    })
+                        let entry_fields = ecmascript_field_order(fields)
+                            .into_iter()
+                            .map(|index| {
+                                let name = fields[index].0.clone();
+                                let ty = Self::fixed_object_property_read_type(fields, &name)
+                                    .expect("entry field was taken from its source type");
+                                (name, ty)
                             })
-                            .map(|(name, field_type)| (name.clone(), field_type.clone()))
                             .collect::<Vec<_>>();
                         let name = format!("__thaw_object_entries_{}", self.next_binding);
                         self.next_binding += 1;
@@ -3096,11 +3134,12 @@ impl<'a> FnLowerer<'a> {
                                             entry_type,
                                             Box::new(HirExpr::ArrayLit(vec![
                                                 HirExpr::Lit(HirLit::Str(field.clone())),
-                                                HirExpr::PropAccess(
-                                                    Box::new(HirExpr::Var(name.clone())),
-                                                    ty.clone(),
-                                                    field,
-                                                ),
+                                                self.lower_fixed_object_property_read(
+                                                    HirExpr::Var(name.clone()),
+                                                    fields,
+                                                    &field,
+                                                )
+                                                .expect("entry field was taken from its source type"),
                                             ])),
                                         )),
                                         Vec::new(),

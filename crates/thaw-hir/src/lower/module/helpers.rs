@@ -116,6 +116,25 @@ fn is_hidden_accessor_field(name: &str) -> bool {
     name.starts_with("__thaw_getter_") || name.starts_with("__thaw_setter_")
 }
 
+fn ecmascript_field_order<T>(fields: &[(Symbol, T)]) -> Vec<usize> {
+    let mut indices = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (name, _))| {
+            (!is_hidden_accessor_field(name)).then_some((index, array_index_key(name)))
+        })
+        .collect::<Vec<_>>();
+    indices.sort_by_key(|(index, array_index)| {
+        (array_index.is_none(), array_index.unwrap_or(*index as u32))
+    });
+    indices.into_iter().map(|(index, _)| index).collect()
+}
+
+fn array_index_key(name: &str) -> Option<u32> {
+    let index = name.parse::<u32>().ok()?;
+    (index != u32::MAX && index.to_string() == name).then_some(index)
+}
+
 /// Whether an object type's identity chain (see `module/classes.rs`) makes
 /// it an `Error`-family instance -- the built-ins themselves, or any user
 /// class transitively `extends`ing one of them.

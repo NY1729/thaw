@@ -9,11 +9,51 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         match &value_type {
             // Scalars are already copied by value; no cloning needed.
-            HirType::F64 | HirType::Str | HirType::Bool => Ok(value),
-            // Array/Tuple/Object round-trip through `Json` for a deep copy.
-            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
-                let json = self.wrap_native_value_as_json(value, value_type.clone())?;
-                Ok(HirExpr::JsonAsNative(Box::new(json), value_type))
+            HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined => {
+                Ok(value)
+            }
+            HirType::Array(element) => self.lower_structured_clone_array(
+                value,
+                value_type.clone(),
+                element.as_ref().clone(),
+            ),
+            HirType::Tuple(elements) => {
+                let mut cloned = Vec::with_capacity(elements.len());
+                for (index, element) in elements.iter().enumerate() {
+                    cloned.push(self.structured_clone_expr(
+                        HirExpr::TypedIndex(
+                            Box::new(value.clone()),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            element.clone(),
+                        ),
+                        element.clone(),
+                    )?);
+                }
+                Ok(HirExpr::ArrayLit(cloned))
+            }
+            HirType::Object(fields) => {
+                let source_name = format!("__thaw_clone_object_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(source_name.clone(), value_type.clone());
+                let mut cloned = Vec::new();
+                for index in ecmascript_field_order(fields) {
+                    let name = &fields[index].0;
+                    let read = self.lower_fixed_object_property_read(
+                        HirExpr::Var(source_name.clone()),
+                        fields,
+                        name,
+                    )?;
+                    let read_type = Self::fixed_object_property_read_type(fields, name)?;
+                    cloned.push((
+                        name.clone(),
+                        self.structured_clone_expr(read, read_type)?,
+                    ));
+                }
+                let result = HirExpr::ObjectLit(cloned);
+                self.wrap_call_argument_bindings(
+                    result,
+                    &[(source_name, value_type, value)],
+                )
             }
             // A dynamic (`any`/`Json`-typed) value -- `structuredClone`
             // on plain data objects/arrays typed loosely as `any` is the
@@ -86,6 +126,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(element_name.clone()),
             element_type.clone(),
         )?;
+        let cloned_type = self.infer_expr_type(&cloned)?;
         self.lower_array_map(
             value,
             array_type,
@@ -97,7 +138,7 @@ impl<'a> FnLowerer<'a> {
                     name: element_name,
                     ty: element_type.clone(),
                 }],
-                element_type,
+                cloned_type,
                 Box::new(cloned),
             ),
             None,

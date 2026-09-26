@@ -458,35 +458,46 @@ impl<'a> FnLowerer<'a> {
                             "cannot spread a value of type {source_type:?} into an object literal"
                         ));
                     };
-                    if let HirExpr::ObjectLit(source_values) = &source {
+                    if matches!(source, HirExpr::ObjectLit(_))
+                        && !source_fields
+                            .iter()
+                            .any(|(name, _)| is_hidden_accessor_field(name))
+                    {
+                        let HirExpr::ObjectLit(source_values) = &source else {
+                            unreachable!()
+                        };
                         source_values.clone()
                     } else if matches!(spread.expr.as_ref(), Expr::Ident(_)) {
-                        source_fields
-                            .iter()
-                            .map(|(name, _)| {
+                        ecmascript_field_order(source_fields)
+                            .into_iter()
+                            .map(|index| {
+                                let (name, _) = &source_fields[index];
                                 (
                                     name.clone(),
-                                    HirExpr::PropAccess(
-                                        Box::new(source.clone()),
-                                        source_type.clone(),
-                                        name.clone(),
-                                    ),
+                                    self.lower_fixed_object_property_read(
+                                        source.clone(),
+                                        source_fields,
+                                        name,
+                                    )
+                                    .expect("spread field was taken from its source type"),
                                 )
                             })
                             .collect::<Vec<_>>()
                     } else {
                         let temporary = format!("__thaw_object_spread_{}", self.next_binding);
                         self.next_binding += 1;
-                        let additions = source_fields
-                            .iter()
-                            .map(|(name, _)| {
+                        let additions = ecmascript_field_order(source_fields)
+                            .into_iter()
+                            .map(|index| {
+                                let (name, _) = &source_fields[index];
                                 (
                                     name.clone(),
-                                    HirExpr::PropAccess(
-                                        Box::new(HirExpr::Var(temporary.clone())),
-                                        source_type.clone(),
-                                        name.clone(),
-                                    ),
+                                    self.lower_fixed_object_property_read(
+                                        HirExpr::Var(temporary.clone()),
+                                        source_fields,
+                                        name,
+                                    )
+                                    .expect("spread field was taken from its source type"),
                                 )
                             })
                             .collect();
@@ -684,6 +695,15 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             for (name, value) in additions {
+                if !is_hidden_accessor_field(&name)
+                    && (matches!(property, PropOrSpread::Spread(_))
+                        || matches!(property, PropOrSpread::Prop(prop) if matches!(prop.as_ref(), Prop::KeyValue(_) | Prop::Shorthand(_) | Prop::Method(_))))
+                {
+                    fields.retain(|(field, _)| {
+                        field != &format!("__thaw_getter_{name}")
+                            && field != &format!("__thaw_setter_{name}")
+                    });
+                }
                 if let Some((_, existing)) =
                     fields.iter_mut().find(|(existing, _)| existing == &name)
                 {
@@ -752,16 +772,18 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(name.clone(), source_type.clone());
                     bindings.push((name.clone(), source_type.clone(), source));
-                    source_fields
-                        .iter()
-                        .map(|(field, _)| {
+                    ecmascript_field_order(source_fields)
+                        .into_iter()
+                        .map(|index| {
+                            let (field, _) = &source_fields[index];
                             (
                                 field.clone(),
-                                HirExpr::PropAccess(
-                                    Box::new(HirExpr::Var(name.clone())),
-                                    source_type.clone(),
-                                    field.clone(),
-                                ),
+                                self.lower_fixed_object_property_read(
+                                    HirExpr::Var(name.clone()),
+                                    source_fields,
+                                    field,
+                                )
+                                .expect("spread field was taken from its source type"),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1645,22 +1667,15 @@ impl<'a> FnLowerer<'a> {
                         if let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() {
                             let key = key.value.to_string_lossy().into_owned();
                             if fields.iter().any(|(name, _)| name == &key) {
-                                return Ok(HirExpr::PropAccess(
-                                    Box::new(obj),
-                                    HirType::Object(fields),
-                                    key,
-                                ));
+                                return self.lower_fixed_object_property_read(obj, &fields, &key);
                             }
                             return Err(format!("object has no field `{key}`"));
                         }
                         let key = self.lower_expr(&computed.expr)?;
                         if let HirType::StrLiteral(key_name) = self.infer_expr_type(&key)? {
                             if fields.iter().any(|(name, _)| name == &key_name) {
-                                return Ok(HirExpr::PropAccess(
-                                    Box::new(obj),
-                                    HirType::Object(fields),
-                                    key_name,
-                                ));
+                                return self
+                                    .lower_fixed_object_property_read(obj, &fields, &key_name);
                             }
                             return Err(format!("object has no field `{key_name}`"));
                         }
@@ -1996,30 +2011,7 @@ impl<'a> FnLowerer<'a> {
                         // receiver as its leading argument), a lone setter
                         // reads `undefined`, and an ordinary data field reads
                         // directly.
-                        let getter = format!("__thaw_getter_{}", prop.sym);
-                        if fields.iter().any(|(name, _)| name == &getter) {
-                            let getter_value = HirExpr::PropAccess(
-                                Box::new(obj.clone()),
-                                obj_ty.clone(),
-                                getter,
-                            );
-                            return Ok(HirExpr::Call(Box::new(getter_value), vec![obj]));
-                        }
-                        let setter = format!("__thaw_setter_{}", prop.sym);
-                        if fields.iter().any(|(name, _)| name == &setter)
-                            && !fields.iter().any(|(name, _)| name == &getter)
-                        {
-                            return Ok(HirExpr::Lit(HirLit::Undefined));
-                        }
-                        if fields.iter().any(|(name, _)| name == prop.sym.as_str()) {
-                            Ok(HirExpr::PropAccess(
-                                Box::new(obj),
-                                obj_ty.clone(),
-                                prop.sym.to_string(),
-                            ))
-                        } else {
-                            Err(format!("object has no field `{}`", prop.sym))
-                        }
+                        self.lower_fixed_object_property_read(obj, fields, prop.sym.as_ref())
                     }
                     HirType::Union(elements) => {
                         self.lower_union_property_read(obj, elements, prop.sym.as_ref())
@@ -2085,7 +2077,7 @@ impl<'a> FnLowerer<'a> {
                     .map(|(_, ty)| ty.clone())
                     .ok_or_else(|| format!("object has no field `{field}`"))?;
                 (
-                    HirExpr::PropAccess(Box::new(unwrapped), payload.as_ref().clone(), field),
+                    self.lower_fixed_object_property_read(unwrapped, fields, &field)?,
                     field_type,
                 )
             }
@@ -2267,6 +2259,119 @@ impl<'a> FnLowerer<'a> {
             vec![HirStmt::Return(Some(present_value))],
         )]);
         self.wrap_call_argument_bindings(result, &[(name, object_type, object)])
+    }
+
+    fn lower_fixed_object_property_read(
+        &mut self,
+        object: HirExpr,
+        fields: &[(Symbol, HirType)],
+        property: &str,
+    ) -> Result<HirExpr, String> {
+        if !fields.iter().any(|(name, _)| name == property) {
+            return Err(format!("object has no field `{property}`"));
+        }
+        let object_type = HirType::Object(fields.to_vec());
+        let getter = format!("__thaw_getter_{property}");
+        if fields.iter().any(|(name, _)| name == &getter) {
+            if !matches!(object, HirExpr::Var(_)) {
+                let receiver = format!("__thaw_accessor_receiver_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(receiver.clone(), object_type.clone());
+                let bound = HirExpr::Var(receiver.clone());
+                let getter = HirExpr::PropAccess(
+                    Box::new(bound.clone()),
+                    object_type.clone(),
+                    getter,
+                );
+                let read = HirExpr::Call(Box::new(getter), vec![bound]);
+                return self.wrap_call_argument_bindings(
+                    read,
+                    &[(receiver, object_type, object)],
+                );
+            }
+            let getter = HirExpr::PropAccess(Box::new(object.clone()), object_type, getter);
+            return Ok(HirExpr::Call(Box::new(getter), vec![object]));
+        }
+        if fields
+            .iter()
+            .any(|(name, _)| name == &format!("__thaw_setter_{property}"))
+        {
+            if !matches!(object, HirExpr::Var(_)) {
+                let receiver = format!("__thaw_accessor_receiver_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(receiver.clone(), object_type.clone());
+                return self.wrap_call_argument_bindings(
+                    HirExpr::Lit(HirLit::Undefined),
+                    &[(receiver, object_type, object)],
+                );
+            }
+            return Ok(HirExpr::Lit(HirLit::Undefined));
+        }
+        Ok(HirExpr::PropAccess(
+            Box::new(object),
+            object_type,
+            property.to_string(),
+        ))
+    }
+
+    fn fixed_object_property_read_type(
+        fields: &[(Symbol, HirType)],
+        property: &str,
+    ) -> Result<HirType, String> {
+        let getter = format!("__thaw_getter_{property}");
+        if let Some((_, getter_type)) = fields.iter().find(|(name, _)| name == &getter) {
+            return match getter_type {
+                HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret) => {
+                    Ok(ret.as_ref().clone())
+                }
+                other => Err(format!("object getter `{property}` has type {other:?}")),
+            };
+        }
+        if fields
+            .iter()
+            .any(|(name, _)| name == &format!("__thaw_setter_{property}"))
+        {
+            return Ok(HirType::Undefined);
+        }
+        fields
+            .iter()
+            .find(|(name, _)| name == property)
+            .map(|(_, ty)| ty.clone())
+            .ok_or_else(|| format!("object has no field `{property}`"))
+    }
+
+    fn materialize_fixed_object_for_json_replacer(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+        keys: &[Symbol],
+    ) -> Result<HirExpr, String> {
+        let source_type = HirType::Object(fields.to_vec());
+        let source_name = format!("__thaw_json_replacer_object_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), source_type.clone());
+        let mut snapshot = Vec::new();
+        for key in keys {
+            if !fields.iter().any(|(name, _)| name == key) {
+                continue;
+            }
+            let read = self.lower_fixed_object_property_read(
+                HirExpr::Var(source_name.clone()),
+                fields,
+                key,
+            )?;
+            let read_type = Self::fixed_object_property_read_type(fields, key)?;
+            let read = if let HirType::Object(nested) = &read_type {
+                self.materialize_fixed_object_for_json_replacer(read, nested, keys)?
+            } else {
+                read
+            };
+            snapshot.push((key.clone(), read));
+        }
+        self.wrap_call_argument_bindings(
+            HirExpr::ObjectLit(snapshot),
+            &[(source_name, source_type, value)],
+        )
     }
 
 }

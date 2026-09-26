@@ -481,17 +481,19 @@ impl<'a> FnLowerer<'a> {
                 })
                 .collect::<Result<HashSet<_>, _>>()?;
             return Ok(HirExpr::ObjectLit(
-                fields
-                    .iter()
-                    .filter(|(name, _)| !omitted.contains(name))
-                    .map(|(name, _)| {
+                ecmascript_field_order(fields)
+                    .into_iter()
+                    .filter(|index| !omitted.contains(&fields[*index].0))
+                    .map(|index| {
+                        let (name, _) = &fields[index];
                         (
                             name.clone(),
-                            HirExpr::PropAccess(
-                                Box::new(source.clone()),
-                                source_type.clone(),
-                                name.clone(),
-                            ),
+                            self.lower_fixed_object_property_read(
+                                source.clone(),
+                                fields,
+                                name,
+                            )
+                            .expect("rest field was taken from its source type"),
                         )
                     })
                     .collect(),

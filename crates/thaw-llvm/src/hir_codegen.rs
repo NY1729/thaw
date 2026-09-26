@@ -139,6 +139,26 @@ fn object_field_offset(fields: &[(String, HirType)], index: usize) -> u64 {
         .sum()
 }
 
+fn ecmascript_object_field_order(fields: &[(String, HirType)]) -> Vec<usize> {
+    let mut indices = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (name, _))| {
+            (!name.starts_with("__thaw_getter_") && !name.starts_with("__thaw_setter_"))
+                .then_some((index, object_array_index_key(name)))
+        })
+        .collect::<Vec<_>>();
+    indices.sort_by_key(|(index, array_index)| {
+        (array_index.is_none(), array_index.unwrap_or(*index as u32))
+    });
+    indices.into_iter().map(|(index, _)| index).collect()
+}
+
+fn object_array_index_key(name: &str) -> Option<u32> {
+    let index = name.parse::<u32>().ok()?;
+    (index != u32::MAX && index.to_string() == name).then_some(index)
+}
+
 fn object_storage_bytes(fields: &[(String, HirType)]) -> u64 {
     fields
         .iter()
