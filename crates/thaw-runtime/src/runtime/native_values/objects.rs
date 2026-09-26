@@ -1,5 +1,9 @@
 thread_local! {
     static OBJECT_STATES: RefCell<HashMap<usize, u8>> = RefCell::new(HashMap::new());
+    // ponytail: side-table keeps the native object ABI stable; use object headers if profiling
+    // shows the pointer lookup matters.
+    static OBJECT_ACCESSORS: RefCell<HashMap<usize, HashMap<String, [usize; 2]>>> =
+        RefCell::new(HashMap::new());
 }
 
 const NON_EXTENSIBLE: u8 = 1;
@@ -44,8 +48,61 @@ pub extern "C" fn thaw_object_state(object: *const u8, query: u8) -> bool {
     }
 }
 
+#[no_mangle]
+/// # Safety
+/// `property` must point to a valid NUL-terminated string for the duration of
+/// this call. `object` and `closure` are opaque identities and are not read.
+pub unsafe extern "C" fn thaw_object_set_accessor(
+    object: *const u8,
+    property: *const c_char,
+    closure: *mut u8,
+    setter: bool,
+) -> bool {
+    if object.is_null() || property.is_null() || closure.is_null() {
+        return false;
+    }
+    let Ok(property) = CStr::from_ptr(property).to_str() else {
+        return false;
+    };
+    OBJECT_ACCESSORS.with(|accessors| {
+        accessors
+            .borrow_mut()
+            .entry(object as usize)
+            .or_default()
+            .entry(property.to_owned())
+            .or_default()[setter as usize] = closure as usize;
+    });
+    true
+}
+
+#[no_mangle]
+/// # Safety
+/// `property` must point to a valid NUL-terminated string for the duration of
+/// this call. `object` is used only as an opaque identity.
+pub unsafe extern "C" fn thaw_object_accessor(
+    object: *const u8,
+    property: *const c_char,
+    setter: bool,
+) -> *mut u8 {
+    if object.is_null() || property.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Ok(property) = CStr::from_ptr(property).to_str() else {
+        return std::ptr::null_mut();
+    };
+    OBJECT_ACCESSORS.with(|accessors| {
+        accessors
+            .borrow()
+            .get(&(object as usize))
+            .and_then(|properties| properties.get(property))
+            .map(|slots| slots[setter as usize] as *mut u8)
+            .unwrap_or(std::ptr::null_mut())
+    })
+}
+
 fn clear_object_states() {
     OBJECT_STATES.with(|states| states.borrow_mut().clear());
+    OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -64,5 +121,28 @@ mod object_state_tests {
         assert!(!thaw_object_state(identity, 0));
         clear_object_states();
         assert!(thaw_object_state(identity, 0));
+    }
+
+    #[test]
+    fn accessors_follow_object_and_property_identity_and_reset() {
+        clear_object_states();
+        let object = 0_u8;
+        let closure = 0_u8;
+        let property = c"value";
+        unsafe {
+            assert!(thaw_object_set_accessor(
+                &object,
+                property.as_ptr(),
+                &closure as *const u8 as *mut u8,
+                false,
+            ));
+            assert_eq!(
+                thaw_object_accessor(&object, property.as_ptr(), false),
+                &closure as *const u8 as *mut u8
+            );
+            assert!(thaw_object_accessor(&object, property.as_ptr(), true).is_null());
+            clear_object_states();
+            assert!(thaw_object_accessor(&object, property.as_ptr(), false).is_null());
+        }
     }
 }

@@ -52,6 +52,14 @@ impl<'a> FnLowerer<'a> {
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<Option<Vec<(Symbol, HirExpr)>>, String> {
         let receiver = || -> Result<HirType, String> {
+            if let Some(expected) = expected_fields {
+                if !expected
+                    .iter()
+                    .any(|(name, _)| is_hidden_accessor_field(name))
+                {
+                    return Ok(HirType::Object(expected.to_vec()));
+                }
+            }
             Ok(HirType::Object(
                 fields
                     .iter()
@@ -2536,6 +2544,17 @@ impl<'a> FnLowerer<'a> {
         fields: &[(Symbol, HirType)],
         property: &str,
     ) -> Result<HirExpr, String> {
+        if !fields.iter().any(|(name, _)| {
+            name == &format!("__thaw_getter_{property}")
+                || name == &format!("__thaw_setter_{property}")
+        }) {
+            return self.runtime_fixed_object_property_descriptor(
+                target,
+                target_type,
+                fields,
+                property,
+            );
+        }
         let source_name = format!("__thaw_descriptor_source_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(source_name.clone(), target_type.clone());
@@ -2622,6 +2641,144 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(
             descriptor,
             &[(source_name, target_type.clone(), target)],
+        )
+    }
+
+    fn runtime_fixed_object_property_descriptor(
+        &mut self,
+        target: HirExpr,
+        target_type: &HirType,
+        fields: &[(Symbol, HirType)],
+        property: &str,
+    ) -> Result<HirExpr, String> {
+        let field_type = fields
+            .iter()
+            .find(|(name, _)| name == property)
+            .map(|(_, ty)| ty.clone())
+            .ok_or_else(|| format!("object has no field `{property}`"))?;
+        let source_name = format!("__thaw_descriptor_source_{}", self.next_binding);
+        self.next_binding += 1;
+        let getter_name = format!("__thaw_descriptor_has_getter_{}", self.next_binding);
+        self.next_binding += 1;
+        let setter_name = format!("__thaw_descriptor_has_setter_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), target_type.clone());
+        self.scope.insert(getter_name.clone(), HirType::Bool);
+        self.scope.insert(setter_name.clone(), HirType::Bool);
+        let source = HirExpr::Var(source_name.clone());
+        let key = HirExpr::Lit(HirLit::Str(property.into()));
+        let has_accessor = |setter| {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_has_accessor".into())),
+                vec![
+                    source.clone(),
+                    key.clone(),
+                    HirExpr::Lit(HirLit::Bool(setter)),
+                ],
+            )
+        };
+        let getter = HirExpr::Lambda(
+            vec![HirParam {
+                name: source_name.clone(),
+                ty: target_type.clone(),
+            }],
+            Vec::new(),
+            field_type.clone(),
+            Box::new(HirExpr::PropAccess(
+                Box::new(source.clone()),
+                target_type.clone(),
+                property.into(),
+            )),
+        );
+        let value_name = format!("__thaw_descriptor_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(value_name.clone(), field_type.clone());
+        let setter = HirExpr::Lambda(
+            vec![HirParam {
+                name: source_name.clone(),
+                ty: target_type.clone(),
+            }],
+            vec![HirParam {
+                name: value_name.clone(),
+                ty: field_type.clone(),
+            }],
+            HirType::Void,
+            Box::new(HirExpr::Block(vec![
+                HirStmt::Expr(HirExpr::PropAssign(
+                    Box::new(source.clone()),
+                    target_type.clone(),
+                    property.into(),
+                    Box::new(HirExpr::Var(value_name)),
+                )),
+                HirStmt::Return(None),
+            ])),
+        );
+        let flags = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(vec![
+                HirExpr::Var(getter_name.clone()),
+                HirExpr::Var(setter_name.clone()),
+            ]),
+        )?;
+        let accessor_descriptor = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str(
+                        "__thaw_accessor_descriptor".into(),
+                    ))],
+                ),
+                flags,
+                HirExpr::ArrayLit(vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("registerNativeCallback".into())),
+                        vec![getter],
+                    ),
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("registerNativeCallback".into())),
+                        vec![setter],
+                    ),
+                ]),
+            ],
+        );
+        let value = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::PropAccess(
+                Box::new(source.clone()),
+                target_type.clone(),
+                property.into(),
+            ),
+        )?;
+        let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![value]))?;
+        let data_descriptor = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str("__thaw_data_descriptor".into()))],
+                ),
+                arguments,
+            ],
+        );
+        let descriptor = HirExpr::Conditional(
+            Box::new(HirExpr::Var(getter_name.clone())),
+            Box::new(accessor_descriptor.clone()),
+            Box::new(HirExpr::Conditional(
+                Box::new(HirExpr::Var(setter_name.clone())),
+                Box::new(accessor_descriptor),
+                Box::new(data_descriptor),
+                HirType::JsValue,
+            )),
+            HirType::JsValue,
+        );
+        self.wrap_call_argument_bindings(
+            descriptor,
+            &[
+                (source_name, target_type.clone(), target),
+                (getter_name, HirType::Bool, has_accessor(false)),
+                (setter_name, HirType::Bool, has_accessor(true)),
+            ],
         )
     }
 

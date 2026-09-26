@@ -88,6 +88,18 @@
     }
     return object;
   };
+  globalThis.__thaw_accessor_descriptor = (readable, writable, getter, setter) => ({
+    get: readable ? getter : undefined,
+    set: writable ? setter : undefined,
+    enumerable: true,
+    configurable: true,
+  });
+  globalThis.__thaw_data_descriptor = value => ({
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
   globalThis.__thaw_json_stringify_native_accessors = (replacer, space, value) =>
     JSON.stringify(value, replacer, space);
   globalThis.__thaw_iterator_from = source => {
