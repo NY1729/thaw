@@ -150,16 +150,44 @@ fn object_type_is_error_family(ty: &HirType) -> bool {
     })
 }
 
-fn class_property_name(name: &PropName) -> Result<Symbol, String> {
+fn literal_property_name(name: &PropName) -> Option<Symbol> {
     match name {
-        PropName::Ident(name) => Ok(name.sym.to_string()),
-        PropName::Str(name) => Ok(name.value.to_string_lossy().into_owned()),
+        PropName::Ident(name) => Some(name.sym.to_string()),
+        PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
+        PropName::Num(name) => Some(number_property_name(name.value)),
+        PropName::BigInt(name) => Some(name.value.to_string()),
         PropName::Computed(computed) => match computed.expr.as_ref() {
-            Expr::Lit(Lit::Str(name)) => Ok(name.value.to_string_lossy().into_owned()),
-            _ => Err("native class computed members require a string-literal name".into()),
+            Expr::Lit(Lit::Str(name)) => Some(name.value.to_string_lossy().into_owned()),
+            _ => None,
         },
-        _ => Err("native class members require an identifier or string-literal name".into()),
     }
+}
+
+fn literal_expr_property_name(name: &Expr) -> Option<Symbol> {
+    match name {
+        Expr::Ident(name) => Some(name.sym.to_string()),
+        Expr::Lit(Lit::Str(name)) => Some(name.value.to_string_lossy().into_owned()),
+        Expr::Lit(Lit::Num(name)) => Some(number_property_name(name.value)),
+        Expr::Lit(Lit::BigInt(name)) => Some(name.value.to_string()),
+        _ => None,
+    }
+}
+
+fn number_property_name(value: f64) -> Symbol {
+    if value == 0.0 {
+        "0".into()
+    } else {
+        value.to_string()
+    }
+}
+
+fn class_property_name(name: &PropName) -> Result<Symbol, String> {
+    literal_property_name(name).ok_or_else(|| match name {
+        PropName::Computed(_) => {
+            "native class computed members require a string-literal name".into()
+        }
+        _ => "native class members require a static name".into(),
+    })
 }
 
 /// Infers a class field's type from a self-contained literal initializer.

@@ -26,19 +26,12 @@ fn callback_signature(ty: &HirType, supplied: usize) -> Option<(Vec<HirType>, Hi
 
 impl<'a> FnLowerer<'a> {
     fn static_object_property_name(&self, property: &PropName) -> Option<String> {
-        match property {
-            PropName::Ident(name) => Some(name.sym.to_string()),
-            PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
-            PropName::Num(name) => Some(if name.value == 0.0 {
-                "0".into()
-            } else {
-                name.value.to_string()
-            }),
-            PropName::BigInt(name) => Some(name.value.to_string()),
+        literal_property_name(property).or_else(|| match property {
             PropName::Computed(computed) => well_known_symbol_from_expr(&computed.expr)
                 .map(well_known_symbol_key)
                 .or_else(|| self.static_property_name(&computed.expr)),
-        }
+            _ => None,
+        })
     }
 
     fn lower_object_method(

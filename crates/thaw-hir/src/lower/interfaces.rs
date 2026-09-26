@@ -491,14 +491,8 @@ fn resolve_interface(
                 ))
             }
         };
-        let field_name = match key {
-            Expr::Ident(ident) => ident.sym.to_string(),
-            _ => {
-                return Err(format!(
-                    "interface `{name}` has an unsupported property key"
-                ))
-            }
-        };
+        let field_name = literal_expr_property_name(key)
+            .ok_or_else(|| format!("interface `{name}` has an unsupported property key"))?;
         let mut field_ty = resolve_type_with_interfaces(
             &field_type,
             raw,

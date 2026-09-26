@@ -1512,21 +1512,9 @@ impl<'a> FnLowerer<'a> {
                             )?;
                         }
                         ObjectPatProp::KeyValue(property) => {
-                            let key =
-                                match &property.key {
-                                    PropName::Ident(key) => key.sym.to_string(),
-                                    PropName::Str(key) => key.value.to_string_lossy().into_owned(),
-                                    PropName::Computed(computed) => match computed.expr.as_ref() {
-                                        Expr::Lit(Lit::Str(key)) => {
-                                            key.value.to_string_lossy().into_owned()
-                                        }
-                                        _ => return Err(
-                                            "computed destructuring keys must be string literals"
-                                                .into(),
-                                        ),
-                                    },
-                                    _ => return Err("unsupported object destructuring key".into()),
-                                };
+                            let key = self
+                                .static_object_property_name(&property.key)
+                                .ok_or_else(|| "unsupported object destructuring key".to_string())?;
                             let field_type =
                                 Self::fixed_object_property_read_type(fields, &key)?;
                             used.insert(key.clone());
@@ -1785,19 +1773,15 @@ impl<'a> FnLowerer<'a> {
                     )?;
                 }
                 ObjectPatProp::KeyValue(property) => {
-                    let key = match &property.key {
-                        PropName::Ident(key) => HirExpr::Lit(HirLit::Str(key.sym.to_string())),
-                        PropName::Str(key) => HirExpr::Lit(HirLit::Str(
-                            key.value.to_string_lossy().into_owned(),
-                        )),
-                        PropName::Num(key) => {
-                            self.coerce_primitive_to_string(HirExpr::Lit(HirLit::F64(key.value)))?
-                        }
-                        PropName::Computed(computed) => {
+                    let key = match self.static_object_property_name(&property.key) {
+                        Some(key) => HirExpr::Lit(HirLit::Str(key)),
+                        None => {
+                            let PropName::Computed(computed) = &property.key else {
+                                return Err("unsupported dictionary destructuring key".into());
+                            };
                             let key = self.lower_expr(&computed.expr)?;
                             self.coerce_primitive_to_string(key)?
                         }
-                        _ => return Err("unsupported dictionary destructuring key".into()),
                     };
                     let key = if has_rest {
                         let name = format!("__thaw_destructure_key_{}", self.next_binding);

@@ -560,6 +560,32 @@ fn compiles_and_runs_computed_native_class_members() {
 }
 
 #[test]
+fn compiles_and_runs_numeric_native_class_members() {
+    let source = r#"
+        class Numbers {
+            0: string = "zero";
+            2n: string = "two";
+            stored: number = 4;
+            static 10: string = "ten";
+            3(): string { return "three"; }
+            get 4(): number { return this.stored; }
+            set 4(value: number) { this.stored = value; }
+            static 5(): string { return "five"; }
+        }
+        function main(): void {
+            const value = new Numbers();
+            console.log(value["0"], value["2"], value["3"](), value["4"]);
+            value["4"] = 40;
+            console.log(value["4"], Numbers["5"](), Numbers["10"]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "numeric_native_class_members"),
+        "zero two three 4\n40 five ten\n"
+    );
+}
+
+#[test]
 fn compiles_and_runs_native_class_tuple_spreads() {
     let source = r#"
         class Calculator {
