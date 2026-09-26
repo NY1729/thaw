@@ -326,6 +326,69 @@ impl<'a> FnLowerer<'a> {
                     let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
+                    if let HirType::Union(elements) = &array_type {
+                        if elements.iter().all(|element| matches!(element, HirType::Array(_)))
+                            && call.args.iter().all(|argument| argument.spread.is_none())
+                        {
+                            if !(1..=2).contains(&call.args.len()) {
+                                return Err(format!(
+                                    "native `.{}()` expects a reducer and optional initial value",
+                                    property.sym
+                                ));
+                            }
+                            let initial = call.args.get(1).map(|argument| {
+                                let value = self.lower_expr(&argument.expr)?;
+                                let ty = self.infer_expr_type(&value)?;
+                                Ok::<_, String>((value, ty))
+                            }).transpose()?;
+                            let mut member_types = Vec::new();
+                            for element in elements {
+                                let HirType::Array(inner) = element else { unreachable!("checked above") };
+                                let ty = if sparse_callback { Self::array_read_type(inner) } else { inner.as_ref().clone() };
+                                Self::flatten_property_union_members(&ty, &mut member_types)?;
+                            }
+                            let element_type = match member_types.as_slice() {
+                                [single] => single.clone(),
+                                _ => HirType::Union(member_types),
+                            };
+                            let accumulator_type = initial.as_ref().map(|(_, ty)| ty).unwrap_or(&element_type);
+                            let callback = self.lower_array_reducer_callback(
+                                &call.args[0].expr, accumulator_type, &element_type, &array_type,
+                            )?;
+                            let name = format!("__thaw_union_reduce_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), array_type.clone());
+                            let bound = HirExpr::Var(name.clone());
+                            let mut result = None;
+                            for (index, element) in elements.iter().enumerate().rev() {
+                                let HirType::Array(inner) = element else { unreachable!("checked above") };
+                                let callback_element_type = if sparse_callback { Self::array_read_type(inner) } else { inner.as_ref().clone() };
+                                let reduced = self.lower_array_reduce(
+                                    HirExpr::UnionValue(Box::new(bound.clone()), index, elements.clone()),
+                                    element.clone(), inner.as_ref().clone(), callback_element_type,
+                                    callback.clone(), initial.clone(), property.sym == *"reduceRight",
+                                )?;
+                                let reduced = if self.infer_expr_type(&reduced)? == *accumulator_type {
+                                    reduced
+                                } else {
+                                    self.coerce_to_declared(accumulator_type, reduced)?
+                                };
+                                result = Some(match result {
+                                    None => reduced,
+                                    Some(rest) => HirExpr::Conditional(
+                                        Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                            Box::new(HirExpr::UnionTag(Box::new(bound.clone()), elements.clone())),
+                                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))))),
+                                        Box::new(reduced), Box::new(rest), accumulator_type.clone(),
+                                    ),
+                                });
+                            }
+                            return self.wrap_call_argument_bindings(
+                                result.ok_or("cannot reduce an empty union")?,
+                                &[(name, array_type.clone(), receiver)],
+                            );
+                        }
+                    }
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
                             "`.{}()` requires a homogeneous array, got {array_type:?}",
@@ -763,6 +826,70 @@ impl<'a> FnLowerer<'a> {
                     let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
+                    if let HirType::Union(elements) = &array_type {
+                        if elements.iter().all(|element| matches!(element, HirType::Array(_)))
+                            && call.args.iter().all(|argument| argument.spread.is_none())
+                        {
+                            if !(1..=2).contains(&call.args.len()) {
+                                return Err("native `.flatMap()` expects a callback and optional thisArg".into());
+                            }
+                            let mut member_types = Vec::new();
+                            for element in elements {
+                                let HirType::Array(inner) = element else { unreachable!("checked above") };
+                                let ty = if sparse_callback { Self::array_read_type(inner) } else { inner.as_ref().clone() };
+                                Self::flatten_property_union_members(&ty, &mut member_types)?;
+                            }
+                            let callback_element_type = match member_types.as_slice() {
+                                [single] => single.clone(),
+                                _ => HirType::Union(member_types),
+                            };
+                            let callback = self.lower_array_mapping_callback(
+                                &call.args[0].expr, &callback_element_type, &array_type,
+                            )?;
+                            let this_arg = call.args.get(1).map(|argument| self.lower_expr(&argument.expr)).transpose()?;
+                            let name = format!("__thaw_union_flat_map_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), array_type.clone());
+                            let bound = HirExpr::Var(name.clone());
+                            let mut branches = Vec::new();
+                            let mut result_members = Vec::new();
+                            for (index, element) in elements.iter().enumerate() {
+                                let HirType::Array(inner) = element else { unreachable!("checked above") };
+                                let member_callback_type = if sparse_callback { Self::array_read_type(inner) } else { inner.as_ref().clone() };
+                                let mapped = self.lower_array_map(
+                                    HirExpr::UnionValue(Box::new(bound.clone()), index, elements.clone()),
+                                    element.clone(), inner.as_ref().clone(), member_callback_type,
+                                    callback.clone(), this_arg.clone(),
+                                )?;
+                                let branch = self.lower_array_flat_map_result(mapped)?;
+                                let ty = self.infer_expr_type(&branch)?;
+                                Self::flatten_property_union_members(&ty, &mut result_members)?;
+                                branches.push((branch, ty));
+                            }
+                            let result_type = match result_members.as_slice() {
+                                [single] => single.clone(),
+                                [] => return Err("cannot flatMap an empty union".into()),
+                                _ => HirType::Union(result_members),
+                            };
+                            let mut result = None;
+                            for (index, (branch, ty)) in branches.into_iter().enumerate().rev() {
+                                let branch = if ty == result_type { branch } else { self.coerce_to_declared(&result_type, branch)? };
+                                result = Some(match result {
+                                    None => branch,
+                                    Some(rest) => HirExpr::Conditional(
+                                        Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                            Box::new(HirExpr::UnionTag(Box::new(bound.clone()), elements.clone())),
+                                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))))),
+                                        Box::new(branch), Box::new(rest), result_type.clone(),
+                                    ),
+                                });
+                            }
+                            return self.wrap_call_argument_bindings(
+                                result.ok_or("cannot flatMap an empty union")?,
+                                &[(name, array_type.clone(), receiver)],
+                            );
+                        }
+                    }
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
                             "`.flatMap()` requires a homogeneous array, got {array_type:?}"
@@ -1004,6 +1131,57 @@ impl<'a> FnLowerer<'a> {
                     let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
+                    if let HirType::Union(elements) = &array_type {
+                        if elements.iter().all(|element| matches!(element, HirType::Array(_)))
+                            && call.args.iter().all(|argument| argument.spread.is_none())
+                        {
+                            if !(1..=2).contains(&call.args.len()) {
+                                return Err("native `.filter()` expects a predicate and optional thisArg".into());
+                            }
+                            let mut member_types = Vec::new();
+                            for element in elements {
+                                let HirType::Array(inner) = element else { unreachable!("checked above") };
+                                let ty = if sparse_callback { Self::array_read_type(inner) } else { inner.as_ref().clone() };
+                                Self::flatten_property_union_members(&ty, &mut member_types)?;
+                            }
+                            let callback_element_type = match member_types.as_slice() {
+                                [single] => single.clone(),
+                                _ => HirType::Union(member_types),
+                            };
+                            let callback = self.lower_array_callback(
+                                &call.args[0].expr, &callback_element_type, &array_type, None,
+                            )?;
+                            let this_arg = call.args.get(1).map(|argument| self.lower_expr(&argument.expr)).transpose()?;
+                            let name = format!("__thaw_union_filter_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), array_type.clone());
+                            let bound = HirExpr::Var(name.clone());
+                            let mut result = None;
+                            for (index, element) in elements.iter().enumerate().rev() {
+                                let HirType::Array(inner) = element else { unreachable!("checked above") };
+                                let member_callback_type = if sparse_callback { Self::array_read_type(inner) } else { inner.as_ref().clone() };
+                                let filtered = self.lower_array_filter(
+                                    HirExpr::UnionValue(Box::new(bound.clone()), index, elements.clone()),
+                                    element.clone(), inner.as_ref().clone(), member_callback_type,
+                                    callback.clone(), this_arg.clone(),
+                                )?;
+                                let filtered = self.coerce_to_declared(&array_type, filtered)?;
+                                result = Some(match result {
+                                    None => filtered,
+                                    Some(rest) => HirExpr::Conditional(
+                                        Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                            Box::new(HirExpr::UnionTag(Box::new(bound.clone()), elements.clone())),
+                                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))))),
+                                        Box::new(filtered), Box::new(rest), array_type.clone(),
+                                    ),
+                                });
+                            }
+                            return self.wrap_call_argument_bindings(
+                                result.ok_or("cannot filter an empty union")?,
+                                &[(name, array_type.clone(), receiver)],
+                            );
+                        }
+                    }
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
                             "`.filter()` requires a homogeneous array, got {array_type:?}"
