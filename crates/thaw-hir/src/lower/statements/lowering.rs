@@ -1334,12 +1334,6 @@ impl<'a> FnLowerer<'a> {
                     let mut values_type = self.infer_expr_type(&values)?;
                     let array_holes_possible =
                         self.expression_may_be_sparse_array(&for_of.right);
-                    if let HirType::Union(members) = &values_type {
-                        if members.iter().all(|member| matches!(member, HirType::Array(_))) {
-                            (values, values_type) =
-                                self.lower_union_array_sequence(values, members)?;
-                        }
-                    }
                     let mut generator_producer = None;
                     if values_type == HirType::Str {
                         values = HirExpr::Call(
@@ -1460,6 +1454,20 @@ impl<'a> FnLowerer<'a> {
                     }
                     let (element, json_array) = match &values_type {
                         HirType::Array(element) => (element.as_ref().clone(), false),
+                        HirType::Union(members)
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) =>
+                        {
+                            let mut elements = Vec::new();
+                            for member in members {
+                                let HirType::Array(element) = member else { unreachable!() };
+                                Self::flatten_property_union_members(element, &mut elements)?;
+                            }
+                            let element = match elements.as_slice() {
+                                [element] => element.clone(),
+                                _ => HirType::Union(elements),
+                            };
+                            (element, false)
+                        }
                         HirType::Json if !for_of.is_await => (HirType::Json, true),
                         HirType::Json => {
                             return Err("`for await...of` cannot await dynamic JSON values".into())
@@ -1484,7 +1492,15 @@ impl<'a> FnLowerer<'a> {
                     let index_name = format!("__thaw_for_of_index_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
-                    let array_item_value = if array_holes_possible
+                    let array_item_value = if let HirType::Union(members) = &values_type {
+                        Some(self.lower_union_array_index(
+                            HirExpr::Var(values_name.clone()),
+                            members,
+                            HirExpr::Var(index_name.clone()),
+                            array_holes_possible,
+                            false,
+                        )?)
+                    } else if array_holes_possible
                         && !await_item
                         && generator_producer.is_none()
                         && !json_array
@@ -1805,7 +1821,10 @@ impl<'a> FnLowerer<'a> {
                                     "length".into(),
                                 )))
                             } else {
-                                HirExpr::ArrayLen(Box::new(HirExpr::Var(values_name.clone())))
+                                self.lower_array_length_read(
+                                    HirExpr::Var(values_name.clone()),
+                                    &values_type,
+                                )?
                             }),
                         )
                     };

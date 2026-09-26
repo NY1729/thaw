@@ -432,6 +432,23 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                     &generic_interfaces,
                                     &mut Vec::new(),
                                 )),
+                            Pat::Rest(rest) => rest
+                                .type_ann
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    format!(
+                                        "generic function `{name}` needs a rest parameter type annotation"
+                                    )
+                                })
+                                .and_then(|ann| {
+                                    generic_type_pattern(
+                                        &ann.type_ann,
+                                        substitutions,
+                                        &interfaces,
+                                        &generic_interfaces,
+                                        &mut Vec::new(),
+                                    )
+                                }),
                             _ => Err(format!("generic function `{name}` requires identifier parameters")),
                         })
                         .collect::<Result<Vec<_>, _>>()?,
@@ -578,7 +595,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     _ => None,
                 };
                 let generates_call_wrappers = !is_extern && generic_type_params.is_empty();
-                // A plain (non-ambient, non-generic) function's trailing
+                // A plain non-ambient function's trailing
                 // `...rest: T[]` parameter reuses the exact same
                 // `native_rest` mechanism a native class constructor's
                 // rest parameter already does -- `params` here still holds
@@ -587,12 +604,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 // from `params` for a real C variadic ABI), so every call
                 // site that already packs trailing arguments into that
                 // slot for a constructor needs no changes to also do it
-                // here. Ambient and generic functions are excluded: the
-                // former already has its own FFI-specific `variadic`
-                // handling, and the latter would need `native_rest`
-                // reconstructed per monomorphization in `generic_calls.rs`,
-                // which still hardcodes `None`.
-                let native_rest = if is_extern || !generic_type_params.is_empty() {
+                // here. Ambient functions use their FFI-specific
+                // `variadic` handling; a generic rest element is initially
+                // `Dynamic` and reconstructed for each monomorphization.
+                let native_rest = if is_extern {
                     None
                 } else {
                     let patterns = func

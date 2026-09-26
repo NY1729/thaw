@@ -3830,3 +3830,32 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         .is_some()
     );
 }
+
+#[test]
+fn recognizes_union_array_index_and_length_in_jit_exports() {
+    let declarations = thaw_bridge::parse_dts(
+        "export declare function length(values: number[] | string[]): number;\nexport declare function first(values: number[] | string[]): number | string;\nexport declare function rewrite(values: number[] | string[], index: number): number | string;\n",
+    )
+    .unwrap();
+    assert!(jit_numeric_export(
+        "module.exports.length = values => values.length; module.exports.first = values => values[0];",
+        "length",
+        false,
+        &declarations[0],
+    )
+    .is_some());
+    assert!(jit_numeric_export(
+        "module.exports.length = values => values.length; module.exports.first = values => values[0];",
+        "first",
+        false,
+        &declarations[1],
+    )
+    .is_some());
+    assert!(jit_numeric_export(
+        "module.exports.rewrite = (values, index) => values[index] = values[index];",
+        "rewrite",
+        false,
+        &declarations[2],
+    )
+    .is_some());
+}

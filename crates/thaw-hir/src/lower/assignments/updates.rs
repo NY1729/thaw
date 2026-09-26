@@ -60,11 +60,13 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Member(member) = update.arg.as_ref() {
             if member_property_name(&member.prop).as_deref() == Some("length") {
                 let array = self.lower_expr(&member.obj)?;
-                if let HirType::Array(element) = self.infer_expr_type(&array)? {
+                let array_type = self.infer_expr_type(&array)?;
+                if matches!(&array_type, HirType::Array(_))
+                    || matches!(&array_type, HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))))
+                {
                     let array_name = format!("__thaw_length_update_array_{}", self.next_binding);
                     let old_name = format!("__thaw_length_update_old_{}", self.next_binding);
                     self.next_binding += 1;
-                    let array_type = HirType::Array(element);
                     self.scope.insert(array_name.clone(), array_type.clone());
                     self.scope.insert(old_name.clone(), HirType::F64);
                     let old = HirExpr::Var(old_name.clone());
@@ -79,11 +81,72 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         HirExpr::Block(vec![HirStmt::Expr(assigned), HirStmt::Return(Some(old))])
                     };
-                    let current = HirExpr::ArrayLen(Box::new(HirExpr::Var(array_name.clone())));
+                    let current = self.lower_array_length_read(
+                        HirExpr::Var(array_name.clone()),
+                        &array_type,
+                    )?;
                     return self.wrap_call_argument_bindings(result, &[
                         (array_name, array_type, array),
                         (old_name, HirType::F64, current),
                     ]);
+                }
+            }
+        }
+        if let Expr::Member(member) = update.arg.as_ref() {
+            if let MemberProp::Computed(computed) = &member.prop {
+                let array = self.lower_expr(&member.obj)?;
+                if let HirType::Union(members) = self.infer_expr_type(&array)? {
+                    if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                        self.ensure_union_array_write_type(&members, &HirType::F64)?;
+                        let index = self.lower_expr(&computed.expr)?;
+                        self.expect_type(&HirType::F64, &index, "array index")?;
+                        let array_name = format!("__thaw_union_update_array_{}", self.next_binding);
+                        let index_name = format!("__thaw_union_update_index_{}", self.next_binding);
+                        let old_name = format!("__thaw_union_update_old_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let union_type = HirType::Union(members.clone());
+                        self.scope.insert(array_name.clone(), union_type.clone());
+                        self.scope.insert(index_name.clone(), HirType::F64);
+                        let current = self.lower_union_array_numeric_read(
+                            &array_name,
+                            &members,
+                            HirExpr::Var(index_name.clone()),
+                        )?;
+                        let current = self.coerce_primitive_to_number(current)?;
+                        self.scope.insert(old_name.clone(), HirType::F64);
+                        let old = HirExpr::Var(old_name.clone());
+                        let operator = match update.op {
+                            UpdateOp::PlusPlus => BinOp::Add,
+                            UpdateOp::MinusMinus => BinOp::Sub,
+                        };
+                        let updated = HirExpr::BinOp(
+                            operator,
+                            Box::new(old.clone()),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        );
+                        let write = self.lower_union_array_index_write(
+                            HirExpr::Var(array_name.clone()),
+                            &members,
+                            HirExpr::Var(index_name.clone()),
+                            updated,
+                        )?;
+                        let result = if update.prefix {
+                            write
+                        } else {
+                            HirExpr::Block(vec![
+                                HirStmt::Expr(write),
+                                HirStmt::Return(Some(old)),
+                            ])
+                        };
+                        return self.wrap_call_argument_bindings(
+                            result,
+                            &[
+                                (array_name, union_type, array),
+                                (index_name, HirType::F64, index),
+                                (old_name, HirType::F64, current),
+                            ],
+                        );
+                    }
                 }
             }
         }

@@ -1082,6 +1082,13 @@ macro_rules! jit_expressions {
                         context,
                         &mut receiver,
                     )?;
+                    if receiver.len() == 1 && jit_dynamic_array_argument(&receiver[0]) {
+                        receiver.push("untagarray".into());
+                    }
+                    let dynamic_array = receiver.last().is_some_and(|token| token == "untagarray");
+                    if dynamic_array {
+                        receiver.pop();
+                    }
                     match jit_expression_kind(&receiver)?.0 {
                         JitKind::Array => {
                             let prefix = array_prefix(&receiver)?;
@@ -1094,6 +1101,17 @@ macro_rules! jit_expressions {
                                 output,
                             )?;
                             output.push(format!("{prefix}get"));
+                        }
+                        JitKind::Dynamic if dynamic_array => {
+                            output.extend(receiver);
+                            encode_number(
+                                computed.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                output,
+                            )?;
+                            output.push("dynarrayat".into());
                         }
                         JitKind::Dictionary => {
                             let prefix = dictionary_prefix(&receiver)?;
@@ -1208,6 +1226,9 @@ macro_rules! jit_expressions {
                     context,
                     &mut receiver,
                 )?;
+                if receiver.len() == 1 && jit_dynamic_array_argument(&receiver[0]) {
+                    receiver.push("untagarray".into());
+                }
                 let dynamic_array = receiver.last().is_some_and(|token| token == "untagarray");
                 if dynamic_array {
                     receiver.pop();

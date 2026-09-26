@@ -787,3 +787,55 @@ fn reflects_sparse_union_arrays_with_single_evaluation() {
         "1 R\n[\"a\",\"c\"] R\n[[\"1\",7]] R\n0|2|length R\n1|length R\ntrue true RNR\nfalse true RRN\ntrue false RR\ntrue false RR\ntrue NR\ntrue SR\nfalse true RR\n"
     );
 }
+
+#[test]
+fn mutates_union_array_lvalues_without_losing_identity_or_live_iteration() {
+    let source = r#"
+        let order = "";
+        function values(wide: boolean): number[] | (number | undefined)[] {
+            order += "R";
+            if (wide) {
+                const result: (number | undefined)[] = [10, , undefined];
+                return result;
+            }
+            return [1, , 3];
+        }
+        function index(): number { order += "I"; return 0; }
+        function rhs(): number { order += "V"; return 4; }
+        function rest(...items: (number | undefined)[]): string { return items.join("|"); }
+        function generic<T>(...items: T[]): number {
+            return items.length;
+        }
+        function exercise(wide: boolean): void {
+            const array = values(wide);
+            const alias = array;
+            console.log(array[index()] = rhs(), order); order = "";
+            console.log(array[index()] += rhs(), order); order = "";
+            console.log(array[0]++, ++array[0], array[0]);
+            console.log(array.length = 5, array.length += 1, array.length--, array.length);
+            console.log(++array.length, array.length--, array.length);
+            array[4] = 9;
+            console.log(alias === array.valueOf(), alias.length, alias[0], alias[4]);
+            console.log(rest(...array));
+            console.log(generic<number | undefined>(...array));
+        }
+        function main(): void {
+            const plain = [1];
+            console.log(plain === plain.valueOf());
+            console.log(generic<number>(1, 2));
+            exercise(false);
+            exercise(true);
+            const live = values(false);
+            let seen = "";
+            for (const item of live) {
+                seen += String(item) + "|";
+                if (live.length === 3) live.push(4);
+            }
+            console.log(seen, live.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_lvalues"),
+        "true\n2\n4 RIV\n8 IV\n8 10 10\n5 6 6 5\n6 6 5\ntrue 5 10 9\n10||3||9\n5\n4 RIV\n8 IV\n8 10 10\n5 6 6 5\n6 6 5\ntrue 5 10 9\n10||||9\n5\n1|undefined|3|4| 4\n"
+    );
+}
