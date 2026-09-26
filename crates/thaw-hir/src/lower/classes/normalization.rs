@@ -133,7 +133,7 @@ impl VisitMut for ClassSelfReferenceRenamer<'_> {
 
 fn static_class_member_name(
     expression: &Expr,
-    constants: &HashMap<Symbol, String>,
+    constant: &impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
     match expression {
         Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().into_owned()),
@@ -143,16 +143,16 @@ fn static_class_member_name(
         {
             Some("__thaw_symbol_iterator".into())
         }
-        Expr::Ident(identifier) => constants.get(identifier.sym.as_ref()).cloned(),
+        Expr::Ident(identifier) => constant(identifier.sym.as_ref()),
         Expr::Bin(binary) if binary.op == BinaryOp::Add => Some(format!(
             "{}{}",
-            static_class_member_name(&binary.left, constants)?,
-            static_class_member_name(&binary.right, constants)?
+            static_class_member_name(&binary.left, constant)?,
+            static_class_member_name(&binary.right, constant)?
         )),
-        Expr::Paren(parenthesized) => static_class_member_name(&parenthesized.expr, constants),
-        Expr::TsAs(assertion) => static_class_member_name(&assertion.expr, constants),
-        Expr::TsTypeAssertion(assertion) => static_class_member_name(&assertion.expr, constants),
-        Expr::TsConstAssertion(assertion) => static_class_member_name(&assertion.expr, constants),
+        Expr::Paren(parenthesized) => static_class_member_name(&parenthesized.expr, constant),
+        Expr::TsAs(assertion) => static_class_member_name(&assertion.expr, constant),
+        Expr::TsTypeAssertion(assertion) => static_class_member_name(&assertion.expr, constant),
+        Expr::TsConstAssertion(assertion) => static_class_member_name(&assertion.expr, constant),
         Expr::Tpl(template) => {
             let mut value = String::new();
             for (index, quasi) in template.quasis.iter().enumerate() {
@@ -163,7 +163,7 @@ fn static_class_member_name(
                     .unwrap_or_else(|| quasi.raw.to_string());
                 value.push_str(&quasi);
                 if let Some(expression) = template.exprs.get(index) {
-                    value.push_str(&static_class_member_name(expression, constants)?);
+                    value.push_str(&static_class_member_name(expression, constant)?);
                 }
             }
             Some(value)
@@ -209,7 +209,9 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             if constants.contains_key(name) {
                 continue;
             }
-            if let Some(value) = static_class_member_name(initializer, &constants) {
+            if let Some(value) =
+                static_class_member_name(initializer, &|name| constants.get(name).cloned())
+            {
                 constants.insert(name.clone(), value);
                 changed = true;
             }
@@ -233,7 +235,9 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
                 continue;
             };
             let span = computed.span;
-            let Some(value) = static_class_member_name(&computed.expr, &constants) else {
+            let Some(value) =
+                static_class_member_name(&computed.expr, &|name| constants.get(name).cloned())
+            else {
                 continue;
             };
             *key = PropName::Str(swc_ecma_ast::Str {
@@ -328,7 +332,9 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
                 computed.visit_mut_children_with(self);
                 return;
             }
-            let Some(value) = static_class_member_name(&computed.expr, self.constants) else {
+            let Some(value) = static_class_member_name(&computed.expr, &|name| {
+                self.constants.get(name).cloned()
+            }) else {
                 computed.visit_mut_children_with(self);
                 return;
             };
@@ -348,7 +354,9 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
                 computed.visit_mut_children_with(self);
                 return;
             }
-            let Some(value) = static_class_member_name(&computed.expr, self.constants) else {
+            let Some(value) = static_class_member_name(&computed.expr, &|name| {
+                self.constants.get(name).cloned()
+            }) else {
                 computed.visit_mut_children_with(self);
                 return;
             };

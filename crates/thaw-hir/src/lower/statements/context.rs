@@ -61,6 +61,7 @@ impl<'a> FnLowerer<'a> {
         Self {
             scope: HashMap::new(),
             immutable_bindings: HashSet::new(),
+            static_string_bindings: HashMap::new(),
             narrowings: HashMap::new(),
             nullable_narrowings: HashMap::new(),
             nullish_narrowings: HashMap::new(),
@@ -123,6 +124,14 @@ impl<'a> FnLowerer<'a> {
             .and_then(|names| names.last())
             .cloned()
             .unwrap_or_else(|| source_name.to_string())
+    }
+
+    fn static_property_name(&self, expression: &Expr) -> Option<String> {
+        static_class_member_name(expression, &|name| {
+            self.static_string_bindings
+                .get(&self.resolve_binding(name))
+                .cloned()
+        })
     }
 
     fn is_primitive_array_index(&self, expr: &Expr, element: &HirType) -> bool {
