@@ -691,8 +691,13 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
         let object_result = property.sym == *"group";
-        let items = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
-        let items_type = self.infer_expr_type(&items)?;
+        let mut items = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+        let mut items_type = self.infer_expr_type(&items)?;
+        if let HirType::Union(members) = &items_type {
+            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                (items, items_type) = self.lower_union_array_sequence(items, members)?;
+            }
+        }
         let HirType::Array(item_type) = &items_type else {
             return Err(format!(
                 "`.{}()` requires a homogeneous array, got {items_type:?}",

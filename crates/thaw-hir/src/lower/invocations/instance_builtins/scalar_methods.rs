@@ -106,11 +106,65 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"concat" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let (arguments, spread_bindings) = if matches!(receiver_type, HirType::Array(_)) {
+                    let union_arrays = matches!(
+                        &receiver_type,
+                        HirType::Union(members)
+                            if members.iter().all(|member| matches!(member, HirType::Array(_)))
+                    );
+                    let (arguments, spread_bindings) = if matches!(receiver_type, HirType::Array(_)) || union_arrays {
                         self.lower_native_spread_array_values(&call.args, "native concat")?
                     } else {
                         self.lower_native_spread_values(&call.args, "native concat")?
                     };
+                    if let HirType::Union(members) = &receiver_type {
+                        if union_arrays {
+                            let receiver_name = format!("__thaw_union_concat_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                            let mut bindings = vec![(receiver_name.clone(), receiver_type.clone(), receiver)];
+                            bindings.extend(spread_bindings);
+                            let mut values = Vec::with_capacity(arguments.len());
+                            for (position, value) in arguments.into_iter().enumerate() {
+                                let ty = self.infer_expr_type(&value)?;
+                                let name = format!("__thaw_concat_arg_{}_{}", position, self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(name.clone(), ty.clone());
+                                bindings.push((name.clone(), ty, value));
+                                values.push(HirExpr::Var(name));
+                            }
+                            let mut branches = Vec::with_capacity(members.len());
+                            for (index, member) in members.iter().enumerate() {
+                                let HirType::Array(element) = member else { unreachable!() };
+                                let mut parts = vec![HirExpr::UnionValue(
+                                    Box::new(HirExpr::Var(receiver_name.clone())),
+                                    index,
+                                    members.clone(),
+                                )];
+                                for value in &values {
+                                    let actual = self.infer_expr_type(value)?;
+                                    if actual == *member {
+                                        parts.push(value.clone());
+                                    } else {
+                                        let value = self.coerce_array_insert_value(value.clone(), element)
+                                            .map_err(|_| format!(
+                                                "array concat argument has type {actual:?}, which is not safely representable by every union receiver member"
+                                            ))?;
+                                        parts.push(self.lower_native_array_literal(
+                                            vec![value],
+                                            element.as_ref().clone(),
+                                        )?);
+                                    }
+                                }
+                                branches.push(HirExpr::ArrayConcat(parts, element.as_ref().clone()));
+                            }
+                            let result = self.merge_union_array_method_branches(
+                                &receiver_name,
+                                members,
+                                branches,
+                            )?;
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                    }
                     if let HirType::Array(element) = receiver_type {
                         let element = element.as_ref().clone();
                         let array_type = HirType::Array(Box::new(element.clone()));

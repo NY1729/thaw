@@ -77,6 +77,39 @@ fn reports_a_missing_required_object_property() {
 }
 
 #[test]
+fn rejects_unsafe_union_array_composition() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            function values(numbers: boolean): number[] | string[] {
+                return numbers ? [1] : ["a"];
+            }
+            function main(): void { values(true).concat(2); }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(
+        error.contains("not safely representable by every union receiver member"),
+        "unexpected error: {error}"
+    );
+
+    let module = thaw_parser::parse_typescript(
+        r#"
+            function values(numbers: boolean): number[] | string[] {
+                return numbers ? [1] : ["a"];
+            }
+            function main(): void { const map = new Map(values(true)); }
+        "#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(
+        error.contains("must contain [key, value] entries"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn validates_satisfies_without_widening_the_expression() {
     let program = lower(
         r#"

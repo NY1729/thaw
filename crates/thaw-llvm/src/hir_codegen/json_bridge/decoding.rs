@@ -556,7 +556,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let (object, key) = self.compile_napi_optional_result_container(element_json)?;
                 self.compile_json_to_nullish_field(object, key, element_json, payload)?
             }
-            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Union(_) => {
                 self.compile_json_to_native(element_json, element)?
             }
             other => return Err(format!("unsupported JSON array element {other:?}")),
