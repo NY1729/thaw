@@ -421,9 +421,15 @@ impl<'a> FnLowerer<'a> {
         let [key_value] = arguments.as_slice() else {
             return Err("`hasOwnProperty` expects exactly one argument".into());
         };
-        let receiver = self.lower_required_member_receiver(&member.obj, "hasOwnProperty")?;
+        let mut receiver = self.lower_required_member_receiver(&member.obj, "hasOwnProperty")?;
+        let mut receiver_type = self.infer_expr_type(&receiver)?;
+        if let HirType::Union(members) = &receiver_type {
+            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                (receiver, receiver_type) = self.lower_union_array_sequence(receiver, members)?;
+            }
+        }
         let result = if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "propertyIsEnumerable")
-            && matches!(self.infer_expr_type(&receiver)?, HirType::Array(_))
+            && matches!(receiver_type, HirType::Array(_))
         {
             HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_array_property_is_enumerable".into())),
@@ -446,7 +452,13 @@ impl<'a> FnLowerer<'a> {
         key_value: HirExpr,
     ) -> Result<HirExpr, String> {
         let key_value = self.coerce_primitive_to_string(key_value)?;
-        let receiver_type = self.infer_expr_type(&receiver)?;
+        let mut receiver = receiver;
+        let mut receiver_type = self.infer_expr_type(&receiver)?;
+        if let HirType::Union(members) = &receiver_type {
+            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                (receiver, receiver_type) = self.lower_union_array_sequence(receiver, members)?;
+            }
+        }
         if matches!(receiver_type, HirType::Array(_)) {
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_array_has_own".into())),

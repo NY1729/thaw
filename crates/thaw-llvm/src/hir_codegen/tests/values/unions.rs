@@ -727,3 +727,63 @@ fn compiles_predicate_methods_on_a_union_of_arrays() {
         "true\ntrue\n20\n2\n30\n2\nb\n"
     );
 }
+
+#[test]
+fn tests_array_identity_across_union_tags_and_mixed_unions() {
+    let source = r#"
+        let calls = 0;
+        function arrays(text: boolean): number[] | string[] {
+            calls += 1;
+            if (text) return ["a"];
+            return [1];
+        }
+        function mixed(array: boolean): number[] | string {
+            calls += 1;
+            if (array) return [1];
+            return "x";
+        }
+        function main(): void {
+            console.log(Array.isArray(arrays(false)), arrays(true) instanceof Array, calls);
+            console.log(Array.isArray(mixed(true)), Array.isArray(mixed(false)));
+            console.log(mixed(true) instanceof Array, mixed(false) instanceof Array, calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_identity"),
+        "true true 2\ntrue false\ntrue false 6\n"
+    );
+}
+
+#[test]
+fn reflects_sparse_union_arrays_with_single_evaluation() {
+    let source = r#"
+        let order = "";
+        function arrays(text: boolean): number[] | string[] {
+            order += "R";
+            if (text) return ["a", , "c"];
+            return [, 7];
+        }
+        function numberKey(): number { order += "N"; return 1; }
+        function stringKey(): string { order += "S"; return "length"; }
+        function main(): void {
+            console.log(Object.keys(arrays(false)).join("|"), order); order = "";
+            console.log(JSON.stringify(Object.values(arrays(true))), order); order = "";
+            console.log(JSON.stringify(Object.entries(arrays(false))), order); order = "";
+            console.log(Object.getOwnPropertyNames(arrays(true)).join("|"), order); order = "";
+            console.log(Reflect.ownKeys(arrays(false)).join("|"), order); order = "";
+
+            console.log(Object.hasOwn(arrays(false), numberKey()), Object.hasOwn(arrays(true), "length"), order); order = "";
+            console.log(arrays(true).hasOwnProperty("1"), arrays(false).hasOwnProperty(numberKey()), order); order = "";
+            console.log(arrays(false).propertyIsEnumerable("1"), arrays(true).propertyIsEnumerable("length"), order); order = "";
+            console.log(Reflect.has(arrays(true), "push"), Reflect.has(arrays(true), 1), order); order = "";
+
+            console.log(numberKey() in arrays(false), order); order = "";
+            console.log(stringKey() in arrays(true), order); order = "";
+            console.log("1" in arrays(true), "length" in arrays(false), order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_reflection"),
+        "1 R\n[\"a\",\"c\"] R\n[[\"1\",7]] R\n0|2|length R\n1|length R\ntrue true RNR\nfalse true RRN\ntrue false RR\ntrue false RR\ntrue NR\ntrue SR\nfalse true RR\n"
+    );
+}
