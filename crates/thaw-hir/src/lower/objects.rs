@@ -29,10 +29,15 @@ impl<'a> FnLowerer<'a> {
         match property {
             PropName::Ident(name) => Some(name.sym.to_string()),
             PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
+            PropName::Num(name) => Some(if name.value == 0.0 {
+                "0".into()
+            } else {
+                name.value.to_string()
+            }),
+            PropName::BigInt(name) => Some(name.value.to_string()),
             PropName::Computed(computed) => well_known_symbol_from_expr(&computed.expr)
                 .map(well_known_symbol_key)
                 .or_else(|| self.static_property_name(&computed.expr)),
-            _ => None,
         }
     }
 
@@ -139,16 +144,15 @@ impl<'a> FnLowerer<'a> {
             };
             let (key, value) = match property.as_ref() {
                 Prop::KeyValue(KeyValueProp { key, value }) => {
-                    let key = match key {
-                        PropName::Ident(key) => HirExpr::Lit(HirLit::Str(key.sym.to_string())),
-                        PropName::Str(key) => HirExpr::Lit(HirLit::Str(
-                            key.value.to_string_lossy().into_owned(),
-                        )),
-                        PropName::Computed(key) => {
+                    let key = match self.static_object_property_name(key) {
+                        Some(key) => HirExpr::Lit(HirLit::Str(key)),
+                        None => {
+                            let PropName::Computed(key) = key else {
+                                return Err("unsupported computed object literal key".into());
+                            };
                             let key = self.lower_expr(&key.expr)?;
                             self.coerce_primitive_to_string(key)?
                         }
-                        _ => return Err("unsupported computed object literal key".into()),
                     };
                     (key, self.lower_object_lit_field_value(value, None)?)
                 }
@@ -278,18 +282,15 @@ impl<'a> FnLowerer<'a> {
                 PropOrSpread::Prop(prop) => {
                     let (key, value) = match prop.as_ref() {
                         Prop::KeyValue(KeyValueProp { key, value }) => {
-                            let key = match key {
-                                PropName::Ident(key) => {
-                                    HirExpr::Lit(HirLit::Str(key.sym.to_string()))
-                                }
-                                PropName::Str(key) => HirExpr::Lit(HirLit::Str(
-                                    key.value.to_string_lossy().into_owned(),
-                                )),
-                                PropName::Computed(computed) => {
+                            let key = match self.static_object_property_name(key) {
+                                Some(key) => HirExpr::Lit(HirLit::Str(key)),
+                                None => {
+                                    let PropName::Computed(computed) = key else {
+                                        return Err("unsupported object literal key".into());
+                                    };
                                     let key = self.lower_expr(&computed.expr)?;
                                     self.coerce_primitive_to_string(key)?
                                 }
-                                _ => return Err("unsupported object literal key".to_string()),
                             };
                             (key, self.lower_object_lit_field_value(value, None)?)
                         }
@@ -764,22 +765,9 @@ impl<'a> FnLowerer<'a> {
                 PropOrSpread::Prop(prop) => {
                     let (field, source) = match prop.as_ref() {
                         Prop::KeyValue(KeyValueProp { key, value }) => {
-                            let field = match key {
-                                PropName::Ident(ident) => ident.sym.to_string(),
-                                PropName::Str(value) => value.value.to_string_lossy().into_owned(),
-                                PropName::Computed(computed) => {
-                                    match computed.expr.as_ref() {
-                                        Expr::Lit(Lit::Str(value)) => {
-                                            value.value.to_string_lossy().into_owned()
-                                        }
-                                        _ => return Err(
-                                            "computed object literal keys must be string literals"
-                                                .into(),
-                                        ),
-                                    }
-                                }
-                                _ => return Err("unsupported object literal key".into()),
-                            };
+                            let field = self
+                                .static_object_property_name(key)
+                                .ok_or_else(|| "unsupported object literal key".to_string())?;
                             (field, self.lower_expr(value)?)
                         }
                         Prop::Shorthand(ident) => (
