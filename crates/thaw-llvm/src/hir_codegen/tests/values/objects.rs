@@ -194,6 +194,114 @@ fn compiles_object_entries_for_fixed_objects() {
 }
 
 #[test]
+fn observes_fixed_object_accessors_across_value_consumers() {
+    let source = r#"
+        let calls = 0;
+        let order = "";
+        function fresh() {
+            console.log("receiver");
+            return { get value(): number { calls++; return 42; } };
+        }
+        function main(): void {
+            const source = {
+                base: 40,
+                get value(): number { calls++; order += "v"; return this.base + 2; },
+            };
+            console.log(source["value"], source?.["value"], calls);
+            const { value } = source;
+            console.log(value, calls);
+            const union = true ? source : { base: 0, get value(): number { return 0; } };
+            console.log(union.value, calls);
+
+            const spread = { ...source };
+            const { base, ...rest } = source;
+            source.base = 1;
+            console.log(spread.value, rest.value, base, calls);
+            console.log(Object.values(source).join("|"), calls);
+            console.log(Object.entries(source)[1][1], calls);
+            console.log(Object.keys(source).join(","), calls);
+            console.log(Object.getOwnPropertyNames(source).join(","), calls);
+
+            const nested = { source };
+            console.log(JSON.stringify(nested), calls);
+            const clone = structuredClone(source);
+            source.base = 100;
+            console.log(clone.value, source.value, calls);
+
+            const writeOnly = { set hidden(next: number) { calls += next; } };
+            console.log(Object.keys(writeOnly).join(","));
+            console.log(Object.values(writeOnly)[0]);
+            console.log(JSON.stringify(writeOnly));
+            console.log(Object.keys(spread).join(","));
+            console.log(fresh()["value"], calls);
+            console.log(order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "fixed_object_accessor_observations"),
+        "42 42 2\n42 3\n42 4\n42 42 40 6\n1|3 7\n3 8\nbase,value 8\nbase,value 8\n{\"source\":{\"base\":1,\"value\":3}} 9\n3 102 11\nhidden\nundefined\n{}\nbase,value\nreceiver\n42 12\nvvvvvvvvvvv\n"
+    );
+}
+
+#[test]
+fn observes_accessor_key_order_replacers_and_overwrites() {
+    let source = r#"
+        let order = "";
+        function observed(label: string, value: number): number {
+            order += label;
+            return value;
+        }
+        function main(): void {
+            const source = {
+                z: 0,
+                get "10"(): number { return observed("10,", 10); },
+                get "2"(): number { return observed("2,", 2); },
+                get a(): number { return observed("a,", 1); },
+            };
+            console.log(Object.keys(source).join("|"), order);
+            console.log(Object.values(source).join("|"), order);
+            order = "";
+            console.log(JSON.stringify(source, ["a", "2"]), order);
+            const overwritten = {
+                get value(): number { order += "bad"; return 1; },
+                value: 42,
+            };
+            console.log(overwritten.value, overwritten["value"], JSON.stringify(overwritten));
+            try {
+                const throwing = {
+                    get value(): number { throw new Error("boom"); return 0; }
+                };
+                console.log(throwing.value);
+            } catch (error) {
+                console.log(error.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "accessor_order_replacers_overwrites"),
+        "2|10|z|a \n2|10|0|1 2,10,a,\n{\"a\":1,\"2\":2} a,2,\n42 42 {\"value\":42}\nboom\n"
+    );
+}
+
+#[test]
+fn rejects_descriptors_for_native_accessor_objects() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            function main(): void {
+                const source = { get value(): number { return 42; } };
+                Object.getOwnPropertyDescriptor(source, "value");
+            }
+        "#,
+    )
+    .unwrap();
+    let error = thaw_hir::lower_module(&module).unwrap_err();
+    assert!(
+        error.contains("property descriptor inspection is not supported for native accessor objects"),
+        "{error}"
+    );
+}
+
+#[test]
 fn compiles_object_from_typed_entries() {
     let source = r#"
         function numberEntries(): [string, number][] {

@@ -64,13 +64,9 @@ impl<'a> FnLowerer<'a> {
                     "cannot access `.{property}` because union member {element:?} is not an object"
                 ));
             };
-            let field = fields
-                .iter()
-                .find(|(name, _)| name == property)
-                .map(|(_, ty)| ty.clone())
-                .ok_or_else(|| {
-                    format!("cannot access `.{property}` because a union member has no such field")
-                })?;
+            let field = Self::fixed_object_property_read_type(fields, property).map_err(|_| {
+                format!("cannot access `.{property}` because a union member has no such field")
+            })?;
             if !field_types.contains(&field) {
                 field_types.push(field);
             }
@@ -115,27 +111,20 @@ impl<'a> FnLowerer<'a> {
                 }
                 continue;
             }
-            let field = HirExpr::PropAccess(
-                Box::new(HirExpr::UnionValue(
+            let union_value = HirExpr::UnionValue(
                     Box::new(HirExpr::Var(parameter.clone())),
                     index,
                     elements.to_vec(),
-                )),
-                element.clone(),
-                property.to_string(),
-            );
+                );
             let HirType::Object(fields) = element else {
                 unreachable!("union property was validated above")
             };
-            let field_type = fields
-                .iter()
-                .find(|(name, _)| name == property)
-                .map(|(_, ty)| ty)
-                .expect("union property was validated above");
+            let field = self.lower_fixed_object_property_read(union_value, fields, property)?;
+            let field_type = Self::fixed_object_property_read_type(fields, property)?;
             let returns = if field_types.len() == 1 {
                 vec![HirStmt::Return(Some(field))]
             } else {
-                self.lower_flattened_property_return(field, field_type, &result_type)?
+                self.lower_flattened_property_return(field, &field_type, &result_type)?
             };
             if index + 1 == elements.len() {
                 statements.extend(returns);

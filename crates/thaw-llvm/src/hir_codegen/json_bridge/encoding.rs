@@ -189,35 +189,38 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        for (index, (name, field_ty)) in fields.iter().enumerate() {
-            // An object-literal accessor is internal: its backing closure is
-            // hidden, and its visible placeholder field isn't a real stored
-            // value (a direct read invokes the getter), so neither belongs in
-            // the marshaled JSON.
-            if name.starts_with("__thaw_getter_") || name.starts_with("__thaw_setter_") {
-                continue;
-            }
+        for index in ecmascript_object_field_order(fields) {
+            let (name, field_ty) = &fields[index];
             let getter = format!("__thaw_getter_{name}");
             let setter = format!("__thaw_setter_{name}");
-            if fields
-                .iter()
-                .any(|(field, _)| field == &getter || field == &setter)
-            {
+            let getter = fields.iter().position(|(field, _)| field == &getter);
+            if getter.is_none() && fields.iter().any(|(field, _)| field == &setter) {
                 continue;
             }
-            let offset = self
-                .context
-                .i64_type()
-                .const_int(object_field_offset(fields, index), false);
-            let pointer = unsafe {
-                self.builder
-                    .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "marshal_field")
-                    .map_err(|error| error.to_string())?
+            let (value, value_type) = if let Some(getter) = getter {
+                self.compile_native_object_getter(object, fields, getter)?
+            } else {
+                let offset = self
+                    .context
+                    .i64_type()
+                    .const_int(object_field_offset(fields, index), false);
+                let pointer = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            object,
+                            &[offset],
+                            "marshal_field",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                (
+                    self.builder
+                        .build_load(self.basic_type(field_ty)?, pointer, "marshal_field_value")
+                        .map_err(|error| error.to_string())?,
+                    field_ty.clone(),
+                )
             };
-            let value = self
-                .builder
-                .build_load(self.basic_type(field_ty)?, pointer, "marshal_field_value")
-                .map_err(|error| error.to_string())?;
             let key = self
                 .builder
                 .build_global_string_ptr(name, "dynamic_object_key")
@@ -226,12 +229,65 @@ impl<'ctx> HirCompiler<'ctx> {
                 json,
                 key.as_pointer_value(),
                 value,
-                field_ty,
+                &value_type,
                 preserve_undefined,
                 false,
             )?;
         }
         Ok(json)
+    }
+
+    fn compile_native_object_getter(
+        &mut self,
+        object: PointerValue<'ctx>,
+        fields: &[(String, HirType)],
+        getter_index: usize,
+    ) -> Result<(BasicValueEnum<'ctx>, HirType), String> {
+        let getter_type = &fields[getter_index].1;
+        let (params, ret) = match getter_type {
+            HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => {
+                (params, ret.as_ref())
+            }
+            other => return Err(format!("native object getter has type {other:?}")),
+        };
+        let offset = self
+            .context
+            .i64_type()
+            .const_int(object_field_offset(fields, getter_index), false);
+        let pointer = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "getter_field")
+                .map_err(|error| error.to_string())?
+        };
+        let closure = self
+            .builder
+            .build_load(self.context.ptr_type(AddressSpace::default()), pointer, "getter_closure")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let function_pointer = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                closure,
+                "getter_code",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let call = self
+            .builder
+            .build_indirect_call(
+                self.function_type(params, ret)?,
+                function_pointer,
+                &[closure.into(), object.into()],
+                "getter_call",
+            )
+            .map_err(|error| error.to_string())?;
+        let value = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("native object getter did not return a value")?;
+        self.branch_on_pending_exception()?;
+        Ok((value, ret.clone()))
     }
 
     fn compile_json_object_set_native(

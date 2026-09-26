@@ -1493,14 +1493,11 @@ impl<'a> FnLowerer<'a> {
                     match property {
                         ObjectPatProp::Assign(property) => {
                             let key = property.key.id.sym.to_string();
-                            let field_type = fields
-                                .iter()
-                                .find(|(name, _)| name == &key)
-                                .map(|(_, ty)| ty.clone())
-                                .ok_or_else(|| format!("object has no field `{key}`"))?;
+                            let field_type =
+                                Self::fixed_object_property_read_type(fields, &key)?;
                             used.insert(key.clone());
-                            let mut field_value =
-                                HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key);
+                            let mut field_value = self
+                                .lower_fixed_object_property_read(value.clone(), fields, &key)?;
                             let mut binding_type = field_type.clone();
                             if let Some(default) = &property.value {
                                 let default = self.lower_expr(default)?;
@@ -1530,36 +1527,43 @@ impl<'a> FnLowerer<'a> {
                                     },
                                     _ => return Err("unsupported object destructuring key".into()),
                                 };
-                            let field_type = fields
-                                .iter()
-                                .find(|(name, _)| name == &key)
-                                .map(|(_, ty)| ty.clone())
-                                .ok_or_else(|| format!("object has no field `{key}`"))?;
+                            let field_type =
+                                Self::fixed_object_property_read_type(fields, &key)?;
                             used.insert(key.clone());
+                            let field_value = self
+                                .lower_fixed_object_property_read(value.clone(), fields, &key)?;
                             self.lower_assignment_pattern(
                                 &property.value,
-                                HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key),
+                                field_value,
                                 &field_type,
                                 statements,
                             )?;
                         }
                         ObjectPatProp::Rest(rest) => {
-                            let remaining = fields
-                                .iter()
-                                .filter(|(name, _)| !used.contains(name))
-                                .cloned()
-                                .collect::<Vec<_>>();
+                            let remaining = ecmascript_field_order(fields)
+                                .into_iter()
+                                .filter_map(|index| {
+                                    let (name, _) = &fields[index];
+                                    (!used.contains(name)).then(|| {
+                                        Ok((
+                                            name.clone(),
+                                            Self::fixed_object_property_read_type(fields, name)?,
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
                             let rest_value = HirExpr::ObjectLit(
                                 remaining
                                     .iter()
                                     .map(|(name, _)| {
                                         (
                                             name.clone(),
-                                            HirExpr::PropAccess(
-                                                Box::new(value.clone()),
-                                                ty.clone(),
-                                                name.clone(),
-                                            ),
+                                            self.lower_fixed_object_property_read(
+                                                value.clone(),
+                                                fields,
+                                                name,
+                                            )
+                                            .expect("rest field was taken from its source type"),
                                         )
                                     })
                                     .collect(),
