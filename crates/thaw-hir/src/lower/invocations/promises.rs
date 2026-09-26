@@ -646,8 +646,8 @@ impl<'a> FnLowerer<'a> {
                 return self.wrap_call_argument_bindings(result, &bindings);
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                let (values, element) = self.lower_promise_array_value(&arg.expr, "all")?;
-                return Ok(HirExpr::PromiseAllArray(Box::new(values), element));
+                let values = self.lower_expr(&arg.expr)?;
+                return self.lower_spread_promise_combinator(values, "all");
             };
             if array
                 .elems
@@ -655,8 +655,8 @@ impl<'a> FnLowerer<'a> {
                 .flatten()
                 .any(|element| element.spread.is_some())
             {
-                let (values, element) = self.lower_promise_array_value(&arg.expr, "all")?;
-                return Ok(HirExpr::PromiseAllArray(Box::new(values), element));
+                let values = self.lower_expr(&arg.expr)?;
+                return self.lower_spread_promise_combinator(values, "all");
             }
             if let Some(dynamic) = self.try_dynamic_promise_combinator("all", &array.elems)? {
                 return Ok(dynamic);
@@ -717,8 +717,8 @@ impl<'a> FnLowerer<'a> {
                 return self.wrap_call_argument_bindings(result, &bindings);
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                let (values, element) = self.lower_promise_array_value(&arg.expr, "allSettled")?;
-                return Ok(HirExpr::PromiseAllSettledArray(Box::new(values), element));
+                let values = self.lower_expr(&arg.expr)?;
+                return self.lower_spread_promise_combinator(values, "allSettled");
             };
             if array
                 .elems
@@ -726,8 +726,8 @@ impl<'a> FnLowerer<'a> {
                 .flatten()
                 .any(|element| element.spread.is_some())
             {
-                let (values, element) = self.lower_promise_array_value(&arg.expr, "allSettled")?;
-                return Ok(HirExpr::PromiseAllSettledArray(Box::new(values), element));
+                let values = self.lower_expr(&arg.expr)?;
+                return self.lower_spread_promise_combinator(values, "allSettled");
             }
             if let Some(dynamic) =
                 self.try_dynamic_promise_combinator("allSettled", &array.elems)?
@@ -799,8 +799,8 @@ impl<'a> FnLowerer<'a> {
                 return self.wrap_call_argument_bindings(result, &bindings);
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                let (values, element) = self.lower_promise_array_value(&arg.expr, "race")?;
-                return Ok(HirExpr::PromiseRaceArray(Box::new(values), element));
+                let values = self.lower_expr(&arg.expr)?;
+                return self.lower_spread_promise_combinator(values, "race");
             };
             if array
                 .elems
@@ -808,8 +808,8 @@ impl<'a> FnLowerer<'a> {
                 .flatten()
                 .any(|element| element.spread.is_some())
             {
-                let (values, element) = self.lower_promise_array_value(&arg.expr, "race")?;
-                return Ok(HirExpr::PromiseRaceArray(Box::new(values), element));
+                let values = self.lower_expr(&arg.expr)?;
+                return self.lower_spread_promise_combinator(values, "race");
             }
             if let Some(dynamic) = self.try_dynamic_promise_combinator("race", &array.elems)? {
                 return Ok(dynamic);
@@ -875,8 +875,8 @@ impl<'a> FnLowerer<'a> {
                 return self.wrap_call_argument_bindings(result, &bindings);
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                let (values, element) = self.lower_promise_array_value(&arg.expr, "any")?;
-                return Ok(HirExpr::PromiseAnyArray(Box::new(values), element));
+                let values = self.lower_expr(&arg.expr)?;
+                return self.lower_spread_promise_combinator(values, "any");
             };
             if array
                 .elems
@@ -884,8 +884,8 @@ impl<'a> FnLowerer<'a> {
                 .flatten()
                 .any(|element| element.spread.is_some())
             {
-                let (values, element) = self.lower_promise_array_value(&arg.expr, "any")?;
-                return Ok(HirExpr::PromiseAnyArray(Box::new(values), element));
+                let values = self.lower_expr(&arg.expr)?;
+                return self.lower_spread_promise_combinator(values, "any");
             }
             if let Some(dynamic) = self.try_dynamic_promise_combinator("any", &array.elems)? {
                 return Ok(dynamic);

@@ -159,16 +159,23 @@ impl<'a> FnLowerer<'a> {
         branches: Vec<HirExpr>,
     ) -> Result<HirExpr, String> {
         let mut branch_types = Vec::with_capacity(branches.len());
-        let mut result_members = Vec::new();
         for branch in &branches {
-            let ty = self.infer_expr_type(branch)?;
-            Self::flatten_property_union_members(&ty, &mut result_members)?;
-            branch_types.push(ty);
+            branch_types.push(self.infer_expr_type(branch)?);
         }
-        let result_type = match result_members.as_slice() {
-            [] => return Err("cannot call an array method on an empty union".into()),
-            [single] => single.clone(),
-            _ => HirType::Union(result_members),
+        let Some(first) = branch_types.first() else {
+            return Err("cannot call an array method on an empty union".into());
+        };
+        let result_type = if branch_types.iter().all(|branch| branch == first) {
+            first.clone()
+        } else {
+            let mut result_members = Vec::new();
+            for branch in &branch_types {
+                Self::flatten_property_union_members(branch, &mut result_members)?;
+            }
+            match result_members.as_slice() {
+                [single] => single.clone(),
+                _ => HirType::Union(result_members),
+            }
         };
         let receiver = HirExpr::Var(receiver_name.into());
         let mut result = None;

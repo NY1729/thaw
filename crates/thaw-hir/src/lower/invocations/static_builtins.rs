@@ -3140,6 +3140,59 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        if let HirType::Union(members) = &ty {
+                            let source_name =
+                                format!("__thaw_from_entries_union_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(source_name.clone(), ty.clone());
+                            let mut branches = Vec::with_capacity(members.len());
+                            for (index, member) in members.iter().enumerate() {
+                                let HirType::Array(entry) = member else {
+                                    return Err(format!(
+                                        "`Object.fromEntries` union member {index} is not an entry array: {member:?}"
+                                    ));
+                                };
+                                let HirType::Tuple(elements) = entry.as_ref() else {
+                                    return Err(format!(
+                                        "`Object.fromEntries` union member {index} must contain [string, value] tuples, got {entry:?}"
+                                    ));
+                                };
+                                let [HirType::Str, element] = elements.as_slice() else {
+                                    return Err(format!(
+                                        "`Object.fromEntries` union member {index} must contain [string, value] tuples, got {elements:?}"
+                                    ));
+                                };
+                                let runtime = match element {
+                                    HirType::F64 => "__thaw_json_object_from_number_entries",
+                                    HirType::Str => "__thaw_json_object_from_string_entries",
+                                    HirType::Bool => "__thaw_json_object_from_bool_entries",
+                                    HirType::Json => "__thaw_json_object_from_json_entries",
+                                    other => {
+                                        return Err(format!(
+                                            "`Object.fromEntries` union member {index} has unsupported value type {other:?}"
+                                        ))
+                                    }
+                                };
+                                branches.push(HirExpr::Call(
+                                    Box::new(HirExpr::Var(runtime.to_string())),
+                                    vec![HirExpr::UnionValue(
+                                        Box::new(HirExpr::Var(source_name.clone())),
+                                        index,
+                                        members.clone(),
+                                    )],
+                                ));
+                            }
+                            let result = self.merge_union_array_method_branches(
+                                &source_name,
+                                members,
+                                branches,
+                            )?;
+                            let result = self.wrap_call_argument_bindings(
+                                result,
+                                &[(source_name, ty, entries)],
+                            )?;
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let HirType::Array(entry) = &ty else {
                             return Err(format!(
                                 "`Object.fromEntries` requires an entry array, got {ty:?}"

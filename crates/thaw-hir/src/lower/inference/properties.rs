@@ -204,6 +204,7 @@ impl<'a> FnLowerer<'a> {
                         | HirType::Array(_)
                         | HirType::Tuple(_)
                         | HirType::Object(_)
+                        | HirType::Dictionary(_)
                         | HirType::Map(_, _)
                         | HirType::Set(_)
                         | HirType::Function(_, _)
