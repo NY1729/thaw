@@ -452,6 +452,16 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_object_has_accessor" => {
+                        let [_, property, setter] = args.as_slice() else {
+                            return Err(
+                                "object accessor query expects an object, property, and kind".into(),
+                            );
+                        };
+                        self.expect_type(&HirType::Str, property, "object accessor property")?;
+                        self.expect_type(&HirType::Bool, setter, "object accessor kind")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_array_has_index" => {
                         let [array, index] = args.as_slice() else {
                             return Err("array presence check expects two operands".into());

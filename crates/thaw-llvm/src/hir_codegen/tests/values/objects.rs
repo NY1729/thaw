@@ -350,26 +350,64 @@ fn observes_runtime_computed_object_accessors() {
 }
 
 #[test]
-fn rejects_accessor_layout_erasure() {
-    for source in [
-        r#"interface Box { value: number }
-            function main(): void {
-                const box: Box = { get value(): number { return 1; } };
-                console.log(box.value);
-            }"#,
-        r#"interface Box { value: number }
-            function make(): Box {
-                return { get value(): number { return 1; } };
-            }
-            function main(): void { console.log(make().value); }"#,
-    ] {
-        let module = thaw_parser::parse_typescript(source).unwrap();
-        let error = thaw_hir::lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("cannot coerce an accessor-bearing object to a fixed object layout"),
-            "{error}"
-        );
-    }
+fn preserves_accessors_across_fixed_object_annotations() {
+    let source = r#"
+        interface Box { value: number }
+        interface Outer { inner: Box }
+        interface Pair { first: number; second: number }
+        let stored = 1;
+        let reads = 0;
+        let writes = 0;
+        function accessor(): Box {
+            return {
+                get value(): number { reads++; return stored; },
+                set value(next: number) { writes++; stored = next; },
+            };
+        }
+        function consume(box: Box): number {
+            box.value = 7;
+            return box.value;
+        }
+        function boxed(): Box | string { return accessor(); }
+        function main(): void {
+            const local: Box = {
+                get value(): number { reads++; return stored; },
+                set value(next: number) { writes++; stored = next; },
+            };
+            console.log(local.value, reads, writes);
+            console.log(consume(local), reads, writes);
+
+            const returned = accessor();
+            console.log(returned.value, reads, writes);
+            const descriptor = Object.getOwnPropertyDescriptor(returned, "value")!;
+            console.log(typeof descriptor.get, typeof descriptor.set);
+            descriptor.set(8);
+            console.log(descriptor.get(), reads, writes);
+            console.log(JSON.stringify(returned), reads);
+            const spread = { ...returned };
+            console.log(spread.value, reads);
+
+            let assigned: Box = { value: 0 };
+            assigned = accessor();
+            assigned.value = 9;
+            console.log(assigned.value, reads, writes);
+
+            const nested: Outer = { inner: accessor() };
+            console.log(nested.inner.value, reads, writes);
+            const union = boxed();
+            if (typeof union !== "string") console.log(union.value, reads, writes);
+
+            const pair: Pair = {
+                get first(): number { return this.second + 1; },
+                second: 4,
+            };
+            console.log(pair.first, pair.second);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "annotated_object_accessors"),
+        "1 1 0\n7 2 1\n7 3 1\nfunction function\n8 4 2\n{\"value\":8} 5\n8 6\n9 7 3\n9 8 3\n9 9 3\n5 4\n"
+    );
 }
 
 #[test]

@@ -139,6 +139,10 @@ fn object_field_offset(fields: &[(String, HirType)], index: usize) -> u64 {
         .sum()
 }
 
+fn is_hidden_accessor_field(name: &str) -> bool {
+    name.starts_with("__thaw_getter_") || name.starts_with("__thaw_setter_")
+}
+
 fn ecmascript_object_field_order(fields: &[(String, HirType)]) -> Vec<usize> {
     let mut indices = fields
         .iter()

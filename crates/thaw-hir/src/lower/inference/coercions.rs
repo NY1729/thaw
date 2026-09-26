@@ -122,13 +122,47 @@ impl<'a> FnLowerer<'a> {
             (declared, self.infer_expr_type(&value)?)
         {
             if actual_fields.as_slice() != declared_fields.as_slice()
-                && actual_fields
-                    .iter()
-                    .any(|(name, _)| is_hidden_accessor_field(name))
+                && actual_fields.iter().any(|(name, _)| is_hidden_accessor_field(name))
             {
-                return Err(
-                    "cannot coerce an accessor-bearing object to a fixed object layout".into(),
-                );
+                if let HirExpr::ObjectLit(fields) = &value {
+                    let mut reordered = declared_fields
+                        .iter()
+                        .map(|(name, expected)| {
+                            let (_, field) = fields
+                                .iter()
+                                .find(|(field, _)| field == name)
+                                .ok_or_else(|| {
+                                    format!("object literal is missing required property `{name}`")
+                                })?;
+                            Ok((
+                                name.clone(),
+                                self.coerce_to_declared(expected, field.clone())?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    reordered.extend(
+                        fields
+                            .iter()
+                            .filter(|(name, _)| is_hidden_accessor_field(name))
+                            .cloned(),
+                    );
+                    return Ok(HirExpr::ObjectLit(reordered));
+                }
+                let visible = actual_fields
+                    .iter()
+                    .filter(|(name, _)| !is_hidden_accessor_field(name))
+                    .collect::<Vec<_>>();
+                if visible
+                    .iter()
+                    .zip(declared_fields)
+                    .all(|((name, actual), (declared, expected))| {
+                        name == declared && actual == expected
+                    })
+                    && visible.len() == declared_fields.len()
+                {
+                    return Ok(value);
+                }
+                return Err("cannot reorder a non-literal accessor object layout".into());
             }
             if actual_fields.starts_with(declared_fields) {
                 return Ok(value);

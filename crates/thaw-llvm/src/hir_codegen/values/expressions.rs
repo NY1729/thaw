@@ -367,12 +367,15 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::ObjectAlloc(object_type) => self.compile_object_alloc(object_type),
             HirExpr::PropAccess(obj, object_ty, field) => {
-                let field_ty = self.field_type(object_ty, field)?;
-                let llvm_ty = self.basic_type(&field_ty)?;
-                let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
-                self.builder
-                    .build_load(llvm_ty, field_ptr, "field")
-                    .map_err(|e| e.to_string())
+                let HirType::Object(fields) = object_ty else {
+                    return Err(format!("property access requires an object, got {object_ty:?}"));
+                };
+                let index = fields
+                    .iter()
+                    .position(|(name, _)| name == field)
+                    .ok_or_else(|| format!("object has no field `{field}`"))?;
+                let object = self.compile_expr(obj)?.into_pointer_value();
+                self.compile_accessor_aware_field_read(object, object_ty, fields, index)
             }
             HirExpr::DynamicPropAccess(obj, key, fields, result) => {
                 self.compile_dynamic_prop_access(obj, key, fields, result)
@@ -381,11 +384,84 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_enum_reverse_lookup(index, entries)
             }
             HirExpr::PropAssign(obj, object_ty, field, value) => {
-                let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
+                let HirType::Object(fields) = object_ty else {
+                    return Err(format!("property assignment requires an object, got {object_ty:?}"));
+                };
+                let index = fields
+                    .iter()
+                    .position(|(name, _)| name == field)
+                    .ok_or_else(|| format!("object has no field `{field}`"))?;
+                let field_type = &fields[index].1;
+                let object = self.compile_expr(obj)?.into_pointer_value();
+                let field_ptr = self.compile_field_ptr_from_pointer(object, fields, index)?;
                 let val = self.compile_expr(value)?;
+                if is_hidden_accessor_field(field) {
+                    self.builder
+                        .build_store(field_ptr, val)
+                        .map_err(|error| error.to_string())?;
+                    let (property, setter) = field
+                        .strip_prefix("__thaw_getter_")
+                        .map(|property| (property, false))
+                        .or_else(|| {
+                            field
+                                .strip_prefix("__thaw_setter_")
+                                .map(|property| (property, true))
+                        })
+                        .expect("hidden accessor field has a known prefix");
+                    let property = self
+                        .builder
+                        .build_global_string_ptr(property, "object_accessor_property")
+                        .map_err(|error| error.to_string())?;
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_object_set_accessor").unwrap(),
+                            &[
+                                object.into(),
+                                property.as_pointer_value().into(),
+                                val.into_pointer_value().into(),
+                                self.context
+                                    .bool_type()
+                                    .const_int(setter as u64, false)
+                                    .into(),
+                            ],
+                            "update_object_accessor",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    return Ok(val);
+                }
+                let setter = self.compile_object_accessor(object, field, true)?;
+                let function = self.current_function();
+                let call_setter = self.context.append_basic_block(function, "object_setter");
+                let store_field = self.context.append_basic_block(function, "object_data_write");
+                let done = self.context.append_basic_block(function, "object_write_done");
+                let has_setter = self
+                    .builder
+                    .build_is_not_null(setter, "object_has_setter")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_conditional_branch(has_setter, call_setter, store_field)
+                    .map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(call_setter);
+                self.compile_registered_accessor_call(
+                    setter,
+                    &[object_ty.clone(), field_type.clone()],
+                    &HirType::Void,
+                    &[object.into(), val.into()],
+                    "object_setter_call",
+                )?;
+                self.builder
+                    .build_unconditional_branch(done)
+                    .map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(store_field);
                 self.builder
                     .build_store(field_ptr, val)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_unconditional_branch(done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
                 Ok(val)
             }
 

@@ -200,24 +200,8 @@ impl<'ctx> HirCompiler<'ctx> {
             let (value, value_type) = if let Some(getter) = getter {
                 self.compile_native_object_getter(object, fields, getter)?
             } else {
-                let offset = self
-                    .context
-                    .i64_type()
-                    .const_int(object_field_offset(fields, index), false);
-                let pointer = unsafe {
-                    self.builder
-                        .build_in_bounds_gep(
-                            self.context.i8_type(),
-                            object,
-                            &[offset],
-                            "marshal_field",
-                        )
-                        .map_err(|error| error.to_string())?
-                };
                 (
-                    self.builder
-                        .build_load(self.basic_type(field_ty)?, pointer, "marshal_field_value")
-                        .map_err(|error| error.to_string())?,
+                    self.compile_accessor_aware_field_read(object, ty, fields, index)?,
                     field_ty.clone(),
                 )
             };

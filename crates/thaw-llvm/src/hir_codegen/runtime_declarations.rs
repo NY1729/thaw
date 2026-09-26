@@ -1545,6 +1545,27 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
+        self.module.add_function(
+            "thaw_object_set_accessor",
+            self.context.bool_type().fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.bool_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_accessor",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.bool_type().into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         let date_set_four_type = f64_type.fn_type(
             &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
             false,

@@ -790,6 +790,31 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(field_ptr, val)
                 .map_err(|e| e.to_string())?;
+            let (property, setter) = if let Some(property) = fields[i].0.strip_prefix("__thaw_getter_") {
+                (Some(property), false)
+            } else if let Some(property) = fields[i].0.strip_prefix("__thaw_setter_") {
+                (Some(property), true)
+            } else {
+                (None, false)
+            };
+            if let Some(property) = property {
+                let property = self
+                    .builder
+                    .build_global_string_ptr(property, "object_accessor_property")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_object_set_accessor").unwrap(),
+                        &[
+                            base_ptr.into(),
+                            property.as_pointer_value().into(),
+                            val.into_pointer_value().into(),
+                            self.context.bool_type().const_int(setter as u64, false).into(),
+                        ],
+                        "register_object_accessor",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
             byte_offset += field_sizes[i];
         }
 
@@ -847,42 +872,12 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(allocation.into())
     }
 
-    /// Looks up `field`'s declared type within `object_ty`, so a read
-    /// knows whether to load an `f64`, a pointer (nested object/array/
-    /// string/json), etc. -- fields are no longer assumed to all be `f64`
-    /// now that nested objects are supported.
-    fn field_type(&self, object_ty: &HirType, field: &str) -> Result<HirType, String> {
-        let HirType::Object(fields) = object_ty else {
-            return Err(format!(
-                "`.{field}` used on a non-object type {object_ty:?}"
-            ));
-        };
-        fields
-            .iter()
-            .find(|(name, _)| name == field)
-            .map(|(_, ty)| ty.clone())
-            .ok_or_else(|| format!("object has no field `{field}`"))
-    }
-
-    /// Computes the address of `object.field`, from `object_ty`'s
-    /// (statically known, per `HirExpr::PropAccess`'s payload) field order.
-    fn compile_field_ptr(
+    fn compile_field_ptr_from_pointer(
         &mut self,
-        object: &HirExpr,
-        object_ty: &HirType,
-        field: &str,
+        object: PointerValue<'ctx>,
+        fields: &[(String, HirType)],
+        index: usize,
     ) -> Result<PointerValue<'ctx>, String> {
-        let HirType::Object(fields) = object_ty else {
-            return Err(format!(
-                "`.{field}` used on a non-object type {object_ty:?}"
-            ));
-        };
-        let index = fields
-            .iter()
-            .position(|(name, _)| name == field)
-            .ok_or_else(|| format!("object has no field `{field}`"))?;
-
-        let obj_ptr = self.compile_expr(object)?.into_pointer_value();
         let offset = self
             .context
             .i64_type()
@@ -890,9 +885,138 @@ impl<'ctx> HirCompiler<'ctx> {
 
         unsafe {
             self.builder
-                .build_in_bounds_gep(self.context.i8_type(), obj_ptr, &[offset], "field_ptr")
+                .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "field_ptr")
                 .map_err(|e| e.to_string())
         }
+    }
+
+    fn compile_object_accessor(
+        &mut self,
+        object: PointerValue<'ctx>,
+        property: &str,
+        setter: bool,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let property = self
+            .builder
+            .build_global_string_ptr(property, "object_accessor_lookup_property")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_object_accessor").unwrap(),
+                &[
+                    object.into(),
+                    property.as_pointer_value().into(),
+                    self.context.bool_type().const_int(setter as u64, false).into(),
+                ],
+                "object_accessor_lookup",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("object accessor lookup returned no value".into())
+            .map(BasicValueEnum::into_pointer_value)
+    }
+
+    fn compile_registered_accessor_call(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        name: &str,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let function_pointer = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                closure,
+                "object_accessor_code",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let mut compiled = vec![closure.into()];
+        compiled.extend_from_slice(args);
+        let call = self
+            .builder
+            .build_indirect_call(
+                self.function_type(params, ret)?,
+                function_pointer,
+                &compiled,
+                name,
+            )
+            .map_err(|error| error.to_string())?;
+        let value = call.try_as_basic_value().basic();
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+
+    fn compile_accessor_aware_field_read(
+        &mut self,
+        object: PointerValue<'ctx>,
+        object_type: &HirType,
+        fields: &[(String, HirType)],
+        index: usize,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let (field, field_type) = &fields[index];
+        let llvm_type = self.basic_type(field_type)?;
+        let field_pointer = self.compile_field_ptr_from_pointer(object, fields, index)?;
+        if is_hidden_accessor_field(field) {
+            return self
+                .builder
+                .build_load(llvm_type, field_pointer, "field")
+                .map_err(|error| error.to_string());
+        }
+        let getter = self.compile_object_accessor(object, field, false)?;
+        let function = self.current_function();
+        let call_getter = self.context.append_basic_block(function, "object_getter");
+        let load_field = self.context.append_basic_block(function, "object_data_read");
+        let done = self.context.append_basic_block(function, "object_read_done");
+        let has_getter = self
+            .builder
+            .build_is_not_null(getter, "object_has_getter")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_getter, call_getter, load_field)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(call_getter);
+        let getter_value = self
+            .compile_registered_accessor_call(
+                getter,
+                std::slice::from_ref(object_type),
+                field_type,
+                &[object.into()],
+                "object_getter_call",
+            )?
+            .ok_or("object getter returned no value")?;
+        let getter_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("object getter call has no insertion block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(load_field);
+        let field_value = self
+            .builder
+            .build_load(llvm_type, field_pointer, "field")
+            .map_err(|error| error.to_string())?;
+        let field_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("object field read has no insertion block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(done);
+        let result = self
+            .builder
+            .build_phi(llvm_type, "object_read")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[(&getter_value, getter_end), (&field_value, field_end)]);
+        Ok(result.as_basic_value())
     }
 
 }

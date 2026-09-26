@@ -22,6 +22,33 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         match name.as_str() {
+            "__thaw_object_has_accessor" => {
+                let [object, property, setter] = args else {
+                    return Err(
+                        "object accessor query expects an object, property, and kind".into(),
+                    );
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let property = self.compile_expr(property)?.into_pointer_value();
+                let setter = self.compile_expr(setter)?.into_int_value();
+                let accessor = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_object_accessor").unwrap(),
+                        &[object.into(), property.into(), setter.into()],
+                        "object_accessor_query",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("object accessor query returned no value")?
+                    .into_pointer_value();
+                return self
+                    .builder
+                    .build_is_not_null(accessor, "object_has_accessor")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_object_set_state"
             | "__thaw_object_set_state_and_return"
             | "__thaw_object_state" => {
