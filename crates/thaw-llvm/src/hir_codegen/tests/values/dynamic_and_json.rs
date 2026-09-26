@@ -792,6 +792,36 @@ fn compiles_structured_clone_of_native_values() {
 }
 
 #[test]
+fn structured_clone_consumes_union_arrays_once_and_keeps_clones_independent() {
+    let source = r#"
+        interface NumberBox { value: number; }
+        interface TextBox { value: string; }
+        let calls = 0;
+        function boxes(numbers: boolean): NumberBox[] | TextBox[] {
+            calls++;
+            if (numbers) return [{ value: 1 }, , { value: 3 }];
+            return [{ value: "a" }, , { value: "c" }];
+        }
+        function check(numbers: boolean): void {
+            const original = boxes(numbers);
+            const clone = structuredClone(original);
+            clone.pop();
+            console.log(String(original[0].value), String(clone[0].value));
+            console.log(original.length, clone.length, 1 in clone);
+        }
+        function main(): void {
+            check(true);
+            check(false);
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structured_clone_union_arrays"),
+        "1 1\n3 2 false\na a\n3 2 false\n2\n"
+    );
+}
+
+#[test]
 fn compiles_structured_clone_of_a_map_or_set() {
     // Builds a fresh Map/Set and recursively clones each entry, snapshotting
     // the source via the same conversion `[...map]`/`Array.from(map)` use.

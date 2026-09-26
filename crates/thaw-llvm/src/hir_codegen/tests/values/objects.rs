@@ -231,6 +231,31 @@ fn compiles_object_from_typed_entries() {
 }
 
 #[test]
+fn object_from_entries_consumes_compatible_union_arrays_once() {
+    let source = r#"
+        let calls = 0;
+        function entries(numbers: boolean): [string, number][] | [string, string][] {
+            calls++;
+            const numberFirst: [string, number] = ["first", 1];
+            const numberSecond: [string, number] = ["second", 2];
+            if (numbers) return [numberFirst, numberSecond];
+            const stringFirst: [string, string] = ["first", "a"];
+            const stringSecond: [string, string] = ["second", "b"];
+            return [stringFirst, stringSecond];
+        }
+        function main(): void {
+            console.log(JSON.stringify(Object.fromEntries(entries(true))));
+            console.log(JSON.stringify(Object.fromEntries(entries(false))));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_from_entries_union_arrays"),
+        "{\"first\":1,\"second\":2}\n{\"first\":\"a\",\"second\":\"b\"}\n2\n"
+    );
+}
+
+#[test]
 fn compiles_object_assign_for_runtime_keyed_objects() {
     let source = r#"
         function source(label: string, shared: number): Record<string, number> {

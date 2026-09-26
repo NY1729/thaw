@@ -209,6 +209,45 @@ fn frame_split_promise_all_accepts_a_promise_array_variable() {
 }
 
 #[test]
+fn promise_combinators_consume_union_arrays_without_erasing_member_types() {
+    let source = r#"
+        let calls = 0;
+        function values(numbers: boolean, reject: boolean): Promise<number>[] | Promise<string>[] {
+            calls++;
+            if (numbers) {
+                return reject
+                    ? [Promise.reject<number>("number failure")]
+                    : [Promise.resolve(1), Promise.resolve(2)];
+            }
+            return reject
+                ? [Promise.reject<string>("string failure"), Promise.resolve("kept")]
+                : [Promise.resolve("a"), Promise.resolve("b")];
+        }
+        async function main(): Promise<void> {
+            console.log((await Promise.all(values(true, false))).join(","));
+            console.log((await Promise.all(values(false, false))).join(","));
+            console.log(String(await Promise.race(values(true, false))));
+            console.log(String(await Promise.race(values(false, false))));
+            console.log(String(await Promise.any(values(true, false))));
+            console.log(String(await Promise.any(values(false, true))));
+            try {
+                await Promise.all(values(true, true));
+            } catch (error) {
+                console.log(error);
+            }
+            const settled = await Promise.allSettled(values(false, true));
+            console.log(settled[0].status, settled[0].reason);
+            console.log(settled[1].status, String(settled[1].value));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_union_array_combinators"),
+        "1,2\na,b\n1\na\n1\nkept\nnumber failure\nrejected string failure\nfulfilled kept\n8\n"
+    );
+}
+
+#[test]
 fn frame_split_promise_combinators_accept_outer_tuple_spreads() {
     let source = r#"
         async function value(input: number): Promise<number> {

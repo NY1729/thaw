@@ -25,32 +25,8 @@ impl<'a> FnLowerer<'a> {
         Ok(callback)
     }
 
-    fn lower_promise_array_value(
-        &mut self,
-        expr: &Expr,
-        combinator: &str,
-    ) -> Result<(HirExpr, HirType), String> {
-        let values = self.lower_expr(expr)?;
-        let HirType::Array(element) = self.infer_expr_type(&values)? else {
-            return Err(format!(
-                "`Promise.{combinator}` expects an array of promises"
-            ));
-        };
-        let HirType::Promise(element) = *element else {
-            return Err(format!(
-                "`Promise.{combinator}` expects an array of promises"
-            ));
-        };
-        if *element == HirType::Void {
-            return Err(format!(
-                "`Promise.{combinator}` elements must not resolve to void"
-            ));
-        }
-        Ok((values, *element))
-    }
-
     fn lower_spread_promise_combinator(
-        &self,
+        &mut self,
         value: HirExpr,
         combinator: &str,
     ) -> Result<HirExpr, String> {
@@ -75,6 +51,148 @@ impl<'a> FnLowerer<'a> {
                     "any" => HirExpr::PromiseAnyArray(Box::new(value), *resolved),
                     _ => unreachable!(),
                 })
+            }
+            HirType::Union(members) => {
+                let mut resolved = Vec::with_capacity(members.len());
+                for (index, member) in members.iter().enumerate() {
+                    let HirType::Array(element) = member else {
+                        return Err(format!(
+                            "`Promise.{combinator}` union member {index} is not an array: {member:?}"
+                        ));
+                    };
+                    let HirType::Promise(payload) = element.as_ref() else {
+                        return Err(format!(
+                            "`Promise.{combinator}` union member {index} is not an array of promises: {member:?}"
+                        ));
+                    };
+                    if payload.as_ref() == &HirType::Void {
+                        return Err(format!(
+                            "`Promise.{combinator}` union member {index} resolves to void"
+                        ));
+                    }
+                    resolved.push(payload.as_ref().clone());
+                }
+
+                let branch_results = resolved
+                    .iter()
+                    .map(|payload| match combinator {
+                        "all" => HirType::Array(Box::new(payload.clone())),
+                        "allSettled" => HirType::Array(Box::new(
+                            promise_settled_result_type(payload.clone()),
+                        )),
+                        "race" | "any" => payload.clone(),
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>();
+                let mut result_members = Vec::new();
+                for result in &branch_results {
+                    let member = match result {
+                        HirType::Array(element) => element.as_ref(),
+                        other => other,
+                    };
+                    Self::flatten_property_union_members(member, &mut result_members)?;
+                }
+                let common_result = match result_members.as_slice() {
+                    [single] => single.clone(),
+                    _ => HirType::Union(result_members),
+                };
+                let result_type = match combinator {
+                    "all" | "allSettled" => HirType::Array(Box::new(common_result)),
+                    "race" | "any" => common_result,
+                    _ => unreachable!(),
+                };
+                let source_type = HirType::Union(members.clone());
+                let source_name = format!("__thaw_promise_union_array_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(source_name.clone(), source_type.clone());
+
+                let mut branches = Vec::with_capacity(members.len());
+                for (index, (payload, branch_result)) in resolved
+                    .into_iter()
+                    .zip(branch_results)
+                    .enumerate()
+                {
+                    let array = HirExpr::UnionValue(
+                        Box::new(HirExpr::Var(source_name.clone())),
+                        index,
+                        members.clone(),
+                    );
+                    let promise = match combinator {
+                        "all" => HirExpr::PromiseAllArray(Box::new(array), payload),
+                        "allSettled" => {
+                            HirExpr::PromiseAllSettledArray(Box::new(array), payload)
+                        }
+                        "race" => HirExpr::PromiseRaceArray(Box::new(array), payload),
+                        "any" => HirExpr::PromiseAnyArray(Box::new(array), payload),
+                        _ => unreachable!(),
+                    };
+                    // Widen fulfilled values after the exact member combinator
+                    // runs so its promise layout and rejection path stay intact.
+                    if branch_result == result_type {
+                        branches.push(promise);
+                        continue;
+                    }
+                    let result_name = format!("__thaw_promise_union_result_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(result_name.clone(), branch_result.clone());
+                    let widened = match (&branch_result, &result_type) {
+                        (HirType::Array(source), HirType::Array(target)) => {
+                            let element_name = format!(
+                                "__thaw_promise_union_element_{}",
+                                self.next_binding
+                            );
+                            self.next_binding += 1;
+                            self.scope
+                                .insert(element_name.clone(), source.as_ref().clone());
+                            let converted = self.coerce_to_declared(
+                                target,
+                                HirExpr::Var(element_name.clone()),
+                            )?;
+                            self.lower_array_map(
+                                HirExpr::Var(result_name.clone()),
+                                branch_result.clone(),
+                                source.as_ref().clone(),
+                                source.as_ref().clone(),
+                                HirExpr::Lambda(
+                                    Vec::new(),
+                                    vec![HirParam {
+                                        name: element_name,
+                                        ty: source.as_ref().clone(),
+                                    }],
+                                    target.as_ref().clone(),
+                                    Box::new(converted),
+                                ),
+                                None,
+                            )?
+                        }
+                        _ => self.coerce_to_declared(
+                            &result_type,
+                            HirExpr::Var(result_name.clone()),
+                        )?,
+                    };
+                    branches.push(HirExpr::PromiseThen(
+                        Box::new(promise),
+                        Box::new(HirExpr::Lambda(
+                            Vec::new(),
+                            vec![HirParam {
+                                name: result_name,
+                                ty: branch_result.clone(),
+                            }],
+                            result_type.clone(),
+                            Box::new(widened),
+                        )),
+                        branch_result,
+                        result_type.clone(),
+                        false,
+                        false,
+                    ));
+                }
+                let result = self.merge_union_array_method_branches(
+                    &source_name,
+                    &members,
+                    branches,
+                )?;
+                self.wrap_call_argument_bindings(result, &[(source_name, source_type, value)])
             }
             HirType::Tuple(elements) => {
                 let mut resolved = Vec::with_capacity(elements.len());

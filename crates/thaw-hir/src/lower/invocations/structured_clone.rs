@@ -10,11 +10,7 @@ impl<'a> FnLowerer<'a> {
         match &value_type {
             // Scalars are already copied by value; no cloning needed.
             HirType::F64 | HirType::Str | HirType::Bool => Ok(value),
-            // Array/Tuple/Object round-trip through a `Json` value and back
-            // (`wrap_native_value_as_json` then `JsonAsNative`, the same pair
-            // `JSON.stringify` reuses for a native value), which is both a
-            // real deep copy and reuses thaw-llvm's existing native<->Json
-            // codegen instead of a new one.
+            // Array/Tuple/Object round-trip through `Json` for a deep copy.
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 let json = self.wrap_native_value_as_json(value, value_type.clone())?;
                 Ok(HirExpr::JsonAsNative(Box::new(json), value_type))
@@ -36,8 +32,76 @@ impl<'a> FnLowerer<'a> {
             HirType::Set(element_type) => {
                 self.lower_structured_clone_set(value, element_type.as_ref().clone())
             }
+            HirType::Union(members)
+                if members
+                    .iter()
+                    .all(|member| matches!(member, HirType::Array(_))) =>
+            {
+                let source_name = format!("__thaw_clone_union_array_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(source_name.clone(), value_type.clone());
+                let branches = members
+                    .iter()
+                    .enumerate()
+                    .map(|(index, member)| {
+                        let HirType::Array(element) = member else {
+                            unreachable!()
+                        };
+                        self.lower_structured_clone_array(
+                            HirExpr::UnionValue(
+                                Box::new(HirExpr::Var(source_name.clone())),
+                                index,
+                                members.clone(),
+                            ),
+                            member.clone(),
+                            element.as_ref().clone(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result = self.merge_union_array_method_branches(
+                    &source_name,
+                    members,
+                    branches,
+                )?;
+                self.wrap_call_argument_bindings(
+                    result,
+                    &[(source_name, value_type, value)],
+                )
+            }
             other => Err(format!("`structuredClone` does not support {other:?}")),
         }
+    }
+
+    fn lower_structured_clone_array(
+        &mut self,
+        value: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let element_name = format!("__thaw_clone_array_element_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope
+            .insert(element_name.clone(), element_type.clone());
+        let cloned = self.structured_clone_expr(
+            HirExpr::Var(element_name.clone()),
+            element_type.clone(),
+        )?;
+        self.lower_array_map(
+            value,
+            array_type,
+            element_type.clone(),
+            element_type.clone(),
+            HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: element_name,
+                    ty: element_type.clone(),
+                }],
+                element_type,
+                Box::new(cloned),
+            ),
+            None,
+        )
     }
 
     /// Builds a fresh `Map` and inserts a structurally-cloned copy of every

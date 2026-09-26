@@ -390,6 +390,38 @@ fn untyped_promise_reject_does_not_constrain_combinator_values() {
 }
 
 #[test]
+fn static_union_array_consumers_reject_incompatible_members_clearly() {
+    let promise = thaw_parser::parse_typescript(
+        r#"
+        function values(flag: boolean): Promise<number>[] | number[] {
+            if (flag) return [Promise.resolve(1)];
+            return [1];
+        }
+        async function main(): Promise<void> { await Promise.all(values(true)); }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&promise)
+        .unwrap_err()
+        .contains("Promise.all` union member 1 is not an array of promises"));
+
+    let entries = thaw_parser::parse_typescript(
+        r#"
+        interface Item { value: number; }
+        function values(flag: boolean): [string, number][] | [string, Item][] {
+            if (flag) return [["ok", 1]];
+            return [["bad", { value: 3 }]];
+        }
+        function main(): void { Object.fromEntries(values(true)); }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&entries)
+        .unwrap_err()
+        .contains("Object.fromEntries` union member 1 has unsupported value type"));
+}
+
+#[test]
 fn rejects_async_function_not_declared_as_returning_promise() {
     let module =
         thaw_parser::parse_typescript("async function f(): number { return 1; }").unwrap();
