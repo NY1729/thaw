@@ -243,6 +243,14 @@ fn add_installed_inner(
                 .map_err(|error| format!("failed to copy `{}`: {error}", source.display()))?;
         }
     }
+    if let Some(executable) = select_optional_dependency_executable(node_modules_dir, &manifest)? {
+        fs::copy(&executable, dest_dir.join("platform-executable")).map_err(|error| {
+            format!(
+                "failed to copy platform executable `{}`: {error}",
+                executable.display()
+            )
+        })?;
+    }
     fs::write(dest_dir.join("package.d.ts"), dts_source).map_err(|e| {
         format!(
             "failed to write `{}`: {e}",

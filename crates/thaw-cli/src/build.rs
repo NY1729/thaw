@@ -444,7 +444,8 @@ fn build_with_native_mode(
             || shim_source.contains("__thaw_typed_js_"),
         "quickjs_reasons": quickjs_reasons,
         "napi": shim_source.contains("loadNativeAddonEmbedded(")
-            || shim_source.contains("loadNativeAddon("),
+            || shim_source.contains("loadNativeAddon(")
+            || shim_source.contains("embedExecutable("),
     });
     let marker = format!("{ARTIFACT_MARKER}{manifest}");
     let marker_literal = serde_json::to_string(&marker)

@@ -41,6 +41,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "constructDynamicValue" => self.compile_construct_dynamic_value(args),
             "loadNativeAddon" => self.compile_load_native_addon(args),
             "loadNativeAddonEmbedded" => self.compile_load_embedded_native_addon(args),
+            "embedExecutable" => self.compile_embed_executable(args),
+            "setProcessEnv" => self.compile_set_process_env(args),
             "loadNativeSharedLibraryEmbedded" => self.compile_load_embedded_native_dependency(args),
             "loadNativeSharedLibrary" => self.compile_load_native_dependency(args),
             "callNativeAddon" => self.compile_call_native_addon(args),

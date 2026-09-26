@@ -2148,6 +2148,8 @@ impl<'a> FnLowerer<'a> {
                     "constructDynamicValue" => return Ok(HirType::JsValue),
                     "loadNativeAddon" => return Ok(HirType::Bool),
                     "loadNativeAddonEmbedded" => return Ok(HirType::Bool),
+                    "embedExecutable" => return Ok(HirType::Str),
+                    "setProcessEnv" => return Ok(HirType::Bool),
                     "loadNativeSharedLibraryEmbedded" => return Ok(HirType::Bool),
                     "loadNativeSharedLibrary" => return Ok(HirType::Bool),
                     "callNativeAddon" => return Ok(HirType::Json),

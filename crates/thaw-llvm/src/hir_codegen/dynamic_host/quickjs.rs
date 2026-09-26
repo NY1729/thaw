@@ -188,6 +188,50 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_embed_executable(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_napi = true;
+        let [bytes] = args else {
+            return Err("embedExecutable expects executable bytes".into());
+        };
+        let bytes = self.compile_expr(bytes)?;
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_napi_embed_executable_hex")
+                    .unwrap(),
+                &[bytes.into()],
+                "embedded_executable_path",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_napi_embed_executable_hex returned no value".into())
+    }
+
+    fn compile_set_process_env(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [name, value] = args else {
+            return Err("setProcessEnv expects a name and value".into());
+        };
+        let name = self.compile_expr(name)?;
+        let value = self.compile_expr(value)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_js_set_process_env").unwrap(),
+                &[name.into(), value.into()],
+                "set_process_env",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_js_set_process_env returned no value".into())
+    }
+
     fn compile_load_embedded_native_dependency(
         &mut self,
         args: &[HirExpr],

@@ -4205,7 +4205,6 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "esbuild platform executable is not bundled yet"]
 fn registry_add_transforms_typescript_with_real_esbuild_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;

@@ -10,6 +10,7 @@ pub struct ResolvedPackage {
     /// C layout.
     pub native_addon: Option<PathBuf>,
     pub native_dependencies: Vec<PathBuf>,
+    pub platform_executable: Option<PathBuf>,
     pub bundle_js: Option<String>,
     /// The version `add` recorded in `version.txt`, if this package went
     /// through `add` (rather than hand-curation, or an `add` run before
@@ -47,6 +48,10 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
     let native_lib = native_lib_path.is_file().then_some(native_lib_path);
     let native_addon_path = dir.join("native.node");
     let native_addon = native_addon_path.is_file().then_some(native_addon_path);
+    let platform_executable_path = dir.join("platform-executable");
+    let platform_executable = platform_executable_path
+        .is_file()
+        .then_some(platform_executable_path);
     let mut native_dependencies = fs::read_dir(dir.join("native-dependencies"))
         .into_iter()
         .flatten()
@@ -100,6 +105,7 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         native_lib,
         native_addon,
         native_dependencies,
+        platform_executable,
         bundle_js,
         version,
         dependency_versions,
@@ -348,6 +354,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         native_lib: None,
         native_addon: None,
         native_dependencies: Vec::new(),
+        platform_executable: None,
         bundle_js: Some(bundle_builtin_module(name)?),
         version: None,
         dependency_versions: None,
