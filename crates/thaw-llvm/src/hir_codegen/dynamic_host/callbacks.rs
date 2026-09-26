@@ -633,7 +633,11 @@ impl<'ctx> HirCompiler<'ctx> {
         // return value to marshal; encoded as a bare JSON `null` result
         // instead of running it through the ordinary array-wrap-then-
         // index dance below, which requires a real value to push.
-        let result_json = if matches!(ret, HirType::Undefined | HirType::Void) {
+        // `undefined` is a real callback result; only `void` means there is
+        // no value for the JavaScript wrapper to reconstruct.
+        let result_json = if matches!(ret, HirType::Undefined) {
+            self.compile_napi_undefined_json()?
+        } else if matches!(ret, HirType::Void) {
             self.compile_json_null()?
         } else {
             let result = call
@@ -689,12 +693,25 @@ impl<'ctx> HirCompiler<'ctx> {
                 // `false` this used to pass silently collapsed the
                 // "absent" case to a plain JSON `null` every time,
                 // indistinguishable from an explicit `null` return.
-                self.compile_json_array_push_native_with_undefined(
-                    result_json,
-                    result,
-                    ret,
-                    true,
-                )?;
+                if *ret == HirType::JsValue {
+                    let result = self.compile_dynamic_value_placeholder_unchecked(result)?;
+                    self.builder
+                        .build_call(
+                            self.module
+                                .get_function("thaw_json_array_push_json")
+                                .unwrap(),
+                            &[result_json.into(), result.into()],
+                            "native_callback_dynamic_result",
+                        )
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    self.compile_json_array_push_native_with_undefined(
+                        result_json,
+                        result,
+                        ret,
+                        true,
+                    )?;
+                }
                 self.builder
                     .build_call(
                         self.module.get_function("thaw_json_index").unwrap(),

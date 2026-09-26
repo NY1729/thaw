@@ -35,6 +35,19 @@
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
     JSON.stringify(value, replacer, space);
+  globalThis.__thaw_object_with_native_getters = (keys, readable, ...getters) => {
+    const object = {};
+    for (let i = 0; i < keys.length; i++) {
+      Object.defineProperty(object, keys[i], {
+        get: readable[i] ? getters[i] : undefined,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    return object;
+  };
+  globalThis.__thaw_json_stringify_native_accessors = (replacer, space, value) =>
+    JSON.stringify(value, replacer, space);
   globalThis.__thaw_iterator_from = source => {
     if (source?.__thawNativeIterator) {
       return Object.assign(Object.create(Iterator.prototype), source, {

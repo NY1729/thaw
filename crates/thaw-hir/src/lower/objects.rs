@@ -2374,6 +2374,152 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    fn fixed_object_property_descriptor(
+        target: HirExpr,
+        target_type: &HirType,
+        fields: &[(Symbol, HirType)],
+        property: &str,
+    ) -> HirExpr {
+        let getter = format!("__thaw_getter_{property}");
+        let setter = format!("__thaw_setter_{property}");
+        let accessor = |hidden: String| {
+            let (_, ty) = fields.iter().find(|(name, _)| name == &hidden)?;
+            let logical = match ty {
+                HirType::Function(params, ret) => {
+                    HirType::Function(params[1..].to_vec(), ret.clone())
+                }
+                HirType::CallableFunction(params, optional, rest, ret) => HirType::CallableFunction(
+                    params[1..].to_vec(),
+                    optional.clone(),
+                    rest.clone(),
+                    ret.clone(),
+                ),
+                _ => return None,
+            };
+            Some(HirExpr::TypedClosure(
+                logical,
+                Box::new(HirExpr::PropAccess(
+                    Box::new(target.clone()),
+                    target_type.clone(),
+                    hidden,
+                )),
+            ))
+        };
+        let getter = accessor(getter);
+        let setter = accessor(setter);
+        if getter.is_some() || setter.is_some() {
+            return HirExpr::ObjectLit(vec![
+                (
+                    "get".into(),
+                    getter.unwrap_or(HirExpr::Lit(HirLit::Undefined)),
+                ),
+                (
+                    "set".into(),
+                    setter.unwrap_or(HirExpr::Lit(HirLit::Undefined)),
+                ),
+                ("enumerable".into(), HirExpr::Lit(HirLit::Bool(true))),
+                ("configurable".into(), HirExpr::Lit(HirLit::Bool(true))),
+            ]);
+        }
+        HirExpr::ObjectLit(vec![
+            (
+                "value".into(),
+                HirExpr::PropAccess(
+                    Box::new(target),
+                    target_type.clone(),
+                    property.into(),
+                ),
+            ),
+            ("writable".into(), HirExpr::Lit(HirLit::Bool(true))),
+            ("enumerable".into(), HirExpr::Lit(HirLit::Bool(true))),
+            ("configurable".into(), HirExpr::Lit(HirLit::Bool(true))),
+        ])
+    }
+
+    fn fixed_object_contains_accessor(fields: &[(Symbol, HirType)]) -> bool {
+        fields.iter().any(|(name, ty)| {
+            is_hidden_accessor_field(name)
+                || matches!(ty, HirType::Object(nested) if Self::fixed_object_contains_accessor(nested))
+        })
+    }
+
+    fn lower_fixed_object_as_dynamic_accessor_object(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+    ) -> Result<HirExpr, String> {
+        let source_type = HirType::Object(fields.to_vec());
+        let source_name = format!("__thaw_dynamic_accessor_object_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), source_type.clone());
+        let mut keys = Vec::new();
+        let mut readable = Vec::new();
+        let mut getters = Vec::new();
+        for index in ecmascript_field_order(fields) {
+            let name = &fields[index].0;
+            let has_getter = fields
+                .iter()
+                .any(|(field, _)| field == &format!("__thaw_getter_{name}"));
+            let setter_only = !has_getter
+                && fields
+                    .iter()
+                    .any(|(field, _)| field == &format!("__thaw_setter_{name}"));
+            let mut read = self.lower_fixed_object_property_read(
+                HirExpr::Var(source_name.clone()),
+                fields,
+                name,
+            )?;
+            let mut read_type = Self::fixed_object_property_read_type(fields, name)?;
+            if let HirType::Object(nested) = &read_type {
+                if Self::fixed_object_contains_accessor(nested) {
+                    read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested)?;
+                    read_type = HirType::JsValue;
+                }
+            }
+            let callback = HirExpr::Lambda(
+                vec![HirParam {
+                    name: source_name.clone(),
+                    ty: source_type.clone(),
+                }],
+                Vec::new(),
+                read_type,
+                Box::new(read),
+            );
+            keys.push(HirExpr::Lit(HirLit::Str(name.clone())));
+            readable.push(HirExpr::Lit(HirLit::Bool(!setter_only)));
+            getters.push(HirExpr::Call(
+                Box::new(HirExpr::Var("registerNativeCallback".into())),
+                vec![callback],
+            ));
+        }
+        let keys = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(keys),
+        )?;
+        let readable = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(readable),
+        )?;
+        let arguments = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(vec![keys, readable]),
+        )?;
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str(
+                        "__thaw_object_with_native_getters".into(),
+                    ))],
+                ),
+                arguments,
+                HirExpr::ArrayLit(getters),
+            ],
+        );
+        self.wrap_call_argument_bindings(result, &[(source_name, source_type, value)])
+    }
+
 }
 
 /// The ECMAScript well-known symbols (`Symbol.<name>`) that thaw recognizes

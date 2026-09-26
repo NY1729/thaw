@@ -261,7 +261,8 @@ fn observes_accessor_key_order_replacers_and_overwrites() {
             console.log(Object.keys(source).join("|"), order);
             console.log(Object.values(source).join("|"), order);
             order = "";
-            console.log(JSON.stringify(source, ["a", "2"]), order);
+            const selected = JSON.stringify(source, ["a", "2"]);
+            console.log(selected, order);
             const overwritten = {
                 get value(): number { order += "bad"; return 1; },
                 value: 42,
@@ -284,20 +285,61 @@ fn observes_accessor_key_order_replacers_and_overwrites() {
 }
 
 #[test]
-fn rejects_descriptors_for_native_accessor_objects() {
-    let module = thaw_parser::parse_typescript(
-        r#"
-            function main(): void {
-                const source = { get value(): number { return 42; } };
-                Object.getOwnPropertyDescriptor(source, "value");
-            }
-        "#,
-    )
-    .unwrap();
-    let error = thaw_hir::lower_module(&module).unwrap_err();
-    assert!(
-        error.contains("property descriptor inspection is not supported for native accessor objects"),
-        "{error}"
+fn observes_native_accessor_descriptors_and_json_replacers() {
+    let source = r#"
+        let stored = 2;
+        let order = "";
+        let reads = 0;
+        function main(): void {
+            const source = {
+                get a(): number { reads++; order += "ga,"; return stored; },
+                set a(value: number) { order += "sa,"; stored = value; },
+                get b(): number { reads++; order += "gb,"; return 3; },
+            };
+            const descriptor = Object.getOwnPropertyDescriptor(source, "a")!;
+            console.log(typeof descriptor.get, typeof descriptor.set,
+                descriptor.enumerable, descriptor.configurable,
+                Object.hasOwn(descriptor, "value"));
+            console.log(descriptor.get.call(source));
+            descriptor.set.call(source, 7);
+            console.log(source.a, order);
+            const descriptors = Object.getOwnPropertyDescriptors(source);
+            console.log(typeof descriptors.a.get, typeof descriptors.b.get,
+                Object.keys(descriptors).join(","));
+
+            order = "";
+            const keys: string[] = ["b", "a", "b"];
+            const selected = JSON.stringify(source, keys);
+            console.log(selected, order);
+
+            order = "";
+            const readsBeforeReplacer = reads;
+            const replaced = JSON.stringify(source, (key: string, value: any): any => {
+                return key === "b" ? undefined : value;
+            });
+            console.log(replaced, reads - readsBeforeReplacer);
+
+            const nested = { source };
+            const shallowKeys: string[] = ["source"];
+            const nestedKeys: string[] = ["source", "a"];
+            const readsBeforeNested = reads;
+            console.log(JSON.stringify(nested, shallowKeys), reads - readsBeforeNested);
+            console.log(JSON.stringify(nested, nestedKeys), reads - readsBeforeNested);
+
+            const absent = {
+                get missing(): undefined { reads++; return undefined; },
+                set writeOnly(value: number) { stored = value; },
+            };
+            const absentKeys: string[] = ["missing", "writeOnly"];
+            const absentJson = JSON.stringify(absent, absentKeys);
+            const writeDescriptor = Object.getOwnPropertyDescriptor(absent, "writeOnly")!;
+            console.log(absentJson, reads, writeDescriptor.get === undefined,
+                typeof writeDescriptor.set);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_accessor_descriptors_replacers"),
+        "function function true true false\n2\n7 ga,sa,ga,\nfunction function a,b\n{\"b\":3,\"a\":7} gb,ga,\n{\"a\":7} 2\n{\"source\":{}} 0\n{\"source\":{\"a\":7}} 1\n{} 8 true function\n"
     );
 }
 
