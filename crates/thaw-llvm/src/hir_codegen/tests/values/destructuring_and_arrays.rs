@@ -433,3 +433,82 @@ fn compiles_union_array_sorting_with_a_comparator() {
         "11\nmiddle!\nlast!\nlast!\n11\nmiddle!\n11\nmiddle!\nlast!\n"
     );
 }
+
+#[test]
+fn compiles_mutating_methods_on_unions_of_arrays() {
+    let source = r#"
+        let receiverCalls = 0;
+        let argumentCalls = 0;
+        function values(text: boolean): number[] | string[] {
+            receiverCalls++;
+            if (text) {
+                const result: string[] = ["c", , "a"];
+                return result;
+            }
+            const result: number[] = [3, , 1];
+            return result;
+        }
+        function index(value: number): number {
+            argumentCalls++;
+            return value;
+        }
+        function insertable(wide: boolean): number[] | (number | string)[] {
+            if (wide) {
+                const result: (number | string)[] = [1, "x"];
+                return result;
+            }
+            const result: number[] = [2];
+            return result;
+        }
+        function compare(left: number | string, right: number | string): number {
+            console.log("compare");
+            return 0;
+        }
+        function comparator(): (left: number | string, right: number | string) => number {
+            console.log("comparator");
+            return compare;
+        }
+        function main(): void {
+            for (const text of [false, true]) {
+                const copied = values(text);
+                console.log(copied.copyWithin(index(0), index(1)) === copied, copied.join(","));
+                const reversed = values(text);
+                console.log(reversed.reverse() === reversed, reversed.join(","));
+                const sorted = values(text);
+                console.log(sorted.sort(comparator()) === sorted, sorted.join(","));
+                const popped = values(text);
+                console.log(popped.pop(), popped.join(","));
+                const shifted = values(text);
+                console.log(shifted.shift(), shifted.join(","));
+                const spliced = values(text);
+                const removed = spliced.splice(index(1), index(1));
+                console.log(removed.join(","), spliced.join(","));
+            }
+            const inserted = insertable(false);
+            console.log(inserted.push(index(4)), inserted.unshift(index(0)), inserted.join(","));
+            const filled = insertable(true);
+            console.log(filled.fill(index(7), index(1)) === filled, filled.join(","));
+            console.log(receiverCalls, argumentCalls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_mutations"),
+        concat!(
+            "true ,1,1\n",
+            "true 1,,3\n",
+            "comparator\ncompare\ntrue 3,1,\n",
+            "1 3,\n",
+            "3 ,1\n",
+            " 3,1\n",
+            "true ,a,a\n",
+            "true a,,c\n",
+            "comparator\ncompare\ntrue c,a,\n",
+            "a c,\n",
+            "c ,a\n",
+            " c,a\n",
+            "2 3 0,2,4\n",
+            "true 1,7\n",
+            "12 12\n",
+        )
+    );
+}

@@ -133,9 +133,7 @@ impl<'a> FnLowerer<'a> {
                 if matches!(property.sym.as_ref(), "sort" | "toSorted") {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    if property.sym == *"toSorted"
-                        && call.args.iter().all(|argument| argument.spread.is_none())
-                    {
+                    if call.args.iter().all(|argument| argument.spread.is_none()) {
                         if let HirType::Union(members) = &receiver_type {
                             if members.iter().all(|member| matches!(member, HirType::Array(_))) {
                                 if call.args.len() > 1 {
@@ -174,13 +172,6 @@ impl<'a> FnLowerer<'a> {
                                 let receiver_name = format!("__thaw_union_sorted_{}", self.next_binding);
                                 self.next_binding += 1;
                                 self.scope.insert(receiver_name.clone(), receiver_type.clone());
-                                let comparator_binding = comparator.map(|value| {
-                                    let ty = self.infer_expr_type(&value)?;
-                                    let name = format!("__thaw_union_comparator_{}", self.next_binding);
-                                    self.next_binding += 1;
-                                    self.scope.insert(name.clone(), ty.clone());
-                                    Ok::<_, String>((name, ty, value))
-                                }).transpose()?;
                                 let mut branches = Vec::with_capacity(members.len());
                                 for (index, member) in members.iter().enumerate() {
                                     let HirType::Array(element) = member else { unreachable!() };
@@ -189,20 +180,18 @@ impl<'a> FnLowerer<'a> {
                                         index,
                                         members.clone(),
                                     );
-                                    let branch = match &comparator_binding {
-                                        Some((name, ty, _)) if *ty != HirType::Undefined => self.lower_array_sort_comparator(
-                                            source, member.clone(), element.as_ref().clone(), callback_element.clone(), HirExpr::Var(name.clone()), true,
+                                    let branch = match &comparator {
+                                        Some(value) if self.infer_expr_type(value)? != HirType::Undefined => self.lower_array_sort_comparator(
+                                            source, member.clone(), element.as_ref().clone(), callback_element.clone(), value.clone(), property.sym == *"toSorted",
                                         )?,
                                         _ => self.lower_array_sort_default(
-                                            source, member.clone(), element.as_ref().clone(), true,
+                                            source, member.clone(), element.as_ref().clone(), property.sym == *"toSorted",
                                         )?,
                                     };
                                     branches.push(branch);
                                 }
                                 let result = self.merge_union_array_method_branches(&receiver_name, members, branches)?;
-                                let mut bindings = vec![(receiver_name, receiver_type, receiver)];
-                                if let Some(binding) = comparator_binding { bindings.push(binding); }
-                                return self.wrap_call_argument_bindings(result, &bindings);
+                                return self.wrap_call_argument_bindings(result, &[(receiver_name, receiver_type, receiver)]);
                             }
                         }
                     }
