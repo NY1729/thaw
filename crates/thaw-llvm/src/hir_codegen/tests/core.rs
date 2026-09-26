@@ -359,6 +359,55 @@ fn destructures_a_bare_dynamic_any_typed_object() {
 }
 
 #[test]
+fn destructures_dynamic_object_and_array_rest() {
+    let source = r#"
+        let calls = 0;
+        function source(): any {
+            calls++;
+            return { selected: [1, 2, 3], kept: 4 };
+        }
+        function main(): void {
+            const {
+                selected: [first, ...tail],
+                missing = "fallback",
+                ...rest
+            } = source();
+            console.log(calls, first, JSON.stringify(tail), missing, JSON.stringify(rest));
+
+            let assignedFirst: any = 0;
+            let assignedTail: any = [];
+            let assignedRest: any = {};
+            ({
+                selected: [assignedFirst, ...assignedTail],
+                ...assignedRest
+            } = source());
+            console.log(
+                calls,
+                assignedFirst,
+                JSON.stringify(assignedTail),
+                JSON.stringify(assignedRest)
+            );
+
+            const sparse: any = [5, 6, 7, 8];
+            const [head, , ...sparseRest] = sparse;
+            let assignedHead: any = 0;
+            let assignedSparseRest: any = [];
+            [assignedHead, , ...assignedSparseRest] = sparse;
+            console.log(
+                head,
+                JSON.stringify(sparseRest),
+                assignedHead,
+                JSON.stringify(assignedSparseRest)
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_array_rest"),
+        "1 1 [2,3] fallback {\"kept\":4}\n2 1 [2,3] {\"kept\":4}\n5 [7,8] 5 [7,8]\n"
+    );
+}
+
+#[test]
 fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest() {
     let source = r#"
         let assignmentSourceCalls: number = 0;

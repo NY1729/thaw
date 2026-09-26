@@ -587,10 +587,11 @@ impl<'a> FnLowerer<'a> {
                             && elements.iter().all(|element| matches!(element, HirType::Tuple(_) | HirType::Array(_))))
             );
             let destructurable_dictionary =
-                matches!((&pattern, &ty), (Pat::Object(_), HirType::Dictionary(_)));
+                matches!((&pattern, &ty), (Pat::Object(_), HirType::Dictionary(_) | HirType::Json));
             if !matches!(ty, HirType::Object(_) | HirType::Tuple(_) | HirType::Array(_))
                 && !destructurable_union
                 && !destructurable_dictionary
+                && ty != HirType::Json
             {
                 return Err(format!(
                     "destructuring assignment requires a fixed-shape object, tuple, or destructurable union, got {ty:?}"
@@ -1480,6 +1481,14 @@ impl<'a> FnLowerer<'a> {
                         statements,
                     );
                 }
+                if ty == &HirType::Json {
+                    return self.lower_dictionary_object_assignment_pattern(
+                        pattern,
+                        value,
+                        &HirType::Json,
+                        statements,
+                    );
+                }
                 if let HirType::Union(elements) = ty {
                     return self.lower_union_object_assignment_pattern(
                         pattern, value, elements, statements,
@@ -1632,19 +1641,25 @@ impl<'a> FnLowerer<'a> {
                     }
                     return Ok(());
                 }
-                // Same `Json`-array-pattern accommodation as `lower_
-                // binding_pattern` (`destructuring.rs`) -- see its own
-                // doc comment for the full reasoning. A rest element is
-                // rejected the same way, for the same reason.
                 if *ty == HirType::Json {
                     for (index, element_pattern) in pattern.elems.iter().enumerate() {
                         let Some(element_pattern) = element_pattern else {
                             continue;
                         };
-                        if matches!(element_pattern, Pat::Rest(_)) {
-                            return Err(
-                                "a rest element cannot destructure a dynamic Json array".into(),
-                            );
+                        if let Pat::Rest(rest) = element_pattern {
+                            self.lower_assignment_pattern(
+                                &rest.arg,
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_array_slice".into())),
+                                    vec![
+                                        value.clone(),
+                                        HirExpr::Lit(HirLit::F64(index as f64)),
+                                    ],
+                                ),
+                                &HirType::Json,
+                                statements,
+                            )?;
+                            break;
                         }
                         self.lower_assignment_pattern(
                             element_pattern,
