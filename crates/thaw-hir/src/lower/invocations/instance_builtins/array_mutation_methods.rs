@@ -1079,7 +1079,7 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"copyWithin" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    if !matches!(receiver_type, HirType::Array(_)) {
+                    if !matches!(receiver_type, HirType::Array(_) | HirType::Union(_)) {
                         return Err(format!(
                             "`.copyWithin()` requires a homogeneous array, got {receiver_type:?}"
                         ));
@@ -1102,7 +1102,7 @@ impl<'a> FnLowerer<'a> {
                         .insert(receiver_name.clone(), receiver_type.clone());
                     let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
                     bindings.extend(spread_bindings);
-                    let mut arguments = vec![HirExpr::Var(receiver_name)];
+                    let mut arguments = Vec::with_capacity(4);
                     for (position, index) in indices.into_iter().enumerate() {
                         let name = format!("__thaw_copy_index_{}_{}", position, self.next_binding);
                         self.next_binding += 1;
@@ -1110,27 +1110,51 @@ impl<'a> FnLowerer<'a> {
                         arguments.push(HirExpr::Var(name.clone()));
                         bindings.push((name, HirType::F64, index));
                     }
-                    let result = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_array_copy_within".to_string())),
-                        arguments,
-                    );
+                    let result = if let HirType::Union(members) = &bindings[0].1 {
+                        if !members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            return Err(format!("`.copyWithin()` requires an array union, got {:?}", bindings[0].1));
+                        }
+                        let branches = members.iter().enumerate().map(|(index, _)| {
+                            let mut branch_arguments = vec![HirExpr::UnionValue(
+                                Box::new(HirExpr::Var(receiver_name.clone())), index, members.clone(),
+                            )];
+                            branch_arguments.extend(arguments.clone());
+                            HirExpr::Call(Box::new(HirExpr::Var("__thaw_array_copy_within".into())), branch_arguments)
+                        }).collect();
+                        self.merge_union_array_method_branches(&receiver_name, members, branches)?
+                    } else {
+                        let mut call_arguments = vec![HirExpr::Var(receiver_name)];
+                        call_arguments.extend(arguments);
+                        HirExpr::Call(Box::new(HirExpr::Var("__thaw_array_copy_within".into())), call_arguments)
+                    };
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"fill" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let HirType::Array(element) = &receiver_type else {
+                    let element_types = match &receiver_type {
+                        HirType::Array(element) => vec![element.as_ref().clone()],
+                        HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))) => members.iter().map(|member| {
+                            let HirType::Array(element) = member else { unreachable!() };
+                            element.as_ref().clone()
+                        }).collect(),
+                        _ => {
                         return Err(format!(
                             "`.fill()` requires a homogeneous array, got {receiver_type:?}"
                         ));
+                        }
                     };
-                    let element = element.as_ref().clone();
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_array_values(&call.args, "Array.fill")?;
                     if !(1..=3).contains(&arguments.len()) {
                         return Err("native `.fill()` expects one to three arguments".into());
                     }
-                    let value = self.coerce_array_insert_value(arguments[0].clone(), &element)?;
+                    let value = arguments[0].clone();
+                    for element in &element_types {
+                        self.coerce_array_insert_value(value.clone(), element).map_err(|error| {
+                            format!("`.fill()` value is not safe for every array union member: {error}")
+                        })?;
+                    }
                     let value_type = self.infer_expr_type(&value)?;
                     let mut indices = Vec::with_capacity(2);
                     for argument in arguments.into_iter().skip(1) {
@@ -1142,15 +1166,6 @@ impl<'a> FnLowerer<'a> {
                     if indices.len() == 1 {
                         indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
                     }
-                    let runtime = match &element {
-                        _ if value_type != element => "__thaw_array_fill",
-                        HirType::F64 => "__thaw_number_array_fill",
-                        HirType::Bool => "__thaw_bool_array_fill",
-                        HirType::Str | HirType::Array(_) | HirType::Object(_) => {
-                            "__thaw_pointer_array_fill"
-                        }
-                        _ => "__thaw_array_fill",
-                    };
                     let receiver_name = format!("__thaw_fill_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope
@@ -1163,15 +1178,37 @@ impl<'a> FnLowerer<'a> {
                     ];
                     bindings.extend(spread_bindings);
                     bindings.push((value_name.clone(), value_type, value));
-                    let mut arguments = vec![HirExpr::Var(receiver_name), HirExpr::Var(value_name)];
+                    let mut index_arguments = Vec::with_capacity(2);
                     for (position, index) in indices.into_iter().enumerate() {
                         let name = format!("__thaw_fill_index_{}_{}", position, self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), HirType::F64);
-                        arguments.push(HirExpr::Var(name.clone()));
+                        index_arguments.push(HirExpr::Var(name.clone()));
                         bindings.push((name, HirType::F64, index));
                     }
-                    let result = HirExpr::Call(Box::new(HirExpr::Var(runtime.into())), arguments);
+                    let mut branch = |array: HirExpr, element: &HirType| {
+                        let coerced = self.coerce_array_insert_value(HirExpr::Var(value_name.clone()), element)?;
+                        let coerced_type = self.infer_expr_type(&coerced)?;
+                        let runtime = match element {
+                            _ if coerced_type != *element => "__thaw_array_fill",
+                            HirType::F64 => "__thaw_number_array_fill",
+                            HirType::Bool => "__thaw_bool_array_fill",
+                            HirType::Str | HirType::Array(_) | HirType::Object(_) => "__thaw_pointer_array_fill",
+                            _ => "__thaw_array_fill",
+                        };
+                        let mut arguments = vec![array, coerced];
+                        arguments.extend(index_arguments.clone());
+                        Ok::<_, String>(HirExpr::Call(Box::new(HirExpr::Var(runtime.into())), arguments))
+                    };
+                    let result = if let HirType::Union(members) = &bindings[0].1 {
+                        let branches = members.iter().enumerate().map(|(index, member)| {
+                            let HirType::Array(element) = member else { unreachable!() };
+                            branch(HirExpr::UnionValue(Box::new(HirExpr::Var(receiver_name.clone())), index, members.clone()), element)
+                        }).collect::<Result<Vec<_>, _>>()?;
+                        self.merge_union_array_method_branches(&receiver_name, members, branches)?
+                    } else {
+                        branch(HirExpr::Var(receiver_name), &element_types[0])?
+                    };
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"reverse" {
@@ -1180,10 +1217,24 @@ impl<'a> FnLowerer<'a> {
                     }
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    if !matches!(receiver_type, HirType::Array(_)) {
+                    if !matches!(receiver_type, HirType::Array(_) | HirType::Union(_)) {
                         return Err(format!(
                             "`.reverse()` requires a homogeneous array, got {receiver_type:?}"
                         ));
+                    }
+                    if let HirType::Union(members) = &receiver_type {
+                        if !members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            return Err(format!("`.reverse()` requires an array union, got {receiver_type:?}"));
+                        }
+                        let name = format!("__thaw_union_reverse_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), receiver_type.clone());
+                        let branches = members.iter().enumerate().map(|(index, _)| HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_reverse".into())),
+                            vec![HirExpr::UnionValue(Box::new(HirExpr::Var(name.clone())), index, members.clone())],
+                        )).collect();
+                        let result = self.merge_union_array_method_branches(&name, members, branches)?;
+                        return self.wrap_call_argument_bindings(result, &[(name, receiver_type, receiver)]);
                     }
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_array_reverse".to_string())),
@@ -1196,7 +1247,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    if !matches!(receiver_type, HirType::Array(_)) {
+                    if !matches!(receiver_type, HirType::Array(_) | HirType::Union(_)) {
                         return Err(format!(
                             "`.{}()` requires a homogeneous array, got {receiver_type:?}",
                             property.sym
@@ -1207,6 +1258,20 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         "__thaw_array_shift_optional"
                     };
+                    if let HirType::Union(members) = &receiver_type {
+                        if !members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            return Err(format!("`.{}()` requires an array union, got {receiver_type:?}", property.sym));
+                        }
+                        let name = format!("__thaw_union_{}_{}", property.sym, self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), receiver_type.clone());
+                        let branches = members.iter().enumerate().map(|(index, _)| HirExpr::Call(
+                            Box::new(HirExpr::Var(runtime.into())),
+                            vec![HirExpr::UnionValue(Box::new(HirExpr::Var(name.clone())), index, members.clone())],
+                        )).collect();
+                        let result = self.merge_union_array_method_branches(&name, members, branches)?;
+                        return self.wrap_call_argument_bindings(result, &[(name, receiver_type, receiver)]);
+                    }
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var(runtime.to_string())),
                         vec![receiver],
@@ -1215,13 +1280,14 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"push" || property.sym == *"unshift" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let HirType::Array(element) = &receiver_type else {
-                        return Err(format!(
-                            "`.{}()` requires a homogeneous array, got {receiver_type:?}",
-                            property.sym
-                        ));
+                    let element_types = match &receiver_type {
+                        HirType::Array(element) => vec![element.as_ref().clone()],
+                        HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))) => members.iter().map(|member| {
+                            let HirType::Array(element) = member else { unreachable!() };
+                            element.as_ref().clone()
+                        }).collect(),
+                        _ => return Err(format!("`.{}()` requires an array or array union, got {receiver_type:?}", property.sym)),
                     };
-                    let element = element.as_ref().clone();
                     let label = if property.sym == *"push" { "push" } else { "unshift" };
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_array_values(&call.args, &format!("Array.{label}"))?;
@@ -1237,23 +1303,26 @@ impl<'a> FnLowerer<'a> {
                     // strict `expect_type` check for anything it can't
                     // coerce, so genuinely incompatible pushes are still
                     // rejected exactly as before.
-                    let arguments = arguments
-                        .into_iter()
-                        .map(|value| self.coerce_array_insert_value(value, &element))
-                        .collect::<Result<Vec<_>, String>>()?;
+                    for value in &arguments {
+                        for element in &element_types {
+                            self.coerce_array_insert_value(value.clone(), element).map_err(|error| {
+                                format!("`.{label}()` value is not safe for every array union member: {error}")
+                            })?;
+                        }
+                    }
                     let receiver_name = format!("__thaw_{label}_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope
                         .insert(receiver_name.clone(), receiver_type.clone());
                     let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
                     bindings.extend(spread_bindings);
-                    let mut call_arguments = vec![HirExpr::Var(receiver_name)];
+                    let mut value_names = Vec::with_capacity(arguments.len());
                     for (position, value) in arguments.into_iter().enumerate() {
                         let name = format!("__thaw_{label}_value_{position}_{}", self.next_binding);
                         self.next_binding += 1;
                         let value_type = self.infer_expr_type(&value)?;
                         self.scope.insert(name.clone(), value_type.clone());
-                        call_arguments.push(HirExpr::Var(name.clone()));
+                        value_names.push(name.clone());
                         bindings.push((name, value_type, value));
                     }
                     let runtime = if property.sym == *"push" {
@@ -1261,19 +1330,35 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         "__thaw_array_unshift"
                     };
-                    let result =
-                        HirExpr::Call(Box::new(HirExpr::Var(runtime.to_string())), call_arguments);
+                    let mut make_branch = |array: HirExpr, element: &HirType| {
+                        let mut call_arguments = vec![array];
+                        for name in &value_names {
+                            call_arguments.push(self.coerce_array_insert_value(HirExpr::Var(name.clone()), element)?);
+                        }
+                        Ok::<_, String>(HirExpr::Call(Box::new(HirExpr::Var(runtime.into())), call_arguments))
+                    };
+                    let result = if let HirType::Union(members) = &bindings[0].1 {
+                        let branches = members.iter().enumerate().map(|(index, member)| {
+                            let HirType::Array(element) = member else { unreachable!() };
+                            make_branch(HirExpr::UnionValue(Box::new(HirExpr::Var(receiver_name.clone())), index, members.clone()), element)
+                        }).collect::<Result<Vec<_>, _>>()?;
+                        self.merge_union_array_method_branches(&receiver_name, members, branches)?
+                    } else {
+                        make_branch(HirExpr::Var(receiver_name), &element_types[0])?
+                    };
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"splice" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let HirType::Array(element) = &receiver_type else {
-                        return Err(format!(
-                            "`.splice()` requires a homogeneous array, got {receiver_type:?}"
-                        ));
+                    let element_types = match &receiver_type {
+                        HirType::Array(element) => vec![element.as_ref().clone()],
+                        HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))) => members.iter().map(|member| {
+                            let HirType::Array(element) = member else { unreachable!() };
+                            element.as_ref().clone()
+                        }).collect(),
+                        _ => return Err(format!("`.splice()` requires an array or array union, got {receiver_type:?}")),
                     };
-                    let element = element.as_ref().clone();
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_array_values(&call.args, "Array.splice")?;
                     let mut arguments = arguments.into_iter();
@@ -1285,9 +1370,14 @@ impl<'a> FnLowerer<'a> {
                         Some(value) => self.coerce_primitive_to_number(value)?,
                         None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
                     };
-                    let items = arguments
-                        .map(|item| self.coerce_array_insert_value(item, &element))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let items = arguments.collect::<Vec<_>>();
+                    for item in &items {
+                        for element in &element_types {
+                            self.coerce_array_insert_value(item.clone(), element).map_err(|error| {
+                                format!("`.splice()` item is not safe for every array union member: {error}")
+                            })?;
+                        }
+                    }
                     let receiver_name = format!("__thaw_splice_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope
@@ -1302,23 +1392,31 @@ impl<'a> FnLowerer<'a> {
                     bindings.extend(spread_bindings);
                     bindings.push((start_name.clone(), HirType::F64, start));
                     bindings.push((delete_name.clone(), HirType::F64, delete_count));
-                    let mut call_arguments = vec![
-                        HirExpr::Var(receiver_name),
-                        HirExpr::Var(start_name),
-                        HirExpr::Var(delete_name),
-                    ];
+                    let mut item_names = Vec::with_capacity(items.len());
                     for (position, item) in items.into_iter().enumerate() {
                         let name = format!("__thaw_splice_item_{position}_{}", self.next_binding);
                         self.next_binding += 1;
                         let item_type = self.infer_expr_type(&item)?;
                         self.scope.insert(name.clone(), item_type.clone());
-                        call_arguments.push(HirExpr::Var(name.clone()));
+                        item_names.push(name.clone());
                         bindings.push((name, item_type, item));
                     }
-                    let result = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_array_splice".to_string())),
-                        call_arguments,
-                    );
+                    let mut make_branch = |array: HirExpr, element: &HirType| {
+                        let mut call_arguments = vec![array, HirExpr::Var(start_name.clone()), HirExpr::Var(delete_name.clone())];
+                        for name in &item_names {
+                            call_arguments.push(self.coerce_array_insert_value(HirExpr::Var(name.clone()), element)?);
+                        }
+                        Ok::<_, String>(HirExpr::Call(Box::new(HirExpr::Var("__thaw_array_splice".into())), call_arguments))
+                    };
+                    let result = if let HirType::Union(members) = &bindings[0].1 {
+                        let branches = members.iter().enumerate().map(|(index, member)| {
+                            let HirType::Array(element) = member else { unreachable!() };
+                            make_branch(HirExpr::UnionValue(Box::new(HirExpr::Var(receiver_name.clone())), index, members.clone()), element)
+                        }).collect::<Result<Vec<_>, _>>()?;
+                        self.merge_union_array_method_branches(&receiver_name, members, branches)?
+                    } else {
+                        make_branch(HirExpr::Var(receiver_name), &element_types[0])?
+                    };
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"join" {

@@ -1295,3 +1295,23 @@ fn typeof_and_custom_properties_on_a_caught_error() {
     assert!(source.contains("__thaw_error_name"), "{source}");
     assert!(source.contains("__thaw_error_message"), "{source}");
 }
+
+#[test]
+fn rejects_unsafe_values_for_mutating_union_array_methods() {
+    for expression in [
+        "value.push(1)",
+        "value.unshift(1)",
+        "value.splice(0, 0, 1)",
+        "value.fill(1)",
+    ] {
+        let source = format!(
+            "function mutate(value: number[] | string[]): void {{ {expression}; }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse error");
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("not safe for every array union member"),
+            "unexpected error for {expression}: {error}"
+        );
+    }
+}
