@@ -43,6 +43,88 @@ impl<'a> FnLowerer<'a> {
         self.lower_object_function(&method.function, receiver, expected, false)
     }
 
+    // Accessors keep a visible typed placeholder plus hidden closures used by
+    // ordinary property reads and writes.
+    fn lower_object_callable_property(
+        &mut self,
+        property: &Prop,
+        fields: &[(Symbol, HirExpr)],
+        expected_fields: Option<&[(Symbol, HirType)]>,
+    ) -> Result<Option<Vec<(Symbol, HirExpr)>>, String> {
+        let receiver = || -> Result<HirType, String> {
+            Ok(HirType::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| Ok((name.clone(), self.infer_expr_type(value)?)))
+                    .chain(std::iter::once(Ok((
+                        "__thaw_object_method_receiver".into(),
+                        HirType::Undefined,
+                    ))))
+                    .collect::<Result<Vec<_>, String>>()?,
+            ))
+        };
+        Ok(match property {
+            Prop::Method(method) => {
+                let name = self
+                    .static_object_property_name(&method.key)
+                    .ok_or_else(|| "object method name must be static".to_string())?;
+                let expected = expected_fields.and_then(|fields| {
+                    fields
+                        .iter()
+                        .find_map(|(field, ty)| (field == &name).then_some(ty))
+                });
+                Some(vec![(
+                    name,
+                    self.lower_object_method(method, receiver()?, expected)?,
+                )])
+            }
+            Prop::Getter(getter) => {
+                let name = self
+                    .static_object_property_name(&getter.key)
+                    .ok_or_else(|| "object getter name must be static".to_string())?;
+                let value =
+                    self.lower_object_function(&getter.function, receiver()?, None, true)?;
+                let return_type = match self.infer_expr_type(&value)? {
+                    HirType::Function(_, ret) => *ret,
+                    HirType::CallableFunction(_, _, _, ret) => *ret,
+                    other => return Err(format!("object getter has non-function type {other:?}")),
+                };
+                Some(vec![
+                    (name.clone(), Self::unreachable_value(&return_type)?),
+                    (format!("__thaw_getter_{name}"), value),
+                ])
+            }
+            Prop::Setter(setter) => {
+                let name = self
+                    .static_object_property_name(&setter.key)
+                    .ok_or_else(|| "object setter name must be static".to_string())?;
+                let value =
+                    self.lower_object_function(&setter.function, receiver()?, None, true)?;
+                let parameter_type = setter
+                    .function
+                    .params
+                    .first()
+                    .ok_or_else(|| "object setter requires exactly one parameter".to_string())
+                    .and_then(|parameter| {
+                        lower_param(
+                            &parameter.pat,
+                            self.interfaces,
+                            self.generic_interfaces,
+                            false,
+                            &HashMap::new(),
+                        )
+                        .map(|parameter| parameter.ty)
+                    })?;
+                let mut additions = vec![(format!("__thaw_setter_{name}"), value)];
+                if !fields.iter().any(|(field, _)| field == &name) {
+                    additions.insert(0, (name, Self::unreachable_value(&parameter_type)?));
+                }
+                Some(additions)
+            }
+            _ => None,
+        })
+    }
+
     /// Lowers an object-literal method/getter/setter body into a closure
     /// value. When the body uses `this` (or `force_receiver`, for an
     /// accessor whose read/write site always passes the receiver), the
@@ -454,11 +536,15 @@ impl<'a> FnLowerer<'a> {
             fn visit_await_expr(&mut self, _: &AwaitExpr) {
                 self.0 = true;
             }
+
+            fn visit_function(&mut self, _: &swc_ecma_ast::Function) {}
+
+            fn visit_arrow_expr(&mut self, _: &swc_ecma_ast::ArrowExpr) {}
         }
         let mut finder = AwaitFinder(false);
         obj_lit.visit_with(&mut finder);
         if finder.0 {
-            return self.lower_ordered_await_object_lit(obj_lit);
+            return self.lower_ordered_await_object_lit(obj_lit, expected_fields);
         }
         let mut fields: Vec<(Symbol, HirExpr)> = Vec::new();
         let mut evaluated_spreads: Vec<(Symbol, HirType, HirExpr)> = Vec::new();
@@ -535,116 +621,11 @@ impl<'a> FnLowerer<'a> {
                         ident.sym.to_string(),
                         self.lower_expr(&Expr::Ident(ident.clone()))?,
                     )],
-                    Prop::Method(method) => {
-                        let name = self
-                            .static_object_property_name(&method.key)
-                            .ok_or_else(|| "object method name must be static".to_string())?;
-                        let receiver = HirType::Object(
-                            fields
-                                .iter()
-                                .map(|(name, value)| {
-                                    Ok((name.clone(), self.infer_expr_type(value)?))
-                                })
-                                .chain(std::iter::once(Ok((
-                                    "__thaw_object_method_receiver".into(),
-                                    HirType::Undefined,
-                                ))))
-                                .collect::<Result<Vec<_>, String>>()?,
-                        );
-                        let expected = expected_fields.and_then(|fields| {
-                            fields
-                                .iter()
-                                .find_map(|(field, ty)| (field == &name).then_some(ty))
-                        });
-                        vec![(name, self.lower_object_method(method, receiver, expected)?)]
-                    }
-                    // An accessor is stored as two fields: the visible
-                    // property (typed by the getter's return, or the
-                    // setter's parameter, so ordinary type inference still
-                    // sees it) and a hidden `__thaw_getter_`/`__thaw_setter_`
-                    // closure the read/write paths dispatch to. The closure
-                    // always takes the receiver as its leading parameter
-                    // (`force_receiver`), so the dispatch site is uniform.
-                    Prop::Getter(getter) => {
-                        let name = self
-                            .static_object_property_name(&getter.key)
-                            .ok_or_else(|| "object getter name must be static".to_string())?;
-                        let receiver = HirType::Object(
-                            fields
-                                .iter()
-                                .map(|(name, value)| {
-                                    Ok((name.clone(), self.infer_expr_type(value)?))
-                                })
-                                .chain(std::iter::once(Ok((
-                                    "__thaw_object_method_receiver".into(),
-                                    HirType::Undefined,
-                                ))))
-                                .collect::<Result<Vec<_>, String>>()?,
-                        );
-                        let value =
-                            self.lower_object_function(&getter.function, receiver, None, true)?;
-                        let return_type = match self.infer_expr_type(&value)? {
-                            HirType::Function(_, ret) => *ret,
-                            HirType::CallableFunction(_, _, _, ret) => *ret,
-                            other => {
-                                return Err(format!("object getter has non-function type {other:?}"))
-                            }
-                        };
-                        vec![
-                            (name.clone(), Self::unreachable_value(&return_type)?),
-                            (format!("__thaw_getter_{name}"), value),
-                        ]
-                    }
-                    Prop::Setter(setter) => {
-                        let name = self
-                            .static_object_property_name(&setter.key)
-                            .ok_or_else(|| "object setter name must be static".to_string())?;
-                        let receiver = HirType::Object(
-                            fields
-                                .iter()
-                                .map(|(name, value)| {
-                                    Ok((name.clone(), self.infer_expr_type(value)?))
-                                })
-                                .chain(std::iter::once(Ok((
-                                    "__thaw_object_method_receiver".into(),
-                                    HirType::Undefined,
-                                ))))
-                                .collect::<Result<Vec<_>, String>>()?,
-                        );
-                        let value =
-                            self.lower_object_function(&setter.function, receiver, None, true)?;
-                        let parameter_type = setter
-                            .function
-                            .params
-                            .first()
-                            .ok_or_else(|| {
-                                "object setter requires exactly one parameter".to_string()
-                            })
-                            .and_then(|parameter| {
-                                lower_param(
-                                    &parameter.pat,
-                                    self.interfaces,
-                                    self.generic_interfaces,
-                                    false,
-                                    &HashMap::new(),
-                                )
-                                .map(|parameter| parameter.ty)
-                            })?;
-                        let mut additions = vec![(format!("__thaw_setter_{name}"), value)];
-                        // A preceding getter already gave the visible property
-                        // its (return) type; only a lone setter supplies the
-                        // placeholder itself.
-                        if !fields.iter().any(|(field, _)| field == &name) {
-                            additions
-                                .insert(0, (name, Self::unreachable_value(&parameter_type)?));
-                        }
-                        additions
-                    }
-                    _ => {
-                        return Err(
+                    property => self
+                        .lower_object_callable_property(property, &fields, expected_fields)?
+                        .ok_or_else(|| {
                             "only data properties are supported in object literals".to_string()
-                        )
-                    }
+                        })?,
                 },
             };
             if matches!(property, PropOrSpread::Prop(_)) {
@@ -722,6 +703,7 @@ impl<'a> FnLowerer<'a> {
     fn lower_ordered_await_object_lit(
         &mut self,
         obj_lit: &SwcObjectLit,
+        expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<HirExpr, String> {
         let mut fields = Vec::new();
         let mut bindings = Vec::new();
@@ -755,13 +737,25 @@ impl<'a> FnLowerer<'a> {
                         })
                         .collect::<Vec<_>>()
                 }
-                PropOrSpread::Prop(prop) => {
-                    let (field, source) = match prop.as_ref() {
+                PropOrSpread::Prop(prop) => match prop.as_ref() {
+                    property @ (Prop::Method(_) | Prop::Getter(_) | Prop::Setter(_)) => self
+                        .lower_object_callable_property(property, &fields, expected_fields)?
+                        .expect("callable object property handled above"),
+                    property => {
+                        let (field, source) = match property {
                         Prop::KeyValue(KeyValueProp { key, value }) => {
                             let field = self
                                 .static_object_property_name(key)
                                 .ok_or_else(|| "unsupported object literal key".to_string())?;
-                            (field, self.lower_expr(value)?)
+                            let expected = expected_fields.and_then(|fields| {
+                                fields
+                                    .iter()
+                                    .find_map(|(name, ty)| (name == &field).then_some(ty))
+                            });
+                            (
+                                field,
+                                self.lower_object_lit_field_value(value, expected)?,
+                            )
                         }
                         Prop::Shorthand(ident) => (
                             ident.sym.to_string(),
@@ -772,16 +766,39 @@ impl<'a> FnLowerer<'a> {
                                 "only data properties are supported in object literals".into()
                             )
                         }
-                    };
-                    let ty = self.infer_expr_type(&source)?;
-                    let name = format!("__thaw_object_value_{}_{}", position, self.next_binding);
-                    self.next_binding += 1;
-                    self.scope.insert(name.clone(), ty.clone());
-                    bindings.push((name.clone(), ty, source));
-                    vec![(field, HirExpr::Var(name))]
-                }
+                        };
+                        let ty = self.infer_expr_type(&source)?;
+                        let name =
+                            format!("__thaw_object_value_{}_{}", position, self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        bindings.push((name.clone(), ty, source));
+                        vec![(field, HirExpr::Var(name))]
+                    }
+                },
             };
+            if matches!(property, PropOrSpread::Prop(_)) {
+                if let Some(expected) = expected_fields {
+                    if let Some((name, _)) = additions.iter().find(|(name, _)| {
+                        !name.starts_with("__thaw_")
+                            && !expected.iter().any(|(field, _)| field == name)
+                    }) {
+                        return Err(format!(
+                            "object literal property `{name}` is not present in the declared type"
+                        ));
+                    }
+                }
+            }
             for (name, value) in additions {
+                if !is_hidden_accessor_field(&name)
+                    && (matches!(property, PropOrSpread::Spread(_))
+                        || matches!(property, PropOrSpread::Prop(prop) if matches!(prop.as_ref(), Prop::KeyValue(_) | Prop::Shorthand(_) | Prop::Method(_))))
+                {
+                    fields.retain(|field| {
+                        field.0 != format!("__thaw_getter_{name}")
+                            && field.0 != format!("__thaw_setter_{name}")
+                    });
+                }
                 if let Some((_, existing)) =
                     fields.iter_mut().find(|(existing, _)| existing == &name)
                 {
