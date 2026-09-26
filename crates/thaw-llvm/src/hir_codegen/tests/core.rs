@@ -394,6 +394,52 @@ fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest(
 }
 
 #[test]
+fn destructures_numeric_and_bigint_property_names() {
+    let source = r#"
+        type Pair = { 0: string; 2: string } | { 0: string; 2: string; 3: string };
+        interface NumericPair { 0: string; 2: string; }
+        interface NumericBox<T> { 0: T; }
+        function unpack(source: Pair): void {
+            const { 0: first, 2: second } = source;
+            let assignedFirst = "";
+            let assignedSecond = "";
+            ({ 0: assignedFirst, 2: assignedSecond } = source);
+            console.log(first, second, assignedFirst, assignedSecond);
+        }
+        function unpackInterface(source: NumericPair): void {
+            console.log(source["0"], source["2"]);
+        }
+        function unpackGeneric(source: NumericBox<string>): void {
+            console.log(source["0"]);
+        }
+        function main(): void {
+            const key = "10";
+            const source = { 0: "zero", 2n: "two", 10: "ten" };
+            const { 0: zero, 2n: two, [key]: ten } = source;
+            let assignedZero = "";
+            let assignedTwo = "";
+            ({ 0: assignedZero, 2n: assignedTwo } = source);
+            console.log(zero, two, ten, assignedZero, assignedTwo);
+
+            const dictionary: Record<string, string> = { 0: "zero", 2n: "two" };
+            const { 0: dictionaryZero, 2n: dictionaryTwo } = dictionary;
+            let reassignedZero = "";
+            let reassignedTwo = "";
+            ({ 0: reassignedZero, 2n: reassignedTwo } = dictionary);
+            console.log(dictionaryZero, dictionaryTwo, reassignedZero, reassignedTwo);
+            unpack({ 0: "union-zero", 2: "union-two" });
+            unpackInterface({ 0: "interface-zero", 2: "interface-two" });
+            unpackGeneric({ 0: "generic-zero" });
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "numeric_bigint_destructuring"),
+        "zero two ten zero two\nzero two zero two\nunion-zero union-two union-zero union-two\ninterface-zero interface-two\ngeneric-zero\n"
+    );
+}
+
+#[test]
 fn structured_dictionary_values_support_reads_and_destructuring() {
     let source = r#"
         interface Item { value: number; label: string; }

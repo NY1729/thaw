@@ -873,11 +873,9 @@ fn generic_type_pattern(
                             ))
                         }
                     };
-                    let Expr::Ident(field) = key else {
-                        return Err(format!(
-                            "generic interface `{name}` has an unsupported property key"
-                        ));
-                    };
+                    let field = literal_expr_property_name(key).ok_or_else(|| {
+                        format!("generic interface `{name}` has an unsupported property key")
+                    })?;
                     let ty = generic_type_pattern(
                         &ty,
                         &nested_substitutions,
@@ -896,10 +894,10 @@ fn generic_type_pattern(
                     {
                         return Err(format!(
                                 "generic interface `{name}` property `{}` does not match its index value type",
-                                field.sym
+                                field
                             ));
                     }
-                    own_fields.push((field.sym.to_string(), field_ty));
+                    own_fields.push((field, field_ty));
                 }
                 for (field_name, field_ty) in own_fields {
                     if fields.iter().any(|(existing, _)| existing == &field_name) {
@@ -1208,9 +1206,9 @@ fn generic_type_pattern(
                                 )
                             }
                         };
-                        let Expr::Ident(field) = key else {
-                            return Err("generic object pattern has an unsupported key".into());
-                        };
+                        let field = literal_expr_property_name(key).ok_or_else(|| {
+                            "generic object pattern has an unsupported key".to_string()
+                        })?;
                         let ty = generic_type_pattern(
                             &ty,
                             substitutions,
@@ -1219,7 +1217,7 @@ fn generic_type_pattern(
                             in_progress,
                         )?;
                         Ok((
-                            field.sym.to_string(),
+                            field,
                             if optional {
                                 GenericTypePattern::Optional(Box::new(ty))
                             } else {

@@ -638,10 +638,8 @@ fn lower_ts_type(
                         ),
                         _ => return Err("object types only support properties and methods".into()),
                     };
-                    let name = match key {
-                        Expr::Ident(ident) => ident.sym.to_string(),
-                        _ => return Err("unsupported object type literal key".into()),
-                    };
+                    let name = literal_expr_property_name(key)
+                        .ok_or_else(|| "unsupported object type literal key".to_string())?;
                     let mut ty = lower_ts_type(&ty, interfaces, generic_interfaces)?;
                     if optional {
                         ty = optional_parameter_type(ty);
@@ -861,14 +859,8 @@ fn resolve_generic_interface(
                 ))
             }
         };
-        let field_name = match key {
-            Expr::Ident(ident) => ident.sym.to_string(),
-            _ => {
-                return Err(format!(
-                    "interface `{name}` has an unsupported property key"
-                ))
-            }
-        };
+        let field_name = literal_expr_property_name(key)
+            .ok_or_else(|| format!("interface `{name}` has an unsupported property key"))?;
         let mut field_ty = resolve_ts_type_with_substitution(
             &ty,
             &substitution,
@@ -1646,10 +1638,8 @@ fn resolve_ts_type_with_substitution(
                         ),
                         _ => return Err("object types only support properties and methods".into()),
                     };
-                    let name = match key {
-                        Expr::Ident(ident) => ident.sym.to_string(),
-                        _ => return Err("unsupported object type literal key".to_string()),
-                    };
+                    let name = literal_expr_property_name(key)
+                        .ok_or_else(|| "unsupported object type literal key".to_string())?;
                     let mut field_ty = resolve_ts_type_with_substitution(
                         &ty,
                         substitution,
