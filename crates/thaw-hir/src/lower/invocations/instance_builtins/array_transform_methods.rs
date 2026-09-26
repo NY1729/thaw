@@ -736,6 +736,95 @@ impl<'a> FnLowerer<'a> {
                     let sparse_callback = self.expression_may_be_sparse_array(&member.obj);
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let array_type = self.infer_expr_type(&receiver)?;
+                    if let HirType::Union(elements) = &array_type {
+                        if elements.iter().all(|element| matches!(element, HirType::Array(_)))
+                            && call.args.iter().all(|argument| argument.spread.is_none())
+                        {
+                            if !(1..=2).contains(&call.args.len()) {
+                                return Err(
+                                    "native `.map()` expects a callback and optional thisArg".into()
+                                );
+                            }
+                            let mut callback_members = Vec::new();
+                            for element in elements {
+                                let HirType::Array(inner) = element else {
+                                    unreachable!("checked above")
+                                };
+                                let ty = if sparse_callback {
+                                    Self::array_read_type(inner)
+                                } else {
+                                    inner.as_ref().clone()
+                                };
+                                Self::flatten_property_union_members(&ty, &mut callback_members)?;
+                            }
+                            let callback_element_type = match callback_members.as_slice() {
+                                [single] => single.clone(),
+                                _ => HirType::Union(callback_members),
+                            };
+                            let callback = self.lower_array_mapping_callback(
+                                &call.args[0].expr,
+                                &callback_element_type,
+                                &array_type,
+                            )?;
+                            let this_arg = call
+                                .args
+                                .get(1)
+                                .map(|argument| self.lower_expr(&argument.expr))
+                                .transpose()?;
+                            let name = format!("__thaw_union_map_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), array_type.clone());
+                            let bound = HirExpr::Var(name.clone());
+                            let mut result: Option<(HirExpr, HirType)> = None;
+                            for (index, element) in elements.iter().enumerate().rev() {
+                                let HirType::Array(inner) = element else {
+                                    unreachable!("checked above")
+                                };
+                                let member_callback_type = if sparse_callback {
+                                    Self::array_read_type(inner)
+                                } else {
+                                    inner.as_ref().clone()
+                                };
+                                let mapped = self.lower_array_map(
+                                    HirExpr::UnionValue(
+                                        Box::new(bound.clone()),
+                                        index,
+                                        elements.clone(),
+                                    ),
+                                    element.clone(),
+                                    inner.as_ref().clone(),
+                                    member_callback_type,
+                                    callback.clone(),
+                                    this_arg.clone(),
+                                )?;
+                                let mapped_type = self.infer_expr_type(&mapped)?;
+                                result = Some(match result {
+                                    None => (mapped, mapped_type),
+                                    Some((rest, result_type)) => (
+                                        HirExpr::Conditional(
+                                            Box::new(HirExpr::BinOp(
+                                                BinOp::EqEqEq,
+                                                Box::new(HirExpr::UnionTag(
+                                                    Box::new(bound.clone()),
+                                                    elements.clone(),
+                                                )),
+                                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                            )),
+                                            Box::new(mapped),
+                                            Box::new(rest),
+                                            result_type.clone(),
+                                        ),
+                                        result_type,
+                                    ),
+                                });
+                            }
+                            let (result, _) = result.ok_or("cannot map an empty union")?;
+                            return self.wrap_call_argument_bindings(
+                                result,
+                                &[(name, array_type.clone(), receiver)],
+                            );
+                        }
+                    }
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
                             "`.map()` requires a homogeneous array, got {array_type:?}"
