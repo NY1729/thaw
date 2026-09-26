@@ -248,6 +248,69 @@ fn array_union_read_methods_use_runtime_tags_once() {
 }
 
 #[test]
+fn array_union_copy_methods_dispatch_once_and_preserve_layout() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-union-copies-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    std::fs::create_dir_all(&registry).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "function sorted(value: number[] | string[]): string { return value.toSorted((_left, _right) => 0).join(','); }\n",
+            "function sortedDefault(value: number[] | string[]): string { return value.toSorted().join(','); }\n",
+            "function spliced(value: number[] | string[]): string { return value.toSpliced(-2, 1).join(','); }\n",
+            "function replaced(value: number[] | string[]): string { return value.with(-1, undefined).join(','); }\n",
+            "function flattened(value: number[][] | string[][]): string { return value.flat(1).join(','); }\n",
+            "function flatNegative(value: number[][] | string[][]): number { return value.flat(-1).length; }\n",
+            "function effects(value: number[] | string[]): string { let count = 0; const receiver = () => { count = count * 10 + 1; return value; }; const start = () => { count = count * 10 + 2; return -1; }; const deletion = () => { count = count * 10 + 3; return 0; }; const result = receiver().toSpliced(start(), deletion()); return String(count) + ':' + result.join(','); }\n",
+            "function sparse(value: number[] | string[]): string { const result = value.toSorted(); return result.join('|') + ':' + String(result.includes(undefined)) + ':' + String(result.length); }\n",
+            "function main(): void {\n",
+            "  const numbers: number[] = [10, 2, 1]; const strings: string[] = ['b', 'a', 'c'];\n",
+            "  console.log(sorted(numbers)); console.log(sortedDefault(strings));\n",
+            "  console.log(spliced(numbers));\n",
+            "  console.log(replaced(numbers)); console.log(replaced(strings));\n",
+            "  console.log(flattened([[1, 2], [3]])); console.log(flattened([['a'], ['b', 'c']]));\n",
+            "  console.log(flatNegative([[1], [2]])); console.log(flatNegative([['a'], ['b']]));\n",
+            "  console.log(effects(numbers)); console.log(effects(strings));\n",
+            "  console.log(sparse([, 2, ,])); console.log(sparse([, 'x', ,]));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false, "{}", manifest["quickjs_reasons"]);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "10,2,1\na,b,c\n10,1\n10,2,\nb,a,\n1,2,3\na,b,c\n2\n2\n123:10,2,1\n123:b,a,c\n2||:true:3\nx||:true:3\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+
+    let declarations = thaw_bridge::parse_dts(
+        "export declare function unsafe(value: number[] | string[], replacement: boolean): number[] | string[];\n",
+    )
+    .unwrap();
+    assert!(jit_numeric_export(
+        "module.exports.unsafe = (value, replacement) => value.with(0, replacement);",
+        "unsafe",
+        false,
+        &declarations[0],
+    )
+    .is_none());
+}
+
+#[test]
 fn tuple_union_array_updates_use_jit_without_quickjs() {
     let dts = concat!(
         "export declare function fillNumbers(value: number[] | [number, number], replacement: number): number[];\n",

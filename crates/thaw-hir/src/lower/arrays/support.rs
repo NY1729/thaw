@@ -216,7 +216,14 @@ impl<'a> FnLowerer<'a> {
                 HirType::F64,
             )),
         );
-        self.lower_array_sort_comparator(receiver, array_type, element_type, comparator, copy)
+        self.lower_array_sort_comparator(
+            receiver,
+            array_type,
+            element_type.clone(),
+            element_type,
+            comparator,
+            copy,
+        )
     }
 
     fn lower_array_sort_comparator(
@@ -224,6 +231,7 @@ impl<'a> FnLowerer<'a> {
         receiver: HirExpr,
         array_type: HirType,
         element_type: HirType,
+        comparator_element_type: HirType,
         comparator: HirExpr,
         copy: bool,
     ) -> Result<HirExpr, String> {
@@ -232,7 +240,10 @@ impl<'a> FnLowerer<'a> {
         let comparator_name = format!("__thaw_sort_comparator_{}", self.next_binding);
         self.next_binding += 1;
         let comparator_type = HirType::Function(
-            vec![element_type.clone(), element_type.clone()],
+            vec![
+                comparator_element_type.clone(),
+                comparator_element_type.clone(),
+            ],
             Box::new(HirType::F64),
         );
         self.scope.insert(receiver_name.clone(), array_type.clone());
@@ -284,7 +295,10 @@ impl<'a> FnLowerer<'a> {
         );
         let compare = HirExpr::Call(
             Box::new(variable(&comparator_name)),
-            vec![variable(&left_name), variable(&right_name)],
+            vec![
+                self.coerce_to_declared(&comparator_element_type, variable(&left_name))?,
+                self.coerce_to_declared(&comparator_element_type, variable(&right_name))?,
+            ],
         );
         let should_swap = HirExpr::BinOp(BinOp::Gt, Box::new(compare), Box::new(number(0.0)));
         let inner_limit = HirExpr::BinOp(
