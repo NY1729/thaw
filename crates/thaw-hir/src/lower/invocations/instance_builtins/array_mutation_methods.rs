@@ -932,7 +932,9 @@ impl<'a> FnLowerer<'a> {
                         receiver = self.coerce_primitive_to_string(receiver)?;
                         receiver_type = HirType::Str;
                     }
-                    if is_subarray && !matches!(receiver_type, HirType::Array(_)) {
+                    if is_subarray
+                        && !matches!(receiver_type, HirType::Array(_) | HirType::Union(_))
+                    {
                         return Err(format!(
                             "`.subarray()` is only supported on a Buffer / array, got {receiver_type:?}"
                         ));
@@ -977,7 +979,7 @@ impl<'a> FnLowerer<'a> {
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
-                    if !matches!(receiver_type, HirType::Array(_)) {
+                    if !matches!(receiver_type, HirType::Array(_) | HirType::Union(_)) {
                         return Err(format!(
                             "`.slice()` requires a homogeneous array, got {receiver_type:?}"
                         ));
@@ -996,6 +998,58 @@ impl<'a> FnLowerer<'a> {
                     }
                     if indices.len() == 1 {
                         indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                    }
+                    if let HirType::Union(members) = &receiver_type {
+                        if !members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            return Err(format!(
+                                "`.slice()` requires an array union, got {receiver_type:?}"
+                            ));
+                        }
+                        let receiver_name =
+                            format!("__thaw_union_slice_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                        let mut bindings = vec![(
+                            receiver_name.clone(),
+                            receiver_type.clone(),
+                            receiver,
+                        )];
+                        bindings.extend(spread_bindings);
+                        let mut index_names = Vec::with_capacity(2);
+                        for (position, index) in indices.into_iter().enumerate() {
+                            let name = format!(
+                                "__thaw_union_slice_index_{position}_{}",
+                                self.next_binding
+                            );
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), HirType::F64);
+                            bindings.push((name.clone(), HirType::F64, index));
+                            index_names.push(name);
+                        }
+                        let branches = members
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| {
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                                    vec![
+                                        HirExpr::UnionValue(
+                                            Box::new(HirExpr::Var(receiver_name.clone())),
+                                            index,
+                                            members.clone(),
+                                        ),
+                                        HirExpr::Var(index_names[0].clone()),
+                                        HirExpr::Var(index_names[1].clone()),
+                                    ],
+                                )
+                            })
+                            .collect();
+                        let result = self.merge_union_array_method_branches(
+                            &receiver_name,
+                            members,
+                            branches,
+                        )?;
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     let receiver_name = format!("__thaw_slice_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -1284,6 +1338,58 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         HirExpr::Lit(HirLit::Str(",".to_string()))
                     };
+                    if let HirType::Union(members) = &receiver_type {
+                        if !members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            return Err(format!(
+                                "`.join()` requires an array union, got {receiver_type:?}"
+                            ));
+                        }
+                        let separator_name =
+                            format!("__thaw_union_join_separator_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(separator_name.clone(), HirType::Str);
+                        let mut branches = Vec::with_capacity(members.len());
+                        for (index, member) in members.iter().enumerate() {
+                            let HirType::Array(element) = member else { unreachable!() };
+                            let builtin = match element.as_ref() {
+                                HirType::F64 => "__thaw_number_array_join",
+                                HirType::Str => "__thaw_string_array_join",
+                                HirType::Bool => "__thaw_bool_array_join",
+                                HirType::Object(_) => "__thaw_object_array_join",
+                                HirType::Optional(_)
+                                | HirType::Nullable(_)
+                                | HirType::Nullish(_)
+                                | HirType::Undefined
+                                | HirType::Null
+                                | HirType::Union(_) => "__thaw_tagged_array_join",
+                                other => {
+                                    return Err(format!(
+                                        "array join does not support element type {other:?}"
+                                    ))
+                                }
+                            };
+                            branches.push(HirExpr::Call(
+                                Box::new(HirExpr::Var(builtin.into())),
+                                vec![
+                                    HirExpr::UnionValue(
+                                        Box::new(HirExpr::Var(source_name.clone())),
+                                        index,
+                                        members.clone(),
+                                    ),
+                                    HirExpr::Var(separator_name.clone()),
+                                ],
+                            ));
+                        }
+                        let result = self.merge_union_array_method_branches(
+                            &source_name,
+                            members,
+                            branches,
+                        )?;
+                        let mut bindings = vec![(source_name, receiver_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((separator_name, HirType::Str, separator));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     let result = match receiver_type.clone() {
                         HirType::Array(element) => {
                             let array_type = HirType::Array(element.clone());
@@ -1527,6 +1633,90 @@ impl<'a> FnLowerer<'a> {
                             "`.{}` requires a string receiver, got {receiver_type:?}",
                             property.sym
                         ));
+                    }
+                    if let HirType::Union(members) = &receiver_type {
+                        if !members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            return Err(format!("`.{}` requires an array union, got {receiver_type:?}", property.sym));
+                        }
+                        let needle = arguments[0].clone();
+                        let needle_type = self.infer_expr_type(&needle)?;
+                        let from_index = if let Some(argument) = arguments.get(1) {
+                            self.coerce_primitive_to_number(argument.clone())?
+                        } else if property.sym == *"lastIndexOf" {
+                            HirExpr::Lit(HirLit::F64(f64::INFINITY))
+                        } else {
+                            HirExpr::Lit(HirLit::F64(0.0))
+                        };
+                        let receiver_name = format!("__thaw_union_search_array_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let needle_name = format!("__thaw_union_search_needle_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let start_name = format!("__thaw_union_search_start_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                        self.scope.insert(needle_name.clone(), needle_type.clone());
+                        self.scope.insert(start_name.clone(), HirType::F64);
+                        let suffix = match property.sym.as_ref() {
+                            "includes" => "includes",
+                            "lastIndexOf" => "last_index_of",
+                            _ => "index_of",
+                        };
+                        let mut branches = Vec::with_capacity(members.len());
+                        for (index, member) in members.iter().enumerate() {
+                            let HirType::Array(element) = member else { unreachable!() };
+                            let array = HirExpr::UnionValue(Box::new(HirExpr::Var(receiver_name.clone())), index, members.clone());
+                            let branch = if needle_type == HirType::Undefined {
+                                let found = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_undefined_index_of".into())),
+                                    vec![
+                                        array,
+                                        HirExpr::Var(start_name.clone()),
+                                        HirExpr::Lit(HirLit::Bool(property.sym == *"lastIndexOf")),
+                                        HirExpr::Lit(HirLit::F64(0.0)),
+                                        HirExpr::Lit(HirLit::Bool(property.sym == *"includes")),
+                                        HirExpr::Lit(HirLit::F64(0.0)),
+                                    ],
+                                );
+                                if property.sym == *"includes" {
+                                    HirExpr::BinOp(
+                                        BinOp::GtEq,
+                                        Box::new(found),
+                                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                    )
+                                } else {
+                                    found
+                                }
+                            } else if element.as_ref() != &needle_type {
+                                if property.sym == *"includes" {
+                                    HirExpr::Lit(HirLit::Bool(false))
+                                } else {
+                                    HirExpr::Lit(HirLit::F64(-1.0))
+                                }
+                            } else {
+                                let prefix = match element.as_ref() {
+                                    HirType::F64 => "number",
+                                    HirType::Str => "string",
+                                    HirType::Bool => "bool",
+                                    HirType::Object(_) => "object",
+                                    other => return Err(format!("array search does not support element type {other:?}")),
+                                };
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var(format!("__thaw_{prefix}_array_{suffix}"))),
+                                    vec![
+                                        array,
+                                        HirExpr::Var(needle_name.clone()),
+                                        HirExpr::Var(start_name.clone()),
+                                    ],
+                                )
+                            };
+                            branches.push(branch);
+                        }
+                        let result = self.merge_union_array_method_branches(&receiver_name, members, branches)?;
+                        let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((needle_name, needle_type, needle));
+                        bindings.push((start_name, HirType::F64, from_index));
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     let HirType::Array(element) = receiver_type.clone() else {
                         return Err(format!(

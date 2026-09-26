@@ -2276,6 +2276,7 @@ macro_rules! jit_expressions {
                         "join"
                             | "toString"
                             | "slice"
+                            | "subarray"
                             | "concat"
                             | "at"
                             | "includes"
@@ -2967,7 +2968,7 @@ macro_rules! jit_expressions {
                     } else {
                         format!("{prefix}with")
                     });
-                } else if method == "slice" {
+                } else if matches!(method, "slice" | "subarray") {
                     match call.args.as_slice() {
                         [] => {
                             output.push("c0000000000000000".into());

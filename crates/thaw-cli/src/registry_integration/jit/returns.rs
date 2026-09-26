@@ -1192,6 +1192,7 @@ macro_rules! jit_returns {
                     matches!(
                         method,
                         "slice"
+                            | "subarray"
                             | "concat"
                             | "toReversed"
                             | "toSorted"
@@ -1265,6 +1266,7 @@ macro_rules! jit_returns {
                 | "join"
                 | "toString"
                 | "slice"
+                | "subarray"
                 | "concat"
                 | "toReversed"
                 | "toSorted"

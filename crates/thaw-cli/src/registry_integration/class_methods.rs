@@ -619,6 +619,13 @@ fn rewrite_external_class_methods_with_static(
                         }
                         let receiver =
                             source_expr_type(&member.obj, variables, functions, named)?;
+                        if matches!(method.as_str(), "slice" | "subarray" | "toReversed")
+                            && (matches!(receiver, thaw_hir::HirType::Array(_))
+                                || matches!(&receiver, thaw_hir::HirType::Union(members)
+                                    if members.iter().all(|member| matches!(member, thaw_hir::HirType::Array(_)))))
+                        {
+                            return Some(receiver);
+                        }
                         match (&receiver, method.as_str()) {
                             (_, "toString")
                             | (
@@ -640,6 +647,13 @@ fn rewrite_external_class_methods_with_static(
                                 "toFixed" | "toExponential" | "toPrecision",
                             )
                             | (thaw_hir::HirType::Array(_), "join") => {
+                                Some(thaw_hir::HirType::Str)
+                            }
+                            (thaw_hir::HirType::Union(members), "join")
+                                if members.iter().all(|member| {
+                                    matches!(member, thaw_hir::HirType::Array(_))
+                                }) =>
+                            {
                                 Some(thaw_hir::HirType::Str)
                             }
                             (
