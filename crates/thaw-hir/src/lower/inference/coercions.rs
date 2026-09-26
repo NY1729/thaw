@@ -121,6 +121,15 @@ impl<'a> FnLowerer<'a> {
         if let (HirType::Object(declared_fields), HirType::Object(actual_fields)) =
             (declared, self.infer_expr_type(&value)?)
         {
+            if actual_fields.as_slice() != declared_fields.as_slice()
+                && actual_fields
+                    .iter()
+                    .any(|(name, _)| is_hidden_accessor_field(name))
+            {
+                return Err(
+                    "cannot coerce an accessor-bearing object to a fixed object layout".into(),
+                );
+            }
             if actual_fields.starts_with(declared_fields) {
                 return Ok(value);
             }
