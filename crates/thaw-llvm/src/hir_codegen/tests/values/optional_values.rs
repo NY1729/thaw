@@ -340,3 +340,29 @@ fn compiles_optional_function_calls() {
     );
 }
 
+/// An optional call on an optional *property* (`o.f?.()`), distinct from an
+/// optional callee value or an optional receiver (`o?.f()`), including the
+/// short-circuit that skips evaluating the arguments when `o.f` is absent.
+#[test]
+fn compiles_optional_calls_on_optional_properties() {
+    let source = r#"
+        interface Handler { run?: (value: number) => number; }
+        function withRun(): Handler { return { run: (value: number) => value + 1 }; }
+        function withoutRun(): Handler { return {}; }
+        function argument(): number {
+            console.log("argument");
+            return 41;
+        }
+        function main(): void {
+            console.log(withRun().run?.(argument()));
+            console.log(withoutRun().run?.(argument()));
+            const handler: Handler = { run: (value: number) => value * 2 };
+            console.log(handler.run?.(21));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "optional_property_calls"),
+        "argument\n42\nundefined\n42\n"
+    );
+}
+
