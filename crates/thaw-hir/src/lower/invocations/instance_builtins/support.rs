@@ -95,6 +95,12 @@ impl<'a> FnLowerer<'a> {
         let element_type = match element_members.as_slice() {
             [] => return Err("sequence receiver cannot be an empty union".into()),
             [element] => element.clone(),
+            [left, right] if left == &HirType::Undefined => {
+                HirType::Optional(Box::new(right.clone()))
+            }
+            [left, right] if right == &HirType::Undefined => {
+                HirType::Optional(Box::new(left.clone()))
+            }
             _ => HirType::Union(element_members),
         };
         let array_type = HirType::Array(Box::new(element_type.clone()));

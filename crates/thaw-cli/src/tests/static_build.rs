@@ -115,6 +115,54 @@ fn tagged_jit_union_runs_without_quickjs() {
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn mixed_scalar_array_jit_union_normalizes_only_the_array_tag() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-jit-scalar-array-union-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    let operation = format!(
+        "expr:a0,asbool,if,arrayempty,c{:016x},rnappend,tagrn,else,c{:016x},tagnum,end:mixed-union",
+        7.0f64.to_bits(),
+        42.0f64.to_bits()
+    );
+    let symbol = operation
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::fs::write(
+        &source,
+        format!(
+            "declare function __thaw_typed_jit_{symbol}(array: boolean): number[] | number;\nfunction main(): void {{ const scalar = __thaw_typed_jit_{symbol}(false); if (typeof scalar === 'number') console.log(scalar); console.log(Array.isArray(__thaw_typed_jit_{symbol}(true))); }}\n"
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &dir.join("registry"),
+        &[],
+    )
+    .unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\ntrue\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn builds_and_runs_a_fully_static_elf() {
     if ensure_static_system_libraries().is_err() {

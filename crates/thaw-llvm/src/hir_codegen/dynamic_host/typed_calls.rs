@@ -616,7 +616,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?
                         .into_int_value();
                 }
-                let mut payload = self
+                let payload = self
                     .builder
                     .build_load(
                         self.context.i64_type(),
@@ -630,10 +630,39 @@ impl<'ctx> HirCompiler<'ctx> {
                 // `{buffer, presence}` handles, so normalize it to a
                 // fresh handle whenever the runtime tag selects an array
                 // member.
-                if elements
+                let array_tags = elements
                     .iter()
-                    .any(|ty| matches!(ty, HirType::Array(_)))
-                {
+                    .filter(|ty| matches!(ty, HirType::Array(_)))
+                    .map(|ty| jit_union_member_tag(ty).unwrap())
+                    .collect::<Vec<_>>();
+                let payload = if array_tags.is_empty() {
+                    payload
+                } else {
+                    let mut selected = self.context.bool_type().const_zero();
+                    for runtime in array_tags {
+                        let matches = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                runtime_tag,
+                                self.context.i64_type().const_int(runtime, false),
+                                "jit_union_array_selected",
+                            )
+                            .map_err(|error| error.to_string())?;
+                        selected = self
+                            .builder
+                            .build_or(selected, matches, "jit_union_any_array_selected")
+                            .map_err(|error| error.to_string())?;
+                    }
+                    let function = self.current_function();
+                    let array_block = self.context.append_basic_block(function, "jit_union_array");
+                    let scalar_block = self.context.append_basic_block(function, "jit_union_scalar");
+                    let merge_block = self.context.append_basic_block(function, "jit_union_payload_end");
+                    self.builder
+                        .build_conditional_branch(selected, array_block, scalar_block)
+                        .map_err(|error| error.to_string())?;
+
+                    self.builder.position_at_end(array_block);
                     let normalized = self.compile_jit_array_result(payload)?;
                     let normalized = self
                         .builder
@@ -643,32 +672,25 @@ impl<'ctx> HirCompiler<'ctx> {
                             "jit_union_array_handle",
                         )
                         .map_err(|error| error.to_string())?;
-                    for ty in elements.iter() {
-                        let HirType::Array(_) = ty else {
-                            continue;
-                        };
-                        let runtime = jit_union_member_tag(ty).unwrap();
-                        let selected = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::EQ,
-                                runtime_tag,
-                                self.context.i64_type().const_int(runtime, false),
-                                "jit_union_array_selected",
-                            )
-                            .map_err(|error| error.to_string())?;
-                        payload = self
-                            .builder
-                            .build_select(
-                                selected,
-                                normalized,
-                                payload,
-                                "jit_union_array_payload",
-                            )
-                            .map_err(|error| error.to_string())?
-                            .into_int_value();
-                    }
-                }
+                    let array_end = self.builder.get_insert_block().unwrap();
+                    self.builder
+                        .build_unconditional_branch(merge_block)
+                        .map_err(|error| error.to_string())?;
+
+                    self.builder.position_at_end(scalar_block);
+                    let scalar_end = self.builder.get_insert_block().unwrap();
+                    self.builder
+                        .build_unconditional_branch(merge_block)
+                        .map_err(|error| error.to_string())?;
+
+                    self.builder.position_at_end(merge_block);
+                    let merged = self
+                        .builder
+                        .build_phi(self.context.i64_type(), "jit_union_payload")
+                        .map_err(|error| error.to_string())?;
+                    merged.add_incoming(&[(&normalized, array_end), (&payload, scalar_end)]);
+                    merged.as_basic_value().into_int_value()
+                };
                 let union_type = self.basic_type(return_type)?.into_struct_type();
                 let union = self
                     .builder

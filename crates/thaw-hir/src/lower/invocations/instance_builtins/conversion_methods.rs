@@ -396,9 +396,14 @@ impl<'a> FnLowerer<'a> {
                             "timestamp".to_string(),
                         ));
                     }
+                    if matches!(receiver_type, HirType::Array(_))
+                        || matches!(&receiver_type, HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))))
+                    {
+                        return Ok(receiver);
+                    }
                     if !matches!(receiver_type, HirType::F64 | HirType::Str | HirType::Bool) {
                         return Err(format!(
-                            "native `.valueOf()` requires a number, string or boolean receiver, got {receiver_type:?}"
+                            "native `.valueOf()` requires a primitive or array receiver, got {receiver_type:?}"
                         ));
                     }
                     return Ok(receiver);

@@ -1805,7 +1805,7 @@ impl<'a> FnLowerer<'a> {
         }
         let preserve_argument_order =
             call.args.iter().any(|arg| arg.spread.is_some()) || lowered.iter().any(contains_await);
-        for (arg, value) in call.args.iter().zip(lowered) {
+        for (arg, mut value) in call.args.iter().zip(lowered) {
             if !preserve_argument_order {
                 lowered_arguments.push(value);
                 continue;
@@ -1832,7 +1832,7 @@ impl<'a> FnLowerer<'a> {
                 continue;
             }
 
-            let source_type = self.infer_expr_type(&value)?;
+            let mut source_type = self.infer_expr_type(&value)?;
             let rest_element = signature
                 .as_ref()
                 .and_then(|signature| signature.native_rest.as_ref())
@@ -1844,8 +1844,32 @@ impl<'a> FnLowerer<'a> {
             let fixed_count = param_types
                 .as_ref()
                 .map_or(0, |params| params.len() - usize::from(rest_element.is_some()));
+            if lowered_arguments.len() == fixed_count {
+                if let (HirType::Union(members), Some(rest_element)) =
+                    (&source_type, rest_element)
+                {
+                    if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                        let (flattened, flattened_type) =
+                            self.lower_union_array_sequence(value.clone(), members)?;
+                        if rest_element == &HirType::Dynamic {
+                            value = flattened;
+                            source_type = flattened_type;
+                        } else {
+                            let expected_array = HirType::Array(Box::new(rest_element.clone()));
+                            if let Ok(converted) =
+                                self.coerce_to_declared(&expected_array, flattened)
+                            {
+                                value = converted;
+                                source_type = expected_array;
+                            }
+                        }
+                    }
+                }
+            }
             if let (HirType::Array(element), Some(rest_element)) = (&source_type, rest_element) {
-                if lowered_arguments.len() == fixed_count && element.as_ref() == rest_element {
+                if lowered_arguments.len() == fixed_count
+                    && (element.as_ref() == rest_element || rest_element == &HirType::Dynamic)
+                {
                     lowered_arguments.push(value);
                     forwarded_rest_array = true;
                     continue;

@@ -30,6 +30,26 @@ fn an_any_annotated_copy_of_a_caught_error_keeps_the_string_error_type() {
 }
 
 #[test]
+fn rejects_writes_not_representable_by_every_union_array_member() {
+    for operation in [
+        "value[0] = 1",
+        "value[0] += 1",
+        "value[0]++",
+        "++value[0]",
+    ] {
+        let module = thaw_parser::parse_typescript(&format!(
+            "function bad(value: number[] | string[]): void {{ {operation}; }}"
+        ))
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("representable by every member"),
+            "{operation}: {error}"
+        );
+    }
+}
+
+#[test]
 fn expands_nested_top_level_object_and_array_destructuring() {
     let program = lower(
         r#"

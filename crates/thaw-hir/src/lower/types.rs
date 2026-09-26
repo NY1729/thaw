@@ -135,6 +135,10 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         // unnecessarily narrow check, not a masked gap the way the
         // `Object`/`Json` case above turned out to be.
         HirType::Array(inner) => supports_generic_native_layout(inner),
+        HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+            supports_generic_native_layout(inner)
+        }
+        HirType::Union(elements) => elements.iter().all(supports_generic_native_layout),
         HirType::Tuple(elements) => elements.iter().all(supports_generic_native_layout),
         HirType::Object(fields) => fields
             .iter()
@@ -477,6 +481,14 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
             HirType::Array(inner) => format!("array_{}", fingerprint(inner)),
             HirType::Tuple(elements) => format!(
                 "tuple_{}",
+                elements
+                    .iter()
+                    .map(fingerprint)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            ),
+            HirType::Union(elements) => format!(
+                "union_{}",
                 elements
                     .iter()
                     .map(fingerprint)
@@ -1691,6 +1703,15 @@ fn lower_generic_instance(
     let mut concrete_signatures = signatures.clone();
     let concrete = concrete_signatures.get_mut(&base_name).unwrap();
     concrete.params = params.iter().map(|param| param.ty.clone()).collect();
+    concrete.native_rest = native_rest_element(
+        &fn_decl
+            .function
+            .params
+            .iter()
+            .map(|parameter| parameter.pat.clone())
+            .collect::<Vec<_>>(),
+        &concrete.params,
+    )?;
     concrete.ret = ret.clone();
     let mut lowerer = FnLowerer::new(
         &concrete_signatures,
