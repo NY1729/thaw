@@ -217,6 +217,62 @@ fn frame_split_preserves_object_fields_before_nested_await() {
 }
 
 #[test]
+fn frame_split_preserves_object_methods_and_accessors_across_await() {
+    let source = r#"
+        interface Trace { value: string; }
+        function record(trace: Trace, label: string, value: number): number {
+            trace.value += label;
+            return value;
+        }
+        async function delayed(trace: Trace, label: string, value: number): Promise<number> {
+            trace.value += label;
+            await sleep(1);
+            return value;
+        }
+        async function spread(trace: Trace): Promise<{ extra: number }> {
+            return { extra: await delayed(trace, "c", 4) };
+        }
+        async function main(): Promise<void> {
+            const trace: Trace = { value: "" };
+            let stored = 3;
+            const value = {
+                first: record(trace, "a", 1),
+                second: await delayed(trace, "b", 2),
+                get total(): number { return this.first + this.second + stored; },
+                set total(next: number) { stored = next; },
+                add(): number { return this.first + this.second; },
+                ...(await spread(trace)),
+                last: record(trace, "d", 5),
+            };
+            console.log(trace.value, value.add(), value.total, value.extra, value.last);
+            value.total = 10;
+            console.log(value.total);
+
+            const overwritten = {
+                get result(): number { return 99; },
+                result: await delayed(trace, "e", 6),
+            };
+            const accessor = {
+                result: await delayed(trace, "f", 7),
+                get result(): number { return 8; },
+            };
+            console.log(overwritten.result, accessor.result, trace.value);
+
+            const callback = {
+                async run(): Promise<number> {
+                    return await delayed(trace, "g", 9);
+                }
+            };
+            console.log(await callback.run(), trace.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_members_across_await"),
+        "abcd 3 6 4 5\n13\n6 8 abcdef\n9 abcdefg\n"
+    );
+}
+
+#[test]
 fn frame_split_returns_from_deep_async_loop_try_and_block_scopes() {
     let source = r#"
         async function delayed(value: number): Promise<number> {
