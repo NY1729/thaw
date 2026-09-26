@@ -985,6 +985,23 @@ fn compiles_dynamic_value_strict_equality() {
     );
 }
 
+#[test]
+fn compares_present_optional_strings_by_value() {
+    let source = r#"
+        function main(): void {
+            const values: string[] = ["same"];
+            const empty: string[] = [];
+            console.log(values[0] === "same");
+            console.log("same" === values[0]);
+            console.log(empty[0] === "same");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "optional_string_strict_equality"),
+        "true\ntrue\nfalse\n"
+    );
+}
+
 /// `NaN`/`Infinity`/`-Infinity` boxed into an `any`-typed (`Json`)
 /// value used to be indistinguishable from a real `null`:
 /// `serde_json::Number` structurally cannot hold a non-finite `f64`, so

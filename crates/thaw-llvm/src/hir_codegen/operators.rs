@@ -480,7 +480,8 @@ impl<'ctx> HirCompiler<'ctx> {
             // own id. Without this, symbol operands fell to a raw pointer
             // compare against two separate arena allocations.
             let string_like = |expr: &HirExpr| {
-                self.expr_is_string(expr) || self.expr_hir_type(expr) == Some(HirType::Symbol)
+                self.expr_is_string(expr)
+                    || matches!(self.expr_hir_type(expr), Some(HirType::Str | HirType::Symbol))
             };
             let string_operands = string_like(lhs) && string_like(rhs);
             // `Json` (`any`-typed) operands are the one pointer-shaped
