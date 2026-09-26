@@ -2775,6 +2775,7 @@ impl<'a> FnLowerer<'a> {
                         let keys = HirExpr::ArrayLit(
                             fields
                                 .iter()
+                                .filter(|(name, _)| !is_hidden_accessor_field(name))
                                 .map(|(name, _)| HirExpr::Lit(HirLit::Str(name.clone())))
                                 .collect(),
                         );
@@ -2858,9 +2859,19 @@ impl<'a> FnLowerer<'a> {
                                 "`Object.values` currently requires a fixed object, got {ty:?}"
                             ));
                         };
+                        // Accessor properties are omitted here (their value
+                        // isn't a stored field); a direct read still invokes
+                        // the getter.
                         let field_names = fields
                             .iter()
                             .map(|(name, _)| name.clone())
+                            .filter(|name| !is_hidden_accessor_field(name))
+                            .filter(|name| {
+                                !fields.iter().any(|(field, _)| {
+                                    field == &format!("__thaw_getter_{name}")
+                                        || field == &format!("__thaw_setter_{name}")
+                                })
+                            })
                             .collect::<Vec<_>>();
                         let name = format!("__thaw_object_values_{}", self.next_binding);
                         self.next_binding += 1;
@@ -2980,8 +2991,16 @@ impl<'a> FnLowerer<'a> {
                                 "`Object.entries` currently requires a fixed object, got {ty:?}"
                             ));
                         };
+                        // Accessor properties are omitted (see `Object.values`).
                         let entry_fields = fields
                             .iter()
+                            .filter(|(name, _)| {
+                                !is_hidden_accessor_field(name)
+                                    && !fields.iter().any(|(field, _)| {
+                                        field == &format!("__thaw_getter_{name}")
+                                            || field == &format!("__thaw_setter_{name}")
+                                    })
+                            })
                             .map(|(name, field_type)| (name.clone(), field_type.clone()))
                             .collect::<Vec<_>>();
                         let name = format!("__thaw_object_entries_{}", self.next_binding);

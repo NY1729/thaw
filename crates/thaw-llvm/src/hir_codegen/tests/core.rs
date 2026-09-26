@@ -868,6 +868,41 @@ fn compiles_object_literal_methods_with_native_receivers() {
     assert_eq!(compile_and_run(source, "object_literal_method"), "42\n");
 }
 
+/// Object-literal getters/setters: reads/writes invoke the stored
+/// accessor, `this` and captured locals work, a getter stays live across a
+/// field mutation, and a lone setter reads `undefined`.
+#[test]
+fn compiles_object_literal_accessors() {
+    let source = r#"
+        function main(): void {
+            const live = {
+                base: 1,
+                get doubled(): number { return this.base * 2; },
+            };
+            console.log(live.doubled);
+            live.base = 21;
+            console.log(live.doubled);
+            const bonus = 40;
+            const computed = { get answer(): number { return bonus + 2; } };
+            console.log(computed.answer);
+            const stored = {
+                value: 0,
+                get current(): number { return this.value; },
+                set current(next: number) { this.value = next; },
+            };
+            stored.current = 42;
+            console.log(stored.current);
+            const writeOnly = { set only(next: number) { console.log("wrote", next); } };
+            writeOnly.only = 7;
+            console.log(writeOnly.only);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_literal_accessors"),
+        "2\n42\n42\n42\nwrote 7\nundefined\n"
+    );
+}
+
 #[test]
 fn numeric_recursion_keeps_variable_cells_on_the_stack() {
     let module = thaw_parser::parse_typescript(
