@@ -266,6 +266,10 @@ impl<'a> FnLowerer<'a> {
         let accumulator_type = initial
             .as_ref()
             .map(|(_, ty)| ty.clone())
+            .or_else(|| match &callback_type {
+                HirType::Function(params, _) => params.first().cloned(),
+                _ => None,
+            })
             .unwrap_or_else(|| callback_element_type.clone());
         self.scope.insert(receiver_name.clone(), array_type.clone());
         self.scope
@@ -332,6 +336,37 @@ impl<'a> FnLowerer<'a> {
         ];
         let callback_call =
             self.lower_array_callback_call(&callback_name, params, &available)?;
+        let accumulate = if initial.is_some() {
+            HirStmt::Expr(HirExpr::Assign(
+                accumulator_name.clone(),
+                Box::new(callback_call),
+            ))
+        } else {
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(found_name.clone())),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                ),
+                vec![
+                    HirStmt::Expr(HirExpr::Assign(
+                        accumulator_name.clone(),
+                        Box::new(self.coerce_to_declared(
+                            &accumulator_type,
+                            HirExpr::Var(element_name.clone()),
+                        )?),
+                    )),
+                    HirStmt::Expr(HirExpr::Assign(
+                        found_name.clone(),
+                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                    )),
+                ],
+                vec![HirStmt::Expr(HirExpr::Assign(
+                    accumulator_name.clone(),
+                    Box::new(callback_call),
+                ))],
+            )
+        };
         let raw_element = HirExpr::TypedIndex(
             Box::new(receiver_var()), Box::new(index()), element_type.clone(),
         );
@@ -376,7 +411,11 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         statements.extend([
-            HirStmt::Let(accumulator_name.clone(), accumulator_type, initial_value),
+            HirStmt::Let(
+                accumulator_name.clone(),
+                accumulator_type.clone(),
+                initial_value,
+            ),
             HirStmt::Let(
                 found_name.clone(),
                 HirType::Bool,
@@ -413,27 +452,7 @@ impl<'a> FnLowerer<'a> {
                                 callback_element_type,
                                 element,
                             ),
-                            HirStmt::If(
-                                HirExpr::BinOp(
-                                    BinOp::EqEqEq,
-                                    Box::new(HirExpr::Var(found_name.clone())),
-                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                                ),
-                                vec![
-                                    HirStmt::Expr(HirExpr::Assign(
-                                        accumulator_name.clone(),
-                                        Box::new(HirExpr::Var(element_name.clone())),
-                                    )),
-                                    HirStmt::Expr(HirExpr::Assign(
-                                        found_name.clone(),
-                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
-                                    )),
-                                ],
-                                vec![HirStmt::Expr(HirExpr::Assign(
-                                    accumulator_name.clone(),
-                                    Box::new(callback_call),
-                                ))],
-                            ),
+                            accumulate,
                         ],
                         Vec::new(),
                     ),

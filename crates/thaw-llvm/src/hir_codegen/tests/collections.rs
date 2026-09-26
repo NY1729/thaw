@@ -869,6 +869,51 @@ fn compiles_native_array_flat_map() {
 }
 
 #[test]
+fn compiles_transform_methods_on_unions_of_arrays() {
+    let source = r#"
+        function receiver(numbers: boolean): number[] | string[] {
+            console.log("receiver");
+            if (numbers) return [1, 2, 3];
+            return ["a", "bb"];
+        }
+        function sparseReceiver(numbers: boolean): number[] | string[] {
+            console.log("receiver");
+            if (numbers) return [, 2, 3];
+            return [, "a", "bb"];
+        }
+        function thisValue(): string {
+            console.log("thisArg");
+            return "ignored";
+        }
+        function initial(): number {
+            console.log("initial");
+            return 10;
+        }
+        function main(): void {
+            const filtered: number[] | string[] = sparseReceiver(true).filter(
+                (_value, index, array: number[] | string[]) => index < array.length,
+                thisValue(),
+            );
+            console.log(JSON.stringify(filtered));
+
+            const flattened = receiver(false).flatMap(
+                (_value, index, array: number[] | string[]) => index < array.length ? [index] : [],
+                thisValue(),
+            );
+            console.log(JSON.stringify(flattened));
+
+            console.log(receiver(false).reduce(accumulator => accumulator + 1, initial()));
+            console.log(receiver(false).reduce((accumulator, _value, _index, _array: number[] | string[]) => accumulator));
+            console.log(receiver(true).reduceRight((accumulator, _value, _index, _array: number[] | string[]) => accumulator));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_union_transforms"),
+        "receiver\nthisArg\n[2,3]\nreceiver\nthisArg\n[0,1]\nreceiver\ninitial\n12\nreceiver\na\nreceiver\n3\n"
+    );
+}
+
+#[test]
 fn compiles_native_array_flat() {
     let source = r#"
         interface Item { value: number; }
