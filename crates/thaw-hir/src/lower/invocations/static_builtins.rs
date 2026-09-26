@@ -1383,15 +1383,26 @@ impl<'a> FnLowerer<'a> {
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         if property.sym == *"has" {
-                            if matches!(self.infer_expr_type(target)?, HirType::Array(_)) {
+                            let mut target = target.clone();
+                            let mut target_type = self.infer_expr_type(&target)?;
+                            if let HirType::Union(members) = &target_type {
+                                if members
+                                    .iter()
+                                    .all(|member| matches!(member, HirType::Array(_)))
+                                {
+                                    (target, target_type) =
+                                        self.lower_union_array_sequence(target, members)?;
+                                }
+                            }
+                            if matches!(target_type, HirType::Array(_)) {
                                 let key = self.coerce_primitive_to_string(key.clone())?;
                                 let result = HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_array_has_property".into())),
-                                    vec![target.clone(), key],
+                                    vec![target, key],
                                 );
                                 return self.wrap_call_argument_bindings(result, &bindings);
                             }
-                            let result = self.lower_has_own_value(target.clone(), key.clone())?;
+                            let result = self.lower_has_own_value(target, key.clone())?;
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         // A literal key resolves against a fixed object's
@@ -2712,6 +2723,37 @@ impl<'a> FnLowerer<'a> {
                         };
                         let value = self.lower_primitive_array_operand(value.clone())?;
                         let ty = self.infer_expr_type(&value)?;
+                        if let HirType::Union(elements) = &ty {
+                            let matching = elements
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, element)| {
+                                    matches!(element, HirType::Array(_) | HirType::Tuple(_))
+                                        .then_some(index)
+                                })
+                                .collect::<Vec<_>>();
+                            let name = format!("__thaw_is_array_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            let mut result = HirExpr::Lit(HirLit::Bool(
+                                matching.len() == elements.len(),
+                            ));
+                            if matching.len() != elements.len() {
+                                for index in matching {
+                                    let check = HirExpr::BinOp(
+                                        BinOp::EqEqEq,
+                                        Box::new(HirExpr::UnionTag(
+                                            Box::new(HirExpr::Var(name.clone())),
+                                            elements.clone(),
+                                        )),
+                                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                    );
+                                    result = self.lower_logical_expr(result, check, false)?;
+                                }
+                            }
+                            bindings.push((name, ty, value));
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         if ty == HirType::Json {
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_is_array".to_string())),
@@ -2741,8 +2783,13 @@ impl<'a> FnLowerer<'a> {
                         let [value] = arguments.as_slice() else {
                             return Err(format!("`{label}` expects exactly one argument"));
                         };
-                        let value = value.clone();
-                        let ty = self.infer_expr_type(&value)?;
+                        let mut value = value.clone();
+                        let mut ty = self.infer_expr_type(&value)?;
+                        if let HirType::Union(members) = &ty {
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                (value, ty) = self.lower_union_array_sequence(value, members)?;
+                            }
+                        }
                         if ty == HirType::JsValue {
                             let call_arguments = self.coerce_to_declared(
                                 &HirType::Json,
@@ -2809,8 +2856,13 @@ impl<'a> FnLowerer<'a> {
                         let [value] = arguments.as_slice() else {
                             return Err("`Object.values` expects exactly one argument".into());
                         };
-                        let value = value.clone();
-                        let ty = self.infer_expr_type(&value)?;
+                        let mut value = value.clone();
+                        let mut ty = self.infer_expr_type(&value)?;
+                        if let HirType::Union(members) = &ty {
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                (value, ty) = self.lower_union_array_sequence(value, members)?;
+                            }
+                        }
                         if ty == HirType::JsValue {
                             let call_arguments = self.coerce_to_declared(
                                 &HirType::Json,
@@ -2915,8 +2967,13 @@ impl<'a> FnLowerer<'a> {
                         let [value] = arguments.as_slice() else {
                             return Err("`Object.entries` expects exactly one argument".into());
                         };
-                        let value = value.clone();
-                        let ty = self.infer_expr_type(&value)?;
+                        let mut value = value.clone();
+                        let mut ty = self.infer_expr_type(&value)?;
+                        if let HirType::Union(members) = &ty {
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                (value, ty) = self.lower_union_array_sequence(value, members)?;
+                            }
+                        }
                         if ty == HirType::JsValue {
                             let call_arguments = self.coerce_to_declared(
                                 &HirType::Json,

@@ -959,24 +959,33 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .enumerate()
                             .filter_map(|(index, element)| {
-                                class_type_has_identity(element, class.sym.as_ref())
-                                    .then_some(index)
+                                (if class.sym == *"Array" {
+                                    native_builtin_instanceof_static_match("Array", element)
+                                        .unwrap_or(false)
+                                } else {
+                                    class_type_has_identity(element, class.sym.as_ref())
+                                })
+                                .then_some(index)
                             })
                             .collect::<Vec<_>>();
                         let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), value_type.clone());
-                        let mut result = HirExpr::Lit(HirLit::Bool(false));
-                        for index in matching {
-                            let check = HirExpr::BinOp(
-                                BinOp::EqEqEq,
-                                Box::new(HirExpr::UnionTag(
-                                    Box::new(HirExpr::Var(name.clone())),
-                                    elements.clone(),
-                                )),
-                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-                            );
-                            result = self.lower_logical_expr(result, check, false)?;
+                        let all_arrays = class.sym == *"Array"
+                            && matching.len() == elements.len();
+                        let mut result = HirExpr::Lit(HirLit::Bool(all_arrays));
+                        if !all_arrays {
+                            for index in matching {
+                                let check = HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::UnionTag(
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        elements.clone(),
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                );
+                                result = self.lower_logical_expr(result, check, false)?;
+                            }
                         }
                         return self.wrap_call_argument_bindings(
                             result,
@@ -1141,7 +1150,13 @@ impl<'a> FnLowerer<'a> {
                 }
                 let value = match bin.op {
                     BinaryOp::In => {
-                        let right_type = self.infer_expr_type(&rhs)?;
+                        let mut right_type = self.infer_expr_type(&rhs)?;
+                        if let HirType::Union(members) = &right_type {
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                (rhs, right_type) =
+                                    self.lower_union_array_sequence(rhs, members)?;
+                            }
+                        }
                         if matches!(right_type, HirType::JsValue | HirType::Dynamic) {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("hasDynamicProperty".into())),
