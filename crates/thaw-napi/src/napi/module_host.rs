@@ -570,6 +570,48 @@ pub unsafe extern "C" fn thaw_napi_load_embedded_hex(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_embed_executable_hex(hex: *const c_char) -> *const c_char {
+    let result = text(hex).and_then(|hex| {
+        let bytes = decode_hex(&hex)?;
+        #[cfg(target_os = "linux")]
+        {
+            let name = CString::new("thaw-embedded-executable").unwrap();
+            let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
+            if fd < 0 {
+                return Err(format!(
+                    "memfd_create failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            file.write_all(&bytes)
+                .map_err(|error| format!("failed to write embedded executable: {error}"))?;
+            if unsafe { libc::fchmod(fd, 0o700) } != 0 {
+                return Err(format!(
+                    "failed to mark embedded executable executable: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            HOST.with(|host| host.borrow_mut().embedded_files.push(file));
+            Ok(format!("/proc/self/fd/{fd}"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = bytes;
+            Err("embedded executables are currently supported only on Linux".into())
+        }
+    });
+    match result {
+        Ok(path) => CString::new(path).unwrap_or_default().into_raw(),
+        Err(error) => {
+            HOST.with(|host| host.borrow_mut().last_error = error.clone());
+            eprintln!("thaw-napi: {error}");
+            std::ptr::null()
+        }
+    }
+}
+
 const TYPED_UNDEFINED_KEY: &str = "$__thaw_napi_undefined$";
 
 fn value_from_json_with_undefined(

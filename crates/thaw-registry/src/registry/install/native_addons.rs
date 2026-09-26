@@ -32,6 +32,51 @@ pub struct AddedPackage {
     pub native_diagnostic: Option<String>,
 }
 
+fn select_optional_dependency_executable(
+    node_modules_dir: &Path,
+    manifest: &serde_json::Value,
+) -> Result<Option<PathBuf>, String> {
+    if manifest.get("name").and_then(serde_json::Value::as_str) != Some("esbuild") {
+        return Ok(None);
+    }
+    let Some(optional) = manifest
+        .get("optionalDependencies")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    let (platform, arch, libc) = target_prebuild_components();
+    let markers = if platform == "linux" && libc == "musl" {
+        vec![format!("linux-{arch}"), format!("linuxmusl-{arch}")]
+    } else {
+        vec![format!("{platform}-{arch}")]
+    };
+    for name in optional
+        .keys()
+        .filter(|name| markers.iter().any(|marker| name.contains(marker)))
+    {
+        let root = node_modules_dir.join(name);
+        if !root.is_dir() {
+            continue;
+        }
+        let manifest = read_manifest(&root)?;
+        let binary = match manifest.get("bin") {
+            Some(serde_json::Value::String(path)) => Some(path.as_str()),
+            Some(serde_json::Value::Object(entries)) => {
+                entries.values().find_map(serde_json::Value::as_str)
+            }
+            _ => None,
+        };
+        let path = binary
+            .map(|path| root.join(path))
+            .unwrap_or_else(|| root.join("bin").join("esbuild"));
+        if path.is_file() {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NativeAddonMetadata {
     pub source: String,

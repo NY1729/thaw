@@ -708,6 +708,20 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
     })
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_js_set_process_env(name: *const c_char, value: *const c_char) -> u8 {
+    let name = to_str(name);
+    let value = to_str(value);
+    with_active_or_context(|ctx| {
+        let result = ctx
+            .globals()
+            .get::<_, Object>("process")
+            .and_then(|process| process.get::<_, Object>("env"))
+            .and_then(|env| env.set(name.as_str(), value));
+        u8::from(result.is_ok())
+    })
+}
+
 fn process_exit_code(ctx: &Ctx<'_>) -> i32 {
     ctx.eval("process.exitCode == null ? 0 : Number(process.exitCode)")
         .unwrap_or(0)

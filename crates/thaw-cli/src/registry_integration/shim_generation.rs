@@ -203,6 +203,7 @@ fn generate_registry_shims(
             native_lib: package.native_lib,
             native_addon: package.native_addon,
             native_dependencies: package.native_dependencies,
+            platform_executable: package.platform_executable,
             bundle_js: package.bundle_js,
             factory_class_returns,
             namespace_self_aliases,
@@ -373,6 +374,7 @@ fn generate_registry_shims(
     let mut static_class_getter_rewrites = Vec::new();
     let mut static_class_setter_rewrites = Vec::new();
     let mut native_libs = Vec::new();
+    let mut platform_executables = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
     let mut native_addons: Vec<PendingNativeAddon> = Vec::new();
     let mut native_addon_paths: Vec<PendingNativeAddonPath> = Vec::new();
@@ -1134,6 +1136,16 @@ fn generate_registry_shims(
         if let Some(native_lib) = &pkg.native_lib {
             native_libs.push(native_lib.clone());
         }
+        if let Some(executable) = &pkg.platform_executable {
+            let bytes = std::fs::read(executable).map_err(|error| {
+                format!(
+                    "failed to embed platform executable `{}`: {error}",
+                    executable.display()
+                )
+            })?;
+            let encoded = thaw_bridge::encode_embedded_native(&bytes);
+            platform_executables.push(encoded);
+        }
         if let Some(native_addon) = &pkg.native_addon {
             let root_export = if pkg.bundle_js.is_some() {
                 None
@@ -1465,7 +1477,23 @@ fn generate_registry_shims(
             },
         )
         .collect();
-    shim.push_str(&thaw_bridge::generate_module_init(&module_bundles));
+    let mut module_init = thaw_bridge::generate_module_init(&module_bundles);
+    if !platform_executables.is_empty() {
+        let setup = platform_executables
+            .iter()
+            .map(|encoded| {
+                format!(
+                    "    setProcessEnv(\"ESBUILD_BINARY_PATH\", embedExecutable(\"{encoded}\"));\n"
+                )
+            })
+            .collect::<String>();
+        module_init = module_init.replacen(
+            "function __thaw_module_init(): void {\n",
+            &format!("function __thaw_module_init(): void {{\n{setup}"),
+            1,
+        );
+    }
+    shim.push_str(&module_init);
     let native_addons: Vec<thaw_bridge::NativeAddon<'_>> = native_addons
         .iter()
         .map(|(name, bytes, dependencies, root_export)| thaw_bridge::NativeAddon {

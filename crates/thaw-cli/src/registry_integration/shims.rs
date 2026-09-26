@@ -19,6 +19,7 @@ struct ResolvedPackage {
     native_lib: Option<PathBuf>,
     native_addon: Option<PathBuf>,
     native_dependencies: Vec<PathBuf>,
+    platform_executable: Option<PathBuf>,
     bundle_js: Option<String>,
     /// `(factory function name) -> (this package's own class name)` for
     /// every function whose declared return type names one of `classes`

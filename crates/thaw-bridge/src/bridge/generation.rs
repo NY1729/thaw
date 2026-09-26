@@ -944,7 +944,7 @@ fn encode_embedded_script(source: &str) -> String {
     source.to_string()
 }
 
-fn encode_embedded_native(bytes: &[u8]) -> String {
+pub fn encode_embedded_native(bytes: &[u8]) -> String {
     // Tiny addons are cheaper as-is and retaining this form keeps old
     // generated shims readable. Real native addons cross this threshold by
     // orders of magnitude.
