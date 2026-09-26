@@ -420,29 +420,18 @@ impl<'a> FnLowerer<'a> {
                                  object, got {target_type:?}"
                             ));
                         };
-                        if fields.iter().any(|(name, _)| is_hidden_accessor_field(name)) {
-                            return Err(
-                                "property descriptor inspection is not supported for native accessor objects"
-                                    .into(),
-                            );
-                        }
                         if !fields.iter().any(|(name, _)| name == &key) {
                             return self.wrap_call_argument_bindings(
                                 HirExpr::Lit(HirLit::Undefined),
                                 &bindings,
                             );
                         }
-                        // All fields thaw models are own, writable,
-                        // enumerable, and configurable.
-                        let descriptor = HirExpr::ObjectLit(vec![
-                            (
-                                "value".to_string(),
-                                HirExpr::PropAccess(Box::new(target.clone()), target_type, key),
-                            ),
-                            ("writable".to_string(), HirExpr::Lit(HirLit::Bool(true))),
-                            ("enumerable".to_string(), HirExpr::Lit(HirLit::Bool(true))),
-                            ("configurable".to_string(), HirExpr::Lit(HirLit::Bool(true))),
-                        ]);
+                        let descriptor = Self::fixed_object_property_descriptor(
+                            target.clone(),
+                            &target_type,
+                            fields,
+                            &key,
+                        );
                         return self.wrap_call_argument_bindings(descriptor, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"create" {
@@ -876,38 +865,19 @@ impl<'a> FnLowerer<'a> {
                                  object, got {target_type:?}"
                             ));
                         };
-                        if fields.iter().any(|(name, _)| is_hidden_accessor_field(name)) {
-                            return Err(
-                                "property descriptor inspection is not supported for native accessor objects"
-                                    .into(),
-                            );
-                        }
-                        let descriptors = fields
-                            .iter()
-                            .map(|(name, _)| {
-                                let descriptor = HirExpr::ObjectLit(vec![
-                                    (
-                                        "value".to_string(),
-                                        HirExpr::PropAccess(
-                                            Box::new(target.clone()),
-                                            target_type.clone(),
-                                            name.clone(),
-                                        ),
+                        let descriptors = ecmascript_field_order(fields)
+                            .into_iter()
+                            .map(|index| {
+                                let name = &fields[index].0;
+                                (
+                                    name.clone(),
+                                    Self::fixed_object_property_descriptor(
+                                        target.clone(),
+                                        &target_type,
+                                        fields,
+                                        name,
                                     ),
-                                    (
-                                        "writable".to_string(),
-                                        HirExpr::Lit(HirLit::Bool(true)),
-                                    ),
-                                    (
-                                        "enumerable".to_string(),
-                                        HirExpr::Lit(HirLit::Bool(true)),
-                                    ),
-                                    (
-                                        "configurable".to_string(),
-                                        HirExpr::Lit(HirLit::Bool(true)),
-                                    ),
-                                ]);
-                                (name.clone(), descriptor)
+                                )
                             })
                             .collect::<Vec<_>>();
                         return self
@@ -1822,46 +1792,46 @@ impl<'a> FnLowerer<'a> {
                                 ),
                             }
                         }
-                        let native_accessor_object = matches!(&value_type, HirType::Object(fields)
-                            if fields.iter().any(|(name, _)| is_hidden_accessor_field(name)));
-                        if native_accessor_object && replacer_function.is_some() {
-                            return Err(
-                                "`JSON.stringify` function replacers are not supported for native accessor objects"
-                                    .into(),
-                            );
-                        }
-                        if native_accessor_object
-                            && replacer_array
-                                .as_ref()
-                                .is_some_and(|replacer| !matches!(replacer, HirExpr::ArrayLit(_)))
-                        {
-                            return Err(
-                                "`JSON.stringify` runtime replacer arrays are not supported for native accessor objects"
-                                    .into(),
-                            );
-                        }
-                        let value = if let (HirType::Object(fields), Some(HirExpr::ArrayLit(keys))) =
-                            (&value_type, &replacer_array)
-                        {
-                            let mut property_list = Vec::new();
-                            for key in keys {
-                                let HirExpr::Lit(HirLit::Str(key)) = key else {
-                                    continue;
-                                };
-                                if !property_list.contains(key) {
-                                    property_list.push(key.clone());
-                                }
+                        let native_accessor_fields = match &value_type {
+                            HirType::Object(fields)
+                                if Self::fixed_object_contains_accessor(fields) =>
+                            {
+                                Some(fields.clone())
                             }
-                            self.materialize_fixed_object_for_json_replacer(
-                                value,
-                                fields,
-                                &property_list,
-                            )?
+                            _ => None,
+                        };
+                        let value = if native_accessor_fields.is_none() {
+                            if let (
+                                HirType::Object(fields),
+                                Some(HirExpr::ArrayLit(keys)),
+                            ) = (&value_type, &replacer_array)
+                            {
+                                let mut property_list = Vec::new();
+                                for key in keys {
+                                    let HirExpr::Lit(HirLit::Str(key)) = key else {
+                                        continue;
+                                    };
+                                    if !property_list.contains(key) {
+                                        property_list.push(key.clone());
+                                    }
+                                }
+                                self.materialize_fixed_object_for_json_replacer(
+                                    value,
+                                    fields,
+                                    &property_list,
+                                )?
+                            } else {
+                                value
+                            }
                         } else {
                             value
                         };
                         let value_type = self.infer_expr_type(&value)?;
-                        let value = if value_type == HirType::JsValue {
+                        let live_accessor_replacer = native_accessor_fields.is_some()
+                            && replacer_array.is_some();
+                        let value = if live_accessor_replacer {
+                            value
+                        } else if value_type == HirType::JsValue {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("readDynamicValue".into())),
                                 vec![value],
@@ -1900,6 +1870,36 @@ impl<'a> FnLowerer<'a> {
                                 }
                             },
                         };
+                        if let (Some(fields), Some(replacer)) =
+                            (native_accessor_fields, replacer_array.clone())
+                        {
+                            let value = self
+                                .lower_fixed_object_as_dynamic_accessor_object(value, &fields)?;
+                            let replacer_json =
+                                self.coerce_to_declared(&HirType::Json, replacer)?;
+                            let space = space
+                                .map(|(value, _)| value)
+                                .unwrap_or(HirExpr::Lit(HirLit::Null));
+                            let space_json = self.coerce_to_declared(&HirType::Json, space)?;
+                            let json_arguments = self.coerce_to_declared(
+                                &HirType::Json,
+                                HirExpr::ArrayLit(vec![replacer_json, space_json]),
+                            )?;
+                            let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("callDynamicValueMixed".into())),
+                                vec![
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                                        vec![HirExpr::Lit(HirLit::Str(
+                                            "__thaw_json_stringify_native_accessors".into(),
+                                        ))],
+                                    ),
+                                    json_arguments,
+                                    HirExpr::ArrayLit(vec![value]),
+                                ],
+                            )));
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         if let Some(replacer) = replacer_function {
                             let space = space
                                 .map(|(value, _)| value)
