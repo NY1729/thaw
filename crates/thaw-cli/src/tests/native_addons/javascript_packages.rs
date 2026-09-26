@@ -4157,7 +4157,6 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "protobufjs has an unrelated unsupported Long-object union return wrapper"]
 fn registry_add_round_trips_a_real_protobufjs_message_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
@@ -4175,7 +4174,7 @@ fn registry_add_round_trips_a_real_protobufjs_message_when_enabled() {
         &source,
         r#"import * as protobuf from "protobufjs";
 function main(): void {
-    const message = protobuf.parse("message Greeting { string text = 1; }").root.lookupType("Greeting");
+    const message = protobuf.parse("syntax = 'proto3'; message Greeting { string text = 1; }").root.lookupType("Greeting");
     const bytes = message.encode({ text: "hello" }).finish();
     console.log(bytes.length, JSON.stringify(message.toObject(message.decode(bytes))));
 }"#,
