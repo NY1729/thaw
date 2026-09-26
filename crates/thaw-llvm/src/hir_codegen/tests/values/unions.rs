@@ -686,3 +686,21 @@ fn compiles_index_length_and_for_each_on_a_union_of_arrays() {
         "10 1\n3\nn 10\nn 20\nn 30\n2\nb\ns 0 a\ns 1 b\ntrue 4\n"
     );
 }
+
+#[test]
+fn compiles_map_on_a_union_of_arrays() {
+    let source = r#"
+        function main(): void {
+            const numbers: number[] | string[] = [10, 20];
+            console.log(numbers.map(
+                (value, index, array) => String(value) + ":" + String(index) + ":" + String(array.length)
+            ).join(","));
+            const strings: number[] | string[] = ["a", "b"];
+            console.log(strings.map((value) => String(value) + "!").join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_map"),
+        "10:0:2,20:1:2\na!,b!\n"
+    );
+}
