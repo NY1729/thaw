@@ -46,6 +46,48 @@
     }
     return object;
   };
+  globalThis.__thaw_object_from_operations = (kinds, keys, values, ...callbacks) => {
+    const object = {};
+    let callback = 0;
+    for (let i = 0; i < kinds.length; i++) {
+      const kind = kinds[i];
+      if (kind === 'spread') {
+        const source = values[i];
+        if (source == null) continue;
+        for (const key of Reflect.ownKeys(Object(source))) {
+          if (!Object.getOwnPropertyDescriptor(source, key)?.enumerable) continue;
+          Object.defineProperty(object, key, {
+            value: source[key], writable: true, enumerable: true, configurable: true,
+          });
+        }
+        continue;
+      }
+      const key = keys[i];
+      if (kind === 'data') {
+        Object.defineProperty(object, key, {
+          value: values[i], writable: true, enumerable: true, configurable: true,
+        });
+        continue;
+      }
+      const fn = callbacks[callback++];
+      if (kind === 'method') {
+        Object.defineProperty(object, key, {
+          value: function (...args) { return fn(this, ...args); },
+          writable: true, enumerable: true, configurable: true,
+        });
+        continue;
+      }
+      const previous = Object.getOwnPropertyDescriptor(object, key);
+      const accessor = previous && !('value' in previous) ? previous : {};
+      Object.defineProperty(object, key, {
+        get: kind === 'getter' ? function () { return fn(this); } : accessor.get,
+        set: kind === 'setter' ? function (value) { fn(this, value); } : accessor.set,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    return object;
+  };
   globalThis.__thaw_json_stringify_native_accessors = (replacer, space, value) =>
     JSON.stringify(value, replacer, space);
   globalThis.__thaw_iterator_from = source => {

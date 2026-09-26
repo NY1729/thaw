@@ -315,6 +315,64 @@ fn observes_local_const_computed_object_members() {
 }
 
 #[test]
+fn observes_runtime_computed_object_accessors() {
+    let source = r#"
+        let trace = "";
+        function key(mark: string, name: string): string {
+            trace += mark;
+            return name;
+        }
+        function main(): void {
+            const source = {
+                backing: 1,
+                get [key("g", "value")](): number { trace += "G"; return this.backing; },
+                set [key("s", "value")](next: number) { trace += "S"; this.backing = next; },
+                [key("d", "plain")]: 4,
+                [key("m", "read")](): number { trace += "M"; return this.backing + this.plain; },
+            };
+            console.log(trace, Number(Object.keys(source).length));
+            source.value = 6;
+            console.log(source.value, source.read(), trace);
+            const descriptor = Object.getOwnPropertyDescriptor(source, "value")!;
+            console.log(typeof descriptor.get, typeof descriptor.set);
+
+            const overwritten = {
+                get [key("x", "value")](): number { trace += "bad"; return 1; },
+                ...{ value: 9 },
+            };
+            console.log(overwritten.value, trace);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "runtime_computed_object_accessors"),
+        "gsdm 4\n6 10 gsdmSGM\nfunction function\n9 gsdmSGMx\n"
+    );
+}
+
+#[test]
+fn rejects_accessor_layout_erasure() {
+    for source in [
+        r#"interface Box { value: number }
+            function main(): void {
+                const box: Box = { get value(): number { return 1; } };
+                console.log(box.value);
+            }"#,
+        r#"interface Box { value: number }
+            function make(): Box {
+                return { get value(): number { return 1; } };
+            }
+            function main(): void { console.log(make().value); }"#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = thaw_hir::lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("cannot coerce an accessor-bearing object to a fixed object layout"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn observes_numeric_object_member_names() {
     let source = r#"
         let stored = "three";

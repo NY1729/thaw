@@ -423,6 +423,164 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &bindings)
     }
 
+    fn lower_dynamic_accessor_object_lit(
+        &mut self,
+        obj_lit: &SwcObjectLit,
+    ) -> Result<HirExpr, String> {
+        let mut bindings = Vec::new();
+        let mut kinds = Vec::new();
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        let mut callbacks = Vec::new();
+        for property in &obj_lit.props {
+            if let PropOrSpread::Spread(spread) = property {
+                let value = self.lower_expr(&spread.expr)?;
+                let value = self.coerce_to_declared(&HirType::Json, value)?;
+                let name = format!("__thaw_dynamic_object_value_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), HirType::Json);
+                bindings.push((name.clone(), HirType::Json, value));
+                kinds.push(HirExpr::Lit(HirLit::Str("spread".into())));
+                keys.push(HirExpr::Lit(HirLit::Str(String::new())));
+                values.push(HirExpr::Var(name));
+                continue;
+            }
+            let PropOrSpread::Prop(property) = property else {
+                unreachable!()
+            };
+            let (kind, key, value, callback) = match property.as_ref() {
+                Prop::KeyValue(KeyValueProp { key, value }) => {
+                    let key = match self.static_object_property_name(key) {
+                        Some(key) => HirExpr::Lit(HirLit::Str(key)),
+                        None => {
+                            let PropName::Computed(computed) = key else {
+                                return Err("unsupported object literal key".into());
+                            };
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.coerce_primitive_to_string(key)?
+                        }
+                    };
+                    let value = self.lower_object_lit_field_value(value, None)?;
+                    let value = self.coerce_to_declared(&HirType::Json, value)?;
+                    ("data", key, Some(value), None)
+                }
+                Prop::Shorthand(ident) => {
+                    let value = self.lower_expr(&Expr::Ident(ident.clone()))?;
+                    let value = self.coerce_to_declared(&HirType::Json, value)?;
+                    (
+                        "data",
+                        HirExpr::Lit(HirLit::Str(ident.sym.to_string())),
+                        Some(value),
+                        None,
+                    )
+                }
+                Prop::Method(method) => {
+                    let key = match self.static_object_property_name(&method.key) {
+                        Some(key) => HirExpr::Lit(HirLit::Str(key)),
+                        None => {
+                            let PropName::Computed(computed) = &method.key else {
+                                return Err("unsupported object method key".into());
+                            };
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.coerce_primitive_to_string(key)?
+                        }
+                    };
+                    let callback = self.lower_object_function(
+                        &method.function,
+                        HirType::JsValue,
+                        None,
+                        true,
+                    )?;
+                    ("method", key, None, Some(callback))
+                }
+                Prop::Getter(getter) => {
+                    let key = match self.static_object_property_name(&getter.key) {
+                        Some(key) => HirExpr::Lit(HirLit::Str(key)),
+                        None => {
+                            let PropName::Computed(computed) = &getter.key else {
+                                return Err("unsupported object getter key".into());
+                            };
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.coerce_primitive_to_string(key)?
+                        }
+                    };
+                    let callback = self.lower_object_function(
+                        &getter.function,
+                        HirType::JsValue,
+                        None,
+                        true,
+                    )?;
+                    ("getter", key, None, Some(callback))
+                }
+                Prop::Setter(setter) => {
+                    let key = match self.static_object_property_name(&setter.key) {
+                        Some(key) => HirExpr::Lit(HirLit::Str(key)),
+                        None => {
+                            let PropName::Computed(computed) = &setter.key else {
+                                return Err("unsupported object setter key".into());
+                            };
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.coerce_primitive_to_string(key)?
+                        }
+                    };
+                    let callback = self.lower_object_function(
+                        &setter.function,
+                        HirType::JsValue,
+                        None,
+                        true,
+                    )?;
+                    ("setter", key, None, Some(callback))
+                }
+                _ => return Err("unsupported dynamic object literal property".into()),
+            };
+            let key_name = format!("__thaw_dynamic_object_key_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(key_name.clone(), HirType::Str);
+            bindings.push((key_name.clone(), HirType::Str, key));
+            kinds.push(HirExpr::Lit(HirLit::Str(kind.into())));
+            keys.push(HirExpr::Var(key_name));
+            if let Some(value) = value {
+                let value_name = format!("__thaw_dynamic_object_value_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(value_name.clone(), HirType::Json);
+                bindings.push((value_name.clone(), HirType::Json, value));
+                values.push(HirExpr::Var(value_name));
+            } else {
+                values.push(self.coerce_to_declared(
+                    &HirType::Json,
+                    HirExpr::Lit(HirLit::Null),
+                )?);
+            }
+            if let Some(callback) = callback {
+                callbacks.push(HirExpr::Call(
+                    Box::new(HirExpr::Var("registerNativeCallback".into())),
+                    vec![callback],
+                ));
+            }
+        }
+        let kinds = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(kinds))?;
+        let keys = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(keys))?;
+        let values = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+        let arguments = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(vec![kinds, keys, values]),
+        )?;
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str(
+                        "__thaw_object_from_operations".into(),
+                    ))],
+                ),
+                arguments,
+                HirExpr::ArrayLit(callbacks),
+            ],
+        );
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     /// Lowers an object literal's own `key: value` field value -- almost
     /// always just `lower_expr`, with one narrow exception: a method
     /// call whose *receiver* is already known to be `JsValue`-typed
@@ -497,14 +655,36 @@ impl<'a> FnLowerer<'a> {
         obj_lit: &SwcObjectLit,
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<HirExpr, String> {
+        let has_callable = obj_lit.props.iter().any(|property| {
+            matches!(property, PropOrSpread::Prop(property)
+                if matches!(property.as_ref(), Prop::Method(_) | Prop::Getter(_) | Prop::Setter(_)))
+        });
         let has_dynamic_computed_key = expected_fields.is_none()
             && obj_lit.props.iter().any(|property| {
-                matches!(property, PropOrSpread::Prop(property)
-                    if matches!(property.as_ref(), Prop::KeyValue(KeyValueProp {
-                        key: PropName::Computed(computed), ..
-                    }) if self.static_property_name(&computed.expr).is_none()))
+                match property {
+                    PropOrSpread::Prop(property) => match property.as_ref() {
+                        Prop::KeyValue(KeyValueProp {
+                            key: PropName::Computed(computed),
+                            ..
+                        }) => self.static_property_name(&computed.expr).is_none(),
+                        Prop::Method(property) => {
+                            self.static_object_property_name(&property.key).is_none()
+                        }
+                        Prop::Getter(property) => {
+                            self.static_object_property_name(&property.key).is_none()
+                        }
+                        Prop::Setter(property) => {
+                            self.static_object_property_name(&property.key).is_none()
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                }
             });
         if has_dynamic_computed_key {
+            if has_callable {
+                return self.lower_dynamic_accessor_object_lit(obj_lit);
+            }
             return if obj_lit
                 .props
                 .iter()
@@ -528,7 +708,11 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             if dynamic_spread.is_some() {
-                return self.lower_dynamic_spread_object_lit(obj_lit);
+                return if has_callable {
+                    self.lower_dynamic_accessor_object_lit(obj_lit)
+                } else {
+                    self.lower_dynamic_spread_object_lit(obj_lit)
+                };
             }
         }
         struct AwaitFinder(bool);
