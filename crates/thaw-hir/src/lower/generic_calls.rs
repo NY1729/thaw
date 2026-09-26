@@ -751,12 +751,46 @@ impl<'a> FnLowerer<'a> {
                 return self
                     .wrap_call_argument_bindings(result, &[(name, receiver_type, receiver)]);
             }
+            // The receiver is present, but the *property* itself may be an
+            // optional function (`o.f?.()`). Reuse the receiver we already
+            // lowered (so `new C().f?.()` constructs once) and let the
+            // shared target path conditionally invoke the property value;
+            // otherwise this is an ordinary member call.
+            let property_is_optional = match (&receiver_type, &member.prop) {
+                (HirType::Object(fields), MemberProp::Ident(prop)) => fields
+                    .iter()
+                    .find(|(name, _)| name == prop.sym.as_str())
+                    .is_some_and(|(_, ty)| {
+                        matches!(
+                            ty,
+                            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                        )
+                    }),
+                _ => false,
+            };
+            if property_is_optional {
+                let property = member_property_name(&member.prop)
+                    .ok_or("optional call requires a statically known property")?;
+                let callee = HirExpr::PropAccess(Box::new(receiver), receiver_type, property);
+                return self.lower_optional_call_target(callee, call);
+            }
             let mut ordinary = CallExpr::from(call.clone());
             ordinary.callee = Callee::Expr(Box::new(Expr::Member(member.clone())));
             return self.lower_call(&ordinary);
         }
 
         let callee = self.lower_expr(&call.callee)?;
+        self.lower_optional_call_target(callee, call)
+    }
+
+    /// Shared tail of `lower_optional_call`: given an already-lowered callee
+    /// value, conditionally invoke it when it is
+    /// `Optional`/`Nullable`/`Nullish` of a function, else an ordinary call.
+    fn lower_optional_call_target(
+        &mut self,
+        callee: HirExpr,
+        call: &swc_ecma_ast::OptCall,
+    ) -> Result<HirExpr, String> {
         let callee_type = self.infer_expr_type(&callee)?;
         let (payload, absence_kind) = match callee_type.clone() {
             HirType::Optional(payload) => (payload, 0),
