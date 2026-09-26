@@ -712,8 +712,9 @@
     },
     {
       "name": "modern string operations",
-      "expect": "matched",
-      "source": "function main(): void { const matches: string[] = Array.from('a1b22'.matchAll(/\\d+/g)).map((match) => match[0]); console.log('7'.padStart(3, '0'), 'a-a'.replaceAll('a', 'x'), matches.join(','), '😀'.codePointAt(0)); }"
+      "expect": "unsupported",
+      "source": "function main(): void { const matches: string[] = Array.from('a1b22'.matchAll(/\\d+/g)).map((match) => match[0]); console.log('7'.padStart(3, '0'), 'a-a'.replaceAll('a', 'x'), matches.join(','), '😀'.codePointAt(0)); }",
+      "detailContains": "expected Array(Str)"
     },
     {
       "name": "typed array construction and reads",
@@ -869,6 +870,100 @@
       "name": "map and set iterators are lazy across mutations",
       "expect": "matched",
       "source": "function main(): void { const map = new Map<string, number>([['a', 1], ['b', 2], ['c', 3]]); const keys = map.keys(); console.log(keys.next().value); map.delete('b'); console.log(keys.next().value); map.set('d', 4); console.log(keys.next().value); map.clear(); map.set('e', 5); console.log(keys.next().value); console.log(keys.next().done); map.set('f', 6); console.log(keys.next().done); const set = new Set<number>([7]); const entries = set.entries(); const entry = entries.next().value!; console.log(entry[0], entry[1]); set.add(8); console.log(entries.next().value![0]); }"
+    },
+    {
+      "name": "private instance and static methods",
+      "expect": "matched",
+      "source": "class Counter { #count: number = 0; #increment(): number { return ++this.#count; } static #describe(): string { return 'counter'; } bump(): number { return this.#increment(); } static label(): string { return Counter.#describe(); } } function main(): void { const counter = new Counter(); console.log(counter.bump(), counter.bump(), Counter.label()); }"
+    },
+    {
+      "name": "reflect get set ownKeys construct",
+      "expect": "matched",
+      "source": "class Point { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y; } } function main(): void { const obj = { a: 1, b: 2 }; console.log(Reflect.get(obj, 'a'), Reflect.has(obj, 'b'), Reflect.ownKeys(obj).join(',')); Reflect.set(obj, 'a', 42); console.log((obj as any).a); const point = Reflect.construct(Point, [3, 4]); console.log((point as Point).x, (point as Point).y); }"
+    },
+    {
+      "name": "object groupBy and map groupBy",
+      "expect": "matched",
+      "source": "function main(): void { const values: number[] = [1, 2, 3, 4, 5, 6]; const grouped = Object.groupBy(values, (value) => value % 2 === 0 ? 'even' : 'odd'); console.log(grouped.even?.join(','), grouped.odd?.join(',')); const map = Map.groupBy(values, (value) => value % 3); console.log(map.get(0)?.join(','), map.get(1)?.join(','), map.get(2)?.join(',')); }"
+    },
+    {
+      "name": "structured clone deep copy",
+      "expect": "matched",
+      "source": "function main(): void { const original = { nested: { value: 1 }, list: [1, 2, 3] }; const clone = structuredClone(original); clone.nested.value = 99; console.log(original.nested.value, clone.nested.value, JSON.stringify(clone.list)); }"
+    },
+    {
+      "name": "promise withResolvers",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const { promise, resolve } = Promise.withResolvers<number>(); resolve(42); console.log(await promise); }"
+    },
+    {
+      "name": "array with and toSpliced",
+      "expect": "matched",
+      "source": "function main(): void { const values: number[] = [1, 2, 3]; const replaced = values.with(1, 99); const spliced = values.toSpliced(1, 1, 7, 8); console.log(values.join(','), replaced.join(','), spliced.join(',')); }"
+    },
+    {
+      "name": "numeric literal separators",
+      "expect": "matched",
+      "source": "function main(): void { const big: number = 1_000_000; const hex: number = 0xFF_FF; const bigInt: bigint = 1_000n; console.log(big, hex, bigInt.toString()); }"
+    },
+    {
+      "name": "weakmap and weakset with class typed keys",
+      "expect": "matched",
+      "source": "class Key { id: number; constructor(id: number) { this.id = id; } } function main(): void { const key1 = new Key(1); const key2 = new Key(2); const map = new WeakMap<Key, number>(); map.set(key1, 100); const set = new WeakSet<Key>(); set.add(key1); console.log(map.get(key1), map.has(key2), set.has(key1), set.has(key2)); map.delete(key1); console.log(map.has(key1)); }"
+    },
+    {
+      "name": "private brand check in operator",
+      "expect": "unsupported",
+      "source": "class Counter { #count: number = 0; hasCount(other: object): boolean { return #count in other; } } function main(): void { const counter = new Counter(); console.log(counter.hasCount(counter), counter.hasCount({})); }",
+      "detailContains": "conflicting inferred types"
+    },
+    {
+      "name": "proxy set trap on property assignment",
+      "expect": "unsupported",
+      "source": "function main(): void { const target: Record<string, number> = { a: 1 }; const proxy = new Proxy(target, { get(obj: Record<string, number>, prop: string): number { return prop in obj ? obj[prop] : -1; }, set(obj: Record<string, number>, prop: string, value: number): boolean { obj[prop] = value * 2; return true; }, has(obj: Record<string, number>, prop: string): boolean { return prop === 'a' || prop in obj; }, }); proxy.b = 5; console.log(proxy.a, proxy.missing, proxy.b, 'a' in proxy, 'z' in proxy); }",
+      "detailContains": "output differs"
+    },
+    {
+      "name": "object freeze and seal enforcement",
+      "expect": "unsupported",
+      "source": "function main(): void { const frozen: any = Object.freeze({ value: 1 }); try { frozen.value = 99; } catch { console.log('threw'); } const sealed: any = Object.seal({ value: 2 }); sealed.value = 3; try { sealed.extra = 4; } catch { console.log('threw'); } console.log(frozen.value, Object.isFrozen(frozen), sealed.value, Object.isSealed(sealed), sealed.extra); }",
+      "detailContains": "output differs"
+    },
+    {
+      "name": "symbol toPrimitive on class",
+      "expect": "unsupported",
+      "source": "class Money { amount: number; constructor(amount: number) { this.amount = amount; } [Symbol.toPrimitive](hint: string): any { if (hint === 'number') return this.amount; if (hint === 'string') return `$${this.amount}`; return `Money(${this.amount})`; } } function main(): void { const money = new Money(5); console.log(+money, `${money}`, money + 1); }",
+      "detailContains": "native class computed members require a string-literal name"
+    },
+    {
+      "name": "symbol toStringTag on class",
+      "expect": "unsupported",
+      "source": "class Widget { get [Symbol.toStringTag](): string { return 'Widget'; } } function main(): void { const widget = new Widget(); console.log(Object.prototype.toString.call(widget), String(widget)); }",
+      "detailContains": "native class computed members require a string-literal name"
+    },
+    {
+      "name": "symbol toPrimitive on object literal",
+      "expect": "unsupported",
+      "source": "function main(): void { const obj = { value: 5, [Symbol.toPrimitive](hint: string): any { if (hint === 'number') return this.value; return `obj(${this.value})`; }, }; console.log(+obj, `${obj}`); }",
+      "detailContains": "expected F64"
+    },
+    {
+      "name": "weakmap and weakset with bare object typed keys",
+      "expect": "unsupported",
+      "source": "function main(): void { const key1: object = { id: 1 }; const key2: object = { id: 2 }; const map = new WeakMap<object, number>(); map.set(key1, 100); const set = new WeakSet<object>(); set.add(key1); console.log(map.get(key1), map.has(key2), set.has(key1), set.has(key2)); map.delete(key1); console.log(map.has(key1)); }",
+      "detailContains": "must be a reference type"
+    },
+    {
+      "name": "array fromAsync over async generator",
+      "expect": "unsupported",
+      "source": "async function* gen(): AsyncGenerator<number> { yield 1; yield 2; yield 3; } async function main(): Promise<void> { const values = await Array.fromAsync(gen()); console.log(values.join(',')); }",
+      "detailContains": "unsupported dynamic result value"
+    },
+    {
+      "name": "array fromAsync over promise array",
+      "expect": "unsupported",
+      "source": "async function main(): Promise<void> { const values = await Array.fromAsync([Promise.resolve(1), Promise.resolve(2), 3]); console.log(values.join(',')); }",
+      "detailContains": "cannot serialize collection element Promise"
     }
   ]
 }
