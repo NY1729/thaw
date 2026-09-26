@@ -279,25 +279,22 @@ impl<'a> FnLowerer<'a> {
                     let (key, value) = match prop.as_ref() {
                         Prop::KeyValue(KeyValueProp { key, value }) => {
                             let key = match key {
-                                PropName::Ident(key) => key.sym.to_string(),
-                                PropName::Str(key) => {
-                                    key.value.to_string_lossy().into_owned()
+                                PropName::Ident(key) => {
+                                    HirExpr::Lit(HirLit::Str(key.sym.to_string()))
                                 }
-                                PropName::Computed(computed) => match computed.expr.as_ref() {
-                                    Expr::Lit(Lit::Str(value)) => {
-                                        value.value.to_string_lossy().into_owned()
-                                    }
-                                    _ => return Err(
-                                        "computed object literal keys must be string literals"
-                                            .to_string(),
-                                    ),
-                                },
+                                PropName::Str(key) => HirExpr::Lit(HirLit::Str(
+                                    key.value.to_string_lossy().into_owned(),
+                                )),
+                                PropName::Computed(computed) => {
+                                    let key = self.lower_expr(&computed.expr)?;
+                                    self.coerce_primitive_to_string(key)?
+                                }
                                 _ => return Err("unsupported object literal key".to_string()),
                             };
                             (key, self.lower_object_lit_field_value(value, None)?)
                         }
                         Prop::Shorthand(ident) => (
-                            ident.sym.to_string(),
+                            HirExpr::Lit(HirLit::Str(ident.sym.to_string())),
                             self.lower_expr(&Expr::Ident(ident.clone()))?,
                         ),
                         _ => {
@@ -307,6 +304,10 @@ impl<'a> FnLowerer<'a> {
                             )
                         }
                     };
+                    let key_name = format!("__thaw_dynamic_object_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(key_name.clone(), HirType::Str);
+                    bindings.push((key_name.clone(), HirType::Str, key));
                     let value = self.coerce_to_declared(&HirType::Json, value)?;
                     let value_name =
                         format!("__thaw_dynamic_object_value_{}", self.next_binding);
@@ -315,7 +316,7 @@ impl<'a> FnLowerer<'a> {
                     bindings.push((value_name.clone(), HirType::Json, value));
                     body.push(HirStmt::Expr(HirExpr::JsonSet(
                         Box::new(HirExpr::Var(object_name.clone())),
-                        Box::new(HirExpr::Lit(HirLit::Str(key))),
+                        Box::new(HirExpr::Var(key_name)),
                         Box::new(HirExpr::Var(value_name)),
                         HirType::Json,
                         false,
@@ -420,15 +421,23 @@ impl<'a> FnLowerer<'a> {
         obj_lit: &SwcObjectLit,
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<HirExpr, String> {
-        if expected_fields.is_none()
+        let has_dynamic_computed_key = expected_fields.is_none()
             && obj_lit.props.iter().any(|property| {
                 matches!(property, PropOrSpread::Prop(property)
                     if matches!(property.as_ref(), Prop::KeyValue(KeyValueProp {
                         key: PropName::Computed(computed), ..
                     }) if self.static_property_name(&computed.expr).is_none()))
-            })
-        {
-            return self.lower_computed_dictionary_lit(obj_lit);
+            });
+        if has_dynamic_computed_key {
+            return if obj_lit
+                .props
+                .iter()
+                .any(|property| matches!(property, PropOrSpread::Spread(_)))
+            {
+                self.lower_dynamic_spread_object_lit(obj_lit)
+            } else {
+                self.lower_computed_dictionary_lit(obj_lit)
+            };
         }
         if expected_fields.is_none() {
             let mut dynamic_spread = None;

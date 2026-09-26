@@ -1127,6 +1127,15 @@ fn compiles_dynamic_object_introspection_used_inline_in_console_log() {
 fn compiles_dynamic_object_literal_spread() {
     let source = r#"
         interface Fixed { x: number; y: number; }
+        let order = "";
+        function computedKey(label: string, key: string): string {
+            order += label;
+            return key;
+        }
+        function computedValue(label: string, value: number): number {
+            order += label;
+            return value;
+        }
         function main(): void {
             const obj: any = { a: 1, b: "x", c: true };
             console.log(JSON.stringify({ ...obj, d: 4 }));
@@ -1146,6 +1155,17 @@ fn compiles_dynamic_object_literal_spread() {
             const target: any = { a: 1 };
             Object.assign(target, nullish, missing, { b: 2 });
             console.log(JSON.stringify(target));
+            const computed = {
+                [computedKey("k1", "b")]: computedValue("v1", 20),
+                ...obj,
+                [computedKey("k2", "d")]: computedValue("v2", 4),
+                ...{ b: 5 },
+                [computedKey("k3", "a")]: computedValue("v3", 9),
+            };
+            console.log(order);
+            console.log(JSON.stringify(computed));
+            const numericKey = 2;
+            console.log(JSON.stringify({ ...obj, [numericKey]: 8 }));
         }
     "#;
     assert_eq!(
@@ -1161,6 +1181,9 @@ fn compiles_dynamic_object_literal_spread() {
             "{\"0\":1,\"1\":2,\"2\":3}\n",
             "{\"a\":1,\"b\":2}\n",
             "{\"a\":1,\"b\":2}\n",
+            "k1v1k2v2k3v3\n",
+            "{\"b\":5,\"a\":9,\"c\":true,\"d\":4}\n",
+            "{\"2\":8,\"a\":1,\"b\":\"x\",\"c\":true}\n",
         )
     );
 }
