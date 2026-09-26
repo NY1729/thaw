@@ -813,10 +813,12 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
         } else {
             wrapped
         };
+        out.push_str("    loadScript(\"globalThis.__thaw_intrinsic_Array = globalThis.Array;\");\n");
         out.push_str(&format!(
             "    loadScript(\"{}\");\n",
             escape_ts_string_literal(&wrapped)
         ));
+        out.push_str("    loadScript(\"globalThis.Array = globalThis.__thaw_intrinsic_Array;\");\n");
         for (export_name, runtime_getter, _, _) in bundle.value_exports {
             let value_path = export_name
                 .split('.')

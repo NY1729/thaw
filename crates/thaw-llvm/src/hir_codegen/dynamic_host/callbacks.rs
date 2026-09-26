@@ -1445,11 +1445,10 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// Decodes a dynamic call's raw JSON result into a declared `Union`
-    /// return type -- real example: validator's own `normalizeEmail(...):
-    /// string | false`. Every member must be a plain scalar (`F64`/`Str`/
-    /// `Bool`/`Null`/`Undefined`); anything else (an object, array,
-    /// nested union, ...) still errors, matching this whole function's
-    /// pre-existing "not supported yet" behavior for those shapes. Picks
+    /// return type -- real examples: validator's `normalizeEmail(...):
+    /// string | false` and protobufjs's `number | Long`. Every member must
+    /// have a distinct runtime `typeof` category; ambiguous members use the
+    /// first declared match. Picks
     /// the member whose runtime JS-visible category the JSON value
     /// actually has (via `thaw_json_typeof`/the napi-undefined sentinel
     /// check, the same primitives already used elsewhere in this file --
@@ -1488,6 +1487,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     | HirType::Bool
                     | HirType::Null
                     | HirType::Undefined
+                    | HirType::Object(_)
                     | HirType::Function(..)
                     | HirType::CallableFunction(..)
             ) {
@@ -1532,6 +1532,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 HirType::F64 => self.compile_typeof_matches(typeof_string, "number")?,
                 HirType::Str => self.compile_typeof_matches(typeof_string, "string")?,
                 HirType::Bool => self.compile_typeof_matches(typeof_string, "boolean")?,
+                HirType::Object(_) => {
+                    let is_object = self.compile_typeof_matches(typeof_string, "object")?;
+                    let is_not_null = self
+                        .builder
+                        .build_not(is_null, "dynamic_union_object_not_null")
+                        .map_err(|error| error.to_string())?;
+                    self.builder
+                        .build_and(is_object, is_not_null, "dynamic_union_is_object")
+                        .map_err(|error| error.to_string())?
+                }
                 // A returned JS function's own `typeof` can't tell apart
                 // two callable members that differ only in *their own*
                 // return type (real example: ejs's own `compile(...):
