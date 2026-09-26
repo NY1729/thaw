@@ -1329,6 +1329,12 @@ impl<'a> FnLowerer<'a> {
                     let mut values_type = self.infer_expr_type(&values)?;
                     let array_holes_possible =
                         self.expression_may_be_sparse_array(&for_of.right);
+                    if let HirType::Union(members) = &values_type {
+                        if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            (values, values_type) =
+                                self.lower_union_array_sequence(values, members)?;
+                        }
+                    }
                     let mut generator_producer = None;
                     if values_type == HirType::Str {
                         values = HirExpr::Call(
@@ -1463,7 +1469,7 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         (element.clone(), false)
                     };
-                    if array_holes_possible && !for_of.is_await {
+                    if array_holes_possible && !await_item {
                         item_type = HirType::Optional(Box::new(item_type));
                     }
                     let values_name = format!("__thaw_for_of_values_{}", self.next_binding);
@@ -1474,7 +1480,7 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
                     let array_item_value = if array_holes_possible
-                        && !for_of.is_await
+                        && !await_item
                         && generator_producer.is_none()
                         && !json_array
                     {

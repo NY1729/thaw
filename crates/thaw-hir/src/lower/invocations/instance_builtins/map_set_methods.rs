@@ -651,10 +651,22 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"keys" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
-                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let mut receiver_type = self.infer_expr_type(&receiver)?;
                     if !call.args.is_empty() {
                         return Err("native `.keys()` expects no arguments".into());
                     }
+                    let receiver = if let HirType::Union(members) = &receiver_type {
+                        if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            let (receiver, ty) =
+                                self.lower_union_array_sequence(receiver, members)?;
+                            receiver_type = ty;
+                            receiver
+                        } else {
+                            receiver
+                        }
+                    } else {
+                        receiver
+                    };
                     if let HirType::Array(_) = &receiver_type {
                         return self.lower_array_keys(receiver, receiver_type);
                     }
@@ -685,10 +697,22 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"values" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
-                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let mut receiver_type = self.infer_expr_type(&receiver)?;
                     if !call.args.is_empty() {
                         return Err("native `.values()` expects no arguments".into());
                     }
+                    let receiver = if let HirType::Union(members) = &receiver_type {
+                        if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            let (receiver, ty) =
+                                self.lower_union_array_sequence(receiver, members)?;
+                            receiver_type = ty;
+                            receiver
+                        } else {
+                            receiver
+                        }
+                    } else {
+                        receiver
+                    };
                     if let HirType::Array(element_type) = &receiver_type {
                         return self.lower_array_values(
                             receiver,
@@ -719,10 +743,22 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"entries" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
-                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let mut receiver_type = self.infer_expr_type(&receiver)?;
                     if !call.args.is_empty() {
                         return Err("native `.entries()` expects no arguments".into());
                     }
+                    let receiver = if let HirType::Union(members) = &receiver_type {
+                        if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            let (receiver, ty) =
+                                self.lower_union_array_sequence(receiver, members)?;
+                            receiver_type = ty;
+                            receiver
+                        } else {
+                            receiver
+                        }
+                    } else {
+                        receiver
+                    };
                     if let HirType::Array(element_type) = &receiver_type {
                         let element_type = element_type.as_ref().clone();
                         return self.lower_array_entries(receiver, receiver_type, element_type);

@@ -257,6 +257,23 @@ impl<'a> FnLowerer<'a> {
                             pattern, value, elements, statements,
                         );
                     }
+                    if elements
+                        .iter()
+                        .all(|element| matches!(element, HirType::Array(_)))
+                    {
+                        let (flattened, flattened_type) =
+                            self.lower_union_array_sequence(value, elements)?;
+                        let name = format!("__thaw_destructure_union_array_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), flattened_type.clone());
+                        statements.push(HirStmt::Let(name.clone(), flattened_type.clone(), flattened));
+                        return self.lower_binding_pattern(
+                            &Pat::Array(pattern.clone()),
+                            HirExpr::Var(name),
+                            &flattened_type,
+                            statements,
+                        );
+                    }
                 }
                 if let HirType::Array(element) = ty {
                     // Unlike `HirType::Tuple` below (a fixed, compile-

@@ -80,6 +80,72 @@ fn weak_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String>
 }
 
 impl<'a> FnLowerer<'a> {
+    fn lower_union_array_sequence(
+        &mut self,
+        receiver: HirExpr,
+        members: &[HirType],
+    ) -> Result<(HirExpr, HirType), String> {
+        let mut element_members = Vec::new();
+        for member in members {
+            let HirType::Array(element) = member else {
+                return Err(format!("sequence receiver union member {member:?} is not an array"));
+            };
+            Self::flatten_property_union_members(element, &mut element_members)?;
+        }
+        let element_type = match element_members.as_slice() {
+            [] => return Err("sequence receiver cannot be an empty union".into()),
+            [element] => element.clone(),
+            _ => HirType::Union(element_members),
+        };
+        let array_type = HirType::Array(Box::new(element_type.clone()));
+        let receiver_type = HirType::Union(members.to_vec());
+        let receiver_name = format!("__thaw_union_sequence_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+
+        let mut branches = Vec::with_capacity(members.len());
+        for (index, member) in members.iter().enumerate() {
+            let HirType::Array(source_element) = member else { unreachable!() };
+            let parameter = format!("__thaw_union_sequence_element_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope
+                .insert(parameter.clone(), source_element.as_ref().clone());
+            let converted = self.coerce_to_declared(
+                &element_type,
+                HirExpr::Var(parameter.clone()),
+            )?;
+            let callback = HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: parameter,
+                    ty: source_element.as_ref().clone(),
+                }],
+                element_type.clone(),
+                Box::new(converted),
+            );
+            branches.push(self.lower_array_map(
+                HirExpr::UnionValue(
+                    Box::new(HirExpr::Var(receiver_name.clone())),
+                    index,
+                    members.to_vec(),
+                ),
+                member.clone(),
+                source_element.as_ref().clone(),
+                source_element.as_ref().clone(),
+                callback,
+                None,
+            )?);
+        }
+        let result = self.merge_union_array_method_branches(&receiver_name, members, branches)?;
+        Ok((
+            self.wrap_call_argument_bindings(
+                result,
+                &[(receiver_name, receiver_type, receiver)],
+            )?,
+            array_type,
+        ))
+    }
+
     fn merge_union_array_method_branches(
         &mut self,
         receiver_name: &str,

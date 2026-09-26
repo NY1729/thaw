@@ -512,3 +512,34 @@ fn compiles_mutating_methods_on_unions_of_arrays() {
         )
     );
 }
+
+#[test]
+fn destructures_union_arrays_with_defaults_rest_and_single_evaluation() {
+    let source = r#"
+        let calls = 0;
+        function values(numbers: boolean): number[] | string[] {
+            calls++;
+            if (numbers) return [1, , 3, 4];
+            return ["a", , "c", "d"];
+        }
+        function main(): void {
+            const [numberFirst, numberDefault = 2, ...numberRest] = values(true);
+            console.log(String(numberFirst), String(numberDefault), numberRest.join("|"));
+            const [wordFirst, wordDefault = "b", ...wordRest] = values(false);
+            console.log(String(wordFirst), String(wordDefault), wordRest.join("|"));
+
+            let first: number | string | undefined = 0;
+            let second: number | string = 0;
+            let rest: (number | string)[] = [];
+            [first, second = 2, ...rest] = values(true);
+            console.log(String(first), String(second), rest.join("|"));
+            [first, second = "b", ...rest] = values(false);
+            console.log(String(first), String(second), rest.join("|"));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_destructuring"),
+        "1 2 3|4\na b c|d\n1 2 3|4\na b c|d\n4\n"
+    );
+}
