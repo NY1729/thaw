@@ -108,6 +108,14 @@ fn is_opaque_global_type(name: &str) -> bool {
     )
 }
 
+/// An object-literal accessor's backing closure is stored as a hidden
+/// `__thaw_getter_<name>`/`__thaw_setter_<name>` field so the read/write
+/// paths can dispatch to it; it is never an own enumerable property, so
+/// enumeration, JSON serialization and declared-type checks all skip it.
+fn is_hidden_accessor_field(name: &str) -> bool {
+    name.starts_with("__thaw_getter_") || name.starts_with("__thaw_setter_")
+}
+
 /// Whether an object type's identity chain (see `module/classes.rs`) makes
 /// it an `Error`-family instance -- the built-ins themselves, or any user
 /// class transitively `extends`ing one of them.

@@ -31,6 +31,22 @@ impl<'a> FnLowerer<'a> {
         receiver: HirType,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        self.lower_object_function(&method.function, receiver, expected, false)
+    }
+
+    /// Lowers an object-literal method/getter/setter body into a closure
+    /// value. When the body uses `this` (or `force_receiver`, for an
+    /// accessor whose read/write site always passes the receiver), the
+    /// receiver becomes the closure's leading parameter -- the same
+    /// convention the ordinary member-call path already passes a method's
+    /// receiver by, so accessors reuse it unchanged.
+    fn lower_object_function(
+        &mut self,
+        function: &swc_ecma_ast::Function,
+        receiver: HirType,
+        expected: Option<&HirType>,
+        force_receiver: bool,
+    ) -> Result<HirExpr, String> {
         struct ReplaceThis<'a>(&'a str);
         impl VisitMut for ReplaceThis<'_> {
             fn visit_mut_expr(&mut self, expression: &mut Expr) {
@@ -47,11 +63,11 @@ impl<'a> FnLowerer<'a> {
 
         let expression = swc_ecma_ast::FnExpr {
             ident: None,
-            function: method.function.clone(),
+            function: Box::new(function.clone()),
         };
         let mut arrow = function_expression_as_arrow(&expression)?;
-        let uses_this = function_uses_this(&method.function);
-        let contextual = expected.and_then(|ty| callback_signature(ty, method.function.params.len()));
+        let uses_this = force_receiver || function_uses_this(function);
+        let contextual = expected.and_then(|ty| callback_signature(ty, function.params.len()));
         let mut params = Vec::new();
         if uses_this {
             let receiver_name = format!("__thaw_object_this_{}", self.next_binding);
@@ -69,7 +85,7 @@ impl<'a> FnLowerer<'a> {
             );
             params.push(receiver);
         }
-        params.extend(method.function.params.iter().enumerate().map(|(index, parameter)| {
+        params.extend(function.params.iter().enumerate().map(|(index, parameter)| {
             lower_param(
                         &parameter.pat,
                         self.interfaces,
@@ -85,8 +101,7 @@ impl<'a> FnLowerer<'a> {
                             .ok_or(error)
                     })
         }).collect::<Result<Vec<_>, _>>()?);
-        let expected_return = method
-            .function
+        let expected_return = function
             .return_type
             .as_ref()
             .map(|annotation| {
@@ -545,6 +560,108 @@ impl<'a> FnLowerer<'a> {
                         });
                         vec![(name, self.lower_object_method(method, receiver, expected)?)]
                     }
+                    // An accessor is stored as two fields: the visible
+                    // property (typed by the getter's return, or the
+                    // setter's parameter, so ordinary type inference still
+                    // sees it) and a hidden `__thaw_getter_`/`__thaw_setter_`
+                    // closure the read/write paths dispatch to. The closure
+                    // always takes the receiver as its leading parameter
+                    // (`force_receiver`), so the dispatch site is uniform.
+                    Prop::Getter(getter) => {
+                        let name = match &getter.key {
+                            PropName::Ident(name) => name.sym.to_string(),
+                            PropName::Str(name) => name.value.to_string_lossy().into_owned(),
+                            PropName::Computed(computed) => {
+                                match well_known_symbol_from_expr(&computed.expr) {
+                                    Some(symbol) => well_known_symbol_key(symbol),
+                                    None => {
+                                        return Err("object getter name must be static".into())
+                                    }
+                                }
+                            }
+                            _ => return Err("object getter name must be static".into()),
+                        };
+                        let receiver = HirType::Object(
+                            fields
+                                .iter()
+                                .map(|(name, value)| {
+                                    Ok((name.clone(), self.infer_expr_type(value)?))
+                                })
+                                .chain(std::iter::once(Ok((
+                                    "__thaw_object_method_receiver".into(),
+                                    HirType::Undefined,
+                                ))))
+                                .collect::<Result<Vec<_>, String>>()?,
+                        );
+                        let value =
+                            self.lower_object_function(&getter.function, receiver, None, true)?;
+                        let return_type = match self.infer_expr_type(&value)? {
+                            HirType::Function(_, ret) => *ret,
+                            HirType::CallableFunction(_, _, _, ret) => *ret,
+                            other => {
+                                return Err(format!("object getter has non-function type {other:?}"))
+                            }
+                        };
+                        vec![
+                            (name.clone(), Self::unreachable_value(&return_type)?),
+                            (format!("__thaw_getter_{name}"), value),
+                        ]
+                    }
+                    Prop::Setter(setter) => {
+                        let name = match &setter.key {
+                            PropName::Ident(name) => name.sym.to_string(),
+                            PropName::Str(name) => name.value.to_string_lossy().into_owned(),
+                            PropName::Computed(computed) => {
+                                match well_known_symbol_from_expr(&computed.expr) {
+                                    Some(symbol) => well_known_symbol_key(symbol),
+                                    None => {
+                                        return Err("object setter name must be static".into())
+                                    }
+                                }
+                            }
+                            _ => return Err("object setter name must be static".into()),
+                        };
+                        let receiver = HirType::Object(
+                            fields
+                                .iter()
+                                .map(|(name, value)| {
+                                    Ok((name.clone(), self.infer_expr_type(value)?))
+                                })
+                                .chain(std::iter::once(Ok((
+                                    "__thaw_object_method_receiver".into(),
+                                    HirType::Undefined,
+                                ))))
+                                .collect::<Result<Vec<_>, String>>()?,
+                        );
+                        let value =
+                            self.lower_object_function(&setter.function, receiver, None, true)?;
+                        let parameter_type = setter
+                            .function
+                            .params
+                            .first()
+                            .ok_or_else(|| {
+                                "object setter requires exactly one parameter".to_string()
+                            })
+                            .and_then(|parameter| {
+                                lower_param(
+                                    &parameter.pat,
+                                    self.interfaces,
+                                    self.generic_interfaces,
+                                    false,
+                                    &HashMap::new(),
+                                )
+                                .map(|parameter| parameter.ty)
+                            })?;
+                        let mut additions = vec![(format!("__thaw_setter_{name}"), value)];
+                        // A preceding getter already gave the visible property
+                        // its (return) type; only a lone setter supplies the
+                        // placeholder itself.
+                        if !fields.iter().any(|(field, _)| field == &name) {
+                            additions
+                                .insert(0, (name, Self::unreachable_value(&parameter_type)?));
+                        }
+                        additions
+                    }
                     _ => {
                         return Err(
                             "only data properties are supported in object literals".to_string()
@@ -554,10 +671,12 @@ impl<'a> FnLowerer<'a> {
             };
             if matches!(property, PropOrSpread::Prop(_)) {
                 if let Some(expected) = expected_fields {
-                    if let Some((name, _)) = additions
-                        .iter()
-                        .find(|(name, _)| !expected.iter().any(|(field, _)| field == name))
-                    {
+                    if let Some((name, _)) = additions.iter().find(|(name, _)| {
+                        // Accessor closures are internal (`__thaw_getter_`/
+                        // `__thaw_setter_`), never declared-type members.
+                        !name.starts_with("__thaw_")
+                            && !expected.iter().any(|(field, _)| field == name)
+                    }) {
                         return Err(format!(
                             "object literal property `{name}` is not present in the declared type"
                         ));
@@ -1754,6 +1873,27 @@ impl<'a> FnLowerer<'a> {
                         ))
                     }
                     HirType::Object(fields) => {
+                        // An object-literal accessor stores a hidden closure
+                        // under `__thaw_getter_<name>`/`__thaw_setter_<name>`;
+                        // a read dispatches to the getter (always passing the
+                        // receiver as its leading argument), a lone setter
+                        // reads `undefined`, and an ordinary data field reads
+                        // directly.
+                        let getter = format!("__thaw_getter_{}", prop.sym);
+                        if fields.iter().any(|(name, _)| name == &getter) {
+                            let getter_value = HirExpr::PropAccess(
+                                Box::new(obj.clone()),
+                                obj_ty.clone(),
+                                getter,
+                            );
+                            return Ok(HirExpr::Call(Box::new(getter_value), vec![obj]));
+                        }
+                        let setter = format!("__thaw_setter_{}", prop.sym);
+                        if fields.iter().any(|(name, _)| name == &setter)
+                            && !fields.iter().any(|(name, _)| name == &getter)
+                        {
+                            return Ok(HirExpr::Lit(HirLit::Undefined));
+                        }
                         if fields.iter().any(|(name, _)| name == prop.sym.as_str()) {
                             Ok(HirExpr::PropAccess(
                                 Box::new(obj),

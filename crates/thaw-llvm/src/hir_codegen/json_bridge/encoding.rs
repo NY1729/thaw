@@ -190,6 +190,21 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for (index, (name, field_ty)) in fields.iter().enumerate() {
+            // An object-literal accessor is internal: its backing closure is
+            // hidden, and its visible placeholder field isn't a real stored
+            // value (a direct read invokes the getter), so neither belongs in
+            // the marshaled JSON.
+            if name.starts_with("__thaw_getter_") || name.starts_with("__thaw_setter_") {
+                continue;
+            }
+            let getter = format!("__thaw_getter_{name}");
+            let setter = format!("__thaw_setter_{name}");
+            if fields
+                .iter()
+                .any(|(field, _)| field == &getter || field == &setter)
+            {
+                continue;
+            }
             let offset = self
                 .context
                 .i64_type()

@@ -1011,6 +1011,31 @@ impl<'a> FnLowerer<'a> {
             }
         };
 
+        // An object-literal setter stores a hidden `__thaw_setter_<field>`
+        // closure; a write dispatches to it (receiver + value) instead of
+        // storing the field.
+        if let Target::Prop(object, HirType::Object(fields), field) = &target {
+            let setter = format!("__thaw_setter_{field}");
+            if let Some((_, setter_type)) = fields.iter().find(|(name, _)| name == &setter) {
+                let parameter_type = match setter_type {
+                    HirType::Function(params, _) => params.last().cloned(),
+                    HirType::CallableFunction(params, _, _, _) => params.last().cloned(),
+                    _ => None,
+                }
+                .ok_or_else(|| format!("object setter `{field}` has no value parameter"))?;
+                let value = self.coerce_to_declared(&parameter_type, value)?;
+                let setter_value = HirExpr::PropAccess(
+                    Box::new(object.clone()),
+                    HirType::Object(fields.clone()),
+                    setter,
+                );
+                return Ok(HirExpr::Call(
+                    Box::new(setter_value),
+                    vec![object.clone(), value],
+                ));
+            }
+        }
+
         let result = build_assign(target, value);
         if let Some((object, path, value, nested)) = assigned_function_property {
             let metadata = self
