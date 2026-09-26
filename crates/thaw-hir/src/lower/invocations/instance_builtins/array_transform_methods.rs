@@ -11,6 +11,34 @@ impl<'a> FnLowerer<'a> {
                     }
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    if let HirType::Union(members) = &receiver_type {
+                        if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            let name = format!("__thaw_union_reversed_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), receiver_type.clone());
+                            let branches = members
+                                .iter()
+                                .enumerate()
+                                .map(|(index, _)| {
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_array_to_reversed".into())),
+                                        vec![HirExpr::UnionValue(
+                                            Box::new(HirExpr::Var(name.clone())),
+                                            index,
+                                            members.clone(),
+                                        )],
+                                    )
+                                })
+                                .collect();
+                            let result = self.merge_union_array_method_branches(
+                                &name, members, branches,
+                            )?;
+                            return self.wrap_call_argument_bindings(
+                                result,
+                                &[(name, receiver_type, receiver)],
+                            );
+                        }
+                    }
                     if !matches!(receiver_type, HirType::Array(_)) {
                         return Err(format!(
                             "`.toReversed()` requires a homogeneous array, got {receiver_type:?}"
@@ -646,6 +674,46 @@ impl<'a> FnLowerer<'a> {
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     let array_type = receiver_type;
+                    if let HirType::Union(members) = &array_type {
+                        if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                            let receiver_name =
+                                format!("__thaw_union_at_source_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(receiver_name.clone(), array_type.clone());
+                            let (arguments, spread_bindings) =
+                                self.lower_native_spread_values(&call.args, "Array.at")?;
+                            let [index] = arguments.as_slice() else {
+                                return Err("native array `.at()` expects exactly one index".into());
+                            };
+                            let index = self.coerce_primitive_to_number(index.clone())?;
+                            let index_name = format!("__thaw_union_at_index_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(index_name.clone(), HirType::F64);
+                            let mut branches = Vec::with_capacity(members.len());
+                            for (member_index, member) in members.iter().enumerate() {
+                                let HirType::Array(element) = member else { unreachable!() };
+                                branches.push(self.lower_array_at(
+                                    HirExpr::UnionValue(
+                                        Box::new(HirExpr::Var(receiver_name.clone())),
+                                        member_index,
+                                        members.clone(),
+                                    ),
+                                    member.clone(),
+                                    element.as_ref().clone(),
+                                    HirExpr::Var(index_name.clone()),
+                                )?);
+                            }
+                            let result = self.merge_union_array_method_branches(
+                                &receiver_name,
+                                members,
+                                branches,
+                            )?;
+                            let mut bindings = vec![(receiver_name, array_type, receiver)];
+                            bindings.extend(spread_bindings);
+                            bindings.push((index_name, HirType::F64, index));
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                    }
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
                             "array `.at()` requires a homogeneous array, got {array_type:?}"

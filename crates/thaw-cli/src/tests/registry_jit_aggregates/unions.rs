@@ -162,6 +162,92 @@ fn fixed_tuple_unions_use_jit_without_quickjs() {
 }
 
 #[test]
+fn array_union_read_methods_use_runtime_tags_once() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-union-reads-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-union-reads");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        concat!(
+            "export declare function reversed(value: number[] | string[]): string;\n",
+            "export declare function slice(value: number[] | string[], start: number, end: number): string;\n",
+            "export declare function subarray(value: number[] | string[], start: number): string;\n",
+            "export declare function at(value: number[] | string[], index: number): string;\n",
+            "export declare function join(value: number[] | string[], separator: string): string;\n",
+            "export declare function includesNumber(value: number[] | string[], needle: number): boolean;\n",
+            "export declare function includesString(value: number[] | string[], needle: string): boolean;\n",
+            "export declare function indexNumber(value: number[] | string[], needle: number): number;\n",
+            "export declare function lastString(value: number[] | string[], needle: string): number;\n",
+            "export declare function effects(value: number[] | string[], start: number): string;\n",
+            "export declare function sparse(value: number[] | string[]): string;\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        concat!(
+            "module.exports.reversed = value => value.toReversed().join(','); ",
+            "module.exports.slice = (value, start, end) => value.slice(start, end).join(','); ",
+            "module.exports.subarray = (value, start) => { const result = value.subarray(start); return result.join(','); }; ",
+            "module.exports.at = (value, index) => String(value.at(index) ?? 'missing'); ",
+            "module.exports.join = (value, separator) => value.join(separator); ",
+            "module.exports.includesNumber = (value, needle) => value.includes(needle); ",
+            "module.exports.includesString = (value, needle) => value.includes(needle); ",
+            "module.exports.indexNumber = (value, needle) => value.indexOf(needle); ",
+            "module.exports.lastString = (value, needle) => value.lastIndexOf(needle); ",
+            "module.exports.effects = (value, start) => { let count = 0; const receiver = () => { count++; return value; }; const argument = () => { count++; return start; }; const result = receiver().slice(argument()); return String(count) + ':' + result.join(','); }; ",
+            "module.exports.sparse = value => { const result = value.toReversed().slice(0); return result.join('|') + ':' + String(result.hasOwnProperty(0)) + ':' + String(result.hasOwnProperty(1)) + ':' + String(result.hasOwnProperty(2)); };",
+        ),
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { at, effects, includesNumber, includesString, indexNumber, join, lastString, reversed, slice, sparse } from 'jit-array-union-reads';\n",
+            "function localSubarray(value: number[] | string[], start: number): string { return value.subarray(start).join(','); }\n",
+            "function localIncludesHole(value: number[] | string[]): boolean { return value.includes(undefined); }\n",
+            "function main(): void {\n",
+            "  const numbers: number[] = [1, 2, 3, 2]; const strings: string[] = ['a', 'b', 'a'];\n",
+            "  const sparseNumbers: number[] = [, 7, ,];\n",
+            "  const sparseStrings: string[] = [, 'x', ,];\n",
+            "  console.log(reversed(numbers)); console.log(reversed(strings));\n",
+            "  console.log(slice(numbers, 1, 3)); console.log(slice(strings, 1, 3));\n",
+            "  console.log(localSubarray(numbers, 2)); console.log(localSubarray(strings, 1));\n",
+            "  console.log(at(numbers, -1)); console.log(at(strings, -1));\n",
+            "  console.log(join(numbers, '-')); console.log(join(strings, '-'));\n",
+            "  console.log(includesNumber(numbers, 2)); console.log(includesNumber(strings, 2));\n",
+            "  console.log(includesString(numbers, 'a')); console.log(includesString(strings, 'a'));\n",
+            "  console.log(indexNumber(numbers, 2)); console.log(indexNumber(strings, 2));\n",
+            "  console.log(lastString(numbers, 'a')); console.log(lastString(strings, 'a'));\n",
+            "  console.log(localIncludesHole(sparseNumbers)); console.log(localIncludesHole(sparseStrings));\n",
+            "  console.log(effects(numbers, 1)); console.log(effects(strings, 1));\n",
+            "  console.log(sparse(sparseNumbers)); console.log(sparse(sparseStrings));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2,3,2,1\na,b,a\n2,3\nb,a\n3,2\nb,a\n2\na\n1-2-3-2\na-b-a\ntrue\nfalse\nfalse\ntrue\n1\n-1\n-1\n2\ntrue\ntrue\n2:2,3,2\n2:b,a\n|7|:true:true:true\n|x|:true:true:true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn tuple_union_array_updates_use_jit_without_quickjs() {
     let dts = concat!(
         "export declare function fillNumbers(value: number[] | [number, number], replacement: number): number[];\n",
@@ -961,4 +1047,3 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
-

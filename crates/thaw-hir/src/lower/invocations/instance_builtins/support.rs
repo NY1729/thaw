@@ -79,6 +79,56 @@ fn weak_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String>
     }
 }
 
+impl<'a> FnLowerer<'a> {
+    fn merge_union_array_method_branches(
+        &mut self,
+        receiver_name: &str,
+        members: &[HirType],
+        branches: Vec<HirExpr>,
+    ) -> Result<HirExpr, String> {
+        let mut branch_types = Vec::with_capacity(branches.len());
+        let mut result_members = Vec::new();
+        for branch in &branches {
+            let ty = self.infer_expr_type(branch)?;
+            Self::flatten_property_union_members(&ty, &mut result_members)?;
+            branch_types.push(ty);
+        }
+        let result_type = match result_members.as_slice() {
+            [] => return Err("cannot call an array method on an empty union".into()),
+            [single] => single.clone(),
+            _ => HirType::Union(result_members),
+        };
+        let receiver = HirExpr::Var(receiver_name.into());
+        let mut result = None;
+        for (index, (branch, branch_type)) in branches
+            .into_iter()
+            .zip(branch_types)
+            .enumerate()
+            .rev()
+        {
+            let branch = if branch_type == result_type {
+                branch
+            } else {
+                self.coerce_to_declared(&result_type, branch)?
+            };
+            result = Some(match result {
+                None => branch,
+                Some(rest) => HirExpr::Conditional(
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(receiver.clone()), members.to_vec())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    )),
+                    Box::new(branch),
+                    Box::new(rest),
+                    result_type.clone(),
+                ),
+            });
+        }
+        result.ok_or_else(|| "cannot call an array method on an empty union".into())
+    }
+}
+
 /// Chooses which `__thaw_map_{num,str}_get_*` variant decodes a `Map`
 /// value of `value_type` correctly, and whether the raw call result needs
 /// wrapping in `HirExpr::TypedClosure` to recover a pointer-shaped type
