@@ -74,6 +74,53 @@ impl<'a> FnLowerer<'a> {
                 return Ok(HirExpr::JsonAsNative(Box::new(value), declared.clone()));
             }
         }
+        // `arr[i]`'s hole/out-of-bounds-aware read is typed `Optional<T>`,
+        // so a callback that returns one makes `.map`/`.flatMap` produce
+        // `Array<Optional<T>>`. Assigning that to a declared `T[]` has no
+        // natural coercion -- real trigger: `const words: string[] =
+        // Array.from(s.matchAll(re)).map((m) => m[0])`, which broke once
+        // array reads became hole-aware. Unwrap element-wise through the
+        // existing array-map lowerer, reusing the same `Optional<T> -> T`
+        // scalar coercion (`undefined` -> "undefined"/NaN) already applied
+        // to `const value: T = arr[i]` assignments.
+        if let HirType::Array(declared_element) = declared {
+            if !matches!(value, HirExpr::ArrayLit(_)) {
+                if let HirType::Array(actual_element) = &self.infer_expr_type(&value)? {
+                    if let HirType::Optional(payload) = actual_element.as_ref() {
+                        if payload.as_ref() == declared_element.as_ref()
+                            && matches!(payload.as_ref(), HirType::F64 | HirType::Str)
+                        {
+                            let parameter = format!("__thaw_array_unwrap_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope
+                                .insert(parameter.clone(), actual_element.as_ref().clone());
+                            let bound = HirExpr::Var(parameter.clone());
+                            let body = match payload.as_ref() {
+                                HirType::F64 => self.coerce_primitive_to_number(bound)?,
+                                _ => self.coerce_primitive_to_string(bound)?,
+                            };
+                            let callback = HirExpr::Lambda(
+                                Vec::new(),
+                                vec![HirParam {
+                                    name: parameter,
+                                    ty: actual_element.as_ref().clone(),
+                                }],
+                                payload.as_ref().clone(),
+                                Box::new(body),
+                            );
+                            return self.lower_array_map(
+                                value,
+                                HirType::Array(actual_element.clone()),
+                                actual_element.as_ref().clone(),
+                                actual_element.as_ref().clone(),
+                                callback,
+                                None,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let inferred = self.infer_expr_type(&value)?;
         if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _)) {
             return Ok(HirExpr::Call(

@@ -712,9 +712,8 @@
     },
     {
       "name": "modern string operations",
-      "expect": "unsupported",
-      "source": "function main(): void { const matches: string[] = Array.from('a1b22'.matchAll(/\\d+/g)).map((match) => match[0]); console.log('7'.padStart(3, '0'), 'a-a'.replaceAll('a', 'x'), matches.join(','), '😀'.codePointAt(0)); }",
-      "detailContains": "expected Array(Str)"
+      "expect": "matched",
+      "source": "function main(): void { const matches: string[] = Array.from('a1b22'.matchAll(/\\d+/g)).map((match) => match[0]); console.log('7'.padStart(3, '0'), 'a-a'.replaceAll('a', 'x'), matches.join(','), '😀'.codePointAt(0)); }"
     },
     {
       "name": "typed array construction and reads",
