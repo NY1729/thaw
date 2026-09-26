@@ -2,6 +2,7 @@
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     immutable_bindings: HashSet<Symbol>,
+    static_string_bindings: HashMap<Symbol, String>,
     narrowings: HashMap<Symbol, HirType>,
     nullable_narrowings: HashMap<Symbol, HirType>,
     nullish_narrowings: HashMap<Symbol, HirType>,

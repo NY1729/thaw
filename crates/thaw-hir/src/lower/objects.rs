@@ -25,6 +25,17 @@ fn callback_signature(ty: &HirType, supplied: usize) -> Option<(Vec<HirType>, Hi
 }
 
 impl<'a> FnLowerer<'a> {
+    fn static_object_property_name(&self, property: &PropName) -> Option<String> {
+        match property {
+            PropName::Ident(name) => Some(name.sym.to_string()),
+            PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
+            PropName::Computed(computed) => well_known_symbol_from_expr(&computed.expr)
+                .map(well_known_symbol_key)
+                .or_else(|| self.static_property_name(&computed.expr)),
+            _ => None,
+        }
+    }
+
     fn lower_object_method(
         &mut self,
         method: &swc_ecma_ast::MethodProp,
@@ -414,7 +425,7 @@ impl<'a> FnLowerer<'a> {
                 matches!(property, PropOrSpread::Prop(property)
                     if matches!(property.as_ref(), Prop::KeyValue(KeyValueProp {
                         key: PropName::Computed(computed), ..
-                    }) if !matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_)))))
+                    }) if self.static_property_name(&computed.expr).is_none()))
             })
         {
             return self.lower_computed_dictionary_lit(obj_lit);
@@ -507,22 +518,9 @@ impl<'a> FnLowerer<'a> {
                 }
                 PropOrSpread::Prop(prop) => match prop.as_ref() {
                     Prop::KeyValue(KeyValueProp { key, value }) => {
-                        let name = match key {
-                            PropName::Ident(ident) => ident.sym.to_string(),
-                            PropName::Str(s) => s.value.to_string_lossy().into_owned(),
-                            PropName::Computed(computed) => match computed.expr.as_ref() {
-                                Expr::Lit(Lit::Str(value)) => {
-                                    value.value.to_string_lossy().into_owned()
-                                }
-                                _ => {
-                                    return Err(
-                                        "computed object literal keys must be string literals"
-                                            .to_string(),
-                                    )
-                                }
-                            },
-                            _ => return Err("unsupported object literal key".to_string()),
-                        };
+                        let name = self
+                            .static_object_property_name(key)
+                            .ok_or_else(|| "unsupported object literal key".to_string())?;
                         let expected = expected_fields.and_then(|fields| {
                             fields
                                 .iter()
@@ -535,23 +533,9 @@ impl<'a> FnLowerer<'a> {
                         self.lower_expr(&Expr::Ident(ident.clone()))?,
                     )],
                     Prop::Method(method) => {
-                        let name = match &method.key {
-                            PropName::Ident(name) => name.sym.to_string(),
-                            PropName::Str(name) => name.value.to_string_lossy().into_owned(),
-                            // A computed well-known symbol (`[Symbol.iterator]`,
-                            // `[Symbol.dispose]`, ...) is stored under its
-                            // sentinel key so the matching member call can find
-                            // it.
-                            PropName::Computed(computed) => {
-                                match well_known_symbol_from_expr(&computed.expr) {
-                                    Some(symbol) => well_known_symbol_key(symbol),
-                                    None => {
-                                        return Err("object method name must be static".into())
-                                    }
-                                }
-                            }
-                            _ => return Err("object method name must be static".into()),
-                        };
+                        let name = self
+                            .static_object_property_name(&method.key)
+                            .ok_or_else(|| "object method name must be static".to_string())?;
                         let receiver = HirType::Object(
                             fields
                                 .iter()
@@ -579,19 +563,9 @@ impl<'a> FnLowerer<'a> {
                     // always takes the receiver as its leading parameter
                     // (`force_receiver`), so the dispatch site is uniform.
                     Prop::Getter(getter) => {
-                        let name = match &getter.key {
-                            PropName::Ident(name) => name.sym.to_string(),
-                            PropName::Str(name) => name.value.to_string_lossy().into_owned(),
-                            PropName::Computed(computed) => {
-                                match well_known_symbol_from_expr(&computed.expr) {
-                                    Some(symbol) => well_known_symbol_key(symbol),
-                                    None => {
-                                        return Err("object getter name must be static".into())
-                                    }
-                                }
-                            }
-                            _ => return Err("object getter name must be static".into()),
-                        };
+                        let name = self
+                            .static_object_property_name(&getter.key)
+                            .ok_or_else(|| "object getter name must be static".to_string())?;
                         let receiver = HirType::Object(
                             fields
                                 .iter()
@@ -619,19 +593,9 @@ impl<'a> FnLowerer<'a> {
                         ]
                     }
                     Prop::Setter(setter) => {
-                        let name = match &setter.key {
-                            PropName::Ident(name) => name.sym.to_string(),
-                            PropName::Str(name) => name.value.to_string_lossy().into_owned(),
-                            PropName::Computed(computed) => {
-                                match well_known_symbol_from_expr(&computed.expr) {
-                                    Some(symbol) => well_known_symbol_key(symbol),
-                                    None => {
-                                        return Err("object setter name must be static".into())
-                                    }
-                                }
-                            }
-                            _ => return Err("object setter name must be static".into()),
-                        };
+                        let name = self
+                            .static_object_property_name(&setter.key)
+                            .ok_or_else(|| "object setter name must be static".to_string())?;
                         let receiver = HirType::Object(
                             fields
                                 .iter()

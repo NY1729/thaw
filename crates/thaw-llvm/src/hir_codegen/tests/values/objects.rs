@@ -285,6 +285,36 @@ fn observes_accessor_key_order_replacers_and_overwrites() {
 }
 
 #[test]
+fn observes_local_const_computed_object_members() {
+    let source = r#"
+        function main(): void {
+            const prefix = "val";
+            const key = `${prefix}ue`;
+            let stored = 3;
+            const source = {
+                ["z"]: 0,
+                get [key](): number { return stored; },
+                set [key](next: number) { stored = next; },
+            };
+            console.log(Object.keys(source).join(","), source.value);
+            source.value = 8;
+            const descriptor = Object.getOwnPropertyDescriptor(source, "value")!;
+            console.log(source.value, typeof descriptor.get, typeof descriptor.set);
+
+            {
+                const key = "inner";
+                const nested = { get [key](): number { return 11; } };
+                console.log(nested.inner, Object.keys(nested).join(","));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "local_const_computed_object_members"),
+        "z,value 3\n8 function function\n11 inner\n"
+    );
+}
+
+#[test]
 fn observes_native_accessor_descriptors_and_json_replacers() {
     let source = r#"
         let stored = 2;
