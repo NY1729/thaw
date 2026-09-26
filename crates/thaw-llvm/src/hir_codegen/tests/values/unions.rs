@@ -704,3 +704,26 @@ fn compiles_map_on_a_union_of_arrays() {
         "10:0:2,20:1:2\na!,b!\n"
     );
 }
+
+#[test]
+fn compiles_predicate_methods_on_a_union_of_arrays() {
+    let source = r#"
+        function main(): void {
+            const numbers: number[] | string[] = [10, 20, 30];
+            console.log(numbers.some((value) => String(value) === "20"));
+            console.log(numbers.every(
+                (value, index, array) => String(value).length === 2 && index < array.length
+            ));
+            console.log(numbers.find((value) => String(value) === "20"));
+            console.log(numbers.findIndex((value) => String(value) === "30"));
+            console.log(numbers.findLast((value) => String(value).length === 2));
+            console.log(numbers.findLastIndex((value) => String(value).length === 2));
+            const strings: number[] | string[] = ["a", "b"];
+            console.log(strings.find((value) => String(value) === "b"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_predicates"),
+        "true\ntrue\n20\n2\n30\n2\nb\n"
+    );
+}
