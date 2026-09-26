@@ -426,12 +426,12 @@ impl<'a> FnLowerer<'a> {
                                 &bindings,
                             );
                         }
-                        let descriptor = Self::fixed_object_property_descriptor(
+                        let descriptor = self.fixed_object_property_descriptor(
                             target.clone(),
                             &target_type,
                             fields,
                             &key,
-                        );
+                        )?;
                         return self.wrap_call_argument_bindings(descriptor, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"create" {
@@ -647,11 +647,8 @@ impl<'a> FnLowerer<'a> {
                     if (object.sym == *"Object" || object.sym == *"Reflect")
                         && property.sym == *"defineProperty"
                     {
-                        // A `value`-only descriptor, and only for a field
-                        // the receiver already has: thaw's objects are
-                        // fixed-layout, so it can reassign an existing
-                        // field but cannot add a new one, and it has no
-                        // accessor (get/set) properties.
+                        // Fixed objects can update data fields or existing
+                        // accessor slots, but cannot change their layout.
                         let [target, key, descriptor] = call.args.as_slice() else {
                             return Err(
                                 "`Object.defineProperty` expects exactly three arguments".into()
@@ -714,81 +711,16 @@ impl<'a> FnLowerer<'a> {
                                     .into(),
                             );
                         };
-                        let mut descriptor_value = None;
-                        for property in &descriptor.props {
-                            let swc_ecma_ast::PropOrSpread::Prop(property) = property else {
-                                return Err(
-                                    "`Object.defineProperty` descriptor must not spread".into()
-                                );
-                            };
-                            let swc_ecma_ast::Prop::KeyValue(property) = property.as_ref() else {
-                                return Err(
-                                    "`Object.defineProperty` descriptor must use `key: value` entries"
-                                        .into(),
-                                );
-                            };
-                            let name = match &property.key {
-                                swc_ecma_ast::PropName::Ident(ident) => ident.sym.to_string(),
-                                swc_ecma_ast::PropName::Str(value) => {
-                                    value.value.to_string_lossy().into_owned()
-                                }
-                                _ => continue,
-                            };
-                            match name.as_str() {
-                                "value" => descriptor_value = Some(property.value.as_ref()),
-                                "writable" | "enumerable" | "configurable" => {}
-                                "get" | "set" => {
-                                    return Err(
-                                        "`Object.defineProperty` accessors (get/set) are not supported"
-                                            .into(),
-                                    )
-                                }
-                                _ => {}
-                            }
-                        }
-                        let Some(descriptor_value) = descriptor_value else {
-                            return Err(
-                                "`Object.defineProperty` requires a `value` in its descriptor"
-                                    .into(),
-                            );
-                        };
-                        let value = self.lower_expr(descriptor_value)?;
                         let target_value = self.lower_expr(target.expr.as_ref())?;
                         let target_type = self.infer_expr_type(&target_value)?;
-                        let assign = match &target_type {
-                            HirType::Object(fields) => {
-                                let Some((_, field_type)) =
-                                    fields.iter().find(|(name, _)| name == &key)
-                                else {
-                                    return Err(format!(
-                                        "`Object.defineProperty` cannot add the new field `{key}` to a fixed object"
-                                    ));
-                                };
-                                let value = self.coerce_to_declared(field_type, value)?;
-                                HirExpr::PropAssign(
-                                    Box::new(target_value.clone()),
-                                    target_type.clone(),
-                                    key,
-                                    Box::new(value),
-                                )
-                            }
-                            HirType::Json => {
-                                let value_type = self.infer_expr_type(&value)?;
-                                HirExpr::JsonSet(
-                                    Box::new(target_value.clone()),
-                                    Box::new(HirExpr::Lit(HirLit::Str(key))),
-                                    Box::new(value),
-                                    value_type,
-                                    true,
-                                )
-                            }
-                            other => {
-                                return Err(format!(
-                                    "`Object.defineProperty` currently requires a fixed object or \
-                                     JSON receiver, got {other:?}"
-                                ))
-                            }
-                        };
+                        let label = format!("{}.defineProperty", object.sym);
+                        let assignments = self.lower_native_property_descriptor(
+                            target_value.clone(),
+                            &target_type,
+                            &key,
+                            descriptor,
+                            &label,
+                        )?;
                         // `Object.defineProperty` returns the object;
                         // `Reflect.defineProperty` returns a boolean. Run
                         // the assignment for its side effect and hand back
@@ -798,10 +730,12 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             (target_value, target_type)
                         };
-                        let body = HirExpr::Block(vec![
-                            HirStmt::Expr(assign),
-                            HirStmt::Return(Some(return_value)),
-                        ]);
+                        let mut body = assignments
+                            .into_iter()
+                            .map(HirStmt::Expr)
+                            .collect::<Vec<_>>();
+                        body.push(HirStmt::Return(Some(return_value)));
+                        let body = HirExpr::Block(body);
                         let mut referenced = BTreeSet::new();
                         collect_referenced_bindings(&body, &mut referenced);
                         let captures = referenced
@@ -867,27 +801,26 @@ impl<'a> FnLowerer<'a> {
                         };
                         let descriptors = ecmascript_field_order(fields)
                             .into_iter()
-                            .map(|index| {
+                            .map(|index| -> Result<_, String> {
                                 let name = &fields[index].0;
-                                (
+                                Ok((
                                     name.clone(),
-                                    Self::fixed_object_property_descriptor(
+                                    self.fixed_object_property_descriptor(
                                         target.clone(),
                                         &target_type,
                                         fields,
                                         name,
-                                    ),
-                                )
+                                    )?,
+                                ))
                             })
-                            .collect::<Vec<_>>();
+                            .collect::<Result<Vec<_>, _>>()?;
                         return self
                             .wrap_call_argument_bindings(HirExpr::ObjectLit(descriptors), &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"defineProperties" {
-                        // Desugars to a sequence of `value`-only
-                        // `Object.defineProperty` assignments over the
-                        // descriptor object's literal keys (same limits:
-                        // existing field on a fixed object, or a JSON key).
+                        // Desugars to descriptor assignments over literal
+                        // keys with the same fixed-layout limits as
+                        // `Object.defineProperty`.
                         let [target, descriptors] = call.args.as_slice() else {
                             return Err(
                                 "`Object.defineProperties` expects exactly two arguments".into()
@@ -965,77 +898,17 @@ impl<'a> FnLowerer<'a> {
                                     "`Object.defineProperties` descriptor for `{key}` must be an object literal"
                                 ));
                             };
-                            let mut descriptor_value = None;
-                            for entry in &descriptor.props {
-                                let swc_ecma_ast::PropOrSpread::Prop(entry) = entry else {
-                                    return Err(
-                                        "`Object.defineProperties` descriptor must not spread"
-                                            .into(),
-                                    );
-                                };
-                                let swc_ecma_ast::Prop::KeyValue(entry) = entry.as_ref() else {
-                                    return Err(
-                                        "`Object.defineProperties` descriptor must use `key: value` entries"
-                                            .into(),
-                                    );
-                                };
-                                let name = match &entry.key {
-                                    swc_ecma_ast::PropName::Ident(ident) => ident.sym.to_string(),
-                                    swc_ecma_ast::PropName::Str(value) => {
-                                        value.value.to_string_lossy().into_owned()
-                                    }
-                                    _ => continue,
-                                };
-                                if name == "value" {
-                                    descriptor_value = Some(entry.value.as_ref());
-                                } else if name == "get" || name == "set" {
-                                    return Err(
-                                        "`Object.defineProperties` accessors (get/set) are not supported"
-                                            .into(),
-                                    );
-                                }
-                            }
-                            let Some(descriptor_value) = descriptor_value else {
-                                return Err(format!(
-                                    "`Object.defineProperties` requires a `value` for `{key}`"
-                                ));
-                            };
-                            let value = self.lower_expr(descriptor_value)?;
-                            let assign = match &target_type {
-                                HirType::Object(fields) => {
-                                    let Some((_, field_type)) =
-                                        fields.iter().find(|(name, _)| name == &key)
-                                    else {
-                                        return Err(format!(
-                                            "`Object.defineProperties` cannot add the new field `{key}` to a fixed object"
-                                        ));
-                                    };
-                                    let value = self.coerce_to_declared(field_type, value)?;
-                                    HirExpr::PropAssign(
-                                        Box::new(target_value.clone()),
-                                        target_type.clone(),
-                                        key,
-                                        Box::new(value),
-                                    )
-                                }
-                                HirType::Json => {
-                                    let value_type = self.infer_expr_type(&value)?;
-                                    HirExpr::JsonSet(
-                                        Box::new(target_value.clone()),
-                                        Box::new(HirExpr::Lit(HirLit::Str(key))),
-                                        Box::new(value),
-                                        value_type,
-                                        true,
-                                    )
-                                }
-                                other => {
-                                    return Err(format!(
-                                        "`Object.defineProperties` currently requires a fixed object or \
-                                         JSON receiver, got {other:?}"
-                                    ))
-                                }
-                            };
-                            body.push(HirStmt::Expr(assign));
+                            body.extend(
+                                self.lower_native_property_descriptor(
+                                    target_value.clone(),
+                                    &target_type,
+                                    &key,
+                                    descriptor,
+                                    "Object.defineProperties",
+                                )?
+                                .into_iter()
+                                .map(HirStmt::Expr),
+                            );
                         }
                         body.push(HirStmt::Return(Some(target_value)));
                         let body = HirExpr::Block(body);
