@@ -2128,7 +2128,13 @@ impl<'a> FnLowerer<'a> {
                             if argument.spread.is_some() {
                                 // Same snapshot conversion array-literal spreads
                                 // (`[...str]`/`[...map]`/`[...set]`) already use.
-                                let spread_source_type = self.infer_expr_type(&value)?;
+                                let mut spread_source_type = self.infer_expr_type(&value)?;
+                                if let HirType::Union(members) = &spread_source_type {
+                                    if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                        (value, spread_source_type) =
+                                            self.lower_union_array_sequence(value, members)?;
+                                    }
+                                }
                                 if spread_source_type == HirType::Str {
                                     value = HirExpr::Call(
                                         Box::new(HirExpr::Var("__thaw_string_to_array".into())),
@@ -2603,12 +2609,18 @@ impl<'a> FnLowerer<'a> {
                         if argument_count != 2 {
                             return Err(format!("`{label}` expects exactly two arguments"));
                         }
-                        let items = if has_spread {
+                        let mut items = if has_spread {
                             arguments[0].clone()
                         } else {
                             self.lower_expr(&call.args[0].expr)?
                         };
-                        let items_type = self.infer_expr_type(&items)?;
+                        let mut items_type = self.infer_expr_type(&items)?;
+                        if let HirType::Union(members) = &items_type {
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                (items, items_type) =
+                                    self.lower_union_array_sequence(items, members)?;
+                            }
+                        }
                         let HirType::Array(item_type) = &items_type else {
                             return Err(format!(
                                 "`{label}` requires a homogeneous array, got {items_type:?}"

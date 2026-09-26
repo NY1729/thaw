@@ -1430,6 +1430,77 @@ fn compiles_object_group_by_a_native_array() {
 }
 
 #[test]
+fn composes_union_array_constructors_concat_and_grouping() {
+    let source = r#"
+        let calls = 0;
+        let callbacks = 0;
+        let concatOrder = "";
+        function values(numbers: boolean): number[] | string[] {
+            calls++;
+            return numbers ? [1, 2, 3] : ["a", "b", "c"];
+        }
+        function sparse(numbers: boolean): number[] | string[] {
+            calls++;
+            return numbers ? [1, , 3] : ["a", , "c"];
+        }
+        function compatible(full: boolean): number[] | (number | undefined)[] {
+            calls++;
+            concatOrder += "r";
+            return full ? [4, 5] : [, 6];
+        }
+        function appended(): number {
+            calls++;
+            concatOrder += "a";
+            return 9;
+        }
+        function entries(numbers: boolean): [string, number][] | [string, string][] {
+            calls++;
+            if (numbers) {
+                const numeric: [string, number][] = [["x", 1], ["y", 2]];
+                return numeric;
+            }
+            const text: [string, string][] = [["x", "a"], ["z", "c"]];
+            return text;
+        }
+        function key(value: number | string, index: number): string {
+            callbacks++;
+            return String(value) + index;
+        }
+        function main(): void {
+            for (const tag of [true, false]) {
+                const concatenated = compatible(tag).concat(appended());
+                console.log(concatenated.join("|"));
+
+                const made = Array.of(...sparse(tag));
+                console.log(made.join("|"), Object.hasOwn(made, 1));
+
+                const set = new Set(values(tag));
+                const map = new Map(entries(tag));
+                console.log("built");
+
+                const objectGroups = Object.groupBy(values(tag), key);
+                console.log(Object.keys(objectGroups).join("|"));
+                const mapGroups = Map.groupBy(values(tag), key);
+                console.log(mapGroups.size);
+                const legacy = values(tag).group(key);
+                console.log(Object.keys(legacy).length);
+                const legacyMap = values(tag).groupToMap(key);
+                console.log(legacyMap.size);
+            }
+            console.log(calls, callbacks, concatOrder);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "union_array_composition"),
+        concat!(
+            "4|5|9\n", "1||3 true\n", "built\n", "10|21|32\n", "3\n", "3\n", "3\n",
+            "|6|9\n", "a||c true\n", "built\n", "a0|b1|c2\n", "3\n", "3\n", "3\n",
+            "18 24 rara\n",
+        )
+    );
+}
+
+#[test]
 fn compiles_set_union_intersection_and_difference() {
     // Each builds a fresh Set from `__thaw_map_snapshot_keys` snapshots of
     // its operand(s), the same conversion `[...set]`/`Array.from(set)`

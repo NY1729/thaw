@@ -518,6 +518,11 @@ impl<'a> FnLowerer<'a> {
             let source = value.as_ref();
             let mut value = self.lower_expr(source)?;
             let mut value_type = self.infer_expr_type(&value)?;
+            if let HirType::Union(members) = &value_type {
+                if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                    (value, value_type) = self.lower_union_array_sequence(value, members)?;
+                }
+            }
             if value_type == HirType::Str && matches!(element, HirType::Str | HirType::Dynamic) {
                 return Ok((
                     vec![HirStmt::Expr(HirExpr::Assign(

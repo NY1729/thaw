@@ -1974,6 +1974,31 @@ fn compiles_generator_yield_delegate() {
 }
 
 #[test]
+fn generator_yield_delegate_flattens_union_arrays_once() {
+    let source = r#"
+        let calls = 0;
+        function values(numbers: boolean): number[] | string[] {
+            calls++;
+            return numbers ? [1, 2, 3] : ["a", "b", "c"];
+        }
+        function* generate(numbers: boolean): Generator<number | string> {
+            yield* values(numbers);
+        }
+        function main(): void {
+            for (const tag of [true, false]) {
+                const seen = Array.from(generate(tag));
+                console.log(seen.join("|"), Object.hasOwn(seen, 1));
+            }
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_union_array_delegate"),
+        "1|2|3 true\na|b|c true\n2\n"
+    );
+}
+
+#[test]
 fn suspends_generator_delegation_until_its_batch_is_consumed() {
     let source = r#"
         let progress: number = 0;
