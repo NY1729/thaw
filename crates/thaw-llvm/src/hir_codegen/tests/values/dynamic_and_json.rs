@@ -1166,6 +1166,10 @@ fn compiles_dynamic_object_literal_spread() {
             console.log(JSON.stringify(computed));
             const numericKey = 2;
             console.log(JSON.stringify({ ...obj, [numericKey]: 8 }));
+            console.log(JSON.stringify({ ...obj, 6: 6, 7n: 7 }));
+            const dictionary = { 1: 1, [computedKey("k4", "x")]: 2, 3n: 3 };
+            console.log(JSON.stringify(dictionary));
+            console.log(order);
         }
     "#;
     assert_eq!(
@@ -1184,6 +1188,9 @@ fn compiles_dynamic_object_literal_spread() {
             "k1v1k2v2k3v3\n",
             "{\"b\":5,\"a\":9,\"c\":true,\"d\":4}\n",
             "{\"2\":8,\"a\":1,\"b\":\"x\",\"c\":true}\n",
+            "{\"6\":6,\"7\":7,\"a\":1,\"b\":\"x\",\"c\":true}\n",
+            "{\"1\":1,\"3\":3,\"x\":2}\n",
+            "k1v1k2v2k3v3k4\n",
         )
     );
 }

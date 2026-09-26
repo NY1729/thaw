@@ -315,6 +315,40 @@ fn observes_local_const_computed_object_members() {
 }
 
 #[test]
+fn observes_numeric_object_member_names() {
+    let source = r#"
+        let stored = "three";
+        async function delayed(): Promise<string> {
+            await sleep(1);
+            return "seven";
+        }
+        async function main(): Promise<void> {
+            const source = {
+                10: "ten",
+                2: "two",
+                get 3(): string { return stored; },
+                set 3(next: string) { stored = next; },
+                4(): string { return "four"; },
+                5n: "five",
+                0: "zero",
+            };
+            console.log(Object.keys(source).join(","));
+            console.log(source["0"], source["2"], source["3"], source["4"](),
+                source["5"], source["10"]);
+            source["3"] = "changed";
+            const descriptor = Object.getOwnPropertyDescriptor(source, "3")!;
+            console.log(source["3"], typeof descriptor.get, typeof descriptor.set);
+            const awaited = { 7: await delayed() };
+            console.log(awaited["7"], Object.keys(awaited).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "numeric_object_member_names"),
+        "0,2,3,4,5,10\nzero two three four five ten\nchanged function function\nseven 7\n"
+    );
+}
+
+#[test]
 fn observes_native_accessor_descriptors_and_json_replacers() {
     let source = r#"
         let stored = 2;
