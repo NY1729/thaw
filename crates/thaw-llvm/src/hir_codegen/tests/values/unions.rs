@@ -660,25 +660,29 @@ fn correlates_destructured_discriminants_with_sibling_payloads() {
     );
 }
 
-/// `.length` and `.forEach` on a union of arrays whose element types differ
-/// (`number[] | string[]`): the member layouts differ, so both dispatch on
+/// Indexing, `.length`, and `.forEach` on a union of arrays whose element types differ
+/// (`number[] | string[]`): the member layouts differ, so each dispatches on
 /// the runtime tag, taking the selected member's length / running its loop
 /// and coercing each element into the callback's union parameter.
 #[test]
-fn compiles_length_and_for_each_on_a_union_of_arrays() {
+fn compiles_index_length_and_for_each_on_a_union_of_arrays() {
     let source = r#"
         function main(): void {
             const numbers: number[] | string[] = [10, 20, 30];
+            let index = 0;
+            console.log(numbers[index++], index);
             console.log(numbers.length);
             numbers.forEach((value) => console.log("n", value));
             const strings: number[] | string[] = ["a", "b"];
             console.log(strings.length);
+            console.log(strings[1]);
             strings.forEach((value, index) => console.log("s", index, value));
+            const sparse: number[] | string[] = [, 4];
+            console.log(sparse[0] === undefined, sparse[1]);
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "union_array_length_for_each"),
-        "3\nn 10\nn 20\nn 30\n2\ns 0 a\ns 1 b\n"
+        compile_and_run(source, "union_array_index_length_for_each"),
+        "10 1\n3\nn 10\nn 20\nn 30\n2\nb\ns 0 a\ns 1 b\ntrue 4\n"
     );
 }
-

@@ -1220,6 +1220,110 @@ impl<'a> FnLowerer<'a> {
         Ok(self.unwrap_required_optional_member(receiver, ty, property).0)
     }
 
+    fn lower_union_array_index(
+        &mut self,
+        object: HirExpr,
+        elements: &[HirType],
+        index: HirExpr,
+        sparse: bool,
+        conservative: bool,
+    ) -> Result<HirExpr, String> {
+        let object_name = format!("__thaw_union_index_array_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_union_index_offset_{}", self.next_binding);
+        self.next_binding += 1;
+        let object_type = HirType::Union(elements.to_vec());
+        self.scope.insert(object_name.clone(), object_type.clone());
+        self.scope.insert(index_name.clone(), HirType::F64);
+
+        let mut reads = Vec::with_capacity(elements.len());
+        let mut read_types = Vec::new();
+        for (member_index, member) in elements.iter().enumerate() {
+            let HirType::Array(element) = member else {
+                return Err(format!("cannot index non-array union member {member:?}"));
+            };
+            let array = HirExpr::UnionValue(
+                Box::new(HirExpr::Var(object_name.clone())),
+                member_index,
+                elements.to_vec(),
+            );
+            let tagged = matches!(element.as_ref(),
+                HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Undefined)
+                || matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined));
+            let scalar = matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::Bool);
+            let read = if sparse && (tagged || (scalar && !conservative)) {
+                self.lower_array_index(
+                    array,
+                    member.clone(),
+                    element.as_ref().clone(),
+                    HirExpr::Var(index_name.clone()),
+                )?
+            } else {
+                HirExpr::TypedIndex(
+                    Box::new(array),
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    element.as_ref().clone(),
+                )
+            };
+            let read_type = self.infer_expr_type(&read)?;
+            if !read_types.contains(&read_type) {
+                read_types.push(read_type.clone());
+            }
+            reads.push((read, read_type));
+        }
+
+        let result_type = match read_types.as_slice() {
+            [] => return Err("cannot index an empty union".into()),
+            [single] => single.clone(),
+            types => {
+                let mut members = Vec::new();
+                for ty in types {
+                    Self::flatten_property_union_members(ty, &mut members)?;
+                }
+                match members.as_slice() {
+                    [single] => single.clone(),
+                    _ => HirType::Union(members),
+                }
+            }
+        };
+        let mut statements = Vec::new();
+        for (member_index, (read, read_type)) in reads.into_iter().enumerate() {
+            let returns = if read_types.len() == 1 {
+                vec![HirStmt::Return(Some(read))]
+            } else {
+                self.lower_flattened_property_return(read, &read_type, &result_type)?
+            };
+            if member_index + 1 == elements.len() {
+                statements.extend(returns);
+            } else {
+                statements.push(HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(
+                            Box::new(HirExpr::Var(object_name.clone())),
+                            elements.to_vec(),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(member_index as f64))),
+                    ),
+                    returns,
+                    Vec::new(),
+                ));
+            }
+        }
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![
+                    HirParam { name: object_name, ty: object_type },
+                    HirParam { name: index_name, ty: HirType::F64 },
+                ],
+                result_type,
+                Box::new(HirExpr::Block(statements)),
+            )),
+            vec![object, index],
+        ))
+    }
+
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         if self.unbound_this_context && matches!(member.obj.as_ref(), Expr::This(_)) {
             let property = member_property_name(&member.prop)
@@ -1523,6 +1627,19 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Lit(HirLit::F64(position as f64))),
                             element,
                         ))
+                    }
+                    HirType::Union(elements)
+                        if elements.iter().all(|element| matches!(element, HirType::Array(_))) =>
+                    {
+                        let index = self.lower_expr(&computed.expr)?;
+                        self.expect_type(&HirType::F64, &index, "index expression")?;
+                        self.lower_union_array_index(
+                            obj,
+                            &elements,
+                            index,
+                            sparse_array,
+                            conservative,
+                        )
                     }
                     HirType::Object(fields) => {
                         if let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() {
