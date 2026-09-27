@@ -549,10 +549,159 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
         other if date_iso_string(other).is_some() => date_iso_string(other)
             .unwrap()
             .unwrap_or_else(|| "Invalid Date".to_string()),
-        other => serde_json::to_string(&ordered_json_omitting_undefined(other))
-            .unwrap_or_else(|_| "null".into()),
+        other => inspect_json_value(other),
     };
     CString::new(text).unwrap_or_default().into_raw()
+}
+
+/// Real Node's `console.log`/`util.inspect` rendering of a `Json` value,
+/// used recursively for anything nested inside an object/array (an
+/// object/array itself is never the bare top-level case `thaw_json_
+/// console_string` already special-cases, so this never needs the
+/// "leave a bare top-level string unquoted" rule -- every string this
+/// function itself prints is a *nested* one, always quoted). Unlike
+/// `JSON.stringify`, real `util.inspect` prints `undefined` as the bare
+/// word `undefined` wherever it appears (an object field, an array
+/// slot) rather than omitting/nulling it -- this checks the napi-
+/// undefined sentinel itself, never delegating to `ordered_json_
+/// omitting_undefined`'s own (JSON.stringify-shaped) omission rule.
+fn inspect_json_value(value: &Value) -> String {
+    if is_napi_undefined(value) {
+        return "undefined".to_string();
+    }
+    if let Some(number) = non_finite_number(value) {
+        return non_finite_display(number).to_string();
+    }
+    if regexp_wrapper_property(value, "source").is_some() {
+        return format!(
+            "/{}/{}",
+            regexp_wrapper_property(value, "source")
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            regexp_wrapper_property(value, "flags")
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        );
+    }
+    if let Some(iso) = date_iso_string(value) {
+        return iso.unwrap_or_else(|| "Invalid Date".to_string());
+    }
+    if let Value::Object(fields) = value {
+        if let Some(entries) = fields.get("__thaw_map_entries__").and_then(Value::as_array) {
+            let items = entries
+                .iter()
+                .filter_map(|entry| {
+                    let [key, value] = entry.as_array()?.as_slice() else {
+                        return None;
+                    };
+                    Some(format!(
+                        "{} => {}",
+                        inspect_json_value(key),
+                        inspect_json_value(value)
+                    ))
+                })
+                .collect::<Vec<_>>();
+            return if items.is_empty() {
+                format!("Map({}) {{}}", entries.len())
+            } else {
+                format!("Map({}) {{ {} }}", entries.len(), items.join(", "))
+            };
+        }
+        if let Some(values) = fields.get("__thaw_set_values__").and_then(Value::as_array) {
+            let items = values.iter().map(inspect_json_value).collect::<Vec<_>>();
+            return if items.is_empty() {
+                format!("Set({}) {{}}", values.len())
+            } else {
+                format!("Set({}) {{ {} }}", values.len(), items.join(", "))
+            };
+        }
+    }
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => inspect_string_literal(value),
+        Value::Array(items) => {
+            if items.is_empty() {
+                "[]".to_string()
+            } else {
+                format!(
+                    "[ {} ]",
+                    items
+                        .iter()
+                        .map(inspect_json_value)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
+        Value::Object(fields) => {
+            if fields.is_empty() {
+                "{}".to_string()
+            } else {
+                let items = ordered_object_fields(fields)
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let key = if is_valid_identifier_key(key) {
+                            key.clone()
+                        } else {
+                            inspect_string_literal(key)
+                        };
+                        format!("{key}: {}", inspect_json_value(value))
+                    })
+                    .collect::<Vec<_>>();
+                format!("{{ {} }}", items.join(", "))
+            }
+        }
+    }
+}
+
+/// A nested string's own `util.inspect` quoting: single-quoted by
+/// default, switching to double quotes when the string itself contains
+/// a `'` but no `"`, and to backticks (a template literal) when it
+/// contains both -- real Node's own precedence, confirmed directly
+/// (`{ s: "it's a test" }` / `{ s: 'has "double" quotes' }` /
+/// `` { s: `has both 'single' and "double"` } ``).
+fn inspect_string_literal(value: &str) -> String {
+    let quote = if value.contains('\'') && !value.contains('"') {
+        '"'
+    } else if value.contains('\'') && value.contains('"') {
+        '`'
+    } else {
+        '\''
+    };
+    let mut text = String::with_capacity(value.len() + 2);
+    text.push(quote);
+    for ch in value.chars() {
+        match ch {
+            '\\' => text.push_str("\\\\"),
+            '\n' => text.push_str("\\n"),
+            '\r' => text.push_str("\\r"),
+            '\t' => text.push_str("\\t"),
+            ch if ch == quote => {
+                text.push('\\');
+                text.push(ch);
+            }
+            ch => text.push(ch),
+        }
+    }
+    text.push(quote);
+    text
+}
+
+/// Whether an object key can print bare (`{ key: ... }`) or needs
+/// quoting (`{ 'weird-key': ... }`) -- real Node's own rule, an
+/// identifier-shaped key prints unquoted. A practical ASCII subset
+/// (real Node also allows Unicode identifier characters) covers every
+/// real-world key this compiler's own object/dictionary literals can
+/// produce.
+fn is_valid_identifier_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
 }
 
 fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
@@ -2572,7 +2721,7 @@ mod tests {
         );
         assert_eq!(
             read_c_string(thaw_json_console_string(parse(r#"{"value":1}"#))),
-            r#"{"value":1}"#
+            "{ value: 1 }"
         );
     }
 

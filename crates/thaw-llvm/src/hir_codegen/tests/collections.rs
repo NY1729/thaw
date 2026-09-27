@@ -1710,3 +1710,44 @@ fn stringifies_a_map_or_set_crossing_an_any_boundary_as_an_empty_object() {
         "{}\n{}\n"
     );
 }
+
+/// round7's own deliberately-deferred remainder, now closed: `console.
+/// log`'s dynamic-value formatter (`thaw_json_console_string`, thaw-
+/// std's `json.rs`) used to fall through to plain JSON serialization for
+/// every object/array/Map/Set stored in `any` -- a `Map`/`Set` printed
+/// bare `{}` (correct for `JSON.stringify`, since neither has its own
+/// enumerable properties, but wrong for `console.log`'s own `util.
+/// inspect`-style rendering). Now recurses through a real inspect-style
+/// formatter: plain objects/arrays print `{ key: value }`/`[ v1, v2 ]`
+/// (unquoted identifier-shaped keys, single/double/backtick-quoted
+/// strings matching Node's own precedence, `undefined` printed as a
+/// bare value rather than omitted), and `Map`/`Set` print Node's own
+/// `Map(n) { k => v, ... }`/`Set(n) { v, ... }` shape, including nested
+/// ones.
+#[test]
+fn console_log_renders_a_map_or_set_crossing_an_any_boundary_in_node_inspect_style() {
+    let source = r#"
+        function main(): void {
+            const m: any = new Map<string, number>([["a", 1], ["b", 2]]);
+            console.log(m);
+            const s: any = new Set<number>([1, 2, 3]);
+            console.log(s);
+            const emptyM: any = new Map<string, number>();
+            console.log(emptyM);
+            const emptyS: any = new Set<number>();
+            console.log(emptyS);
+            const obj: any = { a: 1, b: "x", c: [1, 2], d: { e: 3 } };
+            console.log(obj);
+            const withWeirdKey: any = { "weird-key": 1, normalKey: 2 };
+            console.log(withWeirdKey);
+            const mixed: any = [1, { a: 1 }, "text"];
+            console.log(mixed);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_and_set_console_log_node_inspect_style"),
+        "Map(2) { 'a' => 1, 'b' => 2 }\nSet(3) { 1, 2, 3 }\nMap(0) {}\nSet(0) {}\n\
+         { a: 1, b: 'x', c: [ 1, 2 ], d: { e: 3 } }\n{ 'weird-key': 1, normalKey: 2 }\n\
+         [ 1, { a: 1 }, 'text' ]\n"
+    );
+}

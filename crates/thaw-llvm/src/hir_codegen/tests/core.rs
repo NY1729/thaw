@@ -73,7 +73,7 @@ fn console_log_serializes_arrays_objects_and_json_values() {
 
     assert_eq!(
         compile_and_run(source, "structured_console_log"),
-        "[1,2] [\"a\",\"b\"] [true,false]\n[[1,2],[3]]\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"nested\":[1,true,null]}\ndynamic text null\n"
+        "[1,2] [\"a\",\"b\"] [true,false]\n[[1,2],[3]]\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{ nested: [ 1, true, null ] }\ndynamic text null\n"
     );
 }
 
