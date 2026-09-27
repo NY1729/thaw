@@ -1546,6 +1546,13 @@ impl<'ctx> HirCompiler<'ctx> {
             );
         }
         self.module.add_function(
+            "thaw_object_copy_state",
+            self.context
+                .bool_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_object_set_accessor",
             self.context.bool_type().fn_type(
                 &[
