@@ -3144,3 +3144,62 @@ fn well_known_symbol_from_expr(expr: &Expr) -> Option<&'static str> {
         _ => None,
     }
 }
+
+impl<'a> FnLowerer<'a> {
+    /// If an object literal's compiled field table (`fields`) includes a
+    /// `[Symbol.toPrimitive]` method (stored under `well_known_symbol_
+    /// key`'s sentinel), builds a call to it with the given ECMAScript
+    /// hint (`"number"`/`"string"`/`"default"`) and returns the call's
+    /// raw `Json` result -- `Ok(None)` if the object has no such method,
+    /// so a caller (a numeric/string coercion site) can fall back to its
+    /// own default behavior. Reuses the exact "receiver" object-literal
+    /// convention `invocations/calls.rs`'s own method-call dispatch
+    /// already builds (a `__thaw_object_method_receiver`-marked first
+    /// parameter, populated from the object's own current field values).
+    fn invoke_object_to_primitive(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+        hint: &str,
+    ) -> Result<Option<HirExpr>, String> {
+        let key = well_known_symbol_key("toPrimitive");
+        let Some((_, method_ty)) = fields.iter().find(|(name, _)| *name == key) else {
+            return Ok(None);
+        };
+        let HirType::Function(params, _) = method_ty.clone() else {
+            return Ok(None);
+        };
+        let Some(HirType::Object(receiver_fields)) = params.into_iter().next() else {
+            return Ok(None);
+        };
+        let object_type = HirType::Object(fields.to_vec());
+        let name = format!("__thaw_to_primitive_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), object_type.clone());
+        let bound = HirExpr::Var(name.clone());
+        let method = HirExpr::PropAccess(Box::new(bound.clone()), object_type.clone(), key);
+        let this_arg = HirExpr::ObjectLit(
+            receiver_fields
+                .into_iter()
+                .map(|(field_name, _)| {
+                    if field_name == "__thaw_object_method_receiver" {
+                        (field_name, HirExpr::Lit(HirLit::Undefined))
+                    } else {
+                        let access = HirExpr::PropAccess(
+                            Box::new(bound.clone()),
+                            object_type.clone(),
+                            field_name.clone(),
+                        );
+                        (field_name, access)
+                    }
+                })
+                .collect(),
+        );
+        let call = HirExpr::Call(
+            Box::new(method),
+            vec![this_arg, HirExpr::Lit(HirLit::Str(hint.to_string()))],
+        );
+        let result = self.wrap_call_argument_bindings(call, &[(name, object_type, value)])?;
+        Ok(Some(result))
+    }
+}

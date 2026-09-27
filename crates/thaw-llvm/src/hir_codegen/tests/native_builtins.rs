@@ -8527,6 +8527,34 @@ fn compiles_well_known_symbols() {
     );
 }
 
+/// An object literal's own `[Symbol.toPrimitive]` method (already
+/// storable under the well-known-symbol sentinel key,
+/// `objects.rs`'s `WELL_KNOWN_SYMBOLS`) is now actually *consulted* by
+/// unary `+` and string coercion (template literals), not just
+/// callable explicitly like `compiles_well_known_symbols`'s Date case
+/// above -- `coerce_primitive_to_number`/`coerce_primitive_to_string`
+/// both check for it first via the shared `invoke_object_to_primitive`
+/// helper before falling back to their generic object handling.
+#[test]
+fn object_literal_to_primitive_is_consulted_by_coercions() {
+    let source = r#"
+        function main(): void {
+            const obj = {
+                value: 5,
+                [Symbol.toPrimitive](hint: string): any {
+                    if (hint === "number") return this.value;
+                    return `obj(${this.value})`;
+                },
+            };
+            console.log(+obj, `${obj}`);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_literal_to_primitive_coercion"),
+        "5 obj(5)\n"
+    );
+}
+
 /// `Promise.allKeyed`/`Promise.allSettledKeyed` (strictly typed, including
 /// heterogeneous values).
 #[test]

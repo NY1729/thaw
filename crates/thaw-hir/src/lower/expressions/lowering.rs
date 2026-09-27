@@ -1581,7 +1581,7 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     UnaryOp::Plus => {
-                        if matches!(self.infer_expr_type(&value)?, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)) {
+                        if matches!(self.infer_expr_type(&value)?, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Object(_)) {
                             self.coerce_primitive_to_number(value)?
                         } else {
                             self.expect_type(&HirType::F64, &value, "unary plus")?;
