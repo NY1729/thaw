@@ -928,9 +928,8 @@
     },
     {
       "name": "symbol toPrimitive on class",
-      "expect": "unsupported",
-      "source": "class Money { amount: number; constructor(amount: number) { this.amount = amount; } [Symbol.toPrimitive](hint: string): any { if (hint === 'number') return this.amount; if (hint === 'string') return `$${this.amount}`; return `Money(${this.amount})`; } } function main(): void { const money = new Money(5); console.log(+money, `${money}`, money + 1); }",
-      "detailContains": "arithmetic requires F64 operands"
+      "expect": "matched",
+      "source": "class Money { amount: number; constructor(amount: number) { this.amount = amount; } [Symbol.toPrimitive](hint: string): any { if (hint === 'number') return this.amount; if (hint === 'string') return `$${this.amount}`; return `Money(${this.amount})`; } } function main(): void { const money = new Money(5); console.log(+money, `${money}`, money + 1); }"
     },
     {
       "name": "symbol toStringTag on class",

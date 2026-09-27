@@ -1498,6 +1498,19 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Optional(payload) if payload.as_ref() == &HirType::Str
                             ) =>
                     {
+                        // Real JS's `+` always calls `ToPrimitive(operand)`
+                        // with hint `"default"` for *both* operands, then
+                        // decides string-concat purely from whichever
+                        // result(s) are already strings -- it never passes
+                        // hint `"string"` just because the *other* operand
+                        // happens to be one (confirmed: a class returning a
+                        // different value for `"string"` than `"default"`
+                        // diverged from Node here before this fix).
+                        // `add_operand_to_primitive` is a no-op for an
+                        // already-`Str`/other-primitive operand, so this
+                        // only changes behavior for an `Object`-typed side.
+                        let (lhs, _) = self.add_operand_to_primitive(lhs)?;
+                        let (rhs, _) = self.add_operand_to_primitive(rhs)?;
                         HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                             vec![
@@ -1588,6 +1601,18 @@ impl<'a> FnLowerer<'a> {
                             Box::new(self.coerce_primitive_to_number(lhs)?),
                             Box::new(self.coerce_primitive_to_number(rhs)?),
                         )
+                    }
+                    BinaryOp::Add
+                        if matches!(self.infer_expr_type(&lhs)?, HirType::Object(_))
+                            || matches!(self.infer_expr_type(&rhs)?, HirType::Object(_)) =>
+                    {
+                        // Neither operand is statically `Str` (the first
+                        // `Add` arm above already owns that), so real JS's
+                        // `+` genuinely needs to call `ToPrimitive` on the
+                        // `Object`-typed side(s) and dispatch between
+                        // string-concat and numeric-add from its *runtime*
+                        // result -- see `lower_add_with_to_primitive`.
+                        self.lower_add_with_to_primitive(lhs, rhs)?
                     }
                     other => HirExpr::BinOp(
                         lower_bin_op(other)?,
