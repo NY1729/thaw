@@ -946,9 +946,8 @@
     },
     {
       "name": "weakmap and weakset with bare object typed keys",
-      "expect": "unsupported",
-      "source": "function main(): void { const key1: object = { id: 1 }; const key2: object = { id: 2 }; const map = new WeakMap<object, number>(); map.set(key1, 100); const set = new WeakSet<object>(); set.add(key1); console.log(map.get(key1), map.has(key2), set.has(key1), set.has(key2)); map.delete(key1); console.log(map.has(key1)); }",
-      "detailContains": "must be a reference type"
+      "expect": "matched",
+      "source": "function main(): void { const key1: object = { id: 1 }; const key2: object = { id: 2 }; const map = new WeakMap<object, number>(); map.set(key1, 100); const set = new WeakSet<object>(); set.add(key1); console.log(map.get(key1), map.has(key2), set.has(key1), set.has(key2)); map.delete(key1); console.log(map.has(key1)); }"
     },
     {
       "name": "array fromAsync over async generator",

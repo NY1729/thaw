@@ -1650,6 +1650,60 @@ fn compiles_weak_map_and_weak_set() {
     );
 }
 
+/// `WeakMap`/`WeakSet` with a bare `object`-typed key -- `object` lowers
+/// to `HirType::Json` (`type_resolution.rs`, matching `any`/`unknown`),
+/// so `weak_key_intrinsic_suffix` (`instance_builtins/support.rs`) now
+/// accepts it (as `"any"`, the same classification a real `any`-typed
+/// key would get), reusing the exact same `AnyKey` native machinery a
+/// plain `Map`/`Set` with an `any` key already relies on. `.set()`/
+/// `.add()`'s own lowering (`map_set_methods.rs`) adds the runtime
+/// guard real `WeakMap`/`WeakSet` need for this that a plain `Map`/
+/// `Set` don't: a genuine `TypeError` (matching Node's own message and
+/// `instanceof TypeError`) if the actual value turns out to be a
+/// primitive, since `object`/`any` can't promise a reference type the
+/// way a concrete `Object`/`Array`/... type can. `.has()`/`.delete()`
+/// need no such guard -- confirmed against real Node they just report
+/// `false` for an invalid key instead of throwing.
+#[test]
+fn weak_map_and_weak_set_accept_a_bare_object_typed_key_with_a_runtime_guard() {
+    let source = r#"
+        function main(): void {
+            const map: WeakMap<object, number> = new WeakMap<object, number>();
+            const key1: object = { id: 1 };
+            const key2: object = { id: 2 };
+            map.set(key1, 100);
+            console.log(map.get(key1), map.has(key2));
+            map.delete(key1);
+            console.log(map.has(key1));
+
+            const set: WeakSet<object> = new WeakSet<object>();
+            set.add(key1);
+            console.log(set.has(key1), set.has(key2));
+
+            console.log(map.has(5 as unknown as object));
+            console.log(map.delete("x" as unknown as object));
+            try {
+                map.set(5 as unknown as object, 1);
+                console.log("no throw");
+            } catch (error) {
+                console.log("threw", error instanceof TypeError, (error as TypeError).message);
+            }
+            try {
+                set.add("hello" as unknown as object);
+                console.log("no throw");
+            } catch (error) {
+                console.log("threw", error instanceof TypeError, (error as TypeError).message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "weak_map_weak_set_object_key"),
+        "100 false\nfalse\ntrue false\nfalse\nfalse\n\
+         threw true Invalid value used as weak map key\n\
+         threw true Invalid value used in weak set\n"
+    );
+}
+
 #[test]
 fn compiles_array_keys_values_entries() {
     let source = r#"

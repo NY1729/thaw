@@ -66,13 +66,24 @@ fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> 
 }
 
 /// `WeakMap`/`WeakSet` reuse `map_key_intrinsic_suffix`'s own type
-/// classification, but only the `"ref"` family is a valid key for them --
-/// matching the specification, which requires a `WeakMap`/`WeakSet`
-/// key/element to be an object (or similar reference type), never a
-/// `number` or `string`.
+/// classification. `"ref"` is a statically known reference type,
+/// trivially valid. `"any"` (a `Json`-typed key -- covers both a real
+/// `any`/`unknown` annotation and TS's own `object` keyword, which
+/// `type_resolution.rs` also lowers to `Json`) is accepted too, but
+/// unlike a plain `Map`/`Set` (where a primitive key is perfectly
+/// legal), a `WeakMap`/`WeakSet` key that turns out to be a primitive
+/// at runtime is a genuine spec violation -- real `WeakMap.prototype.
+/// set`/`WeakSet.prototype.add` throw a `TypeError` for one, while
+/// `.has`/`.delete` just report `false` (confirmed against real Node).
+/// `.set`/`.add`'s own lowering (`map_set_methods.rs`) adds the runtime
+/// guard this promise requires; every other reference type keeps
+/// today's `"ref"` classification unchanged, and only `HirType::Str`/
+/// `HirType::F64` (a *statically* known primitive) stays a hard
+/// compile-time rejection, since those can never be valid regardless
+/// of any runtime check.
 fn weak_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> {
     match map_key_intrinsic_suffix(key_type) {
-        Ok("ref") => Ok("ref"),
+        Ok(suffix @ ("ref" | "any")) => Ok(suffix),
         _ => Err(format!(
             "WeakMap/WeakSet keys must be a reference type (object, array, ...), got {key_type:?}"
         )),
