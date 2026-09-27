@@ -62,6 +62,13 @@ impl<'ctx> HirCompiler<'ctx> {
         let object = self.compile_expr(object)?;
         let key = self.compile_expr(key)?;
         let result = self.compile_expr(value)?;
+        if !owned {
+            // `owned` means this write is populating a brand-new object
+            // literal still under construction (never observable/frozen
+            // yet) -- only a write through an existing binding needs the
+            // freeze/seal guard.
+            self.compile_guard_json_write(object, key.into_pointer_value())?;
+        }
         self.compile_json_object_set_native_with_undefined(
             object,
             key.into_pointer_value(),
@@ -71,6 +78,106 @@ impl<'ctx> HirCompiler<'ctx> {
             owned,
         )?;
         Ok(result)
+    }
+
+    /// `Object.freeze` blocks every write to an existing binding;
+    /// `Object.seal`/`preventExtensions` (without `freeze`) block only
+    /// *adding* a genuinely new key -- updating an existing key stays
+    /// allowed. Mirrors `HirExpr::PropAssign`'s equivalent guard for a
+    /// statically `Object`-typed receiver, but also needs a `thaw_json_
+    /// has_own` presence check first, since a `Json` write can add a key
+    /// a compiled `Object`'s fixed layout never could. See
+    /// `thaw_object_state`'s query encoding (0 extensible, 2 frozen) in
+    /// `thaw-runtime/src/runtime/native_values/objects.rs`.
+    fn compile_guard_json_write(
+        &mut self,
+        object: BasicValueEnum<'ctx>,
+        key: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        if !object.is_pointer_value() {
+            return Ok(());
+        }
+        let object_state = self.module.get_function("thaw_object_state").unwrap();
+        let function = self.current_function();
+        let check_extensible = self
+            .context
+            .append_basic_block(function, "json_write_check_extensible");
+        let check_has_own = self
+            .context
+            .append_basic_block(function, "json_write_check_has_own");
+        let frozen_blocked = self.context.append_basic_block(function, "json_write_frozen");
+        let extension_blocked = self
+            .context
+            .append_basic_block(function, "json_write_not_extensible");
+        let allowed = self.context.append_basic_block(function, "json_write_allowed");
+
+        let frozen = self
+            .builder
+            .build_call(
+                object_state,
+                &[object.into(), self.context.i8_type().const_int(2, false).into()],
+                "json_write_is_frozen",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_object_state returned no value")?
+            .into_int_value();
+        self.builder
+            .build_conditional_branch(frozen, frozen_blocked, check_extensible)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(check_extensible);
+        let extensible = self
+            .builder
+            .build_call(
+                object_state,
+                &[object.into(), self.context.i8_type().const_zero().into()],
+                "json_write_is_extensible",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_object_state returned no value")?
+            .into_int_value();
+        self.builder
+            .build_conditional_branch(extensible, allowed, check_has_own)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(check_has_own);
+        let has_own = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_has_own").unwrap(),
+                &[object.into(), key.into()],
+                "json_write_has_own",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_has_own returned no value")?
+            .into_int_value();
+        let has_own = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                has_own,
+                self.context.i8_type().const_zero(),
+                "json_write_has_own_bool",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_own, allowed, extension_blocked)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(frozen_blocked);
+        self.compile_throw_type_error("Cannot assign to read only property of object")?;
+
+        self.builder.position_at_end(extension_blocked);
+        self.compile_throw_type_error("Cannot add property, object is not extensible")?;
+
+        self.builder.position_at_end(allowed);
+        Ok(())
     }
 
     fn compile_json_delete(

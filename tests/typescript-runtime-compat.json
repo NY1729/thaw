@@ -923,7 +923,7 @@
       "detailContains": "output differs"
     },
     {
-      "name": "object freeze and seal enforcement",
+      "name": "object freeze and seal state does not survive an object-to-any boundary",
       "expect": "unsupported",
       "source": "function main(): void { const frozen: any = Object.freeze({ value: 1 }); try { frozen.value = 99; } catch { console.log('threw'); } const sealed: any = Object.seal({ value: 2 }); sealed.value = 3; try { sealed.extra = 4; } catch { console.log('threw'); } console.log(frozen.value, Object.isFrozen(frozen), sealed.value, Object.isSealed(sealed), sealed.extra); }",
       "detailContains": "output differs"
@@ -963,6 +963,16 @@
       "expect": "unsupported",
       "source": "async function main(): Promise<void> { const values = await Array.fromAsync([Promise.resolve(1), Promise.resolve(2), 3]); console.log(values.join(',')); }",
       "detailContains": "cannot serialize collection element Promise"
+    },
+    {
+      "name": "object freeze blocks writes to a statically typed object",
+      "expect": "matched",
+      "source": "function main(): void { const frozen = Object.freeze({ value: 1 }); try { frozen.value = 99; console.log('no throw'); } catch { console.log('threw'); } console.log(frozen.value, Object.isFrozen(frozen)); }"
+    },
+    {
+      "name": "object freeze and seal enforcement on a dynamic object",
+      "expect": "matched",
+      "source": "function main(): void { const obj: any = { value: 1, extra: 2 }; Object.freeze(obj); try { obj.value = 99; } catch { console.log('threw frozen'); } const sealed: any = { value: 3 }; Object.seal(sealed); sealed.value = 4; try { sealed.extra = 5; } catch { console.log('threw sealed'); } console.log(obj.value, obj.extra, Object.isFrozen(obj), sealed.value, sealed.extra, Object.isSealed(sealed)); }"
     }
   ]
 }
