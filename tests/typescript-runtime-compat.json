@@ -984,6 +984,11 @@
       "name": "an unannotated Uint8Array keeps its instanceof identity crossing into any",
       "expect": "matched",
       "source": "function isUint8Array(value: any): boolean { return value instanceof Uint8Array; } function main(): void { const buf = new Uint8Array([1, 2, 3]); console.log(isUint8Array(buf)); console.log(isUint8Array([1, 2, 3])); console.log(isUint8Array(null)); }"
+    },
+    {
+      "name": "JSON.stringify replacer keys array resolves RegExp/Map/Set prototype accessors crossing an any boundary",
+      "expect": "matched",
+      "source": "function main(): void { const re: any = /abc/gi; console.log(JSON.stringify(re, [\"source\", \"flags\"])); const m: any = new Map([[\"a\", 1]]); console.log(JSON.stringify(m, [\"size\"])); console.log(JSON.stringify(m, [\"a\"])); }"
     }
   ]
 }
