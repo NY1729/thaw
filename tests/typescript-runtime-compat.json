@@ -942,9 +942,8 @@
     },
     {
       "name": "symbol toPrimitive on object literal",
-      "expect": "unsupported",
-      "source": "function main(): void { const obj = { value: 5, [Symbol.toPrimitive](hint: string): any { if (hint === 'number') return this.value; return `obj(${this.value})`; }, }; console.log(+obj, `${obj}`); }",
-      "detailContains": "expected F64"
+      "expect": "matched",
+      "source": "function main(): void { const obj = { value: 5, [Symbol.toPrimitive](hint: string): any { if (hint === 'number') return this.value; return `obj(${this.value})`; }, }; console.log(+obj, `${obj}`); }"
     },
     {
       "name": "weakmap and weakset with bare object typed keys",

@@ -687,6 +687,11 @@ impl<'a> FnLowerer<'a> {
                 )
             }
             HirType::Object(fields) => {
+                if let Some(result) =
+                    self.invoke_object_to_primitive(value.clone(), &fields, "string")?
+                {
+                    return Ok(HirExpr::JsonAsString(Box::new(result)));
+                }
                 // A class extending `Error`/`TypeError`/etc. (see
                 // `lower/module/classes.rs`) is a real object with
                 // inherited `message`/`name: Str` fields, not the tagged
@@ -1096,7 +1101,19 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("readDynamicValue".to_string())),
                 vec![value],
             )))),
-            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
+            HirType::Object(fields) => {
+                if let Some(result) =
+                    self.invoke_object_to_primitive(value.clone(), &fields, "number")?
+                {
+                    return Ok(HirExpr::JsonAsNumber(Box::new(result)));
+                }
+                let string = self.coerce_primitive_to_string(value)?;
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                    vec![string],
+                ))
+            }
+            HirType::Array(_) | HirType::Tuple(_) => {
                 let string = self.coerce_primitive_to_string(value)?;
                 Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
