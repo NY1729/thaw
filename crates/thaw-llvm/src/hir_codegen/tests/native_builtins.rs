@@ -2325,6 +2325,96 @@ fn compiles_array_from_async_over_an_async_generator() {
     );
 }
 
+/// `await` on a value whose *static* type is `Union<Promise<T>, T>` --
+/// round25's own union-return-type inference lets an unannotated function
+/// return a `Promise` on one branch and a plain value on another (e.g.
+/// `function pick(flag) { return flag ? Promise.resolve(5) : 10; }`). The
+/// async-frame planner's own `is_frame_await_source` only ever recognizes
+/// a value *known* to always be a `Promise<T>`, so this never becomes a
+/// real coroutine suspend; `compile_await_promise_union` (promises.rs)
+/// instead builds a genuine *runtime* branch on the union's own
+/// discriminant, blocking-driving the `Promise` arm to resolution
+/// (`drive_promise_to_resolved_value`, reused from the existing typed
+/// blocking-await path) and decoding the plain arm's payload directly
+/// (`unpack_union_payload`, reused from `UnionValue`'s own codegen) --
+/// exactly like `sleep()`'s own already-accepted blocking strategy, not a
+/// true coroutine yield. `infer_expr_type`'s matching `HirExpr::Await`
+/// arm (thaw-hir) unwraps this same shape to the plain resolved type, so
+/// the surrounding `let`/frame slot is sized correctly instead of still
+/// expecting a tagged-union struct. Also covers the same shape rejecting
+/// inside a `try`/`catch`.
+#[test]
+fn awaits_a_union_of_a_promise_and_a_plain_value() {
+    let source = r#"
+        function pick(flag: boolean) {
+            if (flag) return Promise.resolve(5);
+            return 10;
+        }
+        function fail(): Promise<number> {
+            return new Promise<number>((_resolve, reject) => reject(new Error("nope")));
+        }
+        function pickOrFail(flag: boolean): number | Promise<number> {
+            if (flag) return fail();
+            return 10;
+        }
+        async function main(): Promise<void> {
+            const a = await pick(true);
+            const b = await pick(false);
+            console.log(a, b);
+            try {
+                const c = await pickOrFail(true);
+                console.log("no throw", c);
+            } catch (e) {
+                console.log("threw", (e as Error).message);
+            }
+            const d = await pickOrFail(false);
+            console.log(d);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "awaits_promise_union"),
+        "5 10\nthrew nope\n10\n"
+    );
+}
+
+/// `Array.fromAsync` over a source array mixing `Promise<T>` and plain
+/// `T` elements -- the general QuickJS-delegating path this dispatch
+/// otherwise falls back to hands the whole argument off as a JSON value,
+/// and a live `Promise` has no JSON representation at all ("cannot
+/// serialize collection element Promise(T) to JSON"). Covers all three
+/// shapes a mixed-Promise source can infer as: a fixed-length array
+/// *literal* becomes a `Tuple` with each position individually, statically
+/// typed (`collect_promise_tuple_array_for_from_async` -- each `Promise`
+/// position is already a genuine, individually-known `Promise<T>`, so it
+/// reuses the existing frame-splitting machinery directly, no new runtime
+/// dispatch needed); a homogeneous array of `Promise`-only calls to the
+/// *same* async function collapses to a plain `Array<Promise<T>>`
+/// (`collect_promise_array_for_from_async` -- a plain sequential
+/// await-and-collect loop); a `Str`-flavored mixed literal exercises the
+/// `Tuple` path with a non-`F64` resolved type. `Array.fromAsync(gen())`
+/// (the sibling async-generator case, `compiles_array_from_async_over_an_
+/// async_generator` above) is unaffected.
+#[test]
+fn array_from_async_over_arrays_mixing_promises_and_plain_values() {
+    let source = r#"
+        async function delayed(n: number): Promise<number> {
+            return n * 10;
+        }
+        async function main(): Promise<void> {
+            const literal = await Array.fromAsync([Promise.resolve(1), Promise.resolve(2), 3]);
+            console.log(literal.join(","));
+            const strings = await Array.fromAsync([Promise.resolve("a"), "b", Promise.resolve("c")]);
+            console.log(strings.join(","));
+            const allPromises = await Array.fromAsync([delayed(1), delayed(2), delayed(3)]);
+            console.log(allPromises.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_async_promise_mixed_arrays"),
+        "1,2,3\na,b,c\n10,20,30\n"
+    );
+}
+
 #[test]
 fn generator_next_returns_the_generators_natural_completion_value() {
     let source = r#"

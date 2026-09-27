@@ -230,6 +230,297 @@ impl<'a> FnLowerer<'a> {
         )))
     }
 
+    /// `Array.fromAsync`'s own sibling for a *literal* array argument
+    /// mixing `Promise<T>` and already-resolved `T` elements (real
+    /// trigger: `Array.fromAsync([Promise.resolve(1), Promise.resolve(2),
+    /// 3])`) -- a fixed-length array literal like this infers as a
+    /// `HirType::Tuple` with each position individually, statically typed
+    /// (`Promise(F64)`, `Promise(F64)`, `F64` here), never a homogeneous
+    /// `Array<Union<Promise<T>, T>>`. Since each `Promise`-typed position
+    /// is *already*, individually, a genuine, statically-known `Promise
+    /// <T>` (not a union at all), this needs none of the new "maybe a
+    /// Promise" machinery -- each one becomes a real `HirExpr::
+    /// AwaitPromise`, exactly like an ordinary `await somePromise`, which
+    /// the existing frame-splitting planner (`extract_first_frame_await`'s
+    /// own `ArrayLit` arm, unmodified) already knows how to hoist one at a
+    /// time into a real, sequential coroutine suspend per element --
+    /// matching real `Array.fromAsync`'s own spec'd sequential (not
+    /// concurrent) per-element `await`. Requires every member to resolve
+    /// to the *same* `T` (mixed final element types aren't attempted).
+    fn collect_promise_tuple_array_for_from_async(
+        &mut self,
+        array: HirExpr,
+        array_type: &HirType,
+    ) -> Result<Option<(HirExpr, HirType)>, String> {
+        let HirType::Tuple(members) = array_type else {
+            return Ok(None);
+        };
+        if members.is_empty()
+            || !members.iter().any(|member| matches!(member, HirType::Promise(_)))
+        {
+            return Ok(None);
+        }
+        let mut resolved_type: Option<HirType> = None;
+        for member in members {
+            let member_resolved = match member {
+                HirType::Promise(inner) => inner.as_ref().clone(),
+                other => other.clone(),
+            };
+            match &resolved_type {
+                None => resolved_type = Some(member_resolved),
+                Some(existing) if existing == &member_resolved => {}
+                Some(_) => return Ok(None),
+            }
+        }
+        let Some(resolved) = resolved_type else {
+            return Ok(None);
+        };
+        let source_name = format!("__thaw_from_async_source_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), array_type.clone());
+        let elements = members
+            .iter()
+            .enumerate()
+            .map(|(index, member)| {
+                let access = HirExpr::TypedIndex(
+                    Box::new(HirExpr::Var(source_name.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    member.clone(),
+                );
+                match member {
+                    HirType::Promise(inner) => {
+                        HirExpr::AwaitPromise(Box::new(access), inner.as_ref().clone())
+                    }
+                    _ => access,
+                }
+            })
+            .collect::<Vec<_>>();
+        let output_array_type = HirType::Array(Box::new(resolved));
+        let result = HirExpr::ArrayLit(elements);
+        Ok(Some((
+            self.wrap_call_argument_bindings(
+                result,
+                &[(source_name, array_type.clone(), array)],
+            )?,
+            output_array_type,
+        )))
+    }
+
+    /// `Array.fromAsync`'s own sibling for a *homogeneous* array whose
+    /// element type is uniformly `Promise<T>` -- no `Union`/`Tuple`
+    /// involved at all (real trigger: `Array.fromAsync([delayed(1),
+    /// delayed(2), delayed(3)])`, each call to the *same* async function,
+    /// so every element shares the exact same `Promise<F64>` type and
+    /// collapses to a plain `Array<Promise<F64>>` rather than a `Tuple` or
+    /// a `Union` member). Each element is *already*, individually, a
+    /// genuine, statically-known `Promise<T>`, so this is a plain
+    /// sequential await-and-collect loop (`AwaitPromise` directly, no
+    /// runtime discriminant branch needed at all) -- structurally the
+    /// `Promise`-only special case of `collect_promise_union_array_for_
+    /// from_async` below, kept separate since there's no union tag to
+    /// read here.
+    fn collect_promise_array_for_from_async(
+        &mut self,
+        array: HirExpr,
+        array_type: &HirType,
+    ) -> Result<Option<(HirExpr, HirType)>, String> {
+        let HirType::Array(element) = array_type else {
+            return Ok(None);
+        };
+        let HirType::Promise(resolved) = element.as_ref() else {
+            return Ok(None);
+        };
+        let resolved = resolved.as_ref().clone();
+        let source_name = format!("__thaw_from_async_source_{}", self.next_binding);
+        self.next_binding += 1;
+        let output = format!("__thaw_from_async_output_{}", self.next_binding);
+        self.next_binding += 1;
+        let index = format!("__thaw_from_async_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let value = format!("__thaw_from_async_value_{}", self.next_binding);
+        self.next_binding += 1;
+        let output_array_type = HirType::Array(Box::new(resolved.clone()));
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                output.clone(),
+                output_array_type.clone(),
+                HirExpr::ArrayLit(Vec::new()),
+            ),
+            HirStmt::Let(index.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(HirExpr::Var(index.clone())),
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(source_name.clone())))),
+                ),
+                vec![
+                    HirStmt::Let(
+                        value.clone(),
+                        resolved.clone(),
+                        HirExpr::AwaitPromise(
+                            Box::new(HirExpr::TypedIndex(
+                                Box::new(HirExpr::Var(source_name.clone())),
+                                Box::new(HirExpr::Var(index.clone())),
+                                element.as_ref().clone(),
+                            )),
+                            resolved.clone(),
+                        ),
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(
+                        output.clone(),
+                        Box::new(HirExpr::ArrayConcat(
+                            vec![
+                                HirExpr::Var(output.clone()),
+                                HirExpr::ArrayLit(vec![HirExpr::Var(value.clone())]),
+                            ],
+                            resolved.clone(),
+                        )),
+                    )),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(HirExpr::Var(output))),
+        ]);
+        Ok(Some((
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: source_name,
+                        ty: array_type.clone(),
+                    }],
+                    HirType::Promise(Box::new(output_array_type.clone())),
+                    Box::new(body),
+                )),
+                vec![array],
+            ),
+            output_array_type,
+        )))
+    }
+
+    /// `Array.fromAsync`'s own sibling for a plain array literal/variable
+    /// mixing `Promise<T>` and already-resolved `T` elements (real trigger:
+    /// `Array.fromAsync([Promise.resolve(1), Promise.resolve(2), 3])`) --
+    /// the general delegation this function's own caller otherwise falls
+    /// back to hands the whole array off to QuickJS's native `Array.
+    /// fromAsync` via a JSON-encoded argument, and JSON has no
+    /// representation for a live `Promise` object at all ("cannot
+    /// serialize collection element Promise(T) to JSON"). A native,
+    /// sequential per-element loop sidesteps that boundary entirely --
+    /// `await element` on each `Union<Promise<T>, T>`-typed element now
+    /// resolves correctly (the `await`-on-a-maybe-`Promise`-`Union` fix,
+    /// `compile_await_promise_union`/`infer_expr_type`'s matching `Union`
+    /// arm) -- matching real `Array.fromAsync`'s own spec'd behavior of
+    /// awaiting each source element in turn, not concurrently.
+    fn collect_promise_union_array_for_from_async(
+        &mut self,
+        array: HirExpr,
+        array_type: &HirType,
+    ) -> Result<Option<(HirExpr, HirType)>, String> {
+        let HirType::Array(element) = array_type else {
+            return Ok(None);
+        };
+        let HirType::Union(members) = element.as_ref() else {
+            return Ok(None);
+        };
+        let promise_member = members.iter().enumerate().find_map(|(index, member)| {
+            if let HirType::Promise(resolved) = member {
+                Some((index, resolved.as_ref().clone()))
+            } else {
+                None
+            }
+        });
+        let Some((promise_index, resolved)) = promise_member else {
+            return Ok(None);
+        };
+        let other_members = members
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != promise_index)
+            .map(|(_, member)| member)
+            .collect::<Vec<_>>();
+        if other_members.len() != 1 || other_members[0] != &resolved {
+            return Ok(None);
+        }
+        let element_type = element.as_ref().clone();
+        let source_name = format!("__thaw_from_async_source_{}", self.next_binding);
+        self.next_binding += 1;
+        let output = format!("__thaw_from_async_output_{}", self.next_binding);
+        self.next_binding += 1;
+        let index = format!("__thaw_from_async_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let value = format!("__thaw_from_async_value_{}", self.next_binding);
+        self.next_binding += 1;
+        let output_array_type = HirType::Array(Box::new(resolved.clone()));
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                output.clone(),
+                output_array_type.clone(),
+                HirExpr::ArrayLit(Vec::new()),
+            ),
+            HirStmt::Let(index.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(HirExpr::Var(index.clone())),
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(source_name.clone())))),
+                ),
+                vec![
+                    HirStmt::Let(
+                        value.clone(),
+                        resolved.clone(),
+                        HirExpr::Await(Box::new(HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(source_name.clone())),
+                            Box::new(HirExpr::Var(index.clone())),
+                            element_type.clone(),
+                        ))),
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(
+                        output.clone(),
+                        Box::new(HirExpr::ArrayConcat(
+                            vec![
+                                HirExpr::Var(output.clone()),
+                                HirExpr::ArrayLit(vec![HirExpr::Var(value.clone())]),
+                            ],
+                            resolved.clone(),
+                        )),
+                    )),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(HirExpr::Var(output))),
+        ]);
+        Ok(Some((
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: source_name,
+                        ty: array_type.clone(),
+                    }],
+                    HirType::Promise(Box::new(output_array_type.clone())),
+                    Box::new(body),
+                )),
+                vec![array],
+            ),
+            output_array_type,
+        )))
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),

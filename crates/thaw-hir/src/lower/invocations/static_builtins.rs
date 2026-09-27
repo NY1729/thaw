@@ -2636,6 +2636,27 @@ impl<'a> FnLowerer<'a> {
                                     return self.wrap_call_argument_bindings(collected, &bindings);
                                 }
                             }
+                            if let Some((collected, _)) = self
+                                .collect_promise_tuple_array_for_from_async(
+                                    source.clone(),
+                                    &source_type,
+                                )?
+                            {
+                                return self.wrap_call_argument_bindings(collected, &bindings);
+                            }
+                            if let Some((collected, _)) = self
+                                .collect_promise_array_for_from_async(source.clone(), &source_type)?
+                            {
+                                return self.wrap_call_argument_bindings(collected, &bindings);
+                            }
+                            if let Some((collected, _)) = self
+                                .collect_promise_union_array_for_from_async(
+                                    source.clone(),
+                                    &source_type,
+                                )?
+                            {
+                                return self.wrap_call_argument_bindings(collected, &bindings);
+                            }
                         }
                         let array = HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".to_string())),
