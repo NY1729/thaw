@@ -291,6 +291,9 @@ impl<'a> FnLowerer<'a> {
         if let Some(invoked) = self.lower_this_parameter_call_or_apply(call)? {
             return Ok(invoked);
         }
+        if let Some(invoked) = self.lower_object_prototype_to_string_call(call)? {
+            return Ok(invoked);
+        }
         if let Some(bound) = self.lower_function_bind(call)? {
             return Ok(bound);
         }

@@ -8793,9 +8793,10 @@ fn binary_plus_consults_symbol_to_primitive_with_the_default_hint() {
 /// `well_known_symbol_key` sentinel `Symbol.toPrimitive` support
 /// already uses, *before* falling into the built-in table, matching
 /// real JS (a class's own tag getter takes priority). `Object.
-/// prototype.toString`/`String()` still don't consult it either way --
-/// unrelated, separate gaps (`Object.prototype` isn't supported at
-/// all yet).
+/// prototype.toString`/`String()` now consult it too (round35, see
+/// `object_prototype_to_string_call_and_string_coercion_consult_a_
+/// classs_symbol_to_string_tag` below) -- at the time this test was
+/// written, that was still a separate, unrelated gap.
 #[test]
 fn class_symbol_to_string_tag_getter_is_consulted() {
     let source = r#"
@@ -8810,6 +8811,46 @@ fn class_symbol_to_string_tag_getter_is_consulted() {
     assert_eq!(
         compile_and_run(source, "class_symbol_to_string_tag_getter"),
         "Widget\n"
+    );
+}
+
+/// `Object.prototype.toString.call(x)`/`String(x)`'s own default fallback
+/// (real JS: absent a `toPrimitive`/`toString`/`valueOf` override, `String`
+/// ultimately calls the inherited `Object.prototype.toString`) now both
+/// consult a class's own `[Symbol.toStringTag]` getter (round32 only fixed
+/// a *direct* `widget[Symbol.toStringTag]` read). Neither `Object` as a
+/// bare identifier nor a general `.prototype` object model exists in this
+/// compiler -- `Object.prototype.toString.call(<value>)` is recognized as
+/// one exact syntactic shape instead (`lower_object_prototype_to_string_
+/// call`, `lower/calls.rs`), computing the same tag for *any* value
+/// (`Null`/`Undefined`/`Array`/`Function`/a small built-in table/a class
+/// getter/`"Object"` default) real ECMA-262 would.
+#[test]
+fn object_prototype_to_string_call_and_string_coercion_consult_a_classs_symbol_to_string_tag() {
+    let source = r#"
+        class Widget {
+            get [Symbol.toStringTag](): string { return "Widget"; }
+        }
+        function main(): void {
+            const widget = new Widget();
+            console.log(Object.prototype.toString.call(widget), String(widget));
+            console.log(Object.prototype.toString.call([1, 2]));
+            console.log(Object.prototype.toString.call(5));
+            console.log(Object.prototype.toString.call("s"));
+            console.log(Object.prototype.toString.call(true));
+            console.log(Object.prototype.toString.call(null));
+            console.log(Object.prototype.toString.call(undefined));
+            console.log(Object.prototype.toString.call(/x/));
+            console.log(Object.prototype.toString.call({ a: 1 }));
+            function f(): void {}
+            console.log(Object.prototype.toString.call(f));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_prototype_to_string_call"),
+        "[object Widget] [object Widget]\n[object Array]\n[object Number]\n[object String]\n\
+         [object Boolean]\n[object Null]\n[object Undefined]\n[object RegExp]\n[object Object]\n\
+         [object Function]\n"
     );
 }
 

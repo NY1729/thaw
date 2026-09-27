@@ -70,6 +70,118 @@ impl<'a> FnLowerer<'a> {
         .map(Some)
     }
 
+    /// `Object.prototype.toString.call(<value>)` -- the single most common
+    /// real-world use of `Object`/`.prototype` (feature-detecting a
+    /// value's "internal class" tag string, e.g. `Object.prototype.
+    /// toString.call([]) === '[object Array]'`). Neither `Object` as a
+    /// bare identifier nor a general `.prototype` object graph exists in
+    /// this compiler, so this recognizes the one exact syntactic call
+    /// shape instead of building either, computing the same tag real
+    /// ECMA-262's `Object.prototype.toString` algorithm would (`Null`/
+    /// `Undefined`/`Array`/`Function` first, then a small built-in table
+    /// for the remaining native types, then a class's own `[Symbol.
+    /// toStringTag]` getter if it has one -- round32's own class-getter
+    /// lookup, also reused by `coerce_primitive_to_string`'s `String
+    /// (value)` fallback -- finally defaulting to `"Object"`).
+    fn lower_object_prototype_to_string_call(
+        &mut self,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(call_member) = callee.as_ref() else {
+            return Ok(None);
+        };
+        if member_property_name(&call_member.prop).as_deref() != Some("call") {
+            return Ok(None);
+        }
+        let Expr::Member(to_string_member) = call_member.obj.as_ref() else {
+            return Ok(None);
+        };
+        if member_property_name(&to_string_member.prop).as_deref() != Some("toString") {
+            return Ok(None);
+        }
+        let Expr::Member(prototype_member) = to_string_member.obj.as_ref() else {
+            return Ok(None);
+        };
+        if member_property_name(&prototype_member.prop).as_deref() != Some("prototype") {
+            return Ok(None);
+        }
+        let Expr::Ident(root) = prototype_member.obj.as_ref() else {
+            return Ok(None);
+        };
+        if root.sym != *"Object" {
+            return Ok(None);
+        }
+        let [argument] = call.args.as_slice() else {
+            return Err("Object.prototype.toString.call expects exactly one argument".into());
+        };
+        if argument.spread.is_some() {
+            return Err("Object.prototype.toString.call does not support a spread argument".into());
+        }
+        let value = self.lower_expr(&argument.expr)?;
+        let ty = self.infer_expr_type(&value)?;
+        self.object_prototype_to_string_tag(value, &ty).map(Some)
+    }
+
+    fn object_prototype_to_string_tag(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
+        if let HirType::Object(fields) = ty {
+            if ty != &date_object_type() && ty != &regex_object_type() {
+                if let Some(class_name) = class_name_from_type(&HirType::Object(fields.clone())) {
+                    let symbol = class_getter_symbol(
+                        class_name,
+                        &well_known_symbol_key("toStringTag"),
+                        false,
+                    );
+                    if self.signatures.contains_key(&symbol) {
+                        let tag = HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![value]);
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![
+                                HirExpr::Lit(HirLit::Str("[object ".to_string())),
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                                    vec![tag, HirExpr::Lit(HirLit::Str("]".to_string()))],
+                                ),
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+        let static_tag = match ty {
+            HirType::Undefined => "Undefined",
+            HirType::Null => "Null",
+            HirType::Array(_) | HirType::Tuple(_) => "Array",
+            HirType::Function(_, _) | HirType::CallableFunction(_, _, _, _) => "Function",
+            _ if *ty == date_object_type() => "Date",
+            _ if *ty == regex_object_type() => "RegExp",
+            HirType::F64 => "Number",
+            HirType::Str => "String",
+            HirType::Bool => "Boolean",
+            HirType::Map(_, _) => "Map",
+            HirType::WeakMap(_, _) => "WeakMap",
+            HirType::Set(_) => "Set",
+            HirType::WeakSet(_) => "WeakSet",
+            HirType::Bytes => "Uint8Array",
+            HirType::Symbol => "Symbol",
+            HirType::Promise(_) => "Promise",
+            HirType::I64 => "BigInt",
+            _ => "Object",
+        };
+        let name = format!("__thaw_object_prototype_to_string_{}", self.next_binding);
+        self.next_binding += 1;
+        self.wrap_call_argument_bindings(
+            HirExpr::Lit(HirLit::Str(format!("[object {static_tag}]"))),
+            &[(name, ty.clone(), value)],
+        )
+    }
+
     fn native_class_expression_type(&self, expression: &Expr) -> Option<HirType> {
         match expression {
             Expr::Ident(identifier) => self
