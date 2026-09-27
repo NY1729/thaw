@@ -1226,6 +1226,108 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `ECMA-262`'s own `ToPrimitive(value)` (no hint override -- the
+    /// default the spec's `+` operator itself uses) for a single binary
+    /// `+` operand: an `Object`-typed operand with a `[Symbol.toPrimitive]`
+    /// method is called *once*, with hint `"default"`, producing a `Json`
+    /// value; anything else is already primitive and passed through
+    /// unchanged. Errors for an `Object`-typed operand with no such method
+    /// -- `OrdinaryToPrimitive`'s `valueOf`/`toString` fallback chain isn't
+    /// implemented, matching this compiler's existing, narrower scope
+    /// (round28/30 only ever added the explicit `Symbol.toPrimitive` path).
+    fn add_operand_to_primitive(&mut self, value: HirExpr) -> Result<(HirExpr, HirType), String> {
+        let ty = self.infer_expr_type(&value)?;
+        let HirType::Object(fields) = &ty else {
+            return Ok((value, ty));
+        };
+        if let Some(result) = self.invoke_object_to_primitive(value.clone(), fields, "default")? {
+            return Ok((result, HirType::Json));
+        }
+        if let Some(result) = self.invoke_class_to_primitive(value.clone(), &ty, "default")? {
+            return Ok((result, HirType::Json));
+        }
+        Err(format!(
+            "binary `+` on an object requires a `[Symbol.toPrimitive]` method, got {ty:?}"
+        ))
+    }
+
+    /// Binary `+` when at least one operand is a statically `Object`-typed
+    /// value with its own `[Symbol.toPrimitive]` (a class instance or
+    /// object literal) -- unlike unary `+`/string coercion (each with one
+    /// *fixed*, compile-time-known hint), `+`'s own algorithm calls
+    /// `ToPrimitive` with hint `"default"` *once* per operand, then decides
+    /// string-concat vs. numeric-add from the *actual runtime type* of
+    /// each result -- a class can legitimately return a different value
+    /// for `"default"` than for `"string"`/`"number"` (confirmed real
+    /// trigger: a `Money` class's `toPrimitive` returns the formatted
+    /// `` `Money(${amount})` `` string for `"default"` alone). Builds the
+    /// real spec dispatch: if either resulting primitive is a string
+    /// (checked via `__thaw_json_typeof` for the `Object`-derived side;
+    /// statically known `false` for an already-primitive side, since a
+    /// statically `Str`-typed operand is already handled by the "one side
+    /// is `Str`" arm above this one), stringify-and-concat both; otherwise
+    /// numeric-add both. Both branches reuse the existing, generic
+    /// `coerce_primitive_to_string`/`coerce_primitive_to_number` (already
+    /// handling a `Json` result via a plain decode, no second `ToPrimitive`
+    /// call).
+    fn lower_add_with_to_primitive(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let (lhs_prim, lhs_ty) = self.add_operand_to_primitive(lhs)?;
+        let (rhs_prim, rhs_ty) = self.add_operand_to_primitive(rhs)?;
+        let lhs_name = format!("__thaw_add_to_primitive_lhs_{}", self.next_binding);
+        self.next_binding += 1;
+        let rhs_name = format!("__thaw_add_to_primitive_rhs_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(lhs_name.clone(), lhs_ty.clone());
+        self.scope.insert(rhs_name.clone(), rhs_ty.clone());
+        let is_result_string = |ty: &HirType, name: &str| {
+            if *ty == HirType::Json {
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_typeof".to_string())),
+                        vec![HirExpr::Var(name.to_string())],
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::Str("string".to_string()))),
+                )
+            } else {
+                HirExpr::Lit(HirLit::Bool(false))
+            }
+        };
+        let either_is_string = self.lower_logical_expr(
+            is_result_string(&lhs_ty, &lhs_name),
+            is_result_string(&rhs_ty, &rhs_name),
+            false,
+        )?;
+        let concat = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+            vec![
+                self.coerce_primitive_to_string(HirExpr::Var(lhs_name.clone()))?,
+                self.coerce_primitive_to_string(HirExpr::Var(rhs_name.clone()))?,
+            ],
+        );
+        let numeric = HirExpr::BinOp(
+            BinOp::Add,
+            Box::new(self.coerce_primitive_to_number(HirExpr::Var(lhs_name.clone()))?),
+            Box::new(self.coerce_primitive_to_number(HirExpr::Var(rhs_name.clone()))?),
+        );
+        let concat = self.coerce_to_declared(&HirType::Json, concat)?;
+        let numeric = self.coerce_to_declared(&HirType::Json, numeric)?;
+        let result = HirExpr::Conditional(
+            Box::new(either_is_string),
+            Box::new(concat),
+            Box::new(numeric),
+            HirType::Json,
+        );
+        self.wrap_call_argument_bindings(
+            result,
+            &[(lhs_name, lhs_ty, lhs_prim), (rhs_name, rhs_ty, rhs_prim)],
+        )
+    }
+
     /// The decimal digits of a `bigint`-like operand: a native `i64` via
     /// `thaw_i64_to_string`, or a live `JsValue` (a `bigint` beyond `i64`,
     /// kept as a handle) via its own `toString()`. Used to compare a

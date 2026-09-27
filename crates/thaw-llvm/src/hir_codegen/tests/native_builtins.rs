@@ -8731,6 +8731,59 @@ fn class_instance_to_primitive_is_consulted_by_coercions() {
     );
 }
 
+/// Binary `+` on a `[Symbol.toPrimitive]`-bearing operand: unlike unary `+`
+/// and string coercion (each with one fixed, compile-time-known hint), real
+/// `+` calls `ToPrimitive(operand)` with hint `"default"` exactly once per
+/// operand and then dispatches between string-concat and numeric-add from
+/// the *runtime type* of the result -- a class can legitimately return a
+/// different value for `"default"` than for `"string"`/`"number"` (`Money`'s
+/// own `[Symbol.toPrimitive]` below: `money + 1` must consult `"default"`,
+/// which returns the formatted `Money(5)` string, not `"number"`'s `5`).
+/// Also covers a sibling bug in the pre-existing "one side is `Str`" fast
+/// path (`money2 + 3` returning a number for `"default"`, used by `+`, but
+/// a different value for `"string"`, only used by e.g. template literals):
+/// it used to call the `Object`-typed operand's `toPrimitive` with hint
+/// `"string"` just because the *other* side was a string, which is not
+/// what real `+` does -- confirmed diverging from Node before this fix.
+#[test]
+fn binary_plus_consults_symbol_to_primitive_with_the_default_hint() {
+    let source = r#"
+        class Money {
+            amount: number;
+            constructor(amount: number) {
+                this.amount = amount;
+            }
+            [Symbol.toPrimitive](hint: string): any {
+                if (hint === "number") return this.amount;
+                if (hint === "string") return `$${this.amount}`;
+                return `Money(${this.amount})`;
+            }
+        }
+        class Vec2 {
+            x: number;
+            constructor(x: number) {
+                this.x = x;
+            }
+            [Symbol.toPrimitive](hint: string): any {
+                return this.x;
+            }
+        }
+        function main(): void {
+            const money = new Money(5);
+            console.log(money + 1);
+            const v = new Vec2(7);
+            console.log(v + 3);
+            console.log(3 + v);
+            console.log(v + "!");
+            console.log("!" + v);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "binary_plus_to_primitive_default_hint"),
+        "Money(5)1\n10\n10\n7!\n!7\n"
+    );
+}
+
 /// `obj[Symbol.toStringTag]`'s own dispatch (`lower_member_read`,
 /// `objects.rs`) used to be a fixed, built-ins-only lookup table
 /// (`Date`/`RegExp`/`Map`/... -> a literal tag string, anything else
