@@ -8595,6 +8595,47 @@ fn object_literal_to_primitive_is_consulted_by_coercions() {
     );
 }
 
+/// The class-instance sibling of `object_literal_to_primitive_is_
+/// consulted_by_coercions` above. Needed two further, separate pieces:
+/// `static_class_member_name` (`classes/normalization.rs`) only
+/// special-cased `Symbol.iterator` for a class *member declaration*'s
+/// computed name (`[Symbol.toPrimitive](hint) {...}` used to reject
+/// outright with "native class computed members require a
+/// string-literal name"), and a class instance represents a method as
+/// a `self.signatures` entry keyed by `class_method_symbol`, not as an
+/// object field the way an object literal's method is -- so the
+/// consultation itself needed its own `invoke_class_to_primitive`,
+/// not just reusing `invoke_object_to_primitive` unchanged. Binary
+/// `+` (`money + 1`) is *not* covered here -- it would need genuine
+/// runtime dispatch between string-concat and numeric-add depending
+/// on what `toPrimitive("default")` actually returns, not just a
+/// fixed-at-compile-time hint the way unary `+`/string coercion get;
+/// still a separate, open gap (see memory).
+#[test]
+fn class_instance_to_primitive_is_consulted_by_coercions() {
+    let source = r#"
+        class Money {
+            amount: number;
+            constructor(amount: number) {
+                this.amount = amount;
+            }
+            [Symbol.toPrimitive](hint: string): any {
+                if (hint === "number") return this.amount;
+                if (hint === "string") return `$${this.amount}`;
+                return `Money(${this.amount})`;
+            }
+        }
+        function main(): void {
+            const money = new Money(5);
+            console.log(+money, `${money}`);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "class_instance_to_primitive_coercion"),
+        "5 $5\n"
+    );
+}
+
 /// `Promise.allKeyed`/`Promise.allSettledKeyed` (strictly typed, including
 /// heterogeneous values).
 #[test]
