@@ -3620,6 +3620,48 @@ fn compiles_regex_property_access_and_stringify_crossing_an_any_boundary() {
     );
 }
 
+/// round7's own deliberately-deferred remainder: `JSON.stringify(re,
+/// ["source"])` (and the same for a Map/Set's `.size`) -- unlike the
+/// no-replacer form just above (always `{}`, since none of the three
+/// sentinel-tagged values have their own enumerable properties), a
+/// replacer *keys array*'s own `[[Get]]` still walks the prototype
+/// chain and picks up an accessor like `RegExp.prototype.source`/
+/// `Map.prototype.size` even though it isn't an *own* property.
+/// `filtered_json_omitting_undefined` (thaw-std's `json.rs`) used to
+/// collapse the sentinel wrapper to `{}` unconditionally regardless of
+/// the requested keys; now resolves each requested key through the same
+/// `regexp_wrapper_property`/`map_or_set_wrapper_size` accessor-
+/// emulation helpers `thaw_json_get` already uses for a direct `re.
+/// source`/`m.size` read, omitting a key that resolves to nothing
+/// (matching a real `undefined` `[[Get]]` result being skipped).
+#[test]
+fn stringify_replacer_keys_resolve_regex_and_map_set_prototype_accessors() {
+    let source = r#"
+        function main(): void {
+            const re: any = /abc/gi;
+            console.log(JSON.stringify(re, ["source"]));
+            console.log(JSON.stringify(re, ["source", "flags"]));
+            console.log(JSON.stringify(re, ["lastIndex"]));
+            console.log(JSON.stringify(re, ["notarealkey"]));
+
+            const m: any = new Map([["a", 1]]);
+            console.log(JSON.stringify(m, ["size"]));
+            console.log(JSON.stringify(m, ["a"]));
+
+            const s: any = new Set([1, 2, 3]);
+            console.log(JSON.stringify(s, ["size"]));
+
+            const nested: any = { re: /y/gi, list: [1, 2] };
+            console.log(JSON.stringify(nested, ["re", "list", "source", "flags"]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "stringify_replacer_keys_sentinel_wrappers"),
+        "{\"source\":\"abc\"}\n{\"source\":\"abc\",\"flags\":\"gi\"}\n{\"lastIndex\":0}\n{}\n\
+         {\"size\":1}\n{}\n{\"size\":3}\n{\"re\":{\"source\":\"y\",\"flags\":\"gi\"},\"list\":[1,2]}\n"
+    );
+}
+
 #[test]
 fn compiles_regex_test_and_exec_with_an_any_typed_receiver() {
     // Sibling of `compiles_match_and_search_with_a_regex_crossing_an_

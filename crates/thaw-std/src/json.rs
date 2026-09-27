@@ -326,9 +326,42 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[String]) -> Value {
         None => {}
     }
     match value {
-        Value::Object(fields) if is_thaw_internal_wrapper(fields) => {
-            Value::Object(serde_json::Map::new())
-        }
+        // The `PropertyList` filter's own `[[Get]]` walks the prototype
+        // chain for each requested key -- unlike the no-replacer form
+        // (which only ever asks "does this wrapper have any *own*
+        // enumerable properties" -- none, so always `{}`), a replacer-
+        // keys array can name a *prototype accessor* (`RegExp.prototype.
+        // source`/`Map.prototype.size`/...), which real `[[Get]]` still
+        // invokes and includes if present. `regexp_wrapper_property`/
+        // `map_or_set_wrapper_size` are the same accessor-emulation
+        // helpers `thaw_json_get` already uses for a direct `re.source`/
+        // `m.size` read on a bare `any`-typed value -- reused here
+        // instead of the previous unconditional empty object, matching
+        // real Node exactly for the common requested keys (`source`/
+        // `flags`/`lastIndex`/`global`/etc. for a RegExp, `size` for a
+        // Map/Set). A key that resolves to nothing (no such accessor,
+        // e.g. `["a"]` against a Map) is omitted, matching a real
+        // `undefined` `[[Get]]` result being skipped by `JSON.stringify`.
+        Value::Object(fields) if is_thaw_internal_wrapper(fields) => Value::Object(
+            keys.iter()
+                .filter_map(|key| {
+                    let resolved = regexp_wrapper_property(value, key).or_else(|| {
+                        (key == "size")
+                            .then(|| map_or_set_wrapper_size(value))
+                            .flatten()
+                    })?;
+                    if is_napi_undefined(&resolved) {
+                        return None;
+                    }
+                    let resolved = if non_finite_number(&resolved).is_some() {
+                        Value::Null
+                    } else {
+                        resolved
+                    };
+                    Some((key.clone(), resolved))
+                })
+                .collect(),
+        ),
         Value::Object(fields) => Value::Object(
             keys.iter()
                 .filter_map(|key| {
