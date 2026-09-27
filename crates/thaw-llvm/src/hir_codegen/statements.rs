@@ -282,43 +282,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_unconditional_branch(header_bb)
             .map_err(|e| e.to_string())?;
 
-        // The condition compiles *before* the body (unlike a naive
-        // top-to-bottom read of the source might suggest -- LLVM basic
-        // blocks don't need to be *populated* in program order, only
-        // *wired* correctly, which happens via the branches below
-        // regardless of instruction-emission order): a plain, non-closure
-        // property read in the body needs to see whichever variable
-        // identity the *condition's own* closures already promoted to a
-        // shared arena cell, since the condition genuinely runs first on
-        // every iteration too (real trigger: `while (anyRe.test(s)) {
-        // console.log(anyRe.lastIndex); }` -- `.test()`'s own lastIndex
-        // write-back closure, built while compiling `cond`, used to
-        // promote `anyRe` to a fresh arena cell that only the condition's
-        // own closure ever wrote into; the body's plain `anyRe.lastIndex`
-        // read, compiled first under the old order, kept reading the
-        // original, never-updated cell instead, frozen at its pre-loop
-        // value forever). `loop_promotion_scopes` is active for the whole
-        // condition compile for the identical reason it already was
-        // (a closure built there, re-entered every iteration via the
-        // backward branch below, needs the same preheader-injected
-        // promotion treatment a capture in the body gets.
-        self.builder.position_at_end(header_bb);
-        let variables_before_cond = self.variables.keys().cloned().collect();
-        self.loop_promotion_scopes
-            .push((preheader_bb, variables_before_cond));
-        let cond_val = self.compile_expr(cond)?.into_int_value();
-        self.builder
-            .build_conditional_branch(cond_val, body_bb, after_bb)
-            .map_err(|e| e.to_string())?;
-
         let variables_before_body = self.variables.clone();
         let variable_types_before_body = self.variable_hir_types.clone();
         let arena_variables_before_body = self.arena_variables.clone();
         self.builder.position_at_end(body_bb);
         self.loop_stack.push((header_bb, after_bb));
+        self.loop_promotion_scopes.push((
+            preheader_bb,
+            variables_before_body.keys().cloned().collect(),
+        ));
         let body_terminated = self.compile_block(body)?;
         self.loop_stack.pop();
-        self.loop_promotion_scopes.pop();
         if !body_terminated {
             self.builder
                 .build_unconditional_branch(header_bb)
@@ -337,6 +311,23 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
         }
+
+        self.builder.position_at_end(header_bb);
+        // The condition block, like the body, is re-entered on every
+        // iteration via the backward branch below -- so a closure built
+        // while compiling `cond` that captures a pre-loop variable needs
+        // the same loop-promotion treatment as one built in the body
+        // (`loop_promotion_scopes` must still be active here). Otherwise
+        // a mutating capture (e.g. `any`-typed RegExp `.exec()`'s
+        // `lastIndex` write-back) gets re-snapshotted from the
+        // still-stale original variable at the top of every iteration,
+        // discarding the previous iteration's write before it's ever
+        // read back.
+        let cond_val = self.compile_expr(cond)?.into_int_value();
+        self.loop_promotion_scopes.pop();
+        self.builder
+            .build_conditional_branch(cond_val, body_bb, after_bb)
+            .map_err(|e| e.to_string())?;
 
         self.builder.position_at_end(after_bb);
         // `after_bb` is always reachable (the condition can be false on the
