@@ -2398,6 +2398,43 @@ fn dynamic_return_type_convergence_tolerates_out_of_order_callers() {
     );
 }
 
+/// Sibling of the test above, but the out-of-order dependency is *within
+/// one class*, not across free functions: `stepA` (declared first) calls
+/// `this.stepB(x)` before `stepB`'s own unannotated return type has
+/// converged. `lower_class_methods` used to lower every method of one
+/// class as a single all-or-nothing `Result` (a plain `for` loop using
+/// `?`), so `stepA`'s failure during the convergence loop's trial pass
+/// aborted the *entire class* for that iteration -- including `stepB`,
+/// declared later in the same loop and never even attempted, so it could
+/// never converge either: a genuine deadlock, not just "needs more
+/// iterations" (confirmed empirically: raising the loop's own iteration
+/// bound alone did not fix this). Fixed by making each individual
+/// method's lowering attempt tolerant of failure (skip just that one
+/// method, keep whatever already succeeded) during the trial pass only --
+/// the real, error-propagating final pass is unchanged, confirmed by
+/// `class_method_chain_deadlock_still_reports_a_real_error` below still
+/// failing correctly for a genuinely unresolvable case.
+#[test]
+fn class_method_chain_with_an_out_of_order_dependency_converges() {
+    let source = r#"
+        class Chain {
+            step1(x: number) { return this.step2(x); }
+            step2(x: number) { return this.step3(x); }
+            step3(x: number) { return this.step4(x); }
+            step4(x: number) { return this.step5(x); }
+            step5(x: number) { return x + 1; }
+        }
+        function main(): void {
+            const chain = new Chain();
+            console.log(chain.step1(10));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "class_method_chain_out_of_order"),
+        "11\n"
+    );
+}
+
 /// A user class's own `[Symbol.iterator]()` method (unannotated, like
 /// the idiomatic real-world pattern) now works with `for...of`, once its
 /// return type actually converges (the fix above) -- previously hit

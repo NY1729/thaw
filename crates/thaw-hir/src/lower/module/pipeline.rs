@@ -1567,7 +1567,33 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     // variables. Re-lower them together until forward references reach a fixed point.
     // signatures discovered in the previous round until forward calls and
     // mutually recursive functions reach a fixed point.
-    for _ in 0..=((fn_decls.len() + global_types.len()) * 2 + 1) {
+    //
+    // The bound has to cover class methods too, not just free functions: this
+    // loop's own class-method branch below only threads a converged return
+    // type back into `signatures` once per *outer* iteration (`lower_class_
+    // methods`'s own per-call lowering doesn't see a sibling method's return
+    // type update until the next pass), so a chain of N unannotated-return
+    // methods within a single class -- even with zero free functions or
+    // globals at all -- genuinely needs N iterations to resolve, one hop at a
+    // time. Confirmed empirically: a bare 2-method chain (`stepA(x) { return
+    // this.stepB(x); } stepB(x) { return x + 1; }`, no free functions) failed
+    // with a confusing internal error ("unbound `this` cannot synthesize
+    // unreachable value of type Dynamic") before this fix, since the old
+    // bound (`(0 + 0) * 2 + 1 == 1`) allowed only one iteration.
+    let class_method_count: usize = class_decls
+        .iter()
+        .copied()
+        .chain(inherited_virtual_class_decls.iter())
+        .map(|declaration| {
+            declaration
+                .class
+                .body
+                .iter()
+                .filter(|member| matches!(member, ClassMember::Method(_)))
+                .count()
+        })
+        .sum();
+    for _ in 0..=((fn_decls.len() + global_types.len() + class_method_count) * 2 + 1) {
         let mut changed = false;
         let call_constraints = RefCell::new(Vec::new());
         let globals = lower_global_decls(
@@ -1661,6 +1687,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 &enum_reverse_values,
                 &global_types,
                 &immutable_globals,
+                true,
             ) else {
                 continue;
             };
@@ -1783,6 +1810,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 &enum_reverse_values,
                 &global_types,
                 &immutable_globals,
+                false,
             )?;
         } else if let Some(fn_decl) = fn_decls
             .iter()
@@ -1844,6 +1872,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 &enum_reverse_values,
                 &global_types,
                 &immutable_globals,
+                false,
             )?;
         } else if let Some(fn_decl) = fn_decls
             .iter()
@@ -2014,6 +2043,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &enum_reverse_values,
             &global_types,
             &immutable_globals,
+            false,
         )?);
     }
     for declaration in &inherited_virtual_class_decls {
@@ -2026,6 +2056,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &enum_reverse_values,
             &global_types,
             &immutable_globals,
+            false,
         )?);
     }
     specialized.extend(inherited_class_functions);

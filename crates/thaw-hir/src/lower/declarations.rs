@@ -760,6 +760,7 @@ fn lower_class_methods(
     enum_reverse_values: &EnumReverseValues,
     global_types: &HashMap<Symbol, HirType>,
     immutable_globals: &HashSet<Symbol>,
+    tolerant: bool,
 ) -> Result<Vec<HirFunction>, String> {
     let class_name = declaration.ident.sym.to_string();
     let instance_type = interfaces[&class_name].clone();
@@ -852,13 +853,33 @@ fn lower_class_methods(
                 .push("__thaw_this".into());
         }
         let mut lowered_body = Vec::new();
-        lower_function_statements(
+        // This whole function is also called from the convergence loop's
+        // own *trial* pass (`module/pipeline.rs`), where a sibling
+        // method's return type may not have converged yet -- e.g. `stepA
+        // (x) { return this.stepB(x); }` declared before `stepB` fails to
+        // resolve `this.stepB`'s call while `stepB`'s own return type is
+        // still `Dynamic`. `?` here used to propagate that immediately,
+        // aborting this *entire* class's convergence for the whole
+        // iteration -- including `stepB` itself, declared later in this
+        // same loop and never even attempted, so it could never converge
+        // either, deadlocking regardless of how many iterations the outer
+        // loop allows. `tolerant` (set only by that trial call site) skips
+        // just this one method instead, exactly like the sibling free-
+        // function loop already tolerates one failing function without
+        // aborting the others -- `stepB` gets its own chance this same
+        // pass, and `stepA` converges on a later one once it has.
+        if let Err(error) = lower_function_statements(
             &mut lowerer,
             &body.stmts,
             &signature.ret,
             method.function.is_generator,
             &mut lowered_body,
-        )?;
+        ) {
+            if tolerant {
+                continue;
+            }
+            return Err(error);
+        }
         let method_ret = if method.function.is_generator
             && hir_type_contains_dynamic(&signature.ret)
         {
@@ -932,13 +953,20 @@ fn lower_class_methods(
                     .push(parameter.name.clone());
             }
             let mut unbound_body = Vec::new();
-            lower_function_statements(
+            // Same tolerance as the bound variant above, and for the
+            // identical reason.
+            if let Err(error) = lower_function_statements(
                 &mut unbound,
                 &body.stmts,
                 &unbound_signature.ret,
                 method.function.is_generator,
                 &mut unbound_body,
-            )?;
+            ) {
+                if tolerant {
+                    continue;
+                }
+                return Err(error);
+            }
             // Same `Dynamic`-deferral resolution as the bound variant
             // above -- the unbound signature is the same underlying
             // table entry (`signatures.get(&unbound_symbol).unwrap_or(

@@ -116,6 +116,27 @@ fn mutual_recursion_between_unannotated_functions_reports_a_clear_error() {
     );
 }
 
+/// Class-method sibling of the test above: `lower_class_methods`'s new
+/// per-method tolerance (see `class_method_chain_with_an_out_of_order_
+/// dependency_converges`, `hir_codegen/tests/classes.rs`) only skips a
+/// method that fails *during the trial convergence loop*, retrying it on
+/// a later pass -- a genuinely unresolvable case (mutual recursion
+/// between two methods with no base case to bootstrap a concrete type
+/// from) still correctly fails, not silently loops forever or accepts a
+/// bogus type.
+#[test]
+fn mutual_recursion_between_unannotated_class_methods_reports_an_error() {
+    let module = thaw_parser::parse_typescript(
+        "class Bad {
+             isEven(n: number) { if (n === 0) return true; return this.isOdd(n - 1); }
+             isOdd(n: number) { if (n === 0) return false; return this.isEven(n - 1); }
+         }
+         function main(): void { console.log(new Bad().isEven(4)); }",
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
 #[test]
 fn lowers_boolean_logical_operators_to_short_circuit_closures() {
     let program = lower(
