@@ -3765,6 +3765,62 @@ fn any_typed_regex_exec_advances_inside_a_while_condition() {
     );
 }
 
+/// The narrower sibling gap left open by the fix just above: `.test()`
+/// (not `.exec()`) in a `while` condition, plus a *separate*, plain
+/// (non-closure) `.lastIndex` read in the body -- the exact combination
+/// this compiler's own `compile_while` compiles body *before* condition.
+/// The condition's own `lastIndex` write-back closure only gets promoted
+/// to a shared arena cell the first time it's compiled; a plain body-side
+/// read compiled from an earlier, un-promoted snapshot of the same
+/// variable then permanently "freezes" at its pre-loop value. Fixed by
+/// eagerly promoting every variable EITHER side's own closure would
+/// capture, before compiling either side (`thaw_hir::closure_captured_
+/// names_in_while`, `compile_while`'s own new pre-pass) -- not by
+/// reordering condition/body compilation (tried once, reverted, see
+/// `for_of_over_a_sparse_array_is_unaffected_by_the_while_loop_eager_
+/// promotion_pass` right below for the regression that reorder caused).
+#[test]
+fn any_typed_regex_test_in_while_condition_keeps_a_plain_body_read_of_last_index_fresh() {
+    let source = r#"
+        function main(): void {
+            const anyRe: any = /a/g;
+            const s = "aaa";
+            while (anyRe.test(s)) {
+                console.log(anyRe.lastIndex);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_typed_regex_test_while_condition_last_index_read"),
+        "1\n2\n3\n"
+    );
+}
+
+/// round38's own reverted fix attempt for the gap above (reordering
+/// `compile_while` to compile the condition before the body) broke this
+/// exact case: `for (const value of [1, , 3]) {...}` desugars to the
+/// identical `while` shape, and its own sparse-hole-check closure (body
+/// side) promotes the loop index to a shared arena cell -- if the
+/// condition compiled first (against a pre-promotion snapshot), the
+/// index comparison never observed the increment, an infinite loop.
+/// Pinned here as a permanent regression guard for the real fix (an
+/// eager, order-independent promotion pre-pass) landed instead.
+#[test]
+fn for_of_over_a_sparse_array_is_unaffected_by_the_while_loop_eager_promotion_pass() {
+    let source = r#"
+        function main(): void {
+            for (const value of [1, , 3]) {
+                console.log(value);
+            }
+            console.log("done");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "for_of_sparse_array_while_promotion_regression"),
+        "1\nundefined\n3\ndone\n"
+    );
+}
+
 #[test]
 fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
     // A `Date` stored in `any` already round-trips through QuickJS

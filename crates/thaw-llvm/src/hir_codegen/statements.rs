@@ -278,6 +278,34 @@ impl<'ctx> HirCompiler<'ctx> {
 
         let preheader_bb = self.builder.get_insert_block().unwrap();
 
+        // Eagerly promote every pre-loop variable EITHER side's own
+        // closure would otherwise reactively promote on first capture --
+        // done here, before either side is compiled and before this
+        // loop's own `loop_promotion_scopes` entry is pushed, so
+        // `promote_variable_to_arena_cell`'s existing logic (no outer
+        // loop scope -> `allocate_arena_cell`, the function entry block;
+        // an outer loop scope active -> `build_arena_cell` at the
+        // current builder position, still `preheader_bb` here, before
+        // its terminator) places the cell correctly regardless of
+        // nesting. Without this, whichever side's own closure compiles
+        // first (currently always the body) reactively promotes the
+        // variable, leaving the *other* side -- compiled from a
+        // `variables_before_body` snapshot taken before that promotion
+        // -- reading a stale, un-promoted cell (round24's `.test()`/
+        // `.lastIndex` staleness bug). See `closure_captured_names_in_
+        // while`'s own doc comment for why simply reordering cond/body
+        // compilation instead (tried in round38, reverted) isn't safe:
+        // it just moves the identical bug to the mirror-image case
+        // (`for...of` over a sparse array desugars to this same `while`
+        // shape, with its own index-normalization closure promoting from
+        // the body side).
+        for name in thaw_hir::closure_captured_names_in_while(cond, body) {
+            let Some(hir_ty) = self.variable_hir_types.get(&name).cloned() else {
+                continue;
+            };
+            self.promote_variable_to_arena_cell(&name, &hir_ty)?;
+        }
+
         self.builder
             .build_unconditional_branch(header_bb)
             .map_err(|e| e.to_string())?;
