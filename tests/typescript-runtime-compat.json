@@ -917,9 +917,8 @@
     },
     {
       "name": "proxy set trap on property assignment",
-      "expect": "unsupported",
-      "source": "function main(): void { const target: Record<string, number> = { a: 1 }; const proxy = new Proxy(target, { get(obj: Record<string, number>, prop: string): number { return prop in obj ? obj[prop] : -1; }, set(obj: Record<string, number>, prop: string, value: number): boolean { obj[prop] = value * 2; return true; }, has(obj: Record<string, number>, prop: string): boolean { return prop === 'a' || prop in obj; }, }); proxy.b = 5; console.log(proxy.a, proxy.missing, proxy.b, 'a' in proxy, 'z' in proxy); }",
-      "detailContains": "output differs"
+      "expect": "matched",
+      "source": "function main(): void { const target: Record<string, number> = { a: 1 }; const proxy = new Proxy(target, { get(obj: Record<string, number>, prop: string): number { return prop in obj ? obj[prop] : -1; }, set(obj: Record<string, number>, prop: string, value: number): boolean { obj[prop] = value * 2; return true; }, has(obj: Record<string, number>, prop: string): boolean { return prop === 'a' || prop in obj; }, }); proxy.b = 5; console.log(proxy.a, proxy.missing, proxy.b, 'a' in proxy, 'z' in proxy); }"
     },
     {
       "name": "object freeze and seal state does not survive an object-to-any boundary",

@@ -7583,6 +7583,47 @@ fn compiles_weak_ref_finalization_registry_and_proxy() {
     );
 }
 
+/// A `Proxy` `set` trap's own object parameter used to be bridged in as a
+/// JSON value-copy snapshot, not a live handle -- `obj[prop] = value * 2`
+/// silently mutated a throwaway decode, discarded the instant the trap
+/// returned, so the assignment through the proxy appeared to succeed
+/// (the trap still returns `true`) but never actually reached anything
+/// observable. `lower_contextual_arrow`'s parameter-binding loop
+/// (`lower/expressions/functions.rs`) now retypes a `Dictionary`/`Object`/
+/// `Dynamic`/`Json`-typed callback parameter to a live `JsValue` handle
+/// when the body mutates it directly, mirroring the existing any-annotated
+/// override `lower_arrow` already applies for immer's own `draft => {
+/// draft.x = ... }`, but keyed on the resolved type shape (not just `any`)
+/// since real Proxy handlers give `obj` a concrete `Record<string, number>`
+/// annotation, not `any`. `get`/`has` (read-only, untouched) confirm the
+/// snapshot path is unaffected for a trap that never mutates its parameter.
+#[test]
+fn proxy_set_trap_mutation_reaches_the_real_target_through_the_proxy() {
+    let source = r#"
+        function main(): void {
+            const target: Record<string, number> = { a: 1 };
+            const proxy = new Proxy(target, {
+                get(obj: Record<string, number>, prop: string): number {
+                    return prop in obj ? obj[prop] : -1;
+                },
+                set(obj: Record<string, number>, prop: string, value: number): boolean {
+                    obj[prop] = value * 2;
+                    return true;
+                },
+                has(obj: Record<string, number>, prop: string): boolean {
+                    return prop === 'a' || prop in obj;
+                },
+            });
+            proxy.b = 5;
+            console.log(proxy.a, proxy.missing, proxy.b, 'a' in proxy, 'z' in proxy);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "proxy_set_trap_mutation"),
+        "1 -1 10 true false\n"
+    );
+}
+
 /// `BigInt` support beyond literals/arithmetic: `console.log`'s `n`
 /// suffix, radix `toString`, `BigInt(number|string|boolean)` conversion,
 /// and `BigInt.asIntN`/`asUintN`. thaw's BigInt is a fixed-width `i64`
