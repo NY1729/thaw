@@ -1535,6 +1535,21 @@ impl<'a> FnLowerer<'a> {
             if well_known_symbol_from_expr(&computed.expr) == Some("toStringTag") {
                 let receiver = self.lower_expr(&member.obj)?;
                 let receiver_type = self.infer_expr_type(&receiver)?;
+                // A user class's own `get [Symbol.toStringTag]()` (mangled
+                // via `well_known_symbol_key`, `normalize_class` in
+                // `classes/normalization.rs`) takes priority over the
+                // built-in table below, matching real JS: a class instance
+                // with its own tag getter reports *that*, not `undefined`.
+                if let Some(class_name) = class_name_from_type(&receiver_type) {
+                    let symbol = class_getter_symbol(
+                        class_name,
+                        &well_known_symbol_key("toStringTag"),
+                        false,
+                    );
+                    if self.signatures.contains_key(&symbol) {
+                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![receiver]));
+                    }
+                }
                 // Only the built-ins that actually define a
                 // `Symbol.toStringTag` getter report one; an Array/plain
                 // object has none, so this reads `undefined` (its "Array"

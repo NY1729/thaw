@@ -976,6 +976,11 @@
       "name": "for...of over a class Symbol.iterator returning a discriminated IteratorResult union",
       "expect": "matched",
       "source": "class Range { start: number; end: number; constructor(start: number, end: number) { this.start = start; this.end = end; } [Symbol.iterator]() { let current = this.start; const end = this.end; return { next() { if (current < end) { const value = current; current++; return { value: value, done: false }; } return { value: undefined, done: true }; } }; } } function main(): void { const r = new Range(1, 5); for (const x of r) { console.log(x); } }"
+    },
+    {
+      "name": "class Symbol.toStringTag getter is consulted by a direct property read",
+      "expect": "matched",
+      "source": "class Widget { get [Symbol.toStringTag](): string { return \"Widget\"; } } function main(): void { const widget = new Widget(); console.log(widget[Symbol.toStringTag]); }"
     }
   ]
 }
