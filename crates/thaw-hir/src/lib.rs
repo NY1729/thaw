@@ -24,6 +24,10 @@ pub use ir::*;
 mod program;
 pub use program::*;
 
+#[path = "hir/closure_analysis.rs"]
+mod closure_analysis;
+pub use closure_analysis::*;
+
 mod lower;
 
 pub use lower::{

@@ -17,6 +17,65 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(value)
     }
 
+    /// Promotes `name` (a pre-existing, currently plain-stack variable) to
+    /// a shared arena cell if it isn't one already -- reused by both a
+    /// closure's own reactive first-capture promotion
+    /// (`allocate_lambda_environment`, below) and `compile_while`'s eager
+    /// pre-pass (see `thaw_hir::closure_captured_names_in_while`'s own
+    /// doc comment for why a `while` loop needs this done for BOTH sides
+    /// up front, not reactively on whichever side's closure compiles
+    /// first).
+    fn promote_variable_to_arena_cell(
+        &mut self,
+        name: &str,
+        hir_ty: &HirType,
+    ) -> Result<(), String> {
+        let Some((variable_cell, ty)) = self.variables.get(name).copied() else {
+            return Ok(());
+        };
+        let frame_backed = self.async_frame_cells.contains(&variable_cell);
+        if self.arena_variables.contains(name)
+            || self.global_variables.contains_key(name)
+            || frame_backed
+        {
+            return Ok(());
+        }
+        let promotion_scope = self
+            .loop_promotion_scopes
+            .iter()
+            .find(|(_, variables)| variables.contains(name))
+            .map(|(preheader, _)| *preheader);
+        let cell = if promotion_scope.is_none() && !self.loop_promotion_scopes.is_empty() {
+            self.build_arena_cell(&self.builder, ty, name)?
+        } else {
+            self.allocate_arena_cell(ty, name)?
+        };
+        let promotion_builder = promotion_scope.map(|preheader| {
+            let builder = self.context.create_builder();
+            builder.position_before(&preheader.get_terminator().unwrap());
+            builder
+        });
+        let builder = promotion_builder.as_ref().unwrap_or(&self.builder);
+        let value = builder
+            .build_load(ty, variable_cell, "captured_stack_value")
+            .map_err(|error| error.to_string())?;
+        if self.uses_quickjs_handles && *hir_ty == HirType::JsValue {
+            builder
+                .build_call(
+                    self.module.get_function("thaw_js_retain_handle").unwrap(),
+                    &[value.into()],
+                    "retain_captured_js_handle",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        builder
+            .build_store(cell, value)
+            .map_err(|error| error.to_string())?;
+        self.variables.insert(name.to_string(), (cell, ty));
+        self.arena_variables.insert(name.to_string());
+        Ok(())
+    }
+
     fn allocate_lambda_environment(
         &mut self,
         function: FunctionValue<'ctx>,
@@ -24,49 +83,7 @@ impl<'ctx> HirCompiler<'ctx> {
         captures: &[HirParam],
     ) -> Result<PointerValue<'ctx>, String> {
         for capture in captures {
-            let Some((variable_cell, ty)) = self.variables.get(&capture.name).copied() else {
-                continue;
-            };
-            let frame_backed = self.async_frame_cells.contains(&variable_cell);
-            if self.arena_variables.contains(&capture.name)
-                || self.global_variables.contains_key(&capture.name)
-                || frame_backed
-            {
-                continue;
-            }
-            let promotion_scope = self
-                .loop_promotion_scopes
-                .iter()
-                .find(|(_, variables)| variables.contains(&capture.name))
-                .map(|(preheader, _)| *preheader);
-            let cell = if promotion_scope.is_none() && !self.loop_promotion_scopes.is_empty() {
-                self.build_arena_cell(&self.builder, ty, &capture.name)?
-            } else {
-                self.allocate_arena_cell(ty, &capture.name)?
-            };
-            let promotion_builder = promotion_scope.map(|preheader| {
-                    let builder = self.context.create_builder();
-                    builder.position_before(&preheader.get_terminator().unwrap());
-                    builder
-                });
-            let builder = promotion_builder.as_ref().unwrap_or(&self.builder);
-            let value = builder
-                .build_load(ty, variable_cell, "captured_stack_value")
-                .map_err(|error| error.to_string())?;
-            if self.uses_quickjs_handles && capture.ty == HirType::JsValue {
-                builder
-                    .build_call(
-                        self.module.get_function("thaw_js_retain_handle").unwrap(),
-                        &[value.into()],
-                        "retain_captured_js_handle",
-                    )
-                    .map_err(|error| error.to_string())?;
-            }
-            builder
-                .build_store(cell, value)
-                .map_err(|error| error.to_string())?;
-            self.variables.insert(capture.name.clone(), (cell, ty));
-            self.arena_variables.insert(capture.name.clone());
+            self.promote_variable_to_arena_cell(&capture.name, &capture.ty)?;
         }
         let i64_type = self.context.i64_type();
         let closure = self
