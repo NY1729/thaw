@@ -201,7 +201,7 @@ impl<'a> FnLowerer<'a> {
                     self.scope.insert(receiver_name.clone(), receiver_type.clone());
                     self.scope.insert(key_name.clone(), key_type.clone());
                     self.scope.insert(value_name.clone(), value_type.clone());
-                    let result = HirExpr::Call(
+                    let set_call = HirExpr::Call(
                         Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
                         vec![
                             HirExpr::Var(receiver_name.clone()),
@@ -209,6 +209,17 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(value_name.clone()),
                         ],
                     );
+                    let result = if key_suffix == "any" && matches!(receiver_type, HirType::WeakMap(_, _))
+                    {
+                        let mut guard = self.weak_key_runtime_guard(
+                            HirExpr::Var(key_name.clone()),
+                            "Invalid value used as weak map key",
+                        )?;
+                        guard.push(HirStmt::Return(Some(set_call)));
+                        HirExpr::Block(guard)
+                    } else {
+                        set_call
+                    };
                     let mut bindings = vec![(receiver_name, receiver_type, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((key_name, key_type, key));
@@ -389,7 +400,7 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(receiver_name.clone(), receiver_type.clone());
                     self.scope.insert(element_name.clone(), element_type.clone());
-                    let result = HirExpr::Call(
+                    let add_call = HirExpr::Call(
                         Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
                         vec![
                             HirExpr::Var(receiver_name.clone()),
@@ -397,6 +408,17 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Lit(HirLit::F64(0.0)),
                         ],
                     );
+                    let result = if key_suffix == "any" && matches!(receiver_type, HirType::WeakSet(_))
+                    {
+                        let mut guard = self.weak_key_runtime_guard(
+                            HirExpr::Var(element_name.clone()),
+                            "Invalid value used in weak set",
+                        )?;
+                        guard.push(HirStmt::Return(Some(add_call)));
+                        HirExpr::Block(guard)
+                    } else {
+                        add_call
+                    };
                     let mut bindings = vec![(receiver_name, receiver_type, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((element_name, element_type, element));
@@ -921,5 +943,58 @@ impl<'a> FnLowerer<'a> {
             Vec::new(),
         );
         self.wrap_call_argument_bindings(iterator, &[(receiver_name, receiver_type, receiver)])
+    }
+
+    /// `WeakMap.prototype.set`/`WeakSet.prototype.add`'s own runtime
+    /// requirement when the *static* key type is only known to be
+    /// `Json` (`weak_key_intrinsic_suffix`'s `"any"` classification,
+    /// `instance_builtins/support.rs`): the actual value has to be a
+    /// genuine reference type (`typeof` `"object"` or `"function"`) at
+    /// call time, exactly like real `WeakMap`/`WeakSet` throw a
+    /// `TypeError` for an actual primitive -- confirmed against real
+    /// Node, and confirmed `.has()`/`.delete()` do *not* need this (they
+    /// just report `false` for an invalid key, since it could never
+    /// have been `.set()`/`.add()`ed in the first place). Reuses the
+    /// existing `__thaw_json_typeof` intrinsic and the tagged-string
+    /// exception channel every other thrown `TypeError` in this
+    /// compiler already uses.
+    fn weak_key_runtime_guard(
+        &mut self,
+        key: HirExpr,
+        message: &str,
+    ) -> Result<Vec<HirStmt>, String> {
+        let typeof_name = format!("__thaw_weak_key_typeof_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(typeof_name.clone(), HirType::Str);
+        let typeof_call = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_typeof".to_string())),
+            vec![key],
+        );
+        let var = || HirExpr::Var(typeof_name.clone());
+        let is_object = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(var()),
+            Box::new(HirExpr::Lit(HirLit::Str("object".to_string()))),
+        );
+        let is_function = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(var()),
+            Box::new(HirExpr::Lit(HirLit::Str("function".to_string()))),
+        );
+        let is_valid = self.lower_logical_expr(is_object, is_function, false)?;
+        Ok(vec![
+            HirStmt::Let(typeof_name, HirType::Str, typeof_call),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(is_valid),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                ),
+                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                    "\u{1}TypeError\u{1}{message}"
+                ))))],
+                Vec::new(),
+            ),
+        ])
     }
 }
