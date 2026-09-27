@@ -7211,7 +7211,7 @@ fn compiles_dynamic_json_value_prototypes() {
     "#;
     assert_eq!(
         compile_and_run(source, "dynamic_json_value_prototypes"),
-        "true\n{\"greet\":\"hello\"}\nnull\nnull\ntrue\ntrue\n"
+        "true\n{ greet: 'hello' }\nnull\nnull\ntrue\ntrue\n"
     );
 }
 

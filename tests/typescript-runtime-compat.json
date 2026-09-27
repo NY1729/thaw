@@ -989,6 +989,11 @@
       "name": "JSON.stringify replacer keys array resolves RegExp/Map/Set prototype accessors crossing an any boundary",
       "expect": "matched",
       "source": "function main(): void { const re: any = /abc/gi; console.log(JSON.stringify(re, [\"source\", \"flags\"])); const m: any = new Map([[\"a\", 1]]); console.log(JSON.stringify(m, [\"size\"])); console.log(JSON.stringify(m, [\"a\"])); }"
+    },
+    {
+      "name": "console.log renders an any-typed object/array/Map/Set in Node's util.inspect style",
+      "expect": "matched",
+      "source": "function main(): void { const obj: any = { a: 1, b: \"x\", c: [1, 2] }; console.log(obj); const m: any = new Map([[\"a\", 1], [\"b\", 2]]); console.log(m); const s: any = new Set([1, 2, 3]); console.log(s); const withWeirdKey: any = { \"weird-key\": 1, normalKey: 2 }; console.log(withWeirdKey); }"
     }
   ]
 }

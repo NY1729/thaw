@@ -686,7 +686,7 @@ fn compiles_object_assign_for_plain_object_literals() {
     "#;
     assert_eq!(
         compile_and_run(source, "object_assign_plain_literals"),
-        "{\"a\":1,\"b\":2}\n{\"a\":1,\"b\":2,\"c\":3}\n{\"a\":1,\"b\":2}\n"
+        "{ a: 1, b: 2 }\n{ a: 1, b: 2, c: 3 }\n{ a: 1, b: 2 }\n"
     );
 }
 
