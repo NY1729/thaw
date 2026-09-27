@@ -2354,6 +2354,47 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Await(inner) | HirExpr::AwaitPromise(inner, _) => {
                 match self.infer_expr_type(inner)? {
                     HirType::Promise(value) => Ok(*value),
+                    // `await` on a value that *might* be a `Promise<T>`
+                    // (round25's own union-return-type inference: an
+                    // unannotated function returning a `Promise` on one
+                    // branch, a plain `T` on another -- e.g. `function
+                    // pick(flag) { return flag ? Promise.resolve(5) :
+                    // 10; }`) resolves to `T` either way, matching real
+                    // JS (`await` on an already-non-Promise value just
+                    // resolves to it unchanged). Only the exact "one
+                    // `Promise` member, one other member already equal
+                    // to its resolved payload" shape is recognized here
+                    // -- this must match `thaw-llvm`'s own
+                    // `compile_await_promise_union` exactly, which relies
+                    // on this unwrapped type to size the surrounding
+                    // `Let`/frame slot correctly; anything wider keeps
+                    // the raw `Union` unchanged (not attempted).
+                    HirType::Union(members) => {
+                        let promise_member =
+                            members.iter().enumerate().find_map(|(index, member)| {
+                                if let HirType::Promise(resolved) = member {
+                                    Some((index, resolved.as_ref().clone()))
+                                } else {
+                                    None
+                                }
+                            });
+                        match promise_member {
+                            Some((promise_index, resolved)) => {
+                                let other_members = members
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(index, _)| *index != promise_index)
+                                    .map(|(_, member)| member)
+                                    .collect::<Vec<_>>();
+                                if other_members.len() == 1 && other_members[0] == &resolved {
+                                    Ok(resolved)
+                                } else {
+                                    Ok(HirType::Union(members))
+                                }
+                            }
+                            None => Ok(HirType::Union(members)),
+                        }
+                    }
                     // Legacy/direct await sources can already expose their
                     // resolved type to the surrounding expression.
                     other => Ok(other),

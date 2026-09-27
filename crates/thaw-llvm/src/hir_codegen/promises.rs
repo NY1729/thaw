@@ -972,6 +972,48 @@ impl<'ctx> HirCompiler<'ctx> {
             inner,
             HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "sleep")
         );
+        // `await` on a `Union` where exactly one member is `Promise<T>`
+        // and the other is already plain `T` (round25's own union-return-
+        // type inference lets an unannotated function return a `Promise`
+        // on one branch, a plain value on another -- e.g. `function pick
+        // (flag: boolean) { return flag ? Promise.resolve(5) : 10; }`)
+        // reaches this ordinary/blocking fallback because the async-frame
+        // planner's own `is_frame_await_source` only recognizes a value
+        // *known* to always be a `Promise<T>`, never "maybe a Promise" --
+        // so it's never hoisted into a real coroutine suspend, and this
+        // function's own "just return the value unchanged" behavior
+        // below is only correct for an operand that provably never *is*
+        // a Promise. Confirmed empirically: this genuinely was wrong,
+        // printing the live `Promise` object itself instead of its
+        // resolved payload. Blocking-drive it, exactly like `sleep`
+        // already does just below -- not a true coroutine suspend, but a
+        // real, narrow, already-accepted trade-off (this shape means the
+        // *whole* enclosing async function blocks the thread while
+        // waiting, rather than cooperatively yielding), matching `sleep`'s
+        // own existing strategy precisely. A union with more than one
+        // non-`Promise` member, or a non-`Promise` member that isn't
+        // exactly the resolved payload type, falls through unchanged --
+        // not attempted this round, no tracked case needs it.
+        if let Some(HirType::Union(members)) = self.expr_hir_type(inner) {
+            let promise_member = members.iter().enumerate().find_map(|(index, member)| {
+                if let HirType::Promise(resolved) = member {
+                    Some((index, resolved.as_ref().clone()))
+                } else {
+                    None
+                }
+            });
+            if let Some((promise_index, resolved)) = promise_member {
+                let other_members = members
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != promise_index)
+                    .map(|(_, member)| member)
+                    .collect::<Vec<_>>();
+                if other_members.len() == 1 && other_members[0] == &resolved {
+                    return self.compile_await_promise_union(inner, promise_index, &resolved);
+                }
+            }
+        }
         let value = self.compile_expr(inner)?;
         if !is_sleep {
             // User-defined async functions still use the V1 synchronous ABI.
@@ -996,6 +1038,83 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_is_not_null(result, "await_resolved")
             .map_err(|e| e.to_string())?;
         Ok(resolved.into())
+    }
+
+    /// `compile_await`'s own `Union` case: `inner` is a tagged-union value
+    /// (the same `{tag, payload}` struct `HirExpr::UnionInject`/`UnionTag`/
+    /// `UnionValue` already build/read) whose `promise_index`'th member is
+    /// `Promise<resolved>` and whose one remaining member is already plain
+    /// `resolved`. Evaluated once, then a genuine *runtime* branch on the
+    /// union's own discriminant: the `Promise` arm blocking-drives it to
+    /// completion (`drive_promise_to_resolved_value`, the same helper a
+    /// statically-known `Promise<T>` await already uses outside a real
+    /// coroutine frame); the other arm decodes the already-resolved payload
+    /// directly (`unpack_union_payload`, the same decode `UnionValue`'s own
+    /// codegen uses). Both arms merge into one native value of `resolved`'s
+    /// own type via a phi node.
+    fn compile_await_promise_union(
+        &mut self,
+        inner: &HirExpr,
+        promise_index: usize,
+        resolved: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let union = self.compile_expr(inner)?.into_struct_value();
+        let tag = self
+            .builder
+            .build_extract_value(union, 0, "await_union_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(union, 1, "await_union_payload")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let is_promise = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                tag,
+                tag.get_type().const_int(promise_index as u64, false),
+                "await_union_is_promise",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let function = self.current_function();
+        let promise_bb = self.context.append_basic_block(function, "await_union_promise");
+        let value_bb = self.context.append_basic_block(function, "await_union_value");
+        let merge_bb = self.context.append_basic_block(function, "await_union_merge");
+        self.builder
+            .build_conditional_branch(is_promise, promise_bb, value_bb)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(promise_bb);
+        let promise_ptr = self
+            .unpack_union_payload(payload, &HirType::Promise(Box::new(resolved.clone())))?
+            .into_pointer_value();
+        let promise_result = self.drive_promise_to_resolved_value(promise_ptr, resolved)?;
+        let promise_bb_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(value_bb);
+        let plain_result = self.unpack_union_payload(payload, resolved)?;
+        let value_bb_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(merge_bb);
+        let result_type = self.basic_type(resolved)?;
+        let phi = self
+            .builder
+            .build_phi(result_type, "await_union_result")
+            .map_err(|error| error.to_string())?;
+        phi.add_incoming(&[
+            (&promise_result, promise_bb_end),
+            (&plain_result, value_bb_end),
+        ]);
+        Ok(phi.as_basic_value())
     }
 
     /// Drives a typed Promise that remains inside a synchronous closure (for

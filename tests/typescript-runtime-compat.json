@@ -953,9 +953,8 @@
     },
     {
       "name": "array fromAsync over promise array",
-      "expect": "unsupported",
-      "source": "async function main(): Promise<void> { const values = await Array.fromAsync([Promise.resolve(1), Promise.resolve(2), 3]); console.log(values.join(',')); }",
-      "detailContains": "cannot serialize collection element Promise"
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const values = await Array.fromAsync([Promise.resolve(1), Promise.resolve(2), 3]); console.log(values.join(',')); }"
     },
     {
       "name": "object freeze blocks writes to a statically typed object",
