@@ -914,14 +914,53 @@ impl<'a> FnLowerer<'a> {
                     Pat::Array(pattern) => format!("__thaw_param_{}", pattern.span.lo.0),
                     _ => return Err("unsupported Promise callback parameter pattern".into()),
                 };
+                // A contextual callback parameter that decodes as a JSON
+                // value-copy snapshot (`compile_json_value_to_native`,
+                // json_bridge/decoding.rs) gets retyped to a live `JsValue`
+                // handle when the body mutates it directly -- the same
+                // reasoning as `lower_arrow`'s own any/unannotated-only
+                // override (real trigger there: immer's `draft => { draft.x
+                // = ... }`), but also covering an explicit `Dictionary`/
+                // `Object` annotation, not just `any`/unannotated. Real-world
+                // Proxy handlers are object-literal methods, not arrows (`{
+                // set(obj, prop, value) { obj[prop] = value * 2; } }`),
+                // lowered here (via `lower_object_function`'s synthesized
+                // arrow) rather than through `lower_arrow` -- and the
+                // parameter is routinely given a concrete annotation like
+                // `Record<string, number>` (-> `Dictionary`), not `any`, so
+                // `lower_arrow`'s narrower any-annotated gate would never
+                // have caught this. The `Dictionary`/`Object` branch requires
+                // an *explicit* source annotation, unlike `Dynamic`/`Json`:
+                // `lower_object_function`'s own synthesized, unannotated
+                // `this`-receiver parameter for an object-literal accessor
+                // (`get`/`set` methods referencing `this`) is also `Object`-
+                // typed and its body also "mutates" it (`this.value = ...`
+                // rewrites to an assignment on that receiver) -- retyping
+                // *that* internal placeholder to `JsValue` breaks the
+                // accessor's own closure ABI (confirmed by a real LLVM
+                // module-verification failure, `compiles_object_literal_
+                // accessors`). Requiring a real annotation excludes it, since
+                // it's purely contextually inferred, never user-annotated.
+                let is_annotated_dictionary_or_object = matches!(
+                    ty,
+                    HirType::Dictionary(_) | HirType::Object(_)
+                ) && parameter_has_explicit_type_annotation(pat);
+                let ty = if (matches!(ty, HirType::Dynamic | HirType::Json)
+                    || is_annotated_dictionary_or_object)
+                    && arrow_body_mutates(&source_name, arrow)
+                {
+                    HirType::JsValue
+                } else {
+                    ty.clone()
+                };
                 let name = self.bind_local(&source_name, ty.clone());
-                self.mark_array_parameter(&name, ty);
+                self.mark_array_parameter(&name, &ty);
                 if !matches!(pat, Pat::Ident(_) | Pat::Rest(_)) {
                     destructuring.push((pat, name.clone(), ty.clone()));
                 }
                 params.push(HirParam {
                     name,
-                    ty: ty.clone(),
+                    ty,
                 });
             }
             for ty in parameter_types.iter().skip(arrow.params.len()) {
@@ -1317,6 +1356,23 @@ fn arrow_body_mutates(name: &str, arrow: &swc_ecma_ast::ArrowExpr) -> bool {
     };
     arrow.body.visit_with(&mut finder);
     finder.mutated
+}
+
+/// Whether an arrow/function parameter carries a real, written-out type
+/// annotation, of any kind -- distinguishes a genuine `obj: Record<string,
+/// number>` from a purely internal, contextually-inferred placeholder
+/// parameter that was never written by the user (e.g. `lower_object_
+/// function`'s synthesized `this`-receiver for an accessor referencing
+/// `this`) -- see `lower_contextual_arrow`'s call site.
+fn parameter_has_explicit_type_annotation(pattern: &Pat) -> bool {
+    match pattern {
+        Pat::Ident(binding) => binding.type_ann.is_some(),
+        Pat::Rest(rest) => rest.type_ann.is_some(),
+        Pat::Object(object) => object.type_ann.is_some(),
+        Pat::Array(array) => array.type_ann.is_some(),
+        Pat::Assign(assignment) => parameter_has_explicit_type_annotation(&assignment.left),
+        _ => false,
+    }
 }
 
 /// Whether an arrow/function parameter's own annotation is `any`/`unknown`
