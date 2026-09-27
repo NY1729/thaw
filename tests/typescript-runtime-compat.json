@@ -974,6 +974,11 @@
       "name": "class Symbol.toStringTag getter is consulted by a direct property read",
       "expect": "matched",
       "source": "class Widget { get [Symbol.toStringTag](): string { return \"Widget\"; } } function main(): void { const widget = new Widget(); console.log(widget[Symbol.toStringTag]); }"
+    },
+    {
+      "name": "a concrete array element before an any[] spread widens the element type",
+      "expect": "matched",
+      "source": "function main(): void { const anyArr: any[] = [1, 2, 3]; console.log(JSON.stringify([0, ...anyArr])); const floatArr: number[] = [10, 20]; console.log(JSON.stringify([...floatArr, 0, ...anyArr])); }"
     }
   ]
 }

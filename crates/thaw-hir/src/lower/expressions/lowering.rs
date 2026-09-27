@@ -2495,12 +2495,22 @@ impl<'a> FnLowerer<'a> {
                     self.infer_expr_type(&value)?;
                     return self.wrap_call_argument_bindings(value, &bindings);
                 }
-                let mut parts = Vec::new();
-                let mut pending = Vec::new();
-                let mut element_type: Option<HirType> = None;
+                // Phase 1 -- collect: lower every element/spread exactly
+                // once (same order as source, so side effects are
+                // unaffected), deferring the "what's the shared element
+                // type" decision instead of fixing it from whichever
+                // segment is seen first. This is what lets `[0, ...anyArr]`
+                // (a concrete element *before* an `any[]` spread) resolve
+                // the same way `[...anyArr, 0]` already does.
+                enum ArrayLitSegment {
+                    Hole,
+                    Value(HirExpr, HirType),
+                    Spread(HirExpr, HirType),
+                }
+                let mut segments = Vec::with_capacity(array_lit.elems.len());
                 for element in &array_lit.elems {
                     let Some(element) = element else {
-                        pending.push(HirExpr::Lit(HirLit::ArrayHole));
+                        segments.push(ArrayLitSegment::Hole);
                         continue;
                     };
                     let mut value = self.lower_expr(&element.expr)?;
@@ -2554,30 +2564,6 @@ impl<'a> FnLowerer<'a> {
                         let HirType::Array(spread_element) = self.infer_expr_type(&value)? else {
                             return Err("array spread source must be a typed array".into());
                         };
-                        if let Some(expected) = &element_type {
-                            if expected != spread_element.as_ref() {
-                                if expected == &HirType::Optional(spread_element.clone()) {
-                                    element_type = Some(spread_element.as_ref().clone());
-                                } else {
-                                    return Err(format!(
-                                        "array spread element type {:?} does not match {expected:?}",
-                                        spread_element
-                                    ));
-                                }
-                            }
-                        } else {
-                            element_type = Some(spread_element.as_ref().clone());
-                        }
-                        if !pending.is_empty() {
-                            let values = std::mem::take(&mut pending).into_iter()
-                                .map(|item| if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
-                                    Ok(item)
-                                } else {
-                                    self.coerce_array_insert_value(item, spread_element.as_ref())
-                                })
-                                .collect::<Result<Vec<_>, String>>()?;
-                            parts.push(self.lower_native_array_literal(values, spread_element.as_ref().clone())?);
-                        }
                         // Array spread iterates values: unlike concat, a source hole
                         // becomes an own `undefined` entry in the new array.
                         value = HirExpr::Call(
@@ -2591,60 +2577,127 @@ impl<'a> FnLowerer<'a> {
                                 ],
                             )],
                         );
-                        parts.push(value);
+                        segments.push(ArrayLitSegment::Spread(value, spread_element.as_ref().clone()));
                     } else {
                         let actual = self.infer_expr_type(&value)?;
-                        if let Some(expected) = &element_type {
-                            if expected != &actual && expected != &HirType::Optional(Box::new(actual.clone()))
-                                && actual != HirType::Optional(Box::new(expected.clone())) {
-                                if matches!(expected, HirType::Union(members) if members.contains(&actual))
-                                    // A plain element following a `...spread`
-                                    // of an `any[]` array -- `[...anyArr, 3]`
-                                    // -- needs the same declared-type coercion
-                                    // an ordinary array-literal element
-                                    // already gets, not a strict type match;
-                                    // `expected` is only ever `Json` here
-                                    // because the spread source's element
-                                    // type was `Json`, so any `actual` type
-                                    // is coercible. Only covers this order
-                                    // (`expected` already `Json` by the time
-                                    // a differently-typed plain element is
-                                    // seen) -- the reverse (`[0, ...anyArr]`,
-                                    // a concrete-typed literal establishing
-                                    // `expected` *before* the `any[]` spread)
-                                    // still hits the sibling "array spread
-                                    // element type ... does not match" error
-                                    // above, since retroactively widening
-                                    // already-compiled earlier elements would
-                                    // need a real two-pass rewrite of this
-                                    // function.
-                                    || expected == &HirType::Json
-                                {
-                                    value = self.coerce_to_declared(expected, value)?;
-                                } else {
-                                    return Err(format!(
-                                        "array element type {actual:?} does not match {expected:?}"
-                                    ));
-                                }
-                            }
-                        } else {
-                            element_type = Some(actual);
+                        segments.push(ArrayLitSegment::Value(value, actual));
+                    }
+                }
+
+                // Phase 2 -- resolve: fold every segment's type into one
+                // shared `element_type`, order-independently. This is a
+                // symmetric generalization of the tolerance rules the old
+                // single-pass loop already applied (Optional-unwrap,
+                // Union-containment, Json-escape-hatch) -- anything that
+                // type-checked left-to-right before still resolves to the
+                // identical type (that resolution is a special case of this
+                // reduce), so this only widens acceptance, never narrows it.
+                fn widen_array_element_type(existing: HirType, next: HirType) -> Result<HirType, String> {
+                    if existing == next {
+                        return Ok(existing);
+                    }
+                    if existing == HirType::Optional(Box::new(next.clone())) {
+                        return Ok(next);
+                    }
+                    if next == HirType::Optional(Box::new(existing.clone())) {
+                        return Ok(existing);
+                    }
+                    if matches!(&existing, HirType::Union(members) if members.contains(&next)) {
+                        return Ok(existing);
+                    }
+                    if matches!(&next, HirType::Union(members) if members.contains(&existing)) {
+                        return Ok(next);
+                    }
+                    if existing == HirType::Json || next == HirType::Json {
+                        return Ok(HirType::Json);
+                    }
+                    Err(format!("array element type {next:?} does not match {existing:?}"))
+                }
+                let mut element_type: Option<HirType> = None;
+                for segment in &segments {
+                    let next = match segment {
+                        ArrayLitSegment::Hole => continue,
+                        ArrayLitSegment::Value(_, ty) | ArrayLitSegment::Spread(_, ty) => ty.clone(),
+                    };
+                    element_type = Some(match element_type {
+                        None => next,
+                        Some(existing) => widen_array_element_type(existing, next)?,
+                    });
+                }
+                let element_type = element_type.unwrap_or(HirType::F64);
+
+                // Phase 3 -- build: walk the already-lowered segments again
+                // (no re-lowering, no re-evaluation) and reconstruct
+                // `pending`/`parts` targeting the now-known `element_type`.
+                let mut parts = Vec::new();
+                let mut pending = Vec::new();
+                for segment in segments {
+                    match segment {
+                        ArrayLitSegment::Hole => pending.push(HirExpr::Lit(HirLit::ArrayHole)),
+                        ArrayLitSegment::Value(value, _) => {
+                            pending.push(value);
                         }
-                        pending.push(value);
+                        ArrayLitSegment::Spread(mut value, spread_element) => {
+                            if !pending.is_empty() {
+                                let values = std::mem::take(&mut pending).into_iter()
+                                    .map(|item| if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
+                                        Ok(item)
+                                    } else {
+                                        self.coerce_array_insert_value(item, &element_type)
+                                    })
+                                    .collect::<Result<Vec<_>, String>>()?;
+                                parts.push(self.lower_native_array_literal(values, element_type.clone())?);
+                            }
+                            if spread_element != element_type {
+                                // Only reachable when a *later* segment
+                                // forces a wider type than this spread's own
+                                // source -- e.g. `[...floatArr, ...anyArr]`.
+                                // Not reachable by any case the old
+                                // left-to-right loop already accepted (it
+                                // required exact equality at the point each
+                                // spread was seen).
+                                let parameter = format!(
+                                    "__thaw_array_lit_spread_widen_{}",
+                                    self.next_binding
+                                );
+                                self.next_binding += 1;
+                                self.scope.insert(parameter.clone(), spread_element.clone());
+                                let converted = self.coerce_to_declared(
+                                    &element_type,
+                                    HirExpr::Var(parameter.clone()),
+                                )?;
+                                let callback = HirExpr::Lambda(
+                                    Vec::new(),
+                                    vec![HirParam {
+                                        name: parameter,
+                                        ty: spread_element.clone(),
+                                    }],
+                                    element_type.clone(),
+                                    Box::new(converted),
+                                );
+                                value = self.lower_array_map(
+                                    value,
+                                    HirType::Array(Box::new(spread_element.clone())),
+                                    spread_element.clone(),
+                                    spread_element,
+                                    callback,
+                                    None,
+                                )?;
+                            }
+                            parts.push(value);
+                        }
                     }
                 }
                 if !pending.is_empty() {
-                    let element = element_type.as_ref().expect("nonempty literal segment has an element type");
                     let values = pending.into_iter()
                         .map(|item| if matches!(item, HirExpr::Lit(HirLit::ArrayHole)) {
                             Ok(item)
                         } else {
-                            self.coerce_array_insert_value(item, element)
+                            self.coerce_array_insert_value(item, &element_type)
                         })
                         .collect::<Result<Vec<_>, String>>()?;
-                    parts.push(self.lower_native_array_literal(values, element.clone())?);
+                    parts.push(self.lower_native_array_literal(values, element_type.clone())?);
                 }
-                let element_type = element_type.unwrap_or(HirType::F64);
                 if !parts.iter().any(contains_await) {
                     return Ok(HirExpr::ArrayConcat(parts, element_type));
                 }

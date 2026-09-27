@@ -491,6 +491,46 @@ fn array_destructuring_assignment_into_already_declared_bindings() {
     );
 }
 
+/// `[0, ...anyArr]` (a concrete-typed literal element *before* an `any[]`
+/// spread) used to hard-error ("array spread element type Json does not
+/// match F64") even though the reverse order, `[...anyArr, 0]`, already
+/// compiled correctly. The array-literal lowering loop fixed
+/// `element_type` from whichever element/spread it saw *first*, with no
+/// way to retroactively widen already-buffered elements once a *later*
+/// spread needed a wider (`Json`) type. Fixed via a collect -> resolve ->
+/// build rewrite: every element/spread is lowered once (same order, so
+/// side effects are unaffected) into a segment list, the shared element
+/// type is resolved order-independently across all segments, then the
+/// segments are rebuilt targeting that type -- including, for the rare
+/// case where an earlier spread's own source is narrower than a type a
+/// later segment forces (`[...floatArr, 0, ...anyArr]`), elementwise
+/// widening that spread's array via `lower_array_map`.
+#[test]
+fn reverse_and_mixed_position_array_spreads_widen_the_element_type() {
+    let source = r#"
+        function main(): void {
+            const anyArr: any[] = [1, 2, 3];
+            const reversed = [0, ...anyArr];
+            console.log(JSON.stringify(reversed));
+
+            const forward = [...anyArr, "x", true, 0];
+            console.log(JSON.stringify(forward));
+
+            const floatArr: number[] = [10, 20];
+            const mixed = [...floatArr, 0, ...anyArr];
+            console.log(JSON.stringify(mixed));
+
+            const emptyAny: any[] = [];
+            const edge = [1, ...emptyAny, 2];
+            console.log(JSON.stringify(edge));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "reverse_array_spread_widening"),
+        "[0,1,2,3]\n[1,2,3,\"x\",true,0]\n[10,20,0,1,2,3]\n[1,2]\n"
+    );
+}
+
 #[test]
 fn destructures_numeric_and_bigint_property_names() {
     let source = r#"
