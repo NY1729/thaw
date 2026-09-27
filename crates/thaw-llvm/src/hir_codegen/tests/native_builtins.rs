@@ -8636,6 +8636,35 @@ fn class_instance_to_primitive_is_consulted_by_coercions() {
     );
 }
 
+/// `obj[Symbol.toStringTag]`'s own dispatch (`lower_member_read`,
+/// `objects.rs`) used to be a fixed, built-ins-only lookup table
+/// (`Date`/`RegExp`/`Map`/... -> a literal tag string, anything else
+/// falling straight to `undefined`) -- a user class's own
+/// `get [Symbol.toStringTag]()` getter was never even consulted.
+/// Fixed by checking for a registered class getter under the same
+/// `well_known_symbol_key` sentinel `Symbol.toPrimitive` support
+/// already uses, *before* falling into the built-in table, matching
+/// real JS (a class's own tag getter takes priority). `Object.
+/// prototype.toString`/`String()` still don't consult it either way --
+/// unrelated, separate gaps (`Object.prototype` isn't supported at
+/// all yet).
+#[test]
+fn class_symbol_to_string_tag_getter_is_consulted() {
+    let source = r#"
+        class Widget {
+            get [Symbol.toStringTag](): string { return "Widget"; }
+        }
+        function main(): void {
+            const widget = new Widget();
+            console.log(widget[Symbol.toStringTag]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "class_symbol_to_string_tag_getter"),
+        "Widget\n"
+    );
+}
+
 /// `Promise.allKeyed`/`Promise.allSettledKeyed` (strictly typed, including
 /// heterogeneous values).
 #[test]
