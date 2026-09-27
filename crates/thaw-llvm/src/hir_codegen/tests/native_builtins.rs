@@ -6665,6 +6665,55 @@ fn compiles_object_freeze_state() {
     );
 }
 
+/// `compiles_object_freeze_state` only checks the observable *state*
+/// (`isFrozen`/`isSealed`/`isExtensible`); this checks *enforcement* --
+/// a write actually throws a catchable `TypeError` instead of silently
+/// succeeding, for both a statically `{..}`-typed receiver
+/// (`HirExpr::PropAssign`) and a plain `any`-typed one
+/// (`HirExpr::JsonSet`), and `seal`/`preventExtensions` (without
+/// `freeze`) still allow updating an *existing* key while blocking a
+/// genuinely new one.
+#[test]
+fn object_freeze_and_seal_block_writes() {
+    let source = r#"
+        function main(): void {
+            const frozen = Object.freeze({ value: 1 });
+            try {
+                frozen.value = 99;
+                console.log("no throw");
+            } catch (error) {
+                console.log("threw", error instanceof TypeError);
+            }
+            console.log(frozen.value);
+
+            const dynamic: any = { value: 1, extra: 2 };
+            Object.freeze(dynamic);
+            try {
+                dynamic.value = 99;
+                console.log("no throw");
+            } catch {
+                console.log("threw");
+            }
+            console.log(dynamic.value, dynamic.extra);
+
+            const sealed: any = { value: 3 };
+            Object.seal(sealed);
+            sealed.value = 4;
+            try {
+                sealed.extra = 5;
+                console.log("no throw");
+            } catch {
+                console.log("threw");
+            }
+            console.log(sealed.value, sealed.extra);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_freeze_and_seal_enforcement"),
+        "threw true\n1\nthrew\n1 2\nthrew\n4 undefined\n"
+    );
+}
+
 /// `RegExp.prototype.hasIndices` (the `d` flag) and the `atob`/`btoa`
 /// base64 globals.
 #[test]

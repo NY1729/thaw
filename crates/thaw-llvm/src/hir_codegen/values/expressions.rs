@@ -6,6 +6,32 @@ impl<'ctx> HirCompiler<'ctx> {
             .expect("builder must be positioned inside a function")
     }
 
+    /// Raises a synthetic `TypeError` from codegen itself (no matching
+    /// user `throw` statement) through the same tagged-string exception
+    /// channel `new TypeError(message)` uses (`docs/design/
+    /// exceptions.md`), so `catch`/`.message`/`instanceof TypeError`
+    /// all see it exactly as they would a real `throw`. Terminates the
+    /// current block -- the caller must not fall through afterward.
+    fn compile_throw_type_error(&mut self, message: &str) -> Result<(), String> {
+        let tagged = format!("\u{1}TypeError\u{1}{message}");
+        let value = self
+            .builder
+            .build_global_string_ptr(&tagged, "synthetic_type_error")
+            .map_err(|error| error.to_string())?
+            .as_pointer_value();
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), value)
+            .map_err(|error| error.to_string())?;
+        if let Some(catch_bb) = self.catch_stack.last().copied() {
+            self.builder
+                .build_unconditional_branch(catch_bb)
+                .map_err(|error| error.to_string())?;
+        } else {
+            self.build_default_return()?;
+        }
+        Ok(())
+    }
+
     fn compile_expr(&mut self, expr: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
         match expr {
             HirExpr::Lit(HirLit::F64(n)) => Ok(self.context.f64_type().const_float(*n).into()),
@@ -432,6 +458,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 let setter = self.compile_object_accessor(object, field, true)?;
                 let function = self.current_function();
                 let call_setter = self.context.append_basic_block(function, "object_setter");
+                let check_frozen = self.context.append_basic_block(function, "object_write_check_frozen");
+                let frozen_blocked = self.context.append_basic_block(function, "object_write_frozen");
                 let store_field = self.context.append_basic_block(function, "object_data_write");
                 let done = self.context.append_basic_block(function, "object_write_done");
                 let has_setter = self
@@ -439,7 +467,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_is_not_null(setter, "object_has_setter")
                     .map_err(|error| error.to_string())?;
                 self.builder
-                    .build_conditional_branch(has_setter, call_setter, store_field)
+                    .build_conditional_branch(has_setter, call_setter, check_frozen)
                     .map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(call_setter);
@@ -453,6 +481,33 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_unconditional_branch(done)
                     .map_err(|error| error.to_string())?;
+
+                // `Object.freeze` blocks every plain data-field write (see
+                // `thaw_object_state`'s query 2, `thaw-runtime/src/
+                // runtime/native_values/objects.rs`); a dynamically
+                // registered setter (above) is left alone -- freezing a
+                // getter/setter pair isn't this probe's concern here.
+                self.builder.position_at_end(check_frozen);
+                let frozen = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_object_state").unwrap(),
+                        &[object.into(), self.context.i8_type().const_int(2, false).into()],
+                        "object_write_is_frozen",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_object_state returned no value")?
+                    .into_int_value();
+                self.builder
+                    .build_conditional_branch(frozen, frozen_blocked, store_field)
+                    .map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(frozen_blocked);
+                self.compile_throw_type_error(&format!(
+                    "Cannot assign to read only property '{field}' of object"
+                ))?;
 
                 self.builder.position_at_end(store_field);
                 self.builder
