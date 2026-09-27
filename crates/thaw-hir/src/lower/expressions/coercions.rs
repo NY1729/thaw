@@ -692,6 +692,13 @@ impl<'a> FnLowerer<'a> {
                 {
                     return Ok(HirExpr::JsonAsString(Box::new(result)));
                 }
+                if let Some(result) = self.invoke_class_to_primitive(
+                    value.clone(),
+                    &HirType::Object(fields.clone()),
+                    "string",
+                )? {
+                    return Ok(HirExpr::JsonAsString(Box::new(result)));
+                }
                 // A class extending `Error`/`TypeError`/etc. (see
                 // `lower/module/classes.rs`) is a real object with
                 // inherited `message`/`name: Str` fields, not the tagged
@@ -1105,6 +1112,13 @@ impl<'a> FnLowerer<'a> {
                 if let Some(result) =
                     self.invoke_object_to_primitive(value.clone(), &fields, "number")?
                 {
+                    return Ok(HirExpr::JsonAsNumber(Box::new(result)));
+                }
+                if let Some(result) = self.invoke_class_to_primitive(
+                    value.clone(),
+                    &HirType::Object(fields.clone()),
+                    "number",
+                )? {
                     return Ok(HirExpr::JsonAsNumber(Box::new(result)));
                 }
                 let string = self.coerce_primitive_to_string(value)?;

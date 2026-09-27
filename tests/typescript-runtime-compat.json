@@ -932,13 +932,13 @@
       "name": "symbol toPrimitive on class",
       "expect": "unsupported",
       "source": "class Money { amount: number; constructor(amount: number) { this.amount = amount; } [Symbol.toPrimitive](hint: string): any { if (hint === 'number') return this.amount; if (hint === 'string') return `$${this.amount}`; return `Money(${this.amount})`; } } function main(): void { const money = new Money(5); console.log(+money, `${money}`, money + 1); }",
-      "detailContains": "native class computed members require a string-literal name"
+      "detailContains": "arithmetic requires F64 operands"
     },
     {
       "name": "symbol toStringTag on class",
       "expect": "unsupported",
       "source": "class Widget { get [Symbol.toStringTag](): string { return 'Widget'; } } function main(): void { const widget = new Widget(); console.log(Object.prototype.toString.call(widget), String(widget)); }",
-      "detailContains": "native class computed members require a string-literal name"
+      "detailContains": "unknown variable"
     },
     {
       "name": "symbol toPrimitive on object literal",

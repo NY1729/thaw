@@ -3202,4 +3202,40 @@ impl<'a> FnLowerer<'a> {
         let result = self.wrap_call_argument_bindings(call, &[(name, object_type, value)])?;
         Ok(Some(result))
     }
+
+    /// The class-instance sibling of `invoke_object_to_primitive` above.
+    /// A class instance's own `[Symbol.toPrimitive](hint)` method (mangled
+    /// via `well_known_symbol_key`, same as an object literal's, by
+    /// `static_class_member_name`'s module-wide computed-key rewrite --
+    /// `classes/normalization.rs`) lives in `self.signatures` under
+    /// `class_method_symbol`, not as an object field the way an object
+    /// literal's does -- a class instance's own field table only holds its
+    /// declared instance properties plus its identity marker
+    /// (`class_name_from_type`). Calling it needs no receiver-copy object
+    /// (unlike the object-literal case): a native class method's own
+    /// calling convention (`invocations/calls.rs`'s `obj.method(args)`
+    /// rewrite) passes the receiver value directly as the first argument.
+    fn invoke_class_to_primitive(
+        &mut self,
+        value: HirExpr,
+        object_type: &HirType,
+        hint: &str,
+    ) -> Result<Option<HirExpr>, String> {
+        let Some(class_name) = class_name_from_type(object_type) else {
+            return Ok(None);
+        };
+        let symbol = class_method_symbol(class_name, &well_known_symbol_key("toPrimitive"));
+        let Some(signature) = self.signatures.get(&symbol).cloned() else {
+            return Ok(None);
+        };
+        let call = HirExpr::Call(
+            Box::new(HirExpr::FunctionRef(
+                symbol,
+                signature.params.clone(),
+                signature.ret.clone(),
+            )),
+            vec![value, HirExpr::Lit(HirLit::Str(hint.to_string()))],
+        );
+        Ok(Some(call))
+    }
 }

@@ -235,8 +235,25 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
                 continue;
             };
             let span = computed.span;
-            let Some(value) =
-                static_class_member_name(&computed.expr, &|name| constants.get(name).cloned())
+            // `static_class_member_name` only special-cases `Symbol.
+            // iterator` (its result is also used by the broader,
+            // module-wide `ComputedAccessNormalizer` visitor below,
+            // which must *not* eagerly rewrite every other well-known
+            // symbol -- an object literal's own `[Symbol.toPrimitive]`
+            // key, or a real `d[Symbol.toPrimitive]("number")` member
+            // access, needs to still see the original `Symbol.<name>`
+            // expression, not a pre-mangled string). This closure is
+            // scoped to *class member declarations* only, though, so a
+            // well-known-symbol fallback here -- mangled the same way
+            // an object literal's own computed key is
+            // (`well_known_symbol_key`, `objects.rs`), so
+            // `invoke_class_to_primitive` finds it under the same
+            // sentinel -- is safe and doesn't leak into that broader
+            // pass.
+            let Some(value) = static_class_member_name(&computed.expr, &|name| {
+                constants.get(name).cloned()
+            })
+            .or_else(|| well_known_symbol_from_expr(&computed.expr).map(well_known_symbol_key))
             else {
                 continue;
             };
