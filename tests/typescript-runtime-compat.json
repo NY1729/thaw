@@ -933,9 +933,8 @@
     },
     {
       "name": "symbol toStringTag on class",
-      "expect": "unsupported",
-      "source": "class Widget { get [Symbol.toStringTag](): string { return 'Widget'; } } function main(): void { const widget = new Widget(); console.log(Object.prototype.toString.call(widget), String(widget)); }",
-      "detailContains": "unknown variable"
+      "expect": "matched",
+      "source": "class Widget { get [Symbol.toStringTag](): string { return 'Widget'; } } function main(): void { const widget = new Widget(); console.log(Object.prototype.toString.call(widget), String(widget)); }"
     },
     {
       "name": "symbol toPrimitive on object literal",

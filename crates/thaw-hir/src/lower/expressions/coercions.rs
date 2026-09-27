@@ -773,10 +773,47 @@ impl<'a> FnLowerer<'a> {
                             &[(binding, object_type, value)],
                         )
                     }
-                    _ => Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_object_to_string".to_string())),
-                        vec![value],
-                    )),
+                    // A plain object/class instance with no `toPrimitive`
+                    // falls to real JS's `OrdinaryToPrimitive`, which tries
+                    // `toString()` -- inherited from `Object.prototype`
+                    // absent an override, whose own algorithm reports
+                    // `"[object " + tag + "]"`, consulting the receiver's
+                    // own `[Symbol.toStringTag]` getter if it has one
+                    // (round32's own class-getter lookup, reused here)
+                    // before falling back to the constant `"[object
+                    // Object]"` (`__thaw_object_to_string`) every other
+                    // class/object literal already gets.
+                    _ => {
+                        if let Some(class_name) =
+                            class_name_from_type(&HirType::Object(fields.clone()))
+                        {
+                            let symbol = class_getter_symbol(
+                                class_name,
+                                &well_known_symbol_key("toStringTag"),
+                                false,
+                            );
+                            if self.signatures.contains_key(&symbol) {
+                                let tag =
+                                    HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![value]);
+                                return Ok(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                                    vec![
+                                        HirExpr::Lit(HirLit::Str("[object ".to_string())),
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var(
+                                                "__thaw_string_concat".to_string(),
+                                            )),
+                                            vec![tag, HirExpr::Lit(HirLit::Str("]".to_string()))],
+                                        ),
+                                    ],
+                                ));
+                            }
+                        }
+                        Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_to_string".to_string())),
+                            vec![value],
+                        ))
+                    }
                 }
             }
             HirType::Array(element) => {
