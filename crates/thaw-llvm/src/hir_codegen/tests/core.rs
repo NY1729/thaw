@@ -442,6 +442,55 @@ fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest(
     );
 }
 
+/// Array-destructuring *assignment* (`[a, b] = arr`, reassigning already-
+/// declared bindings, as opposed to a fresh `const [a, b] = arr`
+/// declaration) into a plain, statically-typed `T[]` (not a fixed-length
+/// tuple). `lower_assignment_pattern`'s own `Pat::Array` arm already
+/// existed for `HirType::Array` and reads each position via `array_read_
+/// type`, which deliberately wraps a primitive element in `Optional`
+/// (matching real JS: an under-length array's missing positions read as
+/// `undefined` at runtime, not a compile-time-provable absence) -- but
+/// each target binding's own *already-declared* type (`F64`/`Str`, fixed
+/// at its own earlier `let`) can't accept that `Optional` value directly,
+/// so this previously hard-errored ("value has type Optional(F64),
+/// expected F64") instead of compiling at all. Fixed by reusing
+/// `coerce_primitive_array_argument` (already used for the identical
+/// "declared F64/Str receiving a resolved Optional<F64>/Optional<Str>"
+/// shape at a function call's own argument-marshaling site) in place of
+/// a plain `coerce_to_declared`. A genuinely too-short array still
+/// diverges from Node in one narrow, pre-existing way (an already-F64-
+/// typed binding can't natively represent `undefined`, so it becomes
+/// `NaN` instead -- confirmed this exact divergence already exists
+/// identically for an ordinary, non-destructuring out-of-bounds
+/// assignment like `y = short[5]`, so this fix doesn't introduce it,
+/// just makes destructuring-assignment consistent with that existing,
+/// accepted trade-off instead of a hard compile error).
+#[test]
+fn array_destructuring_assignment_into_already_declared_bindings() {
+    let source = r#"
+        function main(): void {
+            let a = 0, b = 0;
+            let rest: number[] = [];
+            const arr: number[] = [1, 2, 3, 4, 5];
+            [a, b, ...rest] = arr;
+            console.log(a, b, rest.length);
+
+            let s1 = "", s2 = "";
+            const strs: string[] = ["x", "y"];
+            [s1, s2] = strs;
+            console.log(s1, s2);
+
+            let p = 0, q = 0;
+            [p, q] = [10, 20];
+            console.log(p, q);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_destructuring_assignment"),
+        "1 2 3\nx y\n10 20\n"
+    );
+}
+
 #[test]
 fn destructures_numeric_and_bigint_property_names() {
     let source = r#"
