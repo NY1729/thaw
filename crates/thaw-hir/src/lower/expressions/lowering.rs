@@ -1282,13 +1282,88 @@ impl<'a> FnLowerer<'a> {
                                 // that helper's single-key check doesn't
                                 // fit this two-field shape.
                                 if class.sym == *"Uint8Array" {
+                                    // A real Buffer/Uint8Array crossing
+                                    // into `any` via a *statically*-typed
+                                    // (`HirType::Bytes`) source is caught
+                                    // by the `__thaw_json_is_buffer_shape`
+                                    // check alone -- but a live, JsValue-
+                                    // constructed one (`new Uint8Array(...)`
+                                    // with no static annotation, e.g. round12's
+                                    // `f(new Uint8Array([1,2,3]))`) crosses
+                                    // into `any` as the opaque `{"__thaw_
+                                    // js_handle_id__": id}` placeholder
+                                    // instead (see `coerce_to_declared`'s
+                                    // `Json`-target/`JsValue`-actual branch,
+                                    // `inference/coercions.rs` -- kept
+                                    // unconditionally identity-preserving
+                                    // there rather than eagerly resolved,
+                                    // since a naive fix at *that* shared
+                                    // choke point was tried and reverted:
+                                    // it broke `Atomics.waitAsync` on a
+                                    // live `SharedArrayBuffer`-backed
+                                    // TypedArray, which needs the value to
+                                    // stay genuinely live, not a snapshot
+                                    // copy). Narrower fix, scoped to this
+                                    // one `instanceof` check only: detect
+                                    // the handle-placeholder shape (the
+                                    // same `__thaw_json_has_wrapper_key`
+                                    // structural check the sentinel-tagged
+                                    // table below already uses) and, only
+                                    // then, resolve the live handle back
+                                    // (`coerce_to_declared(JsValue, ...)`,
+                                    // the existing, already-used-elsewhere
+                                    // "recover a JsValue from its Json
+                                    // placeholder" path) and ask the live
+                                    // engine directly via `dynamic_value_
+                                    // check_by_name`, exactly as the
+                                    // `Some(HirType::JsValue)` arm above
+                                    // already does for a receiver that's
+                                    // statically `JsValue`. Every other
+                                    // shape (a genuine Buffer-shape object,
+                                    // `null`, a plain array/object, ...)
+                                    // still falls through to the original,
+                                    // unconditional `__thaw_json_is_buffer_
+                                    // shape` check, unaffected.
                                     let value = self.lower_expr(&bin.left)?;
-                                    return Ok(HirExpr::Call(
+                                    let temp = format!(
+                                        "__thaw_instanceof_uint8array_source_{}",
+                                        self.next_binding
+                                    );
+                                    self.next_binding += 1;
+                                    self.scope.insert(temp.clone(), HirType::Json);
+                                    let is_handle = HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_json_has_wrapper_key".to_string(),
+                                        )),
+                                        vec![
+                                            HirExpr::Var(temp.clone()),
+                                            HirExpr::Lit(HirLit::Str(
+                                                "__thaw_js_handle_id__".to_string(),
+                                            )),
+                                        ],
+                                    );
+                                    let resolved = self.coerce_to_declared(
+                                        &HirType::JsValue,
+                                        HirExpr::Var(temp.clone()),
+                                    )?;
+                                    let live_check =
+                                        self.dynamic_value_check_by_name("Uint8Array", resolved)?;
+                                    let buffer_shape_check = HirExpr::Call(
                                         Box::new(HirExpr::Var(
                                             "__thaw_json_is_buffer_shape".to_string(),
                                         )),
-                                        vec![value],
-                                    ));
+                                        vec![HirExpr::Var(temp.clone())],
+                                    );
+                                    let body = HirExpr::Conditional(
+                                        Box::new(is_handle),
+                                        Box::new(live_check),
+                                        Box::new(buffer_shape_check),
+                                        HirType::Bool,
+                                    );
+                                    return self.wrap_call_argument_bindings(
+                                        body,
+                                        &[(temp, HirType::Json, value)],
+                                    );
                                 }
                                 if let Some(key) =
                                     native_builtin_instanceof_json_sentinel(class.sym.as_ref())

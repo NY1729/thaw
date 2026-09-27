@@ -4119,14 +4119,15 @@ fn compiles_instanceof_uint8array() {
             console.log(arr instanceof Uint8Array);
 
             // A *statically*-typed `Uint8Array` (a real `HirType::Bytes`
-            // value) coerced into `any` -- unlike `buf` above (`new
-            // Uint8Array(...)` with no static annotation constructs a
-            // live `JsValue` handle instead, per `Expr::New`'s own
-            // generic dispatch; that handle-to-`any` coercion doesn't
-            // currently carry the underlying object's real Buffer
-            // identity into the resulting `Json` value, so `useItAsAny
-            // (buf)` above is a separate, confirmed, narrower gap this
-            // fix doesn't reach -- not exercised here).
+            // value) coerced into `any`. `buf` above (`new Uint8Array(...)`
+            // with no static annotation) constructs a live `JsValue`
+            // handle instead, per `Expr::New`'s own generic dispatch, and
+            // crosses into `any` as an opaque handle placeholder rather
+            // than the `{"type":"Buffer",...}` shape -- `useItAsAny(buf)`
+            // (round41/round42) resolves that placeholder back to a live
+            // handle and asks the engine directly, rather than reading
+            // the placeholder's own Json shape.
+            console.log(useItAsAny(buf));
             const typed: Uint8Array = new Uint8Array([4, 5, 6]);
             // `typed` is genuinely `HirType::Bytes` (a static type
             // annotation, unlike `buf` above) -- exercises the actual
@@ -4143,7 +4144,43 @@ fn compiles_instanceof_uint8array() {
     "#;
     assert_eq!(
         compile_and_run(source, "instanceof_uint8array"),
-        "true\nfalse\nfalse\nfalse\ntrue\nfalse\n"
+        "true\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\n"
+    );
+}
+
+/// A live, unannotated TypedArray crossing into `any`/`Json` -- as `new
+/// Uint8Array(...)` does before an `instanceof` check just above -- now
+/// resolves its opaque handle placeholder back to a live value for that
+/// one check. A first attempt at this fix touched the *general*
+/// `JsValue`-into-`Json` coercion (`coerce_to_declared`, thaw-hir) and
+/// was reverted after it broke `Atomics.waitAsync` on a live
+/// `SharedArrayBuffer`-backed `Int32Array`: eagerly resolving there
+/// substituted a disconnected snapshot copy where genuinely live,
+/// shared-memory identity was required. The real fix instead stays
+/// scoped to the `instanceof Uint8Array` check itself (`lower_expr`'s
+/// `Expr::Bin`/`InstanceOf` arm, `expressions/lowering.rs`) -- this test
+/// pins that the general coercion (and `Atomics.waitAsync` in
+/// particular) is unaffected: a shared, live `Int32Array` still crosses
+/// into `any` untouched, correctly reads `false` for `instanceof
+/// Uint8Array` (not a crash), and `Atomics.waitAsync` still observes the
+/// real shared memory afterward.
+#[test]
+fn instanceof_uint8array_check_does_not_disturb_a_live_shared_typed_array() {
+    let source = r#"
+        function isUint8Array(value: any): boolean {
+            return value instanceof Uint8Array;
+        }
+        function main(): void {
+            const shared = new SharedArrayBuffer(8);
+            const i32 = new Int32Array(shared);
+            console.log(isUint8Array(i32));
+            Atomics.store(i32, 0, 7);
+            console.log(Atomics.load(i32, 0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "instanceof_uint8array_shared_typed_array"),
+        "false\n7\n"
     );
 }
 

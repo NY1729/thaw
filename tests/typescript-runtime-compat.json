@@ -979,6 +979,11 @@
       "name": "a concrete array element before an any[] spread widens the element type",
       "expect": "matched",
       "source": "function main(): void { const anyArr: any[] = [1, 2, 3]; console.log(JSON.stringify([0, ...anyArr])); const floatArr: number[] = [10, 20]; console.log(JSON.stringify([...floatArr, 0, ...anyArr])); }"
+    },
+    {
+      "name": "an unannotated Uint8Array keeps its instanceof identity crossing into any",
+      "expect": "matched",
+      "source": "function isUint8Array(value: any): boolean { return value instanceof Uint8Array; } function main(): void { const buf = new Uint8Array([1, 2, 3]); console.log(isUint8Array(buf)); console.log(isUint8Array([1, 2, 3])); console.log(isUint8Array(null)); }"
     }
   ]
 }
