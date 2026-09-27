@@ -30,6 +30,32 @@ pub extern "C" fn thaw_object_set_state(object: *const u8, operation: u8) -> boo
     true
 }
 
+/// Propagates `source`'s own recorded integrity state (if any) onto
+/// `target` too -- used when a statically `Object`-typed value crosses
+/// into a `Json`-encoded representation (e.g. `Object.freeze({...})`
+/// assigned into an `any`-typed binding). `Object`'s native layout and
+/// `Json`'s boxed `serde_json::Value` are different allocations with
+/// different addresses, so a frozen/sealed object's own state -- keyed
+/// purely by pointer identity -- would otherwise silently vanish the
+/// moment its JSON encoding (a genuinely new pointer) is built. A no-op
+/// (returns `false`) when `source` was never frozen/sealed/prevented, so
+/// this is safe to call unconditionally after every native-object-to-JSON
+/// encoding.
+#[no_mangle]
+pub extern "C" fn thaw_object_copy_state(source: *const u8, target: *const u8) -> bool {
+    if source.is_null() || target.is_null() {
+        return false;
+    }
+    let Some(flags) = OBJECT_STATES.with(|states| states.borrow().get(&(source as usize)).copied())
+    else {
+        return false;
+    };
+    OBJECT_STATES.with(|states| {
+        *states.borrow_mut().entry(target as usize).or_default() |= flags;
+    });
+    true
+}
+
 /// Queries extensible (0), sealed (1), or frozen (2) state.
 #[no_mangle]
 pub extern "C" fn thaw_object_state(object: *const u8, query: u8) -> bool {

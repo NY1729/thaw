@@ -218,6 +218,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 false,
             )?;
         }
+        // Carries `object`'s own frozen/sealed/non-extensible state (if
+        // any -- a no-op otherwise) across onto the freshly built `json`
+        // pointer, so `Object.freeze({...})` assigned into an `any`-typed
+        // binding stays observably frozen after crossing into its Json
+        // representation, instead of the state silently vanishing because
+        // `json` is a different allocation with a different identity.
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_object_copy_state").unwrap(),
+                &[object.into(), json.into()],
+                "propagate_object_state",
+            )
+            .map_err(|error| error.to_string())?;
         Ok(json)
     }
 

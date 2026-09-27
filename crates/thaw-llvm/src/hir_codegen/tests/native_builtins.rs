@@ -6898,6 +6898,46 @@ fn object_freeze_and_seal_block_writes() {
     );
 }
 
+/// A sibling of `object_freeze_and_seal_block_writes`: here `Object.freeze`/
+/// `seal` is called on a value that's still *statically* `Object`-typed at
+/// that point (the freeze/seal state itself is recorded via `thaw_object_
+/// set_state`, keyed by that native struct's own pointer), and only
+/// *afterwards* crosses into an `any`-typed binding. That crossing builds a
+/// brand new JSON encoding of the object (`compile_native_object_to_json_
+/// with_undefined`) -- a genuinely different pointer/allocation -- so the
+/// pointer-keyed state used to silently vanish: writes that should still
+/// throw succeeded instead, and `Object.isFrozen`/`isSealed` reported
+/// `false`. Fixed via a new `thaw_object_copy_state` runtime call, invoked
+/// right after that JSON encoding builds its new object, propagating the
+/// original pointer's own recorded state onto the new one.
+#[test]
+fn object_freeze_and_seal_state_survives_crossing_into_any() {
+    let source = r#"
+        function main(): void {
+            const frozen: any = Object.freeze({ value: 1 });
+            try {
+                frozen.value = 99;
+                console.log("no throw");
+            } catch (error) {
+                console.log("threw", error instanceof TypeError);
+            }
+            const sealed: any = Object.seal({ value: 2 });
+            sealed.value = 3;
+            try {
+                sealed.extra = 4;
+                console.log("no throw");
+            } catch {
+                console.log("threw");
+            }
+            console.log(frozen.value, Object.isFrozen(frozen), sealed.value, Object.isSealed(sealed), sealed.extra);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_freeze_seal_state_crosses_into_any"),
+        "threw true\nthrew\n1 true 3 true undefined\n"
+    );
+}
+
 /// `RegExp.prototype.hasIndices` (the `d` flag) and the `atob`/`btoa`
 /// base64 globals.
 #[test]
