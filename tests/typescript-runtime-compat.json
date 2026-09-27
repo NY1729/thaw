@@ -971,6 +971,11 @@
       "name": "object freeze and seal enforcement on a dynamic object",
       "expect": "matched",
       "source": "function main(): void { const obj: any = { value: 1, extra: 2 }; Object.freeze(obj); try { obj.value = 99; } catch { console.log('threw frozen'); } const sealed: any = { value: 3 }; Object.seal(sealed); sealed.value = 4; try { sealed.extra = 5; } catch { console.log('threw sealed'); } console.log(obj.value, obj.extra, Object.isFrozen(obj), sealed.value, sealed.extra, Object.isSealed(sealed)); }"
+    },
+    {
+      "name": "for...of over a class Symbol.iterator returning a discriminated IteratorResult union",
+      "expect": "matched",
+      "source": "class Range { start: number; end: number; constructor(start: number, end: number) { this.start = start; this.end = end; } [Symbol.iterator]() { let current = this.start; const end = this.end; return { next() { if (current < end) { const value = current; current++; return { value: value, done: false }; } return { value: undefined, done: true }; } }; } } function main(): void { const r = new Range(1, 5); for (const x of r) { console.log(x); } }"
     }
   ]
 }
