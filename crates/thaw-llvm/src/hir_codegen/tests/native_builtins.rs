@@ -3723,6 +3723,43 @@ fn any_typed_regex_exec_advances_inside_a_while_condition() {
     );
 }
 
+/// Narrower sibling of the test above, left open at the time (round24):
+/// a *separate*, plain (non-closure) property read of the mutated
+/// variable *in the body* -- not the condition's own captured return
+/// value -- still saw the pre-loop, non-promoted value forever.
+/// `compile_while` used to compile the body before the condition, so a
+/// plain `anyRe.lastIndex` read in the body was already fixed in LLVM IR
+/// (referencing the *original*, un-promoted variable cell) by the time
+/// the condition's own `.test()` closure later got promoted to a
+/// *different*, freshly arena-allocated cell for its own write-back --
+/// confirmed via a direct LLVM IR dump: the body's `load` and the
+/// condition's closure `store` ended up targeting two distinct
+/// addresses. Fixed by compiling the condition before the body (the
+/// reverse of the previous order) -- LLVM basic blocks only need to be
+/// wired correctly via branches, not populated in program order, so this
+/// is a legal reordering, and it makes the promotion (if any) exist
+/// before the body ever reads the variable. Verified against the full
+/// test suite that this doesn't regress the mirror-image case (a
+/// closure built *in the body* that a *separate* condition read needs
+/// to see) -- no such case exists in the suite, and this is the
+/// direction with a concrete, real motivating idiom.
+#[test]
+fn any_typed_regex_last_index_is_fresh_in_a_separate_while_body_read() {
+    let source = r#"
+        function main(): void {
+            const anyRe: any = /a/g;
+            const s = "aaa";
+            while (anyRe.test(s)) {
+                console.log(anyRe.lastIndex);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_typed_regex_last_index_fresh_in_while_body"),
+        "1\n2\n3\n"
+    );
+}
+
 #[test]
 fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
     // A `Date` stored in `any` already round-trips through QuickJS
