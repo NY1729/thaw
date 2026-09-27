@@ -953,9 +953,8 @@
     },
     {
       "name": "array fromAsync over async generator",
-      "expect": "unsupported",
-      "source": "async function* gen(): AsyncGenerator<number> { yield 1; yield 2; yield 3; } async function main(): Promise<void> { const values = await Array.fromAsync(gen()); console.log(values.join(',')); }",
-      "detailContains": "unsupported dynamic result value"
+      "expect": "matched",
+      "source": "async function* gen(): AsyncGenerator<number> { yield 1; yield 2; yield 3; } async function main(): Promise<void> { const values = await Array.fromAsync(gen()); console.log(values.join(',')); }"
     },
     {
       "name": "array fromAsync over promise array",

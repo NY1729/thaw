@@ -114,6 +114,122 @@ impl<'a> FnLowerer<'a> {
         )))
     }
 
+    /// The `async function*` sibling of `collect_generator_for_array_
+    /// spread` above, for `Array.fromAsync(asyncGen())`. Structurally
+    /// identical -- same drain-via-`__thaw_array_shift` loop, same
+    /// producer-call shape -- except an async generator's producer
+    /// returns `Promise<Array<T>>` per resume (`generator_function_
+    /// type`'s `is_async` branch, `declarations.rs`), not a bare
+    /// `Array<T>`, so each resume call needs an `AwaitPromise` before
+    /// its chunk can be drained, and the collecting closure itself must
+    /// be `Promise`-returning (thaw's async-lambda codegen,
+    /// `compile_lambda`, detects this from the declared return type
+    /// plus a genuine `await` reachable in the body -- both true here
+    /// -- and compiles a real coroutine automatically, no other change
+    /// needed).
+    fn collect_async_generator_for_array_spread(
+        &mut self,
+        generator: HirExpr,
+        generator_type: &HirType,
+    ) -> Result<Option<(HirExpr, HirType)>, String> {
+        let HirType::Function(params, result) = generator_type else {
+            return Ok(None);
+        };
+        let [HirType::I64, HirType::Str, input, completion, request, forced] =
+            params.as_slice()
+        else {
+            return Ok(None);
+        };
+        let HirType::Promise(inner) = result.as_ref() else {
+            return Ok(None);
+        };
+        let HirType::Array(element) = inner.as_ref() else {
+            return Ok(None);
+        };
+        let element = element.as_ref().clone();
+        let array_type = inner.as_ref().clone();
+        let producer = format!("__thaw_async_spread_generator_{}", self.next_binding);
+        self.next_binding += 1;
+        let output = format!("__thaw_async_spread_output_{}", self.next_binding);
+        self.next_binding += 1;
+        let chunk = format!("__thaw_async_spread_chunk_{}", self.next_binding);
+        self.next_binding += 1;
+        let empty_channel = |ty: &HirType| {
+            HirExpr::TypedClosure(ty.clone(), Box::new(HirExpr::ArrayLit(Vec::new())))
+        };
+        let resume = HirExpr::AwaitPromise(
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var(producer.clone())),
+                vec![
+                    HirExpr::Lit(HirLit::I64(0)),
+                    HirExpr::Lit(HirLit::Str(String::new())),
+                    generator_placeholder(input).ok_or_else(|| {
+                        format!("generator input type {input:?} has no default value")
+                    })?,
+                    empty_channel(completion),
+                    empty_channel(request),
+                    empty_channel(forced),
+                ],
+            )),
+            array_type.clone(),
+        );
+        let value = format!("__thaw_async_spread_value_{}", self.next_binding);
+        self.next_binding += 1;
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(output.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(chunk.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
+            HirStmt::While(
+                HirExpr::Lit(HirLit::Bool(true)),
+                vec![
+                    HirStmt::Expr(HirExpr::Assign(chunk.clone(), Box::new(resume))),
+                    HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(chunk.clone())))),
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        ),
+                        vec![HirStmt::Break],
+                        Vec::new(),
+                    ),
+                    HirStmt::Let(
+                        value.clone(),
+                        element.clone(),
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_shift".to_string())),
+                            vec![HirExpr::Var(chunk.clone())],
+                        ),
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(
+                        output.clone(),
+                        Box::new(HirExpr::ArrayConcat(
+                            vec![
+                                HirExpr::Var(output.clone()),
+                                HirExpr::ArrayLit(vec![HirExpr::Var(value.clone())]),
+                            ],
+                            element.clone(),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(HirExpr::Var(output))),
+        ]);
+        Ok(Some((
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: producer,
+                        ty: generator_type.clone(),
+                    }],
+                    HirType::Promise(Box::new(array_type)),
+                    Box::new(body),
+                )),
+                vec![generator],
+            ),
+            element,
+        )))
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),

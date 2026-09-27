@@ -2231,6 +2231,46 @@ fn compiles_array_from_a_generator() {
     );
 }
 
+/// `Array.fromAsync(anAsyncGenerator())` -- the `async function*`
+/// sibling of `compiles_array_from_a_generator` above. `Array.fromAsync`
+/// otherwise delegates entirely to the embedded QuickJS realm's own
+/// native implementation (see its own doc comment,
+/// `invocations/static_builtins.rs`), but a real, statically typed
+/// async generator producer has no JS-visible shape that delegation
+/// could ever cross to (its first parameter is thaw's own internal
+/// `i64` resume point) -- it used to fail deep inside dynamic-call
+/// result decoding with a confusing `unsupported dynamic result value
+/// I64` instead. Reuses `collect_async_generator_for_array_spread`
+/// (`expressions/lowering.rs`), the `Promise`-aware sibling of
+/// `collect_generator_for_array_spread` reused by `Array.from` itself
+/// -- each resume call now gets `await`ed before its chunk is drained,
+/// and the collecting closure compiles as a real coroutine (`compile_
+/// lambda`'s existing async-lambda detection needs no changes for
+/// this: a `Promise`-returning lambda whose body genuinely awaits a
+/// frame source already triggers it).
+#[test]
+fn compiles_array_from_async_over_an_async_generator() {
+    let source = r#"
+        async function* gen(): AsyncGenerator<number> { yield 1; yield 2; yield 3; }
+        async function* empty(): AsyncGenerator<string> {}
+        async function* delayed(): AsyncGenerator<number> {
+            await sleep(1);
+            yield 100;
+            await sleep(1);
+            yield 200;
+        }
+        async function main(): Promise<void> {
+            console.log(JSON.stringify(await Array.fromAsync(gen())));
+            console.log(JSON.stringify(await Array.fromAsync(empty())));
+            console.log(JSON.stringify(await Array.fromAsync(delayed())));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_async_over_an_async_generator"),
+        "[1,2,3]\n[]\n[100,200]\n"
+    );
+}
+
 #[test]
 fn generator_next_returns_the_generators_natural_completion_value() {
     let source = r#"
