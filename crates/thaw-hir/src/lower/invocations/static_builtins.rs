@@ -2607,6 +2607,36 @@ impl<'a> FnLowerer<'a> {
                         if arguments.is_empty() || arguments.len() > 3 {
                             return Err("`Array.fromAsync` expects one to three arguments".into());
                         }
+                        // A real, statically typed `async function*`
+                        // producer (thaw's own internal generator ABI, see
+                        // `is_generator_producer_type`) has no JS-visible
+                        // shape the QuickJS-delegating path below could ever
+                        // hand off to -- its first parameter is an internal
+                        // `i64` resume point, not a real argument, so
+                        // crossing it as a dynamic-call argument fails deep
+                        // inside JSON/callback decoding instead of at the
+                        // call site. Reuses `collect_async_generator_for_
+                        // array_spread` (`expressions/lowering.rs`, the
+                        // `async function*` sibling of round20/21/23's own
+                        // `[...generator()]`/`Array.from(generator())`
+                        // collector) directly when there's no mapper/
+                        // `thisArg` argument to also apply -- falls through
+                        // to the general delegation below for every other
+                        // shape (a sync generator, a real async iterable
+                        // object, or a generator with extra arguments).
+                        if let [source] = arguments.as_slice() {
+                            let source_type = self.infer_expr_type(source)?;
+                            if is_generator_producer_type(&source_type) {
+                                if let Some((collected, _)) = self
+                                    .collect_async_generator_for_array_spread(
+                                        source.clone(),
+                                        &source_type,
+                                    )?
+                                {
+                                    return self.wrap_call_argument_bindings(collected, &bindings);
+                                }
+                            }
+                        }
                         let array = HirExpr::Call(
                             Box::new(HirExpr::Var("getDynamicValue".to_string())),
                             vec![HirExpr::Lit(HirLit::Str("Array".to_string()))],
