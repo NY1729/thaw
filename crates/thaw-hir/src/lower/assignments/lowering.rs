@@ -1439,7 +1439,26 @@ impl<'a> FnLowerer<'a> {
                     .get(&name)
                     .cloned()
                     .ok_or_else(|| format!("assignment to unknown binding `{name}`"))?;
-                let value = self.coerce_to_declared(&expected, value)?;
+                // A plain `number[]`/`string[]` (no `noUncheckedIndexedAccess`)
+                // types each element read as `F64`/`Str`, not `Optional<F64>`/
+                // `Optional<Str>`, matching real tsc's own lax default array
+                // indexing -- but `[a, b] = arr` (array-destructuring
+                // *assignment*, not a fresh `const`/`let` declaration) reads
+                // each position via the array-destructuring `Pat::Array` arm
+                // below, whose own `array_read_type` deliberately wraps every
+                // primitive element in `Optional` (an under-length array at
+                // *runtime* legitimately yields `undefined` there, matching
+                // real JS). `a`/`b`'s own *already-declared* type (`F64`/
+                // `Str`, from wherever they were first declared) can't accept
+                // that `Optional` value directly. `coerce_primitive_array_
+                // argument` (`arrays/transformations.rs`) already has this
+                // exact widening for the identical "declared F64/Str,
+                // resolved Optional<F64>/Optional<Str>" shape at a function
+                // call's own argument-marshaling site -- reused directly here
+                // instead of duplicating it, a pure superset of `coerce_to_
+                // declared` (every other declared type, or a non-Optional
+                // source, behaves identically to before).
+                let value = self.coerce_primitive_array_argument(value, &expected)?;
                 self.invalidate_destructured_union_correlation(&name);
                 let (result, array, nested_array, object, functions) = function
                     .map(|metadata| {
