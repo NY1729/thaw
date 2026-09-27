@@ -51,7 +51,31 @@ fn lower_ts_type(
             TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword => {
                 Ok(HirType::Json)
             }
-            TsKeywordTypeKind::TsObjectKeyword => Ok(HirType::Dynamic),
+            // `HirType::Json`, not `HirType::Dynamic`: `Dynamic` has no
+            // codegen representation at all ("Phase 1/2 codegen does not
+            // support type Dynamic yet" -- confirmed empirically, even a
+            // trivial `const x: object = {}` failed at codegen before
+            // this change, independent of any WeakMap/private-brand
+            // question) and collapses `object` into the exact same value
+            // used as the "unannotated parameter, not yet resolved"
+            // placeholder elsewhere (round27's own investigation, real
+            // regressions when changed carelessly). An `Object(vec![])`
+            // sentinel (tried first) has a working codegen representation
+            // but is *statically* fixed-shape once declared -- `in`'s own
+            // `HirType::Object(fields)` arm only compares a key against
+            // the *declared* field list at compile time, so it silently
+            // always returns `false` for a genuinely-any-shaped value
+            // (confirmed empirically: `#count in other` incorrectly
+            // returned `false` for an object that really did have that
+            // field). `Json` is the one existing representation whose
+            // `in` check (`__thaw_json_has_own`) is already a genuine
+            // runtime lookup, matching what `object` needs. This makes
+            // `object` indistinguishable from `any`/`unknown` (both
+            // already lower to `Json` above) -- `type_satisfies_
+            // constraint` (below in this file) needs a matching update so
+            // a `Json`-typed generic constraint still accepts anything,
+            // preserving N-API's own `<T extends object>` ambient bridge.
+            TsKeywordTypeKind::TsObjectKeyword => Ok(HirType::Json),
             other => Err(format!(
                 "unsupported type keyword {other:?}"
             )),
@@ -996,7 +1020,17 @@ fn type_satisfies_constraint(actual: &HirType, constraint: &HirType) -> bool {
     if matches!(actual, HirType::StrLiteral(_)) && constraint == &HirType::Str {
         return true;
     }
-    if actual == constraint || constraint == &HirType::Dynamic {
+    // `Dynamic` is the "unannotated parameter" placeholder -- no real
+    // constraint to check yet, always accept. `Json` is every "top type"
+    // TS keyword this compiler collapses to one representation
+    // (`any`/`unknown`/`object`, `type_resolution.rs`'s own keyword
+    // arm) -- a constraint that resolved to it was never meant to
+    // reject anything (real TS: everything satisfies `T extends any`/
+    // `T extends unknown`, and `object` here specifically needs to keep
+    // accepting a `Function` argument the way N-API's own ambient
+    // bridge, `declare function ...<T extends object>(value: T):
+    // JsValue`, already relies on).
+    if actual == constraint || matches!(constraint, HirType::Dynamic | HirType::Json) {
         return true;
     }
     match constraint {

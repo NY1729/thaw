@@ -821,7 +821,16 @@ impl<'a> FnLowerer<'a> {
                 },
             };
             if matches!(property, PropOrSpread::Prop(_)) {
-                if let Some(expected) = expected_fields {
+                // An empty `expected` field list isn't "exactly zero
+                // fields allowed" -- it's "no specific shape to check
+                // against". A literal `{}` type annotation means "any
+                // non-null/undefined value" in real TS (not "an object
+                // with no properties"), so an object literal assigned to
+                // a `{}`-typed variable should accept any fields at all,
+                // the same way TS itself doesn't flag excess properties
+                // there. Skip the excess-property check entirely when
+                // there's no real declared shape to check against.
+                if let Some(expected) = expected_fields.filter(|fields| !fields.is_empty()) {
                     if let Some((name, _)) = additions.iter().find(|(name, _)| {
                         // Accessor closures are internal (`__thaw_getter_`/
                         // `__thaw_setter_`), never declared-type members.
@@ -970,7 +979,10 @@ impl<'a> FnLowerer<'a> {
                 },
             };
             if matches!(property, PropOrSpread::Prop(_)) {
-                if let Some(expected) = expected_fields {
+                // See the sibling check above (object literal lowering's
+                // other arm) for why an empty `expected` list skips this
+                // entirely instead of rejecting every field.
+                if let Some(expected) = expected_fields.filter(|fields| !fields.is_empty()) {
                     if let Some((name, _)) = additions.iter().find(|(name, _)| {
                         !name.starts_with("__thaw_")
                             && !expected.iter().any(|(field, _)| field == name)

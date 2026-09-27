@@ -946,6 +946,44 @@ fn compiles_native_private_fields_methods_and_accessors() {
     );
 }
 
+/// The sibling of `compiles_native_private_fields_methods_and_accessors`'s
+/// own `#value in other` check (line ~906 above) -- that one's `other:
+/// Vault` is a concretely-typed receiver, so the private-brand rewrite
+/// (`#count in other` -> the mangled-field-name string check,
+/// `classes/normalization.rs`'s `PrivateMemberNormalizer`) already
+/// worked. This one exercises the real motivating case: a bare `object`
+/// keyword receiver, callable with two structurally different shapes
+/// (a real `Counter` instance and a plain empty literal). `object`
+/// lowers to `HirType::Json` (`type_resolution.rs`, not `HirType::
+/// Dynamic` -- `Dynamic` has no codegen representation at all, and
+/// collapses into the same placeholder value an unannotated parameter
+/// mid-inference uses, which is what made this fail before: `object`'s
+/// permanently-dynamic *value* looked, to the "conflicting inferred
+/// types" convergence loop, exactly like a not-yet-resolved parameter
+/// specialized from the *first* call site, hard-erroring on the
+/// second). `#count in other`'s rewritten form already runs correctly
+/// against a `Json`-typed receiver (`__thaw_json_has_own`, an existing,
+/// genuinely dynamic runtime lookup) with no further change needed.
+#[test]
+fn private_brand_check_accepts_a_bare_object_typed_receiver() {
+    let source = r#"
+        class Counter {
+            #count: number = 0;
+            hasCount(other: object): boolean {
+                return #count in other;
+            }
+        }
+        function main(): void {
+            const counter = new Counter();
+            console.log(counter.hasCount(counter), counter.hasCount({}));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "private_brand_check_object_receiver"),
+        "true false\n"
+    );
+}
+
 #[test]
 fn compiles_native_abstract_classes_and_implementations() {
     let source = r#"

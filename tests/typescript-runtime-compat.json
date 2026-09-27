@@ -912,9 +912,8 @@
     },
     {
       "name": "private brand check in operator",
-      "expect": "unsupported",
-      "source": "class Counter { #count: number = 0; hasCount(other: object): boolean { return #count in other; } } function main(): void { const counter = new Counter(); console.log(counter.hasCount(counter), counter.hasCount({})); }",
-      "detailContains": "conflicting inferred types"
+      "expect": "matched",
+      "source": "class Counter { #count: number = 0; hasCount(other: object): boolean { return #count in other; } } function main(): void { const counter = new Counter(); console.log(counter.hasCount(counter), counter.hasCount({})); }"
     },
     {
       "name": "proxy set trap on property assignment",
