@@ -69,7 +69,8 @@ target/release/thaw build app.ts --static -o app
 `dlopen`) for the pieces ICU4X cannot reproduce: `Intl.Collator`'s
 `usage: 'search'`, `Intl.PluralRules`'s `selectRange`,
 `Intl.DateTimeFormat`'s `month: 'narrow'`/`weekday: 'narrow'` and
-`formatRange`, and `Intl.NumberFormat`'s `formatRange`. It is off by
+`formatRange`/`formatRangeToParts`, and `Intl.NumberFormat`'s
+`formatRange`/`formatRangeToParts`. It is off by
 default: the default build has no ICU4C dependency, and those fall back
 (`usage: 'search'` to sort behavior, `selectRange` to `"other"`, narrow
 widths to short, the range methods to the two formatted endpoints joined

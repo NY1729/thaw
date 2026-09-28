@@ -93,6 +93,7 @@ struct Icu {
         ),
     >,
     unumrf_close_result: Option<unsafe extern "C" fn(*mut UFormattedNumberRange)>,
+    unumrf_close: Option<unsafe extern "C" fn(*mut UNumberRangeFormatter)>,
     // Narrow `month`/`weekday` date formatting (`udat`), which ICU4X's
     // field-set builder cannot express (its `Length` has no Narrow).
     udatpg_open: Option<unsafe extern "C" fn(*const c_char, *mut c_int) -> *mut UDateTimePatternGenerator>,
@@ -123,9 +124,31 @@ struct Icu {
         Option<unsafe extern "C" fn(*const UFormattedNumberRange, *mut c_int) -> *const UFormattedValue>,
     ufmtval_get_string:
         Option<unsafe extern "C" fn(*const UFormattedValue, *mut c_int, *mut c_int) -> *const u16>,
+    // Span/field positions (`formatRangeToParts`).
+    ucfpos_open: Option<unsafe extern "C" fn(*mut c_int) -> *mut UConstrainedFieldPosition>,
+    ucfpos_close: Option<unsafe extern "C" fn(*mut UConstrainedFieldPosition)>,
+    ucfpos_get_category:
+        Option<unsafe extern "C" fn(*const UConstrainedFieldPosition, *mut c_int) -> c_int>,
+    ucfpos_get_field:
+        Option<unsafe extern "C" fn(*const UConstrainedFieldPosition, *mut c_int) -> c_int>,
+    ucfpos_get_indexes: Option<
+        unsafe extern "C" fn(*const UConstrainedFieldPosition, *mut c_int, *mut c_int, *mut c_int),
+    >,
+    ufmtval_next_position: Option<
+        unsafe extern "C" fn(*const UFormattedValue, *mut UConstrainedFieldPosition, *mut c_int) -> i8,
+    >,
+    udtitvfmt_format_to_result: Option<
+        unsafe extern "C" fn(*const UDateIntervalFormat, f64, f64, *mut UFormattedDateInterval, *mut c_int),
+    >,
+    udtitvfmt_open_result: Option<unsafe extern "C" fn(*mut c_int) -> *mut UFormattedDateInterval>,
+    udtitvfmt_result_as_value:
+        Option<unsafe extern "C" fn(*const UFormattedDateInterval, *mut c_int) -> *const UFormattedValue>,
+    udtitvfmt_close_result: Option<unsafe extern "C" fn(*mut UFormattedDateInterval)>,
 }
 
 type UFormattedValue = c_void;
+type UConstrainedFieldPosition = c_void;
+type UFormattedDateInterval = c_void;
 
 type UDateIntervalFormat = c_void;
 
@@ -182,6 +205,7 @@ fn icu() -> Option<&'static Icu> {
                 unumrf_open_result: resolve(handle, "unumrf_openResult"),
                 unumrf_format_decimal_range: resolve(handle, "unumrf_formatDecimalRange"),
                 unumrf_close_result: resolve(handle, "unumrf_closeResult"),
+                unumrf_close: resolve(handle, "unumrf_close"),
                 udatpg_open: resolve(handle, "udatpg_open"),
                 udatpg_get_best_pattern: resolve(handle, "udatpg_getBestPattern"),
                 udatpg_close: resolve(handle, "udatpg_close"),
@@ -196,6 +220,16 @@ fn icu() -> Option<&'static Icu> {
                 udtitvfmt_close: resolve(handle, "udtitvfmt_close"),
                 unumrf_result_as_value: resolve(handle, "unumrf_resultAsValue"),
                 ufmtval_get_string: resolve(handle, "ufmtval_getString"),
+                ucfpos_open: resolve(handle, "ucfpos_open"),
+                ucfpos_close: resolve(handle, "ucfpos_close"),
+                ucfpos_get_category: resolve(handle, "ucfpos_getCategory"),
+                ucfpos_get_field: resolve(handle, "ucfpos_getField"),
+                ucfpos_get_indexes: resolve(handle, "ucfpos_getIndexes"),
+                ufmtval_next_position: resolve(handle, "ufmtval_nextPosition"),
+                udtitvfmt_format_to_result: resolve(handle, "udtitvfmt_formatToResult"),
+                udtitvfmt_open_result: resolve(handle, "udtitvfmt_openResult"),
+                udtitvfmt_result_as_value: resolve(handle, "udtitvfmt_resultAsValue"),
+                udtitvfmt_close_result: resolve(handle, "udtitvfmt_closeResult"),
             })
     })
     .as_ref()
@@ -569,7 +603,7 @@ fn datetime_field_type(field: c_int) -> Option<&'static str> {
         1 | 30 => "year",
         2 => "month",
         3 => "day",
-        4 | 5 => "hour",
+        4 | 5 | 15 | 16 => "hour",
         6 => "minute",
         7 => "second",
         8 => "fractionalSecond",
@@ -935,5 +969,359 @@ fn intl_number_range_icu4c_inner(
         None
     };
     unsafe { close_result(result) };
+    if let Some(close) = icu.unumrf_close {
+        unsafe { close(formatter) };
+    }
+    output
+}
+
+// `UFieldCategory`.
+const UFIELD_CATEGORY_DATE: c_int = 1;
+const UFIELD_CATEGORY_NUMBER: c_int = 2;
+const UFIELD_CATEGORY_DATE_INTERVAL_SPAN: c_int = 0x1000 + 5;
+const UFIELD_CATEGORY_NUMBER_RANGE_SPAN: c_int = 0x1000 + 2;
+
+fn number_field_type(field: c_int, value: &str) -> Option<&'static str> {
+    Some(match field {
+        0 => "integer",
+        1 => "fraction",
+        2 => "decimal",
+        3 => "exponentSeparator",
+        4 => "exponentMinusSign",
+        5 => "exponentInteger",
+        6 => "group",
+        7 => "currency",
+        8 => "percentSign",
+        9 => "permilleSign",
+        10 => {
+            if value.starts_with('-') {
+                "minusSign"
+            } else {
+                "plusSign"
+            }
+        }
+        11 => "unit",
+        12 => "compact",
+        13 => "approximatelySign",
+        _ => return None,
+    })
+}
+
+/// Builds a `{type,value,source}` parts array from a `UFormattedValue` by
+/// walking its field positions. ICU marks each range argument's own
+/// fields with a span category (`..._SPAN`, field 0 = start / 1 = end),
+/// so fields/literals inside a span get `startRange`/`endRange` and
+/// everything else `shared` -- exactly the triple ECMA-402
+/// `formatRangeToParts` reports.
+fn formatted_value_to_parts(
+    icu: &Icu,
+    value: *const UFormattedValue,
+    text: &[u16],
+    target_category: c_int,
+    span_category: c_int,
+    map: impl Fn(c_int, &str) -> Option<&'static str>,
+) -> Option<Vec<serde_json::Value>> {
+    let (
+        Some(position_open),
+        Some(position_close),
+        Some(get_category),
+        Some(get_field),
+        Some(get_indexes),
+        Some(next_position),
+    ) = (
+        icu.ucfpos_open,
+        icu.ucfpos_close,
+        icu.ucfpos_get_category,
+        icu.ucfpos_get_field,
+        icu.ucfpos_get_indexes,
+        icu.ufmtval_next_position,
+    )
+    else {
+        return None;
+    };
+    let mut status: c_int = 0;
+    let position = unsafe { position_open(&mut status) };
+    if position.is_null() || status > 0 {
+        return None;
+    }
+    let mut positions: Vec<(c_int, c_int, usize, usize)> = Vec::new();
+    loop {
+        status = 0;
+        let has = unsafe { next_position(value, position, &mut status) };
+        if has == 0 || status > 0 {
+            break;
+        }
+        let category = unsafe { get_category(position, &mut status) };
+        let field = unsafe { get_field(position, &mut status) };
+        let mut begin: c_int = 0;
+        let mut end: c_int = 0;
+        unsafe { get_indexes(position, &mut begin, &mut end, &mut status) };
+        if status > 0 || begin < 0 || end < 0 {
+            break;
+        }
+        positions.push((category, field, begin as usize, end as usize));
+    }
+    unsafe { position_close(position) };
+    if status > 0 {
+        return None;
+    }
+
+    let spans: Vec<(usize, usize, &'static str)> = positions
+        .iter()
+        .filter(|(category, _, _, _)| *category == span_category)
+        .filter_map(|(_, field, begin, end)| match field {
+            0 => Some((*begin, *end, "startRange")),
+            1 => Some((*begin, *end, "endRange")),
+            _ => None,
+        })
+        .collect();
+    let source_for = |begin: usize, end: usize| {
+        spans
+            .iter()
+            .find(|(span_begin, span_end, _)| *span_begin <= begin && end <= *span_end)
+            .map_or("shared", |(_, _, source)| *source)
+    };
+
+    let mut fields: Vec<&(c_int, c_int, usize, usize)> = positions
+        .iter()
+        .filter(|(category, _, _, _)| *category == target_category)
+        .collect();
+    fields.sort_by_key(|(_, _, begin, _)| *begin);
+
+    let mut parts = Vec::new();
+    let mut cursor = 0_usize;
+    for (_, field, begin, end) in fields {
+        let (begin, end) = (*begin, (*end).min(text.len()));
+        if begin > cursor {
+            parts.push(serde_json::json!({
+                "type": "literal",
+                "value": String::from_utf16_lossy(&text[cursor..begin]),
+                "source": source_for(cursor, begin),
+            }));
+        }
+        if end > begin {
+            let value = String::from_utf16_lossy(&text[begin..end]);
+            if let Some(kind) = map(*field, &value) {
+                parts.push(serde_json::json!({
+                    "type": kind,
+                    "value": value,
+                    "source": source_for(begin, end),
+                }));
+            }
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < text.len() {
+        parts.push(serde_json::json!({
+            "type": "literal",
+            "value": String::from_utf16_lossy(&text[cursor..]),
+            "source": source_for(cursor, text.len()),
+        }));
+    }
+    Some(parts)
+}
+
+fn uformatted_text(icu: &Icu, value: *const UFormattedValue) -> Option<Vec<u16>> {
+    let get_string = icu.ufmtval_get_string?;
+    let mut status: c_int = 0;
+    let mut length: c_int = 0;
+    let text = unsafe { get_string(value, &mut length, &mut status) };
+    if text.is_null() || status > 0 || length <= 0 {
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts(text, length as usize) }.to_vec())
+}
+
+/// `__thaw_intl_datetime_range_parts_icu4c(...) -> String` (JSON parts
+/// with `source`): `DateTimeFormat.formatRangeToParts`.
+fn intl_datetime_range_parts_icu4c(
+    locale: &str,
+    options_json: &str,
+    start_json: &str,
+    end_json: &str,
+) -> String {
+    intl_datetime_range_parts_icu4c_inner(locale, options_json, start_json, end_json)
+        .unwrap_or_else(|| "[]".to_string())
+}
+
+fn intl_datetime_range_parts_icu4c_inner(
+    locale: &str,
+    options_json: &str,
+    start_json: &str,
+    end_json: &str,
+) -> Option<String> {
+    let icu = icu()?;
+    let (Some(open), Some(format_to_result), Some(open_result), Some(result_as_value), Some(close_result)) = (
+        icu.udtitvfmt_open,
+        icu.udtitvfmt_format_to_result,
+        icu.udtitvfmt_open_result,
+        icu.udtitvfmt_result_as_value,
+        icu.udtitvfmt_close_result,
+    ) else {
+        return None;
+    };
+    let options: serde_json::Value = serde_json::from_str(options_json).ok()?;
+    let start: serde_json::Value = serde_json::from_str(start_json).ok()?;
+    let end: serde_json::Value = serde_json::from_str(end_json).ok()?;
+    let skeleton = datetime_skeleton(&options);
+    if skeleton.is_empty() {
+        return None;
+    }
+    let locale = CString::new(locale).ok()?;
+    let skeleton = utf16(&skeleton);
+    let time_zone = utf16(
+        start
+            .get("timeZone")
+            .and_then(|value| value.as_str())
+            .unwrap_or("UTC"),
+    );
+    let mut status: c_int = 0;
+    let formatter = unsafe {
+        open(
+            locale.as_ptr(),
+            skeleton.as_ptr(),
+            skeleton.len() as c_int,
+            time_zone.as_ptr(),
+            time_zone.len() as c_int,
+            &mut status,
+        )
+    };
+    if formatter.is_null() || status > 0 {
+        return None;
+    }
+    let from = start.get("timestampMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let to = end.get("timestampMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let result = unsafe { open_result(&mut status) };
+    let output = if result.is_null() || status > 0 {
+        None
+    } else {
+        status = 0;
+        unsafe { format_to_result(formatter, from, to, result, &mut status) };
+        if status > 0 {
+            None
+        } else {
+            let value = unsafe { result_as_value(result, &mut status) };
+            if value.is_null() || status > 0 {
+                None
+            } else {
+                uformatted_text(icu, value).and_then(|text| {
+                    formatted_value_to_parts(
+                        icu,
+                        value,
+                        &text,
+                        UFIELD_CATEGORY_DATE,
+                        UFIELD_CATEGORY_DATE_INTERVAL_SPAN,
+                        |field, _| datetime_field_type(field),
+                    )
+                    .and_then(|parts| serde_json::to_string(&parts).ok())
+                })
+            }
+        }
+    };
+    if !result.is_null() {
+        unsafe { close_result(result) };
+    }
+    unsafe { (icu.udtitvfmt_close?)(formatter) };
+    output
+}
+
+/// `__thaw_intl_number_range_parts_icu4c(...) -> String` (JSON parts with
+/// `source`): `NumberFormat.formatRangeToParts`.
+fn intl_number_range_parts_icu4c(
+    locale: &str,
+    skeleton: &str,
+    start: &str,
+    end: &str,
+) -> String {
+    intl_number_range_parts_icu4c_inner(locale, skeleton, start, end)
+        .unwrap_or_else(|| "[]".to_string())
+}
+
+fn intl_number_range_parts_icu4c_inner(
+    locale: &str,
+    skeleton: &str,
+    start: &str,
+    end: &str,
+) -> Option<String> {
+    let icu = icu()?;
+    let (
+        Some(open),
+        Some(open_result),
+        Some(format_range),
+        Some(result_as_value),
+        Some(close_result),
+    ) = (
+        icu.unumrf_open,
+        icu.unumrf_open_result,
+        icu.unumrf_format_decimal_range,
+        icu.unumrf_result_as_value,
+        icu.unumrf_close_result,
+    )
+    else {
+        return None;
+    };
+    let locale = CString::new(locale).ok()?;
+    let skeleton = utf16(skeleton);
+    let (Ok(start), Ok(end)) = (CString::new(start), CString::new(end)) else {
+        return None;
+    };
+    let mut status: c_int = 0;
+    let formatter = unsafe {
+        open(
+            skeleton.as_ptr(),
+            skeleton.len() as c_int,
+            UNUM_RANGE_COLLAPSE_AUTO,
+            UNUM_IDENTITY_FALLBACK_APPROXIMATELY,
+            locale.as_ptr(),
+            std::ptr::null_mut(),
+            &mut status,
+        )
+    };
+    if formatter.is_null() || status > 0 {
+        return None;
+    }
+    let result = unsafe { open_result(&mut status) };
+    let output = if result.is_null() || status > 0 {
+        None
+    } else {
+        status = 0;
+        unsafe {
+            format_range(
+                formatter,
+                start.as_ptr(),
+                start.as_bytes().len() as c_int,
+                end.as_ptr(),
+                end.as_bytes().len() as c_int,
+                result,
+                &mut status,
+            )
+        };
+        if status > 0 {
+            None
+        } else {
+            let value = unsafe { result_as_value(result, &mut status) };
+            if value.is_null() || status > 0 {
+                None
+            } else {
+                uformatted_text(icu, value).and_then(|text| {
+                    formatted_value_to_parts(
+                        icu,
+                        value,
+                        &text,
+                        UFIELD_CATEGORY_NUMBER,
+                        UFIELD_CATEGORY_NUMBER_RANGE_SPAN,
+                        number_field_type,
+                    )
+                    .and_then(|parts| serde_json::to_string(&parts).ok())
+                })
+            }
+        }
+    };
+    if !result.is_null() {
+        unsafe { close_result(result) };
+    }
+    if let Some(close) = icu.unumrf_close {
+        unsafe { close(formatter) };
+    }
     output
 }

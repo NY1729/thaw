@@ -3850,3 +3850,46 @@ fn intl_number_format_range_icu4c_matches_real_node() {
         .unwrap()
     );
 }
+
+/// `Intl.DateTimeFormat`/`Intl.NumberFormat` `formatRangeToParts` via the
+/// opt-in ICU4C span categories, which carry the real
+/// shared/startRange/endRange sources. Cross-checked against real Node.
+#[cfg(all(feature = "intl", feature = "icu4c"))]
+#[test]
+fn intl_range_to_parts_icu4c_matches_real_node() {
+    assert_eq!(
+        load(
+            "function dateParts() {\n\
+               return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' })\n\
+                 .formatRangeToParts(new Date(Date.UTC(2024, 6, 4)), new Date(Date.UTC(2024, 6, 5)));\n\
+             }\n\
+             function timeParts() {\n\
+               return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit' })\n\
+                 .formatRangeToParts(new Date(Date.UTC(2024, 6, 4, 13, 0)), new Date(Date.UTC(2024, 6, 4, 15, 30)));\n\
+             }\n\
+             function currencyParts() {\n\
+               return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).formatRangeToParts(3, 5);\n\
+             }\n\
+             function equalParts() {\n\
+               return new Intl.NumberFormat('en-US').formatRangeToParts(3, 3);\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("dateParts", "[]"),
+        r#"[{"type":"month","value":"Jul","source":"shared"},{"type":"literal","value":" ","source":"shared"},{"type":"day","value":"4","source":"startRange"},{"type":"literal","value":" – ","source":"shared"},{"type":"day","value":"5","source":"endRange"},{"type":"literal","value":", ","source":"shared"},{"type":"year","value":"2024","source":"shared"}]"#
+    );
+    assert_eq!(
+        call("timeParts", "[]"),
+        r#"[{"type":"hour","value":"1","source":"startRange"},{"type":"literal","value":":","source":"startRange"},{"type":"minute","value":"00","source":"startRange"},{"type":"literal","value":" – ","source":"shared"},{"type":"hour","value":"3","source":"endRange"},{"type":"literal","value":":","source":"endRange"},{"type":"minute","value":"30","source":"endRange"},{"type":"literal","value":" ","source":"shared"},{"type":"dayPeriod","value":"PM","source":"shared"}]"#
+    );
+    assert_eq!(
+        call("currencyParts", "[]"),
+        r#"[{"type":"currency","value":"$","source":"startRange"},{"type":"integer","value":"3","source":"startRange"},{"type":"decimal","value":".","source":"startRange"},{"type":"fraction","value":"00","source":"startRange"},{"type":"literal","value":" – ","source":"shared"},{"type":"currency","value":"$","source":"endRange"},{"type":"integer","value":"5","source":"endRange"},{"type":"decimal","value":".","source":"endRange"},{"type":"fraction","value":"00","source":"endRange"}]"#
+    );
+    assert_eq!(
+        call("equalParts", "[]"),
+        r#"[{"type":"approximatelySign","value":"~","source":"shared"},{"type":"integer","value":"3","source":"shared"}]"#
+    );
+}
