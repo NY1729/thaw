@@ -1103,6 +1103,88 @@
       parts.push(...this._affixParts(suffix));
       return parts;
     }
+
+    // ICU number skeleton for `formatRange` (style/notation/sign/
+    // grouping/precision), matching the digit options `format` applies.
+    _rangeSkeleton() {
+      const tokens = [];
+      if (this._style === 'percent') {
+        tokens.push('percent');
+      } else if (this._style === 'currency') {
+        tokens.push(`currency/${this._currency}`);
+        if (this._currencyDisplay === 'code') tokens.push('unit-width-iso-code');
+        else if (this._currencyDisplay === 'name') tokens.push('unit-width-full-name');
+        else if (this._currencyDisplay === 'narrowSymbol') tokens.push('unit-width-narrow');
+      } else if (this._style === 'unit') {
+        tokens.push(`unit/${this._unit}`);
+        if (this._unitDisplay === 'narrow') tokens.push('unit-width-narrow');
+        else if (this._unitDisplay === 'long') tokens.push('unit-width-full-name');
+      }
+      if (this._notation === 'compact') {
+        tokens.push(this._compactDisplay === 'long' ? 'compact-long' : 'compact-short');
+      } else if (this._notation === 'scientific' || this._notation === 'engineering') {
+        tokens.push(this._notation);
+      }
+      if (this._useGrouping === false) tokens.push('group-off');
+      if (this._signDisplay === 'always') tokens.push('sign-always');
+      else if (this._signDisplay === 'never') tokens.push('sign-never');
+      else if (this._signDisplay === 'exceptZero') tokens.push('sign-except-zero');
+      else if (this._signDisplay === 'negative') tokens.push('sign-negative');
+      if (this._significant) {
+        let precision = '@'.repeat(this._minimumSignificantDigits);
+        if (this._maximumSignificantDigits > this._minimumSignificantDigits) {
+          precision += '#'.repeat(this._maximumSignificantDigits - this._minimumSignificantDigits);
+        }
+        tokens.push(precision);
+      } else {
+        let minFrac = this._minimumFractionDigits;
+        let maxFrac = this._maximumFractionDigits;
+        if (minFrac === undefined && maxFrac === undefined) {
+          let currencyDigits = 2;
+          if (this._style === 'currency' && typeof __thaw_intl_currency_fraction_digits === 'function') {
+            const resolved = __thaw_intl_currency_fraction_digits(this._currency);
+            if (resolved !== null && resolved !== undefined) currencyDigits = resolved;
+          }
+          minFrac = this._style === 'currency' ? currencyDigits : 0;
+          maxFrac = this._style === 'currency' ? minFrac : (this._style === 'percent' ? 0 : 3);
+        } else if (minFrac === undefined) {
+          minFrac = 0;
+        } else if (maxFrac === undefined) {
+          maxFrac = Math.max(minFrac, 3);
+        }
+        if (maxFrac < minFrac) maxFrac = minFrac;
+        if (maxFrac > 0) {
+          tokens.push('.' + '0'.repeat(minFrac) + '#'.repeat(Math.max(0, maxFrac - minFrac)));
+        }
+      }
+      return tokens.join(' ');
+    }
+
+    // `Intl.NumberFormat.prototype.formatRange` (ECMA-402) via ICU4C's
+    // number range formatter under the opt-in `--icu4c`; without it, a
+    // documented approximation joining the two `format()` results with an
+    // en dash (`~n` for equal endpoints).
+    formatRange(start, end) {
+      const startNumber = this._style === 'percent' ? Number(start) * 100 : Number(start);
+      const endNumber = this._style === 'percent' ? Number(end) * 100 : Number(end);
+      if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) {
+        throw new RangeError('Invalid value');
+      }
+      if (typeof __thaw_intl_number_range_icu4c === 'function') {
+        const asText = ({ intPart, fracPart }) => (fracPart ? `${intPart}.${fracPart}` : intPart);
+        const startText = asText(this._standardDigits(startNumber));
+        const endText = asText(this._standardDigits(endNumber));
+        const formatted = __thaw_intl_number_range_icu4c(
+          this.locale,
+          this._rangeSkeleton(),
+          startText,
+          endText,
+        );
+        if (formatted) return formatted;
+      }
+      if (startNumber === endNumber) return `~${this.format(start)}`;
+      return `${this.format(start)}\u2013${this.format(end)}`;
+    }
   }
 
   class ListFormat {
