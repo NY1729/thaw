@@ -66,10 +66,12 @@ target/release/thaw build app.ts --static -o app
 ```
 
 `--icu4c` opts into a system ICU4C backend (loaded at runtime with
-`dlopen`) for `Intl.Collator`'s `usage: 'search'`, which ICU4X cannot
-express. It is off by default: the default build has no ICU4C dependency,
-and `usage: 'search'` falls back to sort behavior when the feature is not
-selected or ICU4C is unavailable at runtime.
+`dlopen`) for `Intl.Collator`'s `usage: 'search'` and
+`Intl.PluralRules`'s `selectRange`, neither of which ICU4X can reproduce.
+It is off by default: the default build has no ICU4C dependency, and
+those fall back (`usage: 'search'` to sort behavior, `selectRange` to
+`"other"`) when the feature is not selected or ICU4C is unavailable at
+runtime.
 
 Inspect a binary without running it:
 
