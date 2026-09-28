@@ -239,6 +239,9 @@
         throw new RangeError(`Invalid ${key}: ${opts[key]}`);
       }
     }
+    if (opts.fractionalSecondDigits !== undefined && ![1, 2, 3].includes(Number(opts.fractionalSecondDigits))) {
+      throw new RangeError(`Invalid fractionalSecondDigits: ${opts.fractionalSecondDigits}`);
+    }
   }
 
   class DateTimeFormat {
@@ -280,6 +283,9 @@
       this._minute = opts.minute;
       this._second = opts.second;
       this._timeZoneName = opts.timeZoneName;
+      this._fractionalSecondDigits = opts.fractionalSecondDigits === undefined
+        ? undefined
+        : Number(opts.fractionalSecondDigits);
       // `dateStyle`/`timeStyle` (ECMA-402) expand into the individual
       // field options with the locale's own CLDR patterns for that
       // style -- the same field-ordering machinery already used for an
@@ -289,7 +295,7 @@
       this._dateStyle = opts.dateStyle;
       this._timeStyle = opts.timeStyle;
       if (this._dateStyle !== undefined || this._timeStyle !== undefined) {
-        if (['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second'].some(key => opts[key] !== undefined)) {
+        if (['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second', 'fractionalSecondDigits'].some(key => opts[key] !== undefined)) {
           throw new TypeError('dateStyle/timeStyle can not be used with individual field options');
         }
         for (const [key, value] of [['dateStyle', this._dateStyle], ['timeStyle', this._timeStyle]]) {
@@ -379,6 +385,7 @@
       }
       if (this._minute) result.minute = this._minute;
       if (this._second) result.second = this._second;
+      if (this._fractionalSecondDigits !== undefined) result.fractionalSecondDigits = this._fractionalSecondDigits;
       if (this._timeZoneName) result.timeZoneName = this._timeZoneName;
       return result;
     }
@@ -444,6 +451,19 @@
           if (part.type === 'hour' && /^0+$/.test(part.value)) part.value = '24';
         }
       }
+      if (this._fractionalSecondDigits !== undefined) {
+        const fraction = intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits);
+        const render = text => this._useRealLocaleData
+          ? String(__thaw_intl_number_format(this.locale, text, false))
+          : text;
+        const secondIndex = parts.findIndex(part => part.type === 'second');
+        if (secondIndex >= 0) {
+          const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
+          parts[secondIndex].value = render(`${whole}.${fraction}`);
+        } else {
+          parts.push({ type: 'fractionalSecond', value: render(fraction) });
+        }
+      }
       if (this._timeZoneName) {
         if (parts.length) parts.push({ type: 'literal', value: ' ' });
         parts.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned, this.locale) });
@@ -498,7 +518,7 @@
       }
 
       const trailing = [];
-      const hasTime = Boolean(this._hour || this._minute || this._second);
+      const hasTime = Boolean(this._hour || this._minute || this._second || this._fractionalSecondDigits !== undefined);
       if (hasTime) {
         const fields = [];
         let dayPeriod = null;
@@ -509,7 +529,15 @@
           fields.push(['hour', padded ? intlPad(displayHour, 2) : String(displayHour)]);
         }
         if (this._minute) fields.push(['minute', this._minute === '2-digit' ? intlPad(zoned.minute, 2) : String(zoned.minute)]);
-        if (this._second) fields.push(['second', this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second)]);
+        if (this._second) {
+          const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
+          const fraction = this._fractionalSecondDigits === undefined
+            ? ''
+            : `.${intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits)}`;
+          fields.push(['second', `${whole}${fraction}`]);
+        } else if (this._fractionalSecondDigits !== undefined) {
+          fields.push(['fractionalSecond', intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits)]);
+        }
         fields.forEach(([type, value], index) => {
           if (index > 0) trailing.push({ type: 'literal', value: ':' });
           trailing.push({ type, value });
