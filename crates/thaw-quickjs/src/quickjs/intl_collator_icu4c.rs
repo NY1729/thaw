@@ -93,7 +93,28 @@ struct Icu {
         ),
     >,
     unumrf_close_result: Option<unsafe extern "C" fn(*mut UFormattedNumberRange)>,
+    // Narrow `month`/`weekday` date formatting (`udat`), which ICU4X's
+    // field-set builder cannot express (its `Length` has no Narrow).
+    udatpg_open: Option<unsafe extern "C" fn(*const c_char, *mut c_int) -> *mut UDateTimePatternGenerator>,
+    udatpg_get_best_pattern: Option<
+        unsafe extern "C" fn(*mut UDateTimePatternGenerator, *const u16, c_int, *mut u16, c_int, *mut c_int) -> c_int,
+    >,
+    udatpg_close: Option<unsafe extern "C" fn(*mut UDateTimePatternGenerator)>,
+    udat_open: Option<
+        unsafe extern "C" fn(c_int, c_int, *const c_char, *const u16, c_int, *const u16, c_int, *mut c_int) -> *mut UDateFormat,
+    >,
+    udat_format_for_fields: Option<
+        unsafe extern "C" fn(*const UDateFormat, f64, *mut u16, c_int, *mut UFieldPositionIterator, *mut c_int) -> c_int,
+    >,
+    udat_close: Option<unsafe extern "C" fn(*mut UDateFormat)>,
+    ufieldpositer_open: Option<unsafe extern "C" fn(*mut c_int) -> *mut UFieldPositionIterator>,
+    ufieldpositer_next: Option<unsafe extern "C" fn(*mut UFieldPositionIterator, *mut c_int, *mut c_int) -> c_int>,
+    ufieldpositer_close: Option<unsafe extern "C" fn(*mut UFieldPositionIterator)>,
 }
+
+type UDateFormat = c_void;
+type UDateTimePatternGenerator = c_void;
+type UFieldPositionIterator = c_void;
 
 type UPluralRules = c_void;
 type UFormattedNumberRange = c_void;
@@ -144,6 +165,15 @@ fn icu() -> Option<&'static Icu> {
                 unumrf_open_result: resolve(handle, "unumrf_openResult"),
                 unumrf_format_decimal_range: resolve(handle, "unumrf_formatDecimalRange"),
                 unumrf_close_result: resolve(handle, "unumrf_closeResult"),
+                udatpg_open: resolve(handle, "udatpg_open"),
+                udatpg_get_best_pattern: resolve(handle, "udatpg_getBestPattern"),
+                udatpg_close: resolve(handle, "udatpg_close"),
+                udat_open: resolve(handle, "udat_open"),
+                udat_format_for_fields: resolve(handle, "udat_formatForFields"),
+                udat_close: resolve(handle, "udat_close"),
+                ufieldpositer_open: resolve(handle, "ufieldpositer_open"),
+                ufieldpositer_next: resolve(handle, "ufieldpositer_next"),
+                ufieldpositer_close: resolve(handle, "ufieldpositer_close"),
             })
     })
     .as_ref()
@@ -440,4 +470,278 @@ fn intl_plural_range_icu4c(locale: &str, kind: &str, start: &str, end: &str) -> 
         return fallback;
     }
     String::from_utf16_lossy(&buffer[..length as usize])
+}
+
+const UDAT_PATTERN: c_int = -2;
+
+fn utf16(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
+}
+
+/// ICU skeleton field letters for the requested options. Unlike the
+/// `FieldSetBuilder` (no Narrow), ICU4C's `udatpg_getBestPattern` maps
+/// these to the locale's own pattern with the right field widths -- so
+/// `month:'narrow'`/`weekday:'narrow'` get both the correct narrow name
+/// *and* the pattern narrow uses (`ja` `{month:'narrow'}` -> `7月`).
+fn datetime_skeleton(options: &serde_json::Value) -> String {
+    let get = |key: &str| options.get(key).and_then(|value| value.as_str());
+    let mut skeleton = String::new();
+    if let Some(era) = get("era") {
+        skeleton.push_str(match era {
+            "long" => "GGGG",
+            "narrow" => "GGGGG",
+            _ => "G",
+        });
+    }
+    if let Some(year) = get("year") {
+        skeleton.push_str(if year == "2-digit" { "yy" } else { "y" });
+    }
+    if let Some(month) = get("month") {
+        skeleton.push_str(match month {
+            "2-digit" => "MM",
+            "long" => "MMMM",
+            "short" => "MMM",
+            "narrow" => "MMMMM",
+            _ => "M",
+        });
+    }
+    if let Some(day) = get("day") {
+        skeleton.push_str(if day == "2-digit" { "dd" } else { "d" });
+    }
+    if let Some(weekday) = get("weekday") {
+        skeleton.push_str(match weekday {
+            "long" => "EEEE",
+            "narrow" => "EEEEE",
+            _ => "EEE",
+        });
+    }
+    if let Some(hour) = get("hour") {
+        let hour12 = options.get("hour12").and_then(|value| value.as_bool());
+        let cycle = get("hourCycle").unwrap_or("");
+        let letter = match (hour12, cycle) {
+            (Some(true), _) => 'h',
+            (Some(false), _) => 'H',
+            (_, "h11") => 'K',
+            (_, "h12") => 'h',
+            (_, "h23") => 'H',
+            (_, "h24") => 'k',
+            _ => 'h',
+        };
+        skeleton.push(letter);
+        if hour == "2-digit" {
+            skeleton.push(letter);
+        }
+    }
+    if let Some(minute) = get("minute") {
+        skeleton.push_str(if minute == "2-digit" { "mm" } else { "m" });
+    }
+    if let Some(second) = get("second") {
+        skeleton.push_str(if second == "2-digit" { "ss" } else { "s" });
+    }
+    skeleton
+}
+
+fn datetime_field_type(field: c_int) -> Option<&'static str> {
+    Some(match field {
+        0 => "era",
+        1 | 30 => "year",
+        2 => "month",
+        3 => "day",
+        4 | 5 => "hour",
+        6 => "minute",
+        7 => "second",
+        8 => "fractionalSecond",
+        9 => "weekday",
+        14 => "dayPeriod",
+        _ => return None,
+    })
+}
+
+fn skeleton_field_type(letter: u16) -> Option<&'static str> {
+    match letter as u8 as char {
+        'G' => Some("era"),
+        'y' | 'u' => Some("year"),
+        'M' | 'L' => Some("month"),
+        'd' => Some("day"),
+        'E' | 'c' => Some("weekday"),
+        'h' | 'H' | 'K' | 'k' => Some("hour"),
+        'm' => Some("minute"),
+        's' => Some("second"),
+        _ => None,
+    }
+}
+
+/// `__thaw_intl_datetime_narrow_icu4c(locale, options_json, zoned_json)
+/// -> String` (a JSON parts array, same shape as the ICU4X path): real
+/// ICU4C date/time rendering, used only for the `month:'narrow'`/
+/// `weekday:'narrow'` requests ICU4X's field-set builder can't express.
+/// Returns `"[]"` on any failure, so the caller falls back to ICU4X.
+fn intl_datetime_narrow_icu4c(locale: &str, options_json: &str, zoned_json: &str) -> String {
+    intl_datetime_narrow_icu4c_inner(locale, options_json, zoned_json)
+        .unwrap_or_else(|| "[]".to_string())
+}
+
+fn intl_datetime_narrow_icu4c_inner(
+    locale: &str,
+    options_json: &str,
+    zoned_json: &str,
+) -> Option<String> {
+    let icu = icu()?;
+    let (
+        Some(pg_open),
+        Some(best_pattern),
+        Some(pg_close),
+        Some(date_open),
+        Some(format_fields),
+        Some(date_close),
+        Some(fpi_open),
+        Some(fpi_next),
+        Some(fpi_close),
+    ) = (
+        icu.udatpg_open,
+        icu.udatpg_get_best_pattern,
+        icu.udatpg_close,
+        icu.udat_open,
+        icu.udat_format_for_fields,
+        icu.udat_close,
+        icu.ufieldpositer_open,
+        icu.ufieldpositer_next,
+        icu.ufieldpositer_close,
+    )
+    else {
+        return None;
+    };
+
+    let options: serde_json::Value = serde_json::from_str(options_json).ok()?;
+    let zoned: serde_json::Value = serde_json::from_str(zoned_json).ok()?;
+    let skeleton = datetime_skeleton(&options);
+    if skeleton.is_empty() {
+        return None;
+    }
+    let locale = CString::new(locale).ok()?;
+    let skeleton = utf16(&skeleton);
+
+    let mut status: c_int = 0;
+    let generator = unsafe { pg_open(locale.as_ptr(), &mut status) };
+    if generator.is_null() || status > 0 {
+        return None;
+    }
+    let mut pattern = vec![0_u16; 128];
+    let pattern_length = unsafe {
+        best_pattern(
+            generator,
+            skeleton.as_ptr(),
+            skeleton.len() as c_int,
+            pattern.as_mut_ptr(),
+            pattern.len() as c_int,
+            &mut status,
+        )
+    };
+    unsafe { pg_close(generator) };
+    if status > 0 || pattern_length <= 0 {
+        return None;
+    }
+    pattern.truncate(pattern_length as usize);
+
+    let time_zone = zoned
+        .get("timeZone")
+        .and_then(|value| value.as_str())
+        .unwrap_or("UTC");
+    let time_zone = utf16(time_zone);
+    status = 0;
+    let formatter = unsafe {
+        date_open(
+            UDAT_PATTERN,
+            UDAT_PATTERN,
+            locale.as_ptr(),
+            time_zone.as_ptr(),
+            time_zone.len() as c_int,
+            pattern.as_ptr(),
+            pattern.len() as c_int,
+            &mut status,
+        )
+    };
+    if formatter.is_null() || status > 0 {
+        return None;
+    }
+
+    let date = zoned
+        .get("timestampMs")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    status = 0;
+    let iterator = unsafe { fpi_open(&mut status) };
+    if iterator.is_null() || status > 0 {
+        unsafe { date_close(formatter) };
+        return None;
+    }
+    let mut buffer = vec![0_u16; 512];
+    status = 0;
+    let length = unsafe {
+        format_fields(
+            formatter,
+            date,
+            buffer.as_mut_ptr(),
+            buffer.len() as c_int,
+            iterator,
+            &mut status,
+        )
+    };
+    if status > 0 || length <= 0 || length as usize > buffer.len() {
+        unsafe {
+            fpi_close(iterator);
+            date_close(formatter);
+        }
+        return None;
+    }
+    let text = &buffer[..length as usize];
+
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    let mut cursor = 0_usize;
+    loop {
+        let mut begin: c_int = 0;
+        let mut end: c_int = 0;
+        let field = unsafe { fpi_next(iterator, &mut begin, &mut end) };
+        if field < 0 {
+            break;
+        }
+        let (begin, end) = (begin.max(0) as usize, end.max(0) as usize);
+        if begin > cursor && end <= text.len() {
+            parts.push(serde_json::json!({
+                "type": "literal",
+                "value": String::from_utf16_lossy(&text[cursor..begin]),
+            }));
+        }
+        if let Some(kind) = datetime_field_type(field) {
+            if end <= text.len() {
+                parts.push(serde_json::json!({
+                    "type": kind,
+                    "value": String::from_utf16_lossy(&text[begin..end]),
+                }));
+            }
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < text.len() {
+        parts.push(serde_json::json!({
+            "type": "literal",
+            "value": String::from_utf16_lossy(&text[cursor..]),
+        }));
+    }
+    // ICU's field-position iterator reports nothing for a pattern that is
+    // a single bare field (`{month:'narrow'}` -> `"LLLLL"`), so those
+    // would otherwise end up empty; the whole text is that one field.
+    if parts.is_empty() && !text.is_empty() {
+        if let Some(kind) = skeleton.first().and_then(|letter| skeleton_field_type(*letter)) {
+            parts.push(serde_json::json!({
+                "type": kind,
+                "value": String::from_utf16_lossy(text),
+            }));
+        }
+    }
+    unsafe {
+        fpi_close(iterator);
+        date_close(formatter);
+    }
+    serde_json::to_string(&parts).ok()
 }
