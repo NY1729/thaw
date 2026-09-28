@@ -437,6 +437,17 @@
     // `timeZoneName`, which stays on the existing jiff-backed English
     // path below until M13 gives it real per-locale zone-name data too.
     _formatToPartsRealLocale(zoned) {
+      // `icu_datetime`'s time rendering is driven by a single
+      // `TimePrecision` (hour < minute < second), so a `minute`/`second`
+      // request without `hour` would still render the hour (real
+      // ECMA-402 renders only the requested fields: `{second:'numeric'}`
+      // -> `"45"`). Time-only requests without an hour are built here
+      // instead; a date+time combination still goes through ICU for its
+      // locale-specific glue.
+      const hasDateFields = Boolean(this._weekday || this._era || this._year || this._month || this._day);
+      if (!hasDateFields && !this._hour && (this._minute || this._second || this._fractionalSecondDigits !== undefined)) {
+        return this._formatTimeOnlyParts(zoned);
+      }
       const options = {
         weekday: this._weekday,
         era: this._era,
@@ -494,6 +505,39 @@
           parts.push({ type: 'fractionalSecond', value: render(fraction) });
         }
       }
+      if (this._timeZoneName) {
+        if (parts.length) parts.push({ type: 'literal', value: ' ' });
+        parts.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned, this.locale) });
+      }
+      return parts;
+    }
+
+    _formatTimeOnlyParts(zoned) {
+      const render = text => this._useRealLocaleData
+        ? String(__thaw_intl_number_format(this.locale, text, false))
+        : text;
+      const fraction = this._fractionalSecondDigits === undefined
+        ? undefined
+        : intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits);
+      const fields = [];
+      if (this._minute) {
+        // A minute shown alongside seconds is zero-padded (`"05:45"`);
+        // a bare minute isn't, even with `'2-digit'` (`"5"`) -- odd but
+        // confirmed against real Node.
+        const text = this._second ? intlPad(zoned.minute, 2) : String(zoned.minute);
+        fields.push(['minute', render(text)]);
+      }
+      if (this._second) {
+        const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
+        fields.push(['second', render(fraction === undefined ? whole : `${whole}.${fraction}`)]);
+      } else if (fraction !== undefined) {
+        fields.push(['fractionalSecond', render(fraction)]);
+      }
+      const parts = [];
+      fields.forEach(([type, value], index) => {
+        if (index > 0) parts.push({ type: 'literal', value: ':' });
+        parts.push({ type, value });
+      });
       if (this._timeZoneName) {
         if (parts.length) parts.push({ type: 'literal', value: ' ' });
         parts.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned, this.locale) });
