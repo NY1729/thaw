@@ -172,6 +172,33 @@
     return text;
   }
 
+  const INTL_ROUNDING_MODES = [
+    'ceil', 'floor', 'expand', 'trunc',
+    'halfCeil', 'halfFloor', 'halfTrunc', 'halfEven', 'halfExpand',
+  ];
+
+  // Rounds a *signed* value to the nearest multiple of `increment` under
+  // the requested ECMA-402 `roundingMode` (default `halfExpand`).
+  function intlRound(value, increment, mode) {
+    const quotient = value / increment;
+    const floor = Math.floor(quotient);
+    const difference = quotient - floor;
+    let rounded;
+    switch (mode) {
+      case 'ceil': rounded = Math.ceil(quotient); break;
+      case 'floor': rounded = floor; break;
+      case 'expand': rounded = quotient < 0 ? floor : (difference === 0 ? floor : floor + 1); break;
+      case 'trunc': rounded = Math.trunc(quotient); break;
+      case 'halfCeil': rounded = difference > 0.5 ? floor + 1 : difference < 0.5 ? floor : floor + 1; break;
+      case 'halfFloor': rounded = difference > 0.5 ? floor + 1 : difference < 0.5 ? floor : floor; break;
+      case 'halfTrunc': rounded = difference > 0.5 ? floor + 1 : difference < 0.5 ? floor : (quotient >= 0 ? floor : floor + 1); break;
+      case 'halfEven': rounded = difference > 0.5 ? floor + 1 : difference < 0.5 ? floor : (floor % 2 === 0 ? floor : floor + 1); break;
+      // halfExpand (default): ties away from zero.
+      default: rounded = difference > 0.5 ? floor + 1 : difference < 0.5 ? floor : (quotient < 0 ? floor : floor + 1);
+    }
+    return rounded * increment;
+  }
+
   // Expands `Number.prototype.toPrecision`'s exponential form (`"1.23e+3"`)
   // back into plain decimal (`"1230"`) -- the plural operands and
   // `Intl.NumberFormat`'s own digit string both need a plain decimal, and
@@ -202,21 +229,24 @@
   // about the value and its visible fraction-digit count, not the
   // locale's digit script). Mirrors `Intl.NumberFormat`'s own fraction
   // handling; `ToRawPrecision` for the significant-digit mode.
-  function intlPluralOperand(number, significant, minFrac, maxFrac, minSig, maxSig) {
-    const negative = number < 0 || Object.is(number, -0);
+  function intlPluralOperand(number, significant, minFrac, maxFrac, minSig, maxSig, mode) {
     const magnitude = Math.abs(number);
     let digits;
     if (significant) {
       const shortest = magnitude === 0 ? 1 : magnitude.toExponential().split('e')[0].replace('.', '').replace(/^0+/, '').length;
       const visible = Math.max(minSig, Math.min(maxSig, shortest || 1));
-      digits = intlExpandExponential(magnitude.toPrecision(visible));
+      const exponent = Math.floor(Math.log10(magnitude || 1));
+      const step = Math.pow(10, exponent - (visible - 1));
+      const rounded = Math.abs(intlRound(number, step, mode));
+      digits = intlExpandExponential(rounded.toPrecision(visible));
     } else {
-      const fixed = magnitude.toFixed(maxFrac);
+      const step = Math.pow(10, -maxFrac);
+      const fixed = Math.abs(intlRound(number, step, mode)).toFixed(maxFrac);
       let [whole, frac = ''] = fixed.split('.');
       while (frac.length > minFrac && frac.endsWith('0')) frac = frac.slice(0, -1);
       digits = frac ? `${whole}.${frac}` : whole;
     }
-    return negative ? `-${digits}` : digits;
+    return digits;
   }
 
   // Real `Intl.DateTimeFormat` throws a `RangeError` for an
@@ -620,6 +650,7 @@
       if (!['standard', 'accounting'].includes(this._currencySign)) {
         throw new RangeError(`Invalid currencySign: ${this._currencySign}`);
       }
+      this._roundingMode = intlEnumOption(opts.roundingMode, INTL_ROUNDING_MODES, 'halfExpand', 'roundingMode');
       this._numberingSystem = opts.numberingSystem;
       const requestedNotation = opts.notation === undefined ? 'standard' : String(opts.notation);
       if (!['standard', 'scientific', 'engineering', 'compact'].includes(requestedNotation)) {
@@ -669,8 +700,8 @@
           : Math.floor(Math.log10(magnitude));
         const mantissa = magnitude / Math.pow(10, exponent);
         const rounded = this._significant
-          ? intlPluralOperand(mantissa, true, 0, 0, this._minimumSignificantDigits, this._maximumSignificantDigits)
-          : intlPluralOperand(mantissa, false, minFrac, Math.max(minFrac, maxFrac), 0, 0);
+          ? intlPluralOperand(mantissa, true, 0, 0, this._minimumSignificantDigits, this._maximumSignificantDigits, this._roundingMode)
+          : intlPluralOperand(mantissa, false, minFrac, Math.max(minFrac, maxFrac), 0, 0, this._roundingMode);
         // Rounding the mantissa can carry it up a magnitude (`9.99` ->
         // `10`); pair it with the exponent that produced.
         const roundedMagnitude = Number(rounded);
@@ -680,8 +711,8 @@
       }
       const mantissa = magnitude === 0 ? 0 : magnitude / Math.pow(10, exponent);
       const mantissaText = this._significant
-        ? intlPluralOperand(mantissa, true, 0, 0, this._minimumSignificantDigits, this._maximumSignificantDigits)
-        : intlPluralOperand(mantissa, false, minFrac, Math.max(minFrac, maxFrac), 0, 0);
+        ? intlPluralOperand(mantissa, true, 0, 0, this._minimumSignificantDigits, this._maximumSignificantDigits, this._roundingMode)
+        : intlPluralOperand(mantissa, false, minFrac, Math.max(minFrac, maxFrac), 0, 0, this._roundingMode);
       const render = digits => this._useRealLocaleData
         ? String(__thaw_intl_number_format(this.locale, digits, false))
         : digits;
@@ -717,6 +748,10 @@
       }
       result.notation = this._notation;
       result.signDisplay = this._signDisplay;
+      result.roundingIncrement = 1;
+      result.roundingMode = this._roundingMode;
+      result.roundingPriority = 'auto';
+      result.trailingZeroDisplay = 'auto';
       return result;
     }
 
@@ -734,12 +769,13 @@
         // what governs the visible digits (and thus the trailing zeros),
         // not `toFixed`'s fraction count.
         const [whole, frac = ''] = intlPluralOperand(
-          Math.abs(number),
+          number,
           true,
           0,
           0,
           this._minimumSignificantDigits,
           this._maximumSignificantDigits,
+          this._roundingMode,
         ).split('.');
         intPart = whole;
         fracPart = frac;
@@ -767,7 +803,7 @@
           maxFrac = Math.max(minFrac, 3);
         }
         if (maxFrac < minFrac) maxFrac = minFrac;
-        const fixed = Math.abs(number).toFixed(maxFrac);
+        const fixed = Math.abs(intlRound(number, Math.pow(10, -maxFrac), this._roundingMode)).toFixed(maxFrac);
         const [wholePart, fracPartRaw = ''] = fixed.split('.');
         fracPart = fracPartRaw;
         while (fracPart.length > minFrac && fracPart.endsWith('0')) {
@@ -984,6 +1020,7 @@
       this._maximumFractionDigits = intlIntegerOption(opts.maximumFractionDigits, Math.max(this._minimumFractionDigits, 3), this._minimumFractionDigits, 100);
       this._minimumSignificantDigits = intlIntegerOption(opts.minimumSignificantDigits, 1, 1, 21);
       this._maximumSignificantDigits = intlIntegerOption(opts.maximumSignificantDigits, Math.max(this._minimumSignificantDigits, 21), this._minimumSignificantDigits, 21);
+      this._roundingMode = intlEnumOption(opts.roundingMode, INTL_ROUNDING_MODES, 'halfExpand', 'roundingMode');
     }
 
     _operandString(value) {
@@ -996,6 +1033,7 @@
         this._maximumFractionDigits,
         this._minimumSignificantDigits,
         this._maximumSignificantDigits,
+        this._roundingMode,
       );
     }
 
@@ -1022,7 +1060,7 @@
       }
       result.pluralCategories = pluralCategories;
       result.roundingIncrement = 1;
-      result.roundingMode = 'halfExpand';
+      result.roundingMode = this._roundingMode;
       result.roundingPriority = 'auto';
       result.trailingZeroDisplay = 'auto';
       return result;
