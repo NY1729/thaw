@@ -2722,9 +2722,57 @@ fn intl_datetime_styles_match_real_node() {
     );
 }
 
-/// `hour12` overrides `hourCycle` (real ECMA-402), and an out-of-enum
-/// field option throws instead of being silently degraded -- both
-/// cross-checked against real Node.
+/// `fractionalSecondDigits` (real ECMA-402) -- previously ignored. The
+/// fractional digits come from the millisecond/sub-second field; with
+/// `second` present they join with the locale decimal separator, and
+/// alone they render just the requested leading digits.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_fractional_second_digits_match_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts })\n\
+                 .format(new Date(Date.UTC(2024, 0, 1, 13, 5, 45, 678)));\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 show('en-US', { fractionalSecondDigits: 1 }),\n\
+                 show('en-US', { fractionalSecondDigits: 2 }),\n\
+                 show('en-US', { fractionalSecondDigits: 3 }),\n\
+                 show('en-US', { hour: 'numeric', minute: '2-digit', second: 'numeric', fractionalSecondDigits: 3 }),\n\
+                 show('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 2 }),\n\
+                 show('de-DE', { hour: 'numeric', minute: '2-digit', second: 'numeric', fractionalSecondDigits: 3 }),\n\
+               ];\n\
+             }\n\
+             function rejectsInvalid() {\n\
+               try { new Intl.DateTimeFormat('en-US', { fractionalSecondDigits: 4 }); return 'no-throw'; }\n\
+               catch (error) { return error.constructor.name; }\n\
+             }\n\
+             function option() {\n\
+               return new Intl.DateTimeFormat('en-US', { fractionalSecondDigits: 2 }).resolvedOptions().fractionalSecondDigits;\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "6",
+            "67",
+            "678",
+            "1:05:45.678 PM",
+            "1:05:45.67 PM",
+            "13:05:45,678"
+        ])
+        .unwrap()
+    );
+    assert_eq!(
+        call("rejectsInvalid", "[]"),
+        serde_json::to_string("RangeError").unwrap()
+    );
+    assert_eq!(call("option", "[]"), "2".to_string());
+}
 #[cfg(feature = "intl")]
 #[test]
 fn intl_datetime_hour_precedence_and_option_validation_match_real_node() {
