@@ -1104,20 +1104,116 @@
       return parts;
     }
 
-    // `Intl.NumberFormat.prototype.formatToParts` (ECMA-402). Exact for
-    // standard notation; `compact`/`scientific` return the whole rendered
-    // string as one `literal` part (their field split is out of scope).
+    _scientificParts(number) {
+      const text = this._formatScientific(number);
+      const separatorIndex = text.indexOf('E');
+      const mantissa = text.slice(0, separatorIndex);
+      const exponent = text.slice(separatorIndex + 1);
+      const decimal = this._decimalSeparator();
+      let whole = mantissa;
+      let fraction = '';
+      const dot = mantissa.indexOf(decimal);
+      if (dot >= 0) {
+        whole = mantissa.slice(0, dot);
+        fraction = mantissa.slice(dot + decimal.length);
+      }
+      const parts = [{ type: 'integer', value: whole }];
+      if (fraction) {
+        parts.push({ type: 'decimal', value: decimal });
+        parts.push({ type: 'fraction', value: fraction });
+      }
+      parts.push({ type: 'exponentSeparator', value: 'E' });
+      if (exponent.startsWith('-')) {
+        parts.push({ type: 'exponentMinusSign', value: '-' });
+        parts.push({ type: 'exponentInteger', value: exponent.slice(1) });
+      } else {
+        parts.push({ type: 'exponentInteger', value: exponent });
+      }
+      return parts;
+    }
+
+    _localizedDigitSet() {
+      if (!this._useRealLocaleData) return new Set('0123456789');
+      const rendered = String(__thaw_intl_number_format(this.locale, '0123456789', false));
+      return new Set([...rendered]);
+    }
+
+    // Splits an already-rendered compact string (`"1.2K"`, `"123.456"`,
+    // `"1.2 thousand"`, `"1.5万"`) into numeric + compact parts.
+    _compactParts(text) {
+      const digits = this._localizedDigitSet();
+      const decimal = this._decimalSeparator();
+      const group = this._groupSeparator();
+      let split = 0;
+      while (split < text.length) {
+        const character = text[split];
+        if (digits.has(character) || character === decimal || character === group) {
+          split += 1;
+        } else {
+          break;
+        }
+      }
+      const numeric = text.slice(0, split);
+      let suffix = text.slice(split);
+      let whole = numeric;
+      let fraction = '';
+      const dot = numeric.indexOf(decimal);
+      if (dot >= 0) {
+        whole = numeric.slice(0, dot);
+        fraction = numeric.slice(dot + decimal.length);
+      }
+      const parts = [];
+      if (group && whole.includes(group)) {
+        whole.split(group).forEach((segment, index) => {
+          if (index > 0) parts.push({ type: 'group', value: group });
+          parts.push({ type: 'integer', value: segment });
+        });
+      } else {
+        parts.push({ type: 'integer', value: whole });
+      }
+      if (fraction) {
+        parts.push({ type: 'decimal', value: decimal });
+        parts.push({ type: 'fraction', value: fraction });
+      }
+      if (suffix) {
+        if (/^\s/.test(suffix)) {
+          parts.push({ type: 'literal', value: suffix[0] });
+          suffix = suffix.slice(1);
+        }
+        if (suffix) parts.push({ type: 'compact', value: suffix });
+      }
+      return parts;
+    }
+
+    // `Intl.NumberFormat.prototype.formatToParts` (ECMA-402): standard
+    // notation is rebuilt from the localized numeric core plus typed
+    // affixes; `compact` parses the rendered compact string into numeric +
+    // `compact` parts; `scientific`/`engineering` emit mantissa +
+    // `exponentSeparator`/`exponentInteger` parts.
     formatToParts(value) {
       const full = this.format(value);
-      if (this._notation !== 'standard') {
-        return [{ type: 'literal', value: full }];
-      }
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
       if (!Number.isFinite(number)) {
         return [{ type: 'nan', value: full }];
       }
       const sign = this._signFor(number);
+      if (this._notation === 'compact') {
+        const parts = [];
+        let text = full;
+        if (text.startsWith('-')) {
+          parts.push({ type: 'minusSign', value: '-' });
+          text = text.slice(1);
+        }
+        parts.push(...this._compactParts(text));
+        return parts;
+      }
+      if (this._notation === 'scientific' || this._notation === 'engineering') {
+        const parts = [];
+        if (sign) parts.push({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign });
+        parts.push(...this._scientificParts(number));
+        return parts;
+      }
       const { intPart, fracPart, groupDigits } = this._standardDigits(number);
       const numeric = this._numericParts(intPart, fracPart, groupDigits);
       const core = numeric.map(part => part.value).join('');

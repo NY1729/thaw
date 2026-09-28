@@ -3893,3 +3893,64 @@ fn intl_range_to_parts_icu4c_matches_real_node() {
         r#"[{"type":"approximatelySign","value":"~","source":"shared"},{"type":"integer","value":"3","source":"shared"}]"#
     );
 }
+
+/// `Intl.NumberFormat` `formatToParts` for `compact` and
+/// `scientific`/`engineering` notation (previously collapsed to a single
+/// literal part). Cross-checked against real Node.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_number_format_to_parts_compact_and_scientific_match_real_node() {
+    assert_eq!(
+        load(
+            "function partsFor(locale, opts, value) {\n\
+               return new Intl.NumberFormat(locale, opts).formatToParts(value);\n\
+             }\n\
+             function sci() { return partsFor('en-US', { notation: 'scientific' }, 1234); }\n\
+             function eng() { return partsFor('en-US', { notation: 'engineering' }, 12345); }\n\
+             function scineg() { return partsFor('en-US', { notation: 'scientific' }, -1234.5); }\n\
+             function scinegexp() { return partsFor('en-US', { notation: 'scientific' }, 0.001234); }\n\
+             function compact() { return partsFor('en-US', { notation: 'compact' }, 1234); }\n\
+             function compactde() { return partsFor('de-DE', { notation: 'compact' }, 1234); }\n\
+             function compactde2() { return partsFor('de-DE', { notation: 'compact' }, 123456); }\n\
+             function compactja() { return partsFor('ja-JP', { notation: 'compact' }, 15127); }\n\
+             function compactlong() { return partsFor('en-US', { notation: 'compact', compactDisplay: 'long' }, 1234); }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("sci", "[]"),
+        r#"[{"type":"integer","value":"1"},{"type":"decimal","value":"."},{"type":"fraction","value":"234"},{"type":"exponentSeparator","value":"E"},{"type":"exponentInteger","value":"3"}]"#
+    );
+    assert_eq!(
+        call("eng", "[]"),
+        r#"[{"type":"integer","value":"12"},{"type":"decimal","value":"."},{"type":"fraction","value":"345"},{"type":"exponentSeparator","value":"E"},{"type":"exponentInteger","value":"3"}]"#
+    );
+    assert_eq!(
+        call("scineg", "[]"),
+        r#"[{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"decimal","value":"."},{"type":"fraction","value":"235"},{"type":"exponentSeparator","value":"E"},{"type":"exponentInteger","value":"3"}]"#
+    );
+    assert_eq!(
+        call("scinegexp", "[]"),
+        r#"[{"type":"integer","value":"1"},{"type":"decimal","value":"."},{"type":"fraction","value":"234"},{"type":"exponentSeparator","value":"E"},{"type":"exponentMinusSign","value":"-"},{"type":"exponentInteger","value":"3"}]"#
+    );
+    assert_eq!(
+        call("compact", "[]"),
+        r#"[{"type":"integer","value":"1"},{"type":"decimal","value":"."},{"type":"fraction","value":"2"},{"type":"compact","value":"K"}]"#
+    );
+    assert_eq!(
+        call("compactde", "[]"),
+        r#"[{"type":"integer","value":"1234"}]"#
+    );
+    assert_eq!(
+        call("compactde2", "[]"),
+        r#"[{"type":"integer","value":"123"},{"type":"group","value":"."},{"type":"integer","value":"456"}]"#
+    );
+    assert_eq!(
+        call("compactja", "[]"),
+        r#"[{"type":"integer","value":"1"},{"type":"decimal","value":"."},{"type":"fraction","value":"5"},{"type":"compact","value":"万"}]"#
+    );
+    assert_eq!(
+        call("compactlong", "[]"),
+        r#"[{"type":"integer","value":"1"},{"type":"decimal","value":"."},{"type":"fraction","value":"2"},{"type":"literal","value":" "},{"type":"compact","value":"thousand"}]"#
+    );
+}
