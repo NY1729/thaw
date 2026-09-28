@@ -483,6 +483,21 @@
           part.value = `0${part.value}`;
         }
       }
+      // Conversely, real ECMA-402 `'numeric'` never zero-pads, but some
+      // ICU4X calendar-period patterns do (`ja` `{year,month:'numeric'}`
+      // -> `"2024/07"`, Node `"2024/7"`) -- strip a single leading zero.
+      // Not year (4-digit) nor hour (h23/h24 genuinely pad, per above).
+      const numericUnpadFor = {
+        month: this._month,
+        day: this._day,
+        minute: this._minute,
+        second: this._second,
+      };
+      for (const part of parts) {
+        if (numericUnpadFor[part.type] === 'numeric' && /^0\d$/.test(part.value)) {
+          part.value = part.value.slice(1);
+        }
+      }
       // `icu_datetime` has no `h24` equivalent (only `H23`, hours
       // 0-23), so its midnight hour comes back as `0`/`00`; real
       // ECMA-402 `hourCycle: 'h24'` renders that same instant as `24`

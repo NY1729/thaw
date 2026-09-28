@@ -447,16 +447,42 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
             let Ok(iso_date) = iso_date_result else {
                 return "[]".to_string();
             };
-            let Ok(field_set) = builder.build_date() else {
-                return "[]".to_string();
-            };
-            let Ok(formatter) =
-                icu_datetime::DateTimeFormatter::try_new_unstable(&thaw_icu_data::ThawIcuDataProvider, prefs, field_set)
-            else {
-                return "[]".to_string();
-            };
-            let date = iso_date.to_calendar(formatter.calendar());
-            write_parts_json(&formatter.format(&date))
+            // ICU4X classifies `M`/`YM`/`Y` as *calendar-period* field sets
+            // (a standalone month/year), which `build_date()` rejects --
+            // so a bare `{month}`/`{year}`/`{year,month}` request must go
+            // through `build_calendar_period()`. Using `build_date()` for
+            // them silently produced an empty string.
+            use icu_datetime::fieldsets::builder::DateFields;
+            if matches!(
+                builder.date_fields,
+                Some(DateFields::M | DateFields::YM | DateFields::Y)
+            ) {
+                let Ok(field_set) = builder.build_calendar_period() else {
+                    return "[]".to_string();
+                };
+                let Ok(formatter) = icu_datetime::DateTimeFormatter::try_new_unstable(
+                    &thaw_icu_data::ThawIcuDataProvider,
+                    prefs,
+                    field_set,
+                ) else {
+                    return "[]".to_string();
+                };
+                let date = iso_date.to_calendar(formatter.calendar());
+                write_parts_json(&formatter.format(&date))
+            } else {
+                let Ok(field_set) = builder.build_date() else {
+                    return "[]".to_string();
+                };
+                let Ok(formatter) = icu_datetime::DateTimeFormatter::try_new_unstable(
+                    &thaw_icu_data::ThawIcuDataProvider,
+                    prefs,
+                    field_set,
+                ) else {
+                    return "[]".to_string();
+                };
+                let date = iso_date.to_calendar(formatter.calendar());
+                write_parts_json(&formatter.format(&date))
+            }
         }
         (false, true) => {
             let Ok(time) = time_result else {
