@@ -4188,3 +4188,33 @@ fn intl_datetime_fa_persian_defaults_match_real_node() {
         serde_json::to_string(&["۱۴ تیر ۱۴۰۳", "۱۴ تیر ۱۴۰۳", "۱۴۰۳/۴/۱۴",]).unwrap()
     );
 }
+
+/// `icu_datetime` renders a non-Gregorian `relatedYear` (Chinese/Dangi) in
+/// Latin digits by design; ICU4C/Node localize it, so the JS path
+/// re-localizes the `relatedYear` part with the locale's numbering system.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_chinese_related_year_digits_match_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, ms) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts }).format(new Date(ms));\n\
+             }\n\
+             function all() {\n\
+               const t = Date.UTC(2024, 6, 4);\n\
+               const o = { calendar: 'chinese', year: 'numeric', month: 'long', day: 'numeric' };\n\
+               return [show('ar-SA', o, t), show('fa', o, t), show('zh', o, t)];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "٢٠٢٤(jia-chen) M05 ٢٩",
+            "۲۰۲۴(jia-chen) M05 ۲۹",
+            "2024甲辰年五月29",
+        ])
+        .unwrap()
+    );
+}
