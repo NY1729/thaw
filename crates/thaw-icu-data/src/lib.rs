@@ -177,6 +177,21 @@
 //!     `/tmp/icu4x-source-cache/...` (or the release zip) when the
 //!     curated locale list changes.
 //!
+//! 13. (2026-09-28) `ca`/`hr`/`sk`/`bg` appended to the curated list, and
+//!     the **date-path** markers (`CalendarPreferredV1`,
+//!     `CalendarJapaneseModernV1`, `DatetimeNames{Dayperiod,Weekday}V1`,
+//!     `DatetimeNames{Month,Year}<Cal>V1`, `DatetimePatternsDate<Cal>V1`,
+//!     `DatetimePatterns{Glue,Time}V1`, `DecimalDigitsV1`,
+//!     `LocaleLikelySubtags*V1`, `LocaleParentsV1`) regenerated for the
+//!     expanded list with `--cldr-tag 48.2.1` (the exact tag the original
+//!     `latest` resolved to -- confirmed byte-identical for the old
+//!     locales) and `--use-separate-crates`. `DecimalSymbolsV1` was
+//!     regenerated separately with `fa` still appended (see step 10).
+//!     Only those `.rs.data` files were replaced; `data/mod.rs` is
+//!     unchanged (marker names match). Time-zone/segmenter/collation
+//!     markers were deliberately left alone (they come from other
+//!     sources and would risk drift).
+//!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!
 //! Re-run step 3 with a longer `--locales` list (and, if new API surface
@@ -185,12 +200,12 @@
 //! `src/data/mod.rs` with the new output. No other crate needs to change
 //! for a locale/API combination the regenerated data now covers.
 //!
-//! ## Curated locale list (35 tags)
+//! ## Curated locale list (40 tags)
 //!
 //! `en-US en-GB es es-419 fr de it pt pt-BR nl sv pl ru uk tr ar ar-SA he
-//! hi bn ja ko zh-Hans zh-Hant th vi id ms fil el ro cs hu da fi nb` --
-//! see `docs/design/intl-polyfill.md` for the rationale behind each
-//! locale's inclusion.
+//! hi bn ja ko zh-Hans zh-Hant th vi id ms fil el ro cs hu da fi nb ca hr
+//! sk bg` -- see `docs/design/intl-polyfill.md` for the rationale behind
+//! each locale's inclusion.
 #![allow(clippy::redundant_static_lifetimes, clippy::octal_escapes)]
 
 extern crate alloc;

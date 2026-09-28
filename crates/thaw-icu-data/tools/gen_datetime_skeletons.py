@@ -142,6 +142,44 @@ def pattern_to_skeleton(pattern):
     return "".join(out)
 
 
+# Canonical UTS-35 field order (matches `intl_datetime_skeleton.rs`'s
+# `skeleton_idx`), used to dedupe skeletons that differ only in symbol order
+# (`dMMMy` vs `yMMMd`).
+_SKELETON_ORDER = {
+    "G": 0,
+    "y": 1, "Y": 1, "u": 1, "U": 1, "r": 1,
+    "M": 2, "L": 2, "l": 2,
+    "w": 3, "W": 3,
+    "d": 4, "D": 4, "F": 4, "g": 4,
+    "E": 5, "c": 5, "e": 5,
+    "a": 6, "b": 6, "B": 6,
+    "h": 7, "H": 7, "K": 7, "k": 7, "J": 7, "C": 7,
+    "m": 8,
+    "s": 9, "A": 9,
+    "z": 10, "Z": 10, "O": 10, "v": 10, "V": 10, "x": 10, "X": 10,
+}
+
+
+def canonical_skeleton(skeleton):
+    """Canonicalize a skeleton string (sorted fields) so skeletons that
+    differ only in symbol order collide. Returns `None` for a skeleton with
+    a field this crate can't represent (`Q`/`w`/`W`/...), which the runtime
+    matcher skips anyway."""
+    fields = []
+    i, n = 0, len(skeleton)
+    while i < n:
+        ch = skeleton[i]
+        if ch not in _SKELETON_ORDER:
+            return None
+        j = i
+        while j < n and skeleton[j] == ch:
+            j += 1
+        fields.append((_SKELETON_ORDER[ch], ch, j - i))
+        i = j
+    fields.sort()
+    return "".join(ch * count for _, ch, count in fields)
+
+
 def candidate_formats(cal):
     """The full match table for a calendar: its standard date/time patterns
     (by derived skeleton) overridden by its `availableFormats`. Mirrors
@@ -149,15 +187,23 @@ def candidate_formats(cal):
     (`availableFormats`, which override duplicates). Deliberately does *not*
     inherit Gregorian `availableFormats`: ICU's non-Gregorian calendars only
     carry era-prefixed skeletons, and their own standard date patterns are
-    what produce e.g. Thai Buddhist's era-less `d MMM y`."""
+    what produce e.g. Thai Buddhist's era-less `d MMM y`.
+
+    Keys are canonicalized so an `availableFormats` entry overrides a
+    standard pattern with the same field set -- e.g. ca `availableFormats`
+    `yMMMd` (`d MMM 'del' y`) must beat the standard medium `d MMM y`
+    (same canonical `yMMMd`), as ICU's `PatternMap` does."""
     out = {}
     for section in ("dateFormats", "timeFormats"):
         for key in ("full", "long", "medium", "short"):
             pattern = val(cal[section][key])
-            skeleton = pattern_to_skeleton(pattern)
+            skeleton = canonical_skeleton(pattern_to_skeleton(pattern))
             if skeleton:
                 out.setdefault(skeleton, pattern)
-    out.update(available_formats(cal))
+    for skeleton, pattern in available_formats(cal).items():
+        canonical = canonical_skeleton(skeleton)
+        if canonical:
+            out[canonical] = pattern
     return out
 
 
