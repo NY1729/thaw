@@ -142,6 +142,62 @@
     return { displayHour, dayPeriod, padByDefault: hourCycle === 'h23' || hourCycle === 'h24' };
   }
 
+  function intlIntegerOption(value, fallback, min, max) {
+    if (value === undefined) return fallback;
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      throw new RangeError(`Invalid value: ${String(value)}`);
+    }
+    return n;
+  }
+
+  // Expands `Number.prototype.toPrecision`'s exponential form (`"1.23e+3"`)
+  // back into plain decimal (`"1230"`) -- the plural operands and
+  // `Intl.NumberFormat`'s own digit string both need a plain decimal, and
+  // ICU's `Decimal` parser doesn't accept exponent notation.
+  function intlExpandExponential(text) {
+    if (!/e/i.test(text)) return text;
+    const [mantissa, exponentPart] = text.toLowerCase().split('e');
+    const exponent = parseInt(exponentPart, 10);
+    const negative = mantissa.startsWith('-');
+    const mantissaDigits = negative ? mantissa.slice(1) : mantissa;
+    const [whole, fraction = ''] = mantissaDigits.split('.');
+    const digits = whole + fraction;
+    const pointPosition = whole.length + exponent;
+    let expanded;
+    if (pointPosition <= 0) {
+      expanded = `0.${'0'.repeat(-pointPosition)}${digits}`;
+    } else if (pointPosition >= digits.length) {
+      expanded = `${digits}${'0'.repeat(pointPosition - digits.length)}`;
+    } else {
+      expanded = `${digits.slice(0, pointPosition)}.${digits.slice(pointPosition)}`;
+    }
+    return negative ? `-${expanded}` : expanded;
+  }
+
+  // `Intl.PluralRules.select`'s operand: the number formatted with the
+  // requested visible digits, as a plain ASCII decimal string (ICU's
+  // `Decimal` parser and the CLDR plural `v`/`i` operands both only care
+  // about the value and its visible fraction-digit count, not the
+  // locale's digit script). Mirrors `Intl.NumberFormat`'s own fraction
+  // handling; `ToRawPrecision` for the significant-digit mode.
+  function intlPluralOperand(number, significant, minFrac, maxFrac, minSig, maxSig) {
+    const negative = number < 0 || Object.is(number, -0);
+    const magnitude = Math.abs(number);
+    let digits;
+    if (significant) {
+      const shortest = magnitude === 0 ? 1 : magnitude.toExponential().split('e')[0].replace('.', '').replace(/^0+/, '').length;
+      const visible = Math.max(minSig, Math.min(maxSig, shortest || 1));
+      digits = intlExpandExponential(magnitude.toPrecision(visible));
+    } else {
+      const fixed = magnitude.toFixed(maxFrac);
+      let [whole, frac = ''] = fixed.split('.');
+      while (frac.length > minFrac && frac.endsWith('0')) frac = frac.slice(0, -1);
+      digits = frac ? `${whole}.${frac}` : whole;
+    }
+    return negative ? `-${digits}` : digits;
+  }
+
   class DateTimeFormat {
     constructor(locale, options) {
       const opts = options || {};
@@ -414,6 +470,9 @@
       this._minimumIntegerDigits = opts.minimumIntegerDigits || 1;
       this._minimumFractionDigits = opts.minimumFractionDigits;
       this._maximumFractionDigits = opts.maximumFractionDigits;
+      this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
+      this._minimumSignificantDigits = intlIntegerOption(opts.minimumSignificantDigits, 1, 1, 21);
+      this._maximumSignificantDigits = intlIntegerOption(opts.maximumSignificantDigits, Math.max(this._minimumSignificantDigits, 21), this._minimumSignificantDigits, 21);
     }
 
     resolvedOptions() {
@@ -424,6 +483,17 @@
         useGrouping: this._useGrouping,
         minimumIntegerDigits: this._minimumIntegerDigits,
       };
+      if (this._significant) {
+        result.minimumSignificantDigits = this._minimumSignificantDigits;
+        result.maximumSignificantDigits = this._maximumSignificantDigits;
+      } else {
+        const minFrac = this._minimumFractionDigits === undefined ? 0 : this._minimumFractionDigits;
+        const maxFrac = this._maximumFractionDigits === undefined
+          ? (this._style === 'percent' ? 0 : 3)
+          : this._maximumFractionDigits;
+        result.minimumFractionDigits = minFrac;
+        result.maximumFractionDigits = Math.max(minFrac, maxFrac);
+      }
       if (this._style === 'unit') {
         result.unit = this._unit;
         result.unitDisplay = this._unitDisplay;
@@ -438,36 +508,54 @@
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
       const negative = number < 0 || Object.is(number, -0);
-      let minFrac = this._minimumFractionDigits;
-      let maxFrac = this._maximumFractionDigits;
-      if (minFrac === undefined && maxFrac === undefined) {
-        // The real per-currency minor-unit digit count (e.g. 0 for
-        // JPY/KRW, 2 for USD/EUR, 3 for BHD/KWD), via
-        // `__thaw_intl_currency_fraction_digits`'s vendored CLDR data
-        // -- not a single hand-picked "JPY is the only exception"
-        // guess, which would have been wrong for every other real
-        // zero-decimal currency (confirmed: real Node also gives KRW 0
-        // digits and BHD 3, not just JPY 0/everything-else 2).
-        let currencyDigits = 2;
-        if (this._style === 'currency' && typeof __thaw_intl_currency_fraction_digits === 'function') {
-          const resolved = __thaw_intl_currency_fraction_digits(this._currency);
-          if (resolved !== null && resolved !== undefined) currencyDigits = resolved;
+      let intPart;
+      let fracPart;
+      if (this._significant) {
+        // `ToRawPrecision` -- the requested significant-digit count is
+        // what governs the visible digits (and thus the trailing zeros),
+        // not `toFixed`'s fraction count.
+        const [whole, frac = ''] = intlPluralOperand(
+          Math.abs(number),
+          true,
+          0,
+          0,
+          this._minimumSignificantDigits,
+          this._maximumSignificantDigits,
+        ).split('.');
+        intPart = whole;
+        fracPart = frac;
+      } else {
+        let minFrac = this._minimumFractionDigits;
+        let maxFrac = this._maximumFractionDigits;
+        if (minFrac === undefined && maxFrac === undefined) {
+          // The real per-currency minor-unit digit count (e.g. 0 for
+          // JPY/KRW, 2 for USD/EUR, 3 for BHD/KWD), via
+          // `__thaw_intl_currency_fraction_digits`'s vendored CLDR data
+          // -- not a single hand-picked "JPY is the only exception"
+          // guess, which would have been wrong for every other real
+          // zero-decimal currency (confirmed: real Node also gives KRW 0
+          // digits and BHD 3, not just JPY 0/everything-else 2).
+          let currencyDigits = 2;
+          if (this._style === 'currency' && typeof __thaw_intl_currency_fraction_digits === 'function') {
+            const resolved = __thaw_intl_currency_fraction_digits(this._currency);
+            if (resolved !== null && resolved !== undefined) currencyDigits = resolved;
+          }
+          minFrac = this._style === 'currency' ? currencyDigits : 0;
+          maxFrac = this._style === 'currency' ? minFrac : (this._style === 'percent' ? 0 : 3);
+        } else if (minFrac === undefined) {
+          minFrac = 0;
+        } else if (maxFrac === undefined) {
+          maxFrac = Math.max(minFrac, 3);
         }
-        minFrac = this._style === 'currency' ? currencyDigits : 0;
-        maxFrac = this._style === 'currency' ? minFrac : (this._style === 'percent' ? 0 : 3);
-      } else if (minFrac === undefined) {
-        minFrac = 0;
-      } else if (maxFrac === undefined) {
-        maxFrac = Math.max(minFrac, 3);
+        if (maxFrac < minFrac) maxFrac = minFrac;
+        const fixed = Math.abs(number).toFixed(maxFrac);
+        const [wholePart, fracPartRaw = ''] = fixed.split('.');
+        fracPart = fracPartRaw;
+        while (fracPart.length > minFrac && fracPart.endsWith('0')) {
+          fracPart = fracPart.slice(0, -1);
+        }
+        intPart = wholePart;
       }
-      if (maxFrac < minFrac) maxFrac = minFrac;
-      const fixed = Math.abs(number).toFixed(maxFrac);
-      const [wholePart, fracPartRaw = ''] = fixed.split('.');
-      let fracPart = fracPartRaw;
-      while (fracPart.length > minFrac && fracPart.endsWith('0')) {
-        fracPart = fracPart.slice(0, -1);
-      }
-      let intPart = wholePart;
       while (intPart.length < this._minimumIntegerDigits) intPart = `0${intPart}`;
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
       const signedDigits = negative ? `-${digits}` : digits;
@@ -646,8 +734,11 @@
   }
 
   // `Intl.PluralRules` (M8) -- entirely new, no prior English-only
-  // version existed. `minimumFractionDigits`/significant-digit options
-  // aren't honored (see `intl_plurals.rs`'s own doc comment);
+  // version existed. `minimum`/`maximumFractionDigits` and
+  // `minimum`/`maximumSignificantDigits` are honored by formatting the
+  // operand the same way `Intl.NumberFormat` would (so the ICU plural
+  // rules see the real visible-fraction-digit count, which is what
+  // distinguishes e.g. `en` `one` for `1` from `other` for `1.0`);
   // `resolvedOptions().pluralCategories` returns the locale's real
   // categories via `__thaw_intl_plural_categories`.
   class PluralRules {
@@ -655,27 +746,54 @@
       const opts = options || {};
       this.locale = String(locale === undefined ? 'en-US' : locale);
       this._type = opts.type === 'ordinal' ? 'ordinal' : 'cardinal';
+      this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
+      this._minimumIntegerDigits = intlIntegerOption(opts.minimumIntegerDigits, 1, 1, 21);
+      this._minimumFractionDigits = intlIntegerOption(opts.minimumFractionDigits, 0, 0, 100);
+      this._maximumFractionDigits = intlIntegerOption(opts.maximumFractionDigits, Math.max(this._minimumFractionDigits, 3), this._minimumFractionDigits, 100);
+      this._minimumSignificantDigits = intlIntegerOption(opts.minimumSignificantDigits, 1, 1, 21);
+      this._maximumSignificantDigits = intlIntegerOption(opts.maximumSignificantDigits, Math.max(this._minimumSignificantDigits, 21), this._minimumSignificantDigits, 21);
+    }
+
+    _operandString(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new RangeError(`Invalid value: ${String(value)}`);
+      return intlPluralOperand(
+        number,
+        this._significant,
+        this._minimumFractionDigits,
+        this._maximumFractionDigits,
+        this._minimumSignificantDigits,
+        this._maximumSignificantDigits,
+      );
     }
 
     select(value) {
       if (typeof __thaw_intl_plural_category !== 'function') return 'other';
-      return __thaw_intl_plural_category(this.locale, this._type, String(Number(value)));
+      return __thaw_intl_plural_category(this.locale, this._type, this._operandString(value));
     }
 
     resolvedOptions() {
       const pluralCategories = typeof __thaw_intl_plural_categories === 'function'
         ? JSON.parse(__thaw_intl_plural_categories(this.locale, this._type))
         : ['other'];
-      return {
+      const result = {
         locale: this.locale,
         type: this._type,
-        minimumIntegerDigits: 1,
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 3,
-        minimumSignificantDigits: 1,
-        maximumSignificantDigits: 21,
-        pluralCategories,
+        minimumIntegerDigits: this._minimumIntegerDigits,
       };
+      if (this._significant) {
+        result.minimumSignificantDigits = this._minimumSignificantDigits;
+        result.maximumSignificantDigits = this._maximumSignificantDigits;
+      } else {
+        result.minimumFractionDigits = this._minimumFractionDigits;
+        result.maximumFractionDigits = this._maximumFractionDigits;
+      }
+      result.pluralCategories = pluralCategories;
+      result.roundingIncrement = 1;
+      result.roundingMode = 'halfExpand';
+      result.roundingPriority = 'auto';
+      result.trailingZeroDisplay = 'auto';
+      return result;
     }
   }
 

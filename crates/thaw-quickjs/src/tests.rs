@@ -1907,6 +1907,10 @@ fn intl_number_format_and_list_format_match_real_node() {
              function defaultGrouping() {\n\
                return new Intl.NumberFormat('en-US').format(1234567.891);\n\
              }\n\
+             function significantDigits() {\n\
+               const f = (opts, n) => new Intl.NumberFormat('en-US', { useGrouping: false, ...opts }).format(n);\n\
+               return [f({ maximumSignificantDigits: 3 }, 1234), f({ maximumSignificantDigits: 3 }, 1.2345), f({ minimumSignificantDigits: 3 }, 2), f({ maximumSignificantDigits: 2, style: 'percent' }, 0.1234)];\n\
+             }\n\
              function unitDurations() {\n\
                const of = (n, unit, unitDisplay) => new Intl.NumberFormat('en-US', { style: 'unit', unit, unitDisplay }).format(n);\n\
                return [of(3, 'day', 'long'), of(1, 'day', 'long'), of(3, 'hour', 'short'), of(3, 'year', 'short'), of(3, 'day', 'narrow')];\n\
@@ -1921,6 +1925,10 @@ fn intl_number_format_and_list_format_match_real_node() {
     );
     assert_eq!(call("paddedNoGrouping", "[]"), r#"["05","1234"]"#);
     assert_eq!(call("defaultGrouping", "[]"), r#""1,234,567.891""#);
+    assert_eq!(
+        call("significantDigits", "[]"),
+        r#"["1230","1.23","2.00","12%"]"#
+    );
     assert_eq!(
         call("unitDurations", "[]"),
         r#"["3 days","1 day","3 hr","3 yrs","3d"]"#
@@ -2783,6 +2791,9 @@ fn intl_plural_rules_matches_real_node() {
              function categories(locale) {\n\
                return new Intl.PluralRules(locale).resolvedOptions().pluralCategories;\n\
              }\n\
+             function byOptions(locale, opts, n) {\n\
+               return new Intl.PluralRules(locale, opts).select(n);\n\
+             }\n\
              function all() {\n\
                return [\n\
                  cardinal('en', 1),\n\
@@ -2826,6 +2837,43 @@ fn intl_plural_rules_matches_real_node() {
         r#"["few","many","one","two","zero","other"]"#
     );
     assert_eq!(call("categories", "[\"ja\"]"), r#"["other"]"#);
+    // Digit options are honored by formatting the operand the way
+    // `Intl.NumberFormat` would (real Node values).
+    assert_eq!(
+        call("byOptions", "[\"en\", {}, 1]"),
+        serde_json::to_string("one").unwrap()
+    );
+    assert_eq!(
+        call("byOptions", "[\"en\", {\"minimumFractionDigits\":1}, 1]"),
+        serde_json::to_string("other").unwrap()
+    );
+    assert_eq!(
+        call("byOptions", "[\"en\", {\"maximumFractionDigits\":0}, 1.4]"),
+        serde_json::to_string("one").unwrap()
+    );
+    assert_eq!(
+        call("byOptions", "[\"en\", {\"maximumFractionDigits\":0}, 1.5]"),
+        serde_json::to_string("other").unwrap()
+    );
+    assert_eq!(
+        call("byOptions", "[\"en\", {\"maximumFractionDigits\":0}, 2]"),
+        serde_json::to_string("other").unwrap()
+    );
+    assert_eq!(
+        call(
+            "byOptions",
+            "[\"en\", {\"maximumSignificantDigits\":1}, 1.4]"
+        ),
+        serde_json::to_string("one").unwrap()
+    );
+    assert_eq!(
+        call("byOptions", "[\"en\", {\"minimumSignificantDigits\":3}, 2]"),
+        serde_json::to_string("other").unwrap()
+    );
+    assert_eq!(
+        call("byOptions", "[\"ro\", {\"minimumFractionDigits\":1}, 1]"),
+        serde_json::to_string("few").unwrap()
+    );
 }
 
 /// `Intl.Collator` (M9, entirely new capability) -- real collation
