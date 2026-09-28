@@ -210,6 +210,28 @@
     return negative ? `-${digits}` : digits;
   }
 
+  // Real `Intl.DateTimeFormat` throws a `RangeError` for an
+  // out-of-enum field option at construction time; previously such a
+  // value was silently degraded instead.
+  function intlValidateDateTimeFields(opts) {
+    const allowed = {
+      weekday: ['long', 'short', 'narrow'],
+      era: ['long', 'short', 'narrow'],
+      year: ['numeric', '2-digit'],
+      month: ['numeric', '2-digit', 'long', 'short', 'narrow'],
+      day: ['numeric', '2-digit'],
+      hour: ['numeric', '2-digit'],
+      minute: ['numeric', '2-digit'],
+      second: ['numeric', '2-digit'],
+      timeZoneName: ['long', 'short', 'shortOffset', 'longOffset', 'shortGeneric', 'longGeneric'],
+    };
+    for (const [key, values] of Object.entries(allowed)) {
+      if (opts[key] !== undefined && !values.includes(String(opts[key]))) {
+        throw new RangeError(`Invalid ${key}: ${opts[key]}`);
+      }
+    }
+  }
+
   class DateTimeFormat {
     constructor(locale, options) {
       const opts = options || {};
@@ -301,17 +323,23 @@
       // so the native call can apply the requested locale's own actual
       // default hour cycle (e.g. most of Europe defaults to h23, not
       // en-US's h12) instead of a hardcoded English default.
-      this._explicitHour12 = opts.hour12;
+      this._explicitHour12 = opts.hour12 === undefined ? undefined : Boolean(opts.hour12);
       this._explicitHourCycle = opts.hourCycle;
-      if (opts.hourCycle) {
+      // Real ECMA-402: an explicit `hour12` wins over `hourCycle`
+      // (confirmed against Node: `{hourCycle:'h23', hour12:true}` resolves
+      // to `h12`).
+      if (this._explicitHour12 !== undefined) {
+        this._hourCycle = this._explicitHour12 ? 'h12' : 'h23';
+        this._explicitHourCycle = this._hourCycle;
+      } else if (opts.hourCycle !== undefined) {
+        if (!['h11', 'h12', 'h23', 'h24'].includes(opts.hourCycle)) {
+          throw new RangeError(`Invalid hourCycle: ${opts.hourCycle}`);
+        }
         this._hourCycle = opts.hourCycle;
-      } else if (opts.hour12 === true) {
-        this._hourCycle = 'h12';
-      } else if (opts.hour12 === false) {
-        this._hourCycle = 'h23';
       } else {
         this._hourCycle = 'h12';
       }
+      intlValidateDateTimeFields(opts);
     }
 
     resolvedOptions() {

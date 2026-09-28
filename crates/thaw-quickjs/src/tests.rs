@@ -2722,6 +2722,52 @@ fn intl_datetime_styles_match_real_node() {
     );
 }
 
+/// `hour12` overrides `hourCycle` (real ECMA-402), and an out-of-enum
+/// field option throws instead of being silently degraded -- both
+/// cross-checked against real Node.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_hour_precedence_and_option_validation_match_real_node() {
+    assert_eq!(
+        load(
+            "function show(opts) {\n\
+               const d = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit', ...opts });\n\
+               const r = d.resolvedOptions();\n\
+               return [r.hourCycle, r.hour12, d.format(new Date(Date.UTC(2024, 0, 1, 13, 5)))];\n\
+             }\n\
+             function rejectsInvalid() {\n\
+               const bad = [];\n\
+               for (const opts of [{ hourCycle: 'h25' }, { weekday: 'x' }, { month: 'x' }, { year: 'x' }]) {\n\
+                 try { new Intl.DateTimeFormat('en-US', opts); bad.push('no-throw'); }\n\
+                 catch (error) { bad.push(error.constructor.name); }\n\
+               }\n\
+               return bad;\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("show", "[{\"hourCycle\":\"h23\",\"hour12\":true}]"),
+        serde_json::json!(["h12", true, "1:05 PM"]).to_string()
+    );
+    assert_eq!(
+        call("show", "[{\"hourCycle\":\"h12\",\"hour12\":false}]"),
+        serde_json::json!(["h23", false, "13:05"]).to_string()
+    );
+    assert_eq!(
+        call("show", "[{\"hourCycle\":\"h11\"}]"),
+        serde_json::json!(["h11", true, "1:05 PM"]).to_string()
+    );
+    assert_eq!(
+        call("show", "[{\"hour12\":false}]"),
+        serde_json::json!(["h23", false, "13:05"]).to_string()
+    );
+    assert_eq!(
+        call("rejectsInvalid", "[]"),
+        serde_json::to_string(&["RangeError", "RangeError", "RangeError", "RangeError"]).unwrap()
+    );
+}
+
 /// Real multi-locale `Intl.NumberFormat` (M6 of docs/design/
 /// intl-polyfill.md's "Real CLDR data via icu4x" plan) --
 /// `intl_number.rs`'s `__thaw_intl_number_format`, replacing the
