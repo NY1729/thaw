@@ -2868,10 +2868,7 @@ fn intl_number_format_matches_real_node_for_curated_non_english_locales() {
 /// `numberingSystem` (explicit override), and `currencySign:
 /// 'accounting'` -- all cross-checked against real Node. Previously
 /// `notation`/`numberingSystem` were silently ignored and negative
-/// currency always used a minus sign. (An explicit `numberingSystem`
-/// localizes the digits; the *grouping separator* on an overridden
-/// latn-base locale follows the base locale, a known native nuance, so
-/// the digit case is checked ungrouped.)
+/// currency always used a minus sign.
 #[cfg(feature = "intl")]
 #[test]
 fn intl_number_notation_numbering_system_and_accounting_match_real_node() {
@@ -2892,8 +2889,12 @@ fn intl_number_notation_numbering_system_and_accounting_match_real_node() {
                ];\n\
              }\n\
              function numberingSystem() {\n\
-               const nf = new Intl.NumberFormat('en', { useGrouping: false, numberingSystem: 'arab' });\n\
-               return [nf.format(1234), nf.resolvedOptions().numberingSystem];\n\
+               const g = (nu, n) => new Intl.NumberFormat('en', { numberingSystem: nu }).format(n);\n\
+               return [\n\
+                 g('arab', 1234), g('arab', 1234567),\n\
+                 g('beng', 1234567), g('deva', 1234567), g('thai', 1234567), g('hanidec', 1234567),\n\
+                 new Intl.NumberFormat('en', { numberingSystem: 'arab' }).resolvedOptions().numberingSystem,\n\
+               ];\n\
              }\n\
              function accounting() {\n\
                const nf = new Intl.NumberFormat('en', { style: 'currency', currency: 'USD', currencySign: 'accounting' });\n\
@@ -2911,7 +2912,16 @@ fn intl_number_notation_numbering_system_and_accounting_match_real_node() {
     );
     assert_eq!(
         call("numberingSystem", "[]"),
-        serde_json::to_string(&["١٢٣٤", "arab"]).unwrap()
+        serde_json::to_string(&[
+            "١٬٢٣٤",
+            "١٬٢٣٤٬٥٦٧",
+            "১,২৩৪,৫৬৭",
+            "१,२३४,५६७",
+            "๑,๒๓๔,๕๖๗",
+            "一,二三四,五六七",
+            "arab",
+        ])
+        .unwrap()
     );
     assert_eq!(
         call("accounting", "[]"),
