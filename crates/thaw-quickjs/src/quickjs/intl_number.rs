@@ -36,8 +36,26 @@ fn intl_number_format(locale_tag: &str, digits: &str, use_grouping: bool) -> Str
     let curated_tag = resolve_curated_locale(&locale.id);
     let curated_locale: icu_locale::Locale =
         curated_tag.parse().expect("resolve_curated_locale returns a valid tag");
-    let mut prefs = icu_decimal::DecimalFormatterPreferences::from(&curated_locale);
-    prefs.numbering_system = icu_decimal::DecimalFormatterPreferences::from(&locale).numbering_system;
+    let requested_prefs = icu_decimal::DecimalFormatterPreferences::from(&locale);
+    // CLDR defines a non-Latin numbering system's *symbols* only in the
+    // locales that use it (e.g. `symbols-numberSystem-arab` under
+    // `ar-SA`), never at the root locale. So an explicit `numberingSystem`
+    // on an unrelated locale (`en` + `arab`) would otherwise fall back to
+    // the base locale's Latin symbols (digits localize, but the grouping
+    // separator stays a comma). For the systems whose separators actually
+    // differ from Latin, resolve through a representative locale that
+    // natively carries that system; a system that differs only in its
+    // digit glyphs keeps the base locale's symbols (the grouping *sizes*
+    // are locale-defined, not numbering-system-defined -- `en` groups
+    // `1234567` as `1,234,567`, not Bengali's `12,34,567`).
+    let base_locale = requested_prefs
+        .numbering_system
+        .as_ref()
+        .and_then(|nu| intl_numbering_system_representative(nu.as_str()))
+        .and_then(|tag| tag.parse::<icu_locale::Locale>().ok())
+        .unwrap_or(curated_locale);
+    let mut prefs = icu_decimal::DecimalFormatterPreferences::from(&base_locale);
+    prefs.numbering_system = requested_prefs.numbering_system;
 
     let options: icu_decimal::options::DecimalFormatterOptions = if use_grouping {
         icu_decimal::options::GroupingStrategy::Auto
@@ -51,4 +69,22 @@ fn intl_number_format(locale_tag: &str, digits: &str, use_grouping: bool) -> Str
         return digits.to_string();
     };
     formatter.format(&decimal).to_string()
+}
+
+/// A curated locale that natively uses the given numbering system, used
+/// to source that system's symbols when it's been explicitly requested on
+/// a locale that doesn't define them (see `intl_number_format`'s own
+/// comment). Only the non-Latin systems `thaw-icu-data`'s curated locale
+/// list can actually define.
+fn intl_numbering_system_representative(numbering_system: &str) -> Option<&'static str> {
+    // Only the systems whose CLDR *separators* differ from Latin
+    // (grouping `٬`, decimal `٫`): a system that differs from Latin only
+    // in its digit glyphs (`beng`/`deva`/`thai`/`hanidec`) keeps the base
+    // locale's own symbols (and, crucially, its grouping *sizes*, which
+    // are locale-defined, not numbering-system-defined -- `en` groups
+    // `1234567` as `1,234,567`, not Bengali's `12,34,567`).
+    match numbering_system {
+        "arab" => Some("ar-SA"),
+        _ => None,
+    }
 }
