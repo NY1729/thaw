@@ -4218,3 +4218,45 @@ fn intl_datetime_chinese_related_year_digits_match_real_node() {
         .unwrap()
     );
 }
+
+/// ICU's `PatternMap` candidate set + `getDistance` reproduce bg's `Hm`
+/// split (numeric keeps the availableFormat `HH:mm 'ч'.`, `2-digit` picks
+/// the standard `H:mm`) and cs's standard-medium adjustment, which the
+/// earlier CLDR-availableFormats-only reconstruction got wrong.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_patternmap_selection_matches_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, ms) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts }).format(new Date(ms));\n\
+             }\n\
+             function all() {\n\
+               const t = Date.UTC(2024, 6, 4, 16, 30, 45);\n\
+               return [\n\
+                 show('bg', {hour:'numeric',minute:'numeric'}, t),\n\
+                 show('bg', {hour:'2-digit',minute:'2-digit'}, t),\n\
+                 show('bg', {hour:'numeric',minute:'numeric',second:'numeric'}, t),\n\
+                 show('cs', {year:'numeric',month:'2-digit',day:'2-digit'}, t),\n\
+                 show('it', {year:'numeric',month:'2-digit',day:'numeric'}, t),\n\
+                 show('uk', {year:'numeric',month:'2-digit',day:'numeric'}, t),\n\
+                 show('fr', {year:'numeric',month:'numeric',day:'numeric'}, t),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "16:30 ч.",
+            "16:30",
+            "16:30:45 ч.",
+            "04. 07. 2024",
+            "04/07/2024",
+            "04.07.2024",
+            "04/07/2024",
+        ])
+        .unwrap()
+    );
+}
