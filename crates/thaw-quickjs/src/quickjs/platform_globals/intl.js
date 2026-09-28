@@ -151,6 +151,18 @@
     return n;
   }
 
+  // Real `Intl.NumberFormat`'s `useGrouping` accepts a boolean (legacy)
+  // or `"auto"`/`"always"`/`"min2"`, and `resolvedOptions` reports the
+  // normalized string form (`true` -> `"always"`, `false` stays `false`).
+  function intlNormalizeUseGrouping(value) {
+    if (value === undefined) return 'auto';
+    if (value === true) return 'always';
+    if (value === false) return false;
+    const text = String(value);
+    if (text === 'auto' || text === 'always' || text === 'min2') return text;
+    throw new RangeError(`Invalid useGrouping: ${text}`);
+  }
+
   // Expands `Number.prototype.toPrecision`'s exponential form (`"1.23e+3"`)
   // back into plain decimal (`"1230"`) -- the plural operands and
   // `Intl.NumberFormat`'s own digit string both need a plain decimal, and
@@ -528,7 +540,7 @@
       if (!['symbol', 'narrowSymbol', 'code', 'name'].includes(this._currencyDisplay)) {
         throw new RangeError(`Invalid currencyDisplay: ${this._currencyDisplay}`);
       }
-      this._useGrouping = opts.useGrouping === undefined ? true : Boolean(opts.useGrouping);
+      this._useGrouping = intlNormalizeUseGrouping(opts.useGrouping);
       this._minimumIntegerDigits = opts.minimumIntegerDigits || 1;
       this._minimumFractionDigits = opts.minimumFractionDigits;
       this._maximumFractionDigits = opts.maximumFractionDigits;
@@ -701,6 +713,11 @@
       while (intPart.length < this._minimumIntegerDigits) intPart = `0${intPart}`;
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
       const signedDigits = `${sign}${digits}`;
+      // `useGrouping: 'min2'` groups only once the integer part exceeds
+      // four digits (real ECMA-402); `'auto'`/`'always'` group normally.
+      const groupDigits = this._useGrouping === false
+        ? false
+        : this._useGrouping === 'min2' ? intPart.length > 4 : true;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
         const result = __thaw_intl_percent_format(this.locale, signedDigits);
         if (result) return result;
@@ -725,8 +742,8 @@
       // applied identically across every curated locale (confirmed),
       // so there's no need to push it through a locale-data lookup.
       const rendered = this._useRealLocaleData
-        ? __thaw_intl_number_format(this.locale, digits, this._useGrouping)
-        : (this._useGrouping ? intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : intPart) +
+        ? __thaw_intl_number_format(this.locale, digits, groupDigits)
+        : (groupDigits ? intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : intPart) +
           (fracPart ? `.${fracPart}` : '');
       const signed = `${sign}${rendered}`;
       if (this._style === 'percent') return `${signed}%`;

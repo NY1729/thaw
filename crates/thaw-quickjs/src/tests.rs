@@ -1911,6 +1911,17 @@ fn intl_number_format_and_list_format_match_real_node() {
                const f = (opts, n) => new Intl.NumberFormat('en-US', { useGrouping: false, ...opts }).format(n);\n\
                return [f({ maximumSignificantDigits: 3 }, 1234), f({ maximumSignificantDigits: 3 }, 1.2345), f({ minimumSignificantDigits: 3 }, 2), f({ maximumSignificantDigits: 2, style: 'percent' }, 0.1234)];\n\
              }\n\
+             function useGroupingModes() {\n\
+               const f = (u, n) => new Intl.NumberFormat('en-US', { useGrouping: u }).format(n);\n\
+               return [f(true, 1000), f(false, 1000), f('auto', 1000), f('always', 1000), f('min2', 1000), f('min2', 10000)];\n\
+             }\n\
+             function groupingResolved() {\n\
+               return [\n\
+                 new Intl.NumberFormat('en-US').resolvedOptions().useGrouping,\n\
+                 new Intl.NumberFormat('en-US', { useGrouping: true }).resolvedOptions().useGrouping,\n\
+                 new Intl.NumberFormat('en-US', { useGrouping: false }).resolvedOptions().useGrouping,\n\
+               ];\n\
+             }\n\
              function signDisplays() {\n\
                const f = (s, n) => new Intl.NumberFormat('en-US', { useGrouping: false, signDisplay: s }).format(n);\n\
                return [\n\
@@ -1940,6 +1951,11 @@ fn intl_number_format_and_list_format_match_real_node() {
         call("significantDigits", "[]"),
         r#"["1230","1.23","2.00","12%"]"#
     );
+    assert_eq!(
+        call("useGroupingModes", "[]"),
+        r#"["1,000","1000","1,000","1,000","1000","10,000"]"#
+    );
+    assert_eq!(call("groupingResolved", "[]"), r#"["auto","always",false]"#);
     assert_eq!(
         call("signDisplays", "[]"),
         r#"["5","0","-5","-0","5","+5","+0","-5","-0","+5","0","0","+50%"]"#
