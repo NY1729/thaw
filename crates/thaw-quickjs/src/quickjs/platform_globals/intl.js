@@ -388,6 +388,21 @@
         // `resolvedOptions` (matching Node) omits it for a style.
         this._timeZoneName = expanded.timeZoneName;
       }
+      // ECMA-402 `ToDateTimeOptions(options, "any", "date")`: with no date
+      // *or* time field at all, default to `{year,month,day:'numeric'}`.
+      // `era` and `timeZoneName` are not "date/time fields" for this check,
+      // so `{era:'short'}` alone still gets the numeric y/m/d (confirmed
+      // against Node: `"7/4/2024 AD"`).
+      const hasAnyField =
+        this._weekday !== undefined || this._year !== undefined ||
+        this._month !== undefined || this._day !== undefined ||
+        this._hour !== undefined || this._minute !== undefined ||
+        this._second !== undefined || this._fractionalSecondDigits !== undefined;
+      if (!hasAnyField) {
+        this._year = 'numeric';
+        this._month = 'numeric';
+        this._day = 'numeric';
+      }
       // Kept separate from `this._hourCycle` below (which always
       // forces a concrete value for the legacy English-only path's own
       // internal am/pm logic): the *real* per-locale path must leave

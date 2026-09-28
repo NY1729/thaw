@@ -618,16 +618,27 @@ fn format_skeleton_pattern(
             // Load only the name data this pattern actually references.
             // (`load_for_pattern` would also demand time-zone data this
             // polyfill deliberately doesn't vendor -- `timeZoneName` is
-            // rendered JS-side -- so load names explicitly instead.)
+            // rendered JS-side -- so load names explicitly instead.) Each
+            // `load_*_names` holds a single length, so pick one length per
+            // field type: an `Era` field's names come from the same marker
+            // as a (cyclic) year's, and loading both lengths would clobber
+            // the era's wide name with the numeric year's abbreviated one.
+            let year_name_length = |length: FieldLength| match length {
+                FieldLength::Four => YearNameLength::Wide,
+                FieldLength::Five => YearNameLength::Narrow,
+                _ => YearNameLength::Abbreviated,
+            };
+            let mut month_len = None;
+            let mut weekday_len = None;
+            let mut year_len = None;
+            let mut dayperiod_len = None;
             for field in &pattern_fields {
                 match field.symbol {
                     FieldSymbol::Month(month) => {
                         use icu_datetime::provider::fields::Month;
                         let standalone = month == Month::StandAlone;
-                        let length = match (field.length, standalone) {
-                            (FieldLength::One | FieldLength::Two, false) => {
-                                MonthNameLength::Numeric
-                            }
+                        month_len = Some(match (field.length, standalone) {
+                            (FieldLength::One | FieldLength::Two, false) => MonthNameLength::Numeric,
                             (FieldLength::One | FieldLength::Two, true) => {
                                 MonthNameLength::StandaloneNumeric
                             }
@@ -637,40 +648,49 @@ fn format_skeleton_pattern(
                             (FieldLength::Five, true) => MonthNameLength::StandaloneNarrow,
                             (_, false) => MonthNameLength::Abbreviated,
                             (_, true) => MonthNameLength::StandaloneAbbreviated,
-                        };
-                        let _ = names.load_month_names(provider, length);
+                        });
                     }
                     FieldSymbol::Weekday(weekday) => {
                         use icu_datetime::provider::fields::Weekday;
                         let standalone = weekday == Weekday::StandAlone;
-                        let length = match (field.length, standalone) {
+                        weekday_len = Some(match (field.length, standalone) {
                             (FieldLength::Four, false) => WeekdayNameLength::Wide,
                             (FieldLength::Five, false) => WeekdayNameLength::Narrow,
                             (FieldLength::Four, true) => WeekdayNameLength::StandaloneWide,
                             (FieldLength::Five, true) => WeekdayNameLength::StandaloneNarrow,
                             (_, false) => WeekdayNameLength::Abbreviated,
                             (_, true) => WeekdayNameLength::StandaloneAbbreviated,
-                        };
-                        let _ = names.load_weekday_names(provider, length);
+                        });
                     }
-                    FieldSymbol::Era | FieldSymbol::Year(_) => {
-                        let length = match field.length {
-                            FieldLength::Four => YearNameLength::Wide,
-                            FieldLength::Five => YearNameLength::Narrow,
-                            _ => YearNameLength::Abbreviated,
-                        };
-                        let _ = names.load_year_names(provider, length);
+                    FieldSymbol::Era => {
+                        year_len = Some(year_name_length(field.length));
+                    }
+                    FieldSymbol::Year(icu_datetime::provider::fields::Year::Cyclic) => {
+                        if year_len.is_none() {
+                            year_len = Some(year_name_length(field.length));
+                        }
                     }
                     FieldSymbol::DayPeriod(_) => {
-                        let length = match field.length {
+                        dayperiod_len = Some(match field.length {
                             FieldLength::Four => DayPeriodNameLength::Wide,
                             FieldLength::Five => DayPeriodNameLength::Narrow,
                             _ => DayPeriodNameLength::Abbreviated,
-                        };
-                        let _ = names.load_day_period_names(provider, length);
+                        });
                     }
                     _ => {}
                 }
+            }
+            if let Some(length) = month_len {
+                let _ = names.load_month_names(provider, length);
+            }
+            if let Some(length) = weekday_len {
+                let _ = names.load_weekday_names(provider, length);
+            }
+            if let Some(length) = year_len {
+                let _ = names.load_year_names(provider, length);
+            }
+            if let Some(length) = dayperiod_len {
+                let _ = names.load_day_period_names(provider, length);
             }
             let pattern = icu_datetime::pattern::DateTimePattern::try_from_pattern_str(&pattern_str)
                 .ok()?;
