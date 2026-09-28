@@ -723,6 +723,40 @@
       if (startMs === endMs) return this.format(startDate);
       return `${this.format(startDate)} \u2013 ${this.format(endDate)}`;
     }
+
+    // `Intl.DateTimeFormat.prototype.formatRangeToParts` -- ICU4C marks
+    // each argument's own fields with a span, giving the real
+    // shared/startRange/endRange sources.
+    formatRangeToParts(startDate, endDate) {
+      const startMs = Number(startDate);
+      const endMs = Number(endDate);
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+        throw new RangeError('Invalid time value');
+      }
+      const start = intlZonedParts(this._timeZone, startMs);
+      const end = intlZonedParts(this._timeZone, endMs);
+      if (!start.valid || !end.valid) {
+        throw new RangeError('Invalid time value');
+      }
+      if (this._useRealLocaleData && typeof __thaw_intl_datetime_range_parts_icu4c === 'function') {
+        const options = this._effectiveOptions();
+        const startParts = { ...start, timeZone: this._timeZone };
+        const endParts = { ...end, timeZone: this._timeZone };
+        const parts = JSON.parse(
+          __thaw_intl_datetime_range_parts_icu4c(
+            this.locale,
+            JSON.stringify(options),
+            JSON.stringify(startParts),
+            JSON.stringify(endParts),
+          ),
+        );
+        if (parts.length) return parts;
+      }
+      if (startMs === endMs) {
+        return this.formatToParts(startDate).map(part => ({ ...part, source: 'shared' }));
+      }
+      return [{ type: 'literal', value: this.formatRange(startDate, endDate), source: 'shared' }];
+    }
   }
 
   class NumberFormat {
@@ -1184,6 +1218,35 @@
       }
       if (startNumber === endNumber) return `~${this.format(start)}`;
       return `${this.format(start)}\u2013${this.format(end)}`;
+    }
+
+    // `Intl.NumberFormat.prototype.formatRangeToParts` -- ICU4C number
+    // range spans give the real shared/startRange/endRange sources.
+    formatRangeToParts(start, end) {
+      const startNumber = this._style === 'percent' ? Number(start) * 100 : Number(start);
+      const endNumber = this._style === 'percent' ? Number(end) * 100 : Number(end);
+      if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) {
+        throw new RangeError('Invalid value');
+      }
+      if (typeof __thaw_intl_number_range_parts_icu4c === 'function') {
+        const asText = ({ intPart, fracPart }) => (fracPart ? `${intPart}.${fracPart}` : intPart);
+        const parts = JSON.parse(
+          __thaw_intl_number_range_parts_icu4c(
+            this.locale,
+            this._rangeSkeleton(),
+            asText(this._standardDigits(startNumber)),
+            asText(this._standardDigits(endNumber)),
+          ),
+        );
+        if (parts.length) return parts;
+      }
+      if (startNumber === endNumber) {
+        return [
+          { type: 'approximatelySign', value: '~', source: 'shared' },
+          ...this.formatToParts(start).map(part => ({ ...part, source: 'shared' })),
+        ];
+      }
+      return [{ type: 'literal', value: this.formatRange(start, end), source: 'shared' }];
     }
   }
 
