@@ -2,15 +2,12 @@
 // CLDR data via icu4x" plan), via `icu_plurals` -- entirely new
 // capability, no prior English-only version existed.
 //
-// `minimumFractionDigits`/`maximumFractionDigits`/significant-digit
-// options aren't honored (a known, documented gap): real `Intl.
-// PluralRules.select()` with no such option just uses the plain JS
-// number's own representation (confirmed against real Node: `1.0` and
-// `1` select identically, since a JS number carries no separate
-// "how many fraction digits were written" concept the way a formatted
-// *string* would), which `String(number)` already gives for free --
-// `intl.js` passes that straight through, no Rust-side rounding needed
-// for the common case this covers.
+// `intl.js` formats the operand with the requested `minimum`/
+// `maximumFractionDigits`/`SignificantDigits` before handing it here, so
+// the ICU rules see the real visible-fraction-digit count (the `v`
+// operand, which is what distinguishes e.g. `en` `one` for `1` from
+// `other` for `1.0`); this file only resolves the category from the
+// already-formatted ASCII decimal string.
 
 /// `__thaw_intl_plural_category(locale, kind, digits) -> String`.
 /// `kind` is `"cardinal"`/`"ordinal"`; `digits` is `String(number)`
