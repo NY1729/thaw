@@ -73,8 +73,8 @@ target/release/thaw build app.ts --static -o app
 `formatRange`/`formatRangeToParts`. It is off by
 default: the default build has no ICU4C dependency, and those fall back
 (`usage: 'search'` to sort behavior, `selectRange` to `"other"`, narrow
-widths to short, the range methods to the two formatted endpoints joined
-by an en dash) when the feature is not selected or ICU4C is unavailable
+widths to short, the range methods to a shared/startRange/endRange partition
+of the two endpoints with a locale-independent separator) when the feature is not selected or ICU4C is unavailable
 at runtime.
 
 Inspect a binary without running it:
