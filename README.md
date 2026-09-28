@@ -68,11 +68,12 @@ target/release/thaw build app.ts --static -o app
 `--icu4c` opts into a system ICU4C backend (loaded at runtime with
 `dlopen`) for the pieces ICU4X cannot reproduce: `Intl.Collator`'s
 `usage: 'search'`, `Intl.PluralRules`'s `selectRange`, and
-`Intl.DateTimeFormat`'s `month: 'narrow'`/`weekday: 'narrow'`. It is off
-by default: the default build has no ICU4C dependency, and those fall
-back (`usage: 'search'` to sort behavior, `selectRange` to `"other"`,
-narrow widths to short) when the feature is not selected or ICU4C is
-unavailable at runtime.
+`Intl.DateTimeFormat`'s `month: 'narrow'`/`weekday: 'narrow'` and
+`formatRange`. It is off by default: the default build has no ICU4C
+dependency, and those fall back (`usage: 'search'` to sort behavior,
+`selectRange` to `"other"`, narrow widths to short, `formatRange` to the
+two formatted endpoints joined by an en dash) when the feature is not
+selected or ICU4C is unavailable at runtime.
 
 Inspect a binary without running it:
 

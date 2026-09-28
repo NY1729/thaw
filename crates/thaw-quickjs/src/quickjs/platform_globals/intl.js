@@ -674,6 +674,55 @@
     format(date) {
       return this.formatToParts(date).map(part => part.value).join('');
     }
+
+    // The ECMA-402 default field set (year/month/day numeric) when no
+    // field options were given.
+    _effectiveOptions() {
+      const hasAny = this._weekday || this._era || this._year || this._month || this._day ||
+        this._hour || this._minute || this._second;
+      return {
+        weekday: this._weekday,
+        era: this._era,
+        year: this._year || (hasAny ? undefined : 'numeric'),
+        month: this._month || (hasAny ? undefined : 'numeric'),
+        day: this._day || (hasAny ? undefined : 'numeric'),
+        hour: this._hour,
+        minute: this._minute,
+        second: this._second,
+        hour12: this._explicitHour12,
+        hourCycle: this._explicitHourCycle,
+      };
+    }
+
+    // `Intl.DateTimeFormat.prototype.formatRange` (ECMA-402) via ICU4C's
+    // interval formatter under the opt-in `--icu4c`; without it, a
+    // documented approximation joining the two formatted endpoints.
+    formatRange(startDate, endDate) {
+      const startMs = Number(startDate);
+      const endMs = Number(endDate);
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+        throw new RangeError('Invalid time value');
+      }
+      const start = intlZonedParts(this._timeZone, startMs);
+      const end = intlZonedParts(this._timeZone, endMs);
+      if (!start.valid || !end.valid) {
+        throw new RangeError('Invalid time value');
+      }
+      if (this._useRealLocaleData && typeof __thaw_intl_datetime_range_icu4c === 'function') {
+        const options = this._effectiveOptions();
+        const startParts = { ...start, timeZone: this._timeZone };
+        const endParts = { ...end, timeZone: this._timeZone };
+        const formatted = __thaw_intl_datetime_range_icu4c(
+          this.locale,
+          JSON.stringify(options),
+          JSON.stringify(startParts),
+          JSON.stringify(endParts),
+        );
+        if (formatted) return formatted;
+      }
+      if (startMs === endMs) return this.format(startDate);
+      return `${this.format(startDate)} \u2013 ${this.format(endDate)}`;
+    }
   }
 
   class NumberFormat {
@@ -831,21 +880,10 @@
       return result;
     }
 
-    format(value) {
-      const input = Number(value);
-      const number = this._style === 'percent' ? input * 100 : input;
-      const sign = this._signFor(number);
-      if (this._notation === 'compact' && typeof __thaw_intl_compact_number === 'function') {
-        // The compact pattern itself chooses the mantissa's precision, so
-        // the raw number is passed through rather than `intl.js`'s own
-        // rounded digit string. A known divergence: icu4x rounds compact
-        // mantissas half-to-even (real ECMA-402 default is `halfExpand`),
-        // so an exact tie differs (`1650` -> `1.6K` vs Node's `1.7K`).
-        return String(__thaw_intl_compact_number(this.locale, String(number), this._compactDisplay === 'long'));
-      }
-      if (this._notation !== 'standard') {
-        return `${sign}${this._formatScientific(number)}`;
-      }
+    // The standard-notation digit computation (significant- or
+    // fraction-digit rounding, integer zero-padding, effective grouping),
+    // shared by `format` and `formatToParts`.
+    _standardDigits(number) {
       let intPart;
       let fracPart;
       if (this._significant) {
@@ -896,13 +934,32 @@
         intPart = wholePart;
       }
       while (intPart.length < this._minimumIntegerDigits) intPart = `0${intPart}`;
-      const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
-      const signedDigits = `${sign}${digits}`;
       // `useGrouping: 'min2'` groups only once the integer part exceeds
       // four digits (real ECMA-402); `'auto'`/`'always'` group normally.
       const groupDigits = this._useGrouping === false
         ? false
         : this._useGrouping === 'min2' ? intPart.length > 4 : true;
+      return { intPart, fracPart, groupDigits };
+    }
+
+    format(value) {
+      const input = Number(value);
+      const number = this._style === 'percent' ? input * 100 : input;
+      const sign = this._signFor(number);
+      if (this._notation === 'compact' && typeof __thaw_intl_compact_number === 'function') {
+        // The compact pattern itself chooses the mantissa's precision, so
+        // the raw number is passed through rather than `intl.js`'s own
+        // rounded digit string. A known divergence: icu4x rounds compact
+        // mantissas half-to-even (real ECMA-402 default is `halfExpand`),
+        // so an exact tie differs (`1650` -> `1.6K` vs Node's `1.7K`).
+        return String(__thaw_intl_compact_number(this.locale, String(number), this._compactDisplay === 'long'));
+      }
+      if (this._notation !== 'standard') {
+        return `${sign}${this._formatScientific(number)}`;
+      }
+      const { intPart, fracPart, groupDigits } = this._standardDigits(number);
+      const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
+      const signedDigits = `${sign}${digits}`;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
         const result = __thaw_intl_percent_format(this.locale, signedDigits);
         if (result) return result;
@@ -942,6 +999,109 @@
       // 'long'/'short' both do (`"3 days"`/`"3 days"`) -- confirmed
       // against real Node's own output for every unit above.
       return this._unitDisplay === 'narrow' ? `${signed}${unitText}` : `${signed} ${unitText}`;
+    }
+
+    _renderDigits(text, grouping) {
+      return this._useRealLocaleData
+        ? String(__thaw_intl_number_format(this.locale, text, grouping))
+        : (grouping ? text.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : text);
+    }
+
+    _groupSeparator() {
+      if (!this._useRealLocaleData) return ',';
+      const probe = String(__thaw_intl_number_format(this.locale, '1000', true));
+      return probe.length > 4 ? probe.slice(1, probe.length - 3) : ',';
+    }
+
+    _decimalSeparator() {
+      if (!this._useRealLocaleData) return '.';
+      const probe = String(__thaw_intl_number_format(this.locale, '1.5', false));
+      return probe.length > 2 ? probe.slice(1, probe.length - 1) : '.';
+    }
+
+    _numericParts(intPart, fracPart, groupDigits) {
+      const parts = [];
+      const whole = this._renderDigits(intPart, groupDigits);
+      const separator = groupDigits ? this._groupSeparator() : null;
+      if (separator && whole.includes(separator)) {
+        whole.split(separator).forEach((segment, index) => {
+          if (index > 0) parts.push({ type: 'group', value: separator });
+          parts.push({ type: 'integer', value: segment });
+        });
+      } else {
+        parts.push({ type: 'integer', value: whole });
+      }
+      if (fracPart) {
+        parts.push({ type: 'decimal', value: this._decimalSeparator() });
+        parts.push({ type: 'fraction', value: this._renderDigits(fracPart, false) });
+      }
+      return parts;
+    }
+
+    _affixType() {
+      if (this._style === 'percent') return 'percentSign';
+      if (this._style === 'currency') return 'currency';
+      if (this._style === 'unit') return 'unit';
+      return 'literal';
+    }
+
+    // The non-numeric affixes around the number (currency symbol, unit
+    // text, percent sign, punctuation/space) as typed parts.
+    _affixParts(text) {
+      if (!text) return [];
+      const parts = [];
+      let buffer = '';
+      const flush = () => {
+        if (buffer) parts.push({ type: this._affixType(), value: buffer });
+        buffer = '';
+      };
+      for (const character of text) {
+        if (
+          character === ' ' || character === '\u00a0' || character === '\u202f' ||
+          character === '\u2009' || character === '(' || character === ')'
+        ) {
+          flush();
+          parts.push({ type: 'literal', value: character });
+        } else {
+          buffer += character;
+        }
+      }
+      flush();
+      return parts;
+    }
+
+    // `Intl.NumberFormat.prototype.formatToParts` (ECMA-402). Exact for
+    // standard notation; `compact`/`scientific` return the whole rendered
+    // string as one `literal` part (their field split is out of scope).
+    formatToParts(value) {
+      const full = this.format(value);
+      if (this._notation !== 'standard') {
+        return [{ type: 'literal', value: full }];
+      }
+      const input = Number(value);
+      const number = this._style === 'percent' ? input * 100 : input;
+      if (!Number.isFinite(number)) {
+        return [{ type: 'nan', value: full }];
+      }
+      const sign = this._signFor(number);
+      const { intPart, fracPart, groupDigits } = this._standardDigits(number);
+      const numeric = this._numericParts(intPart, fracPart, groupDigits);
+      const core = numeric.map(part => part.value).join('');
+      const index = full.indexOf(core);
+      if (index < 0) {
+        return [{ type: 'literal', value: full }];
+      }
+      let prefix = full.slice(0, index);
+      const suffix = full.slice(index + core.length);
+      const parts = [];
+      if (sign && prefix.startsWith(sign)) {
+        parts.push({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign });
+        prefix = prefix.slice(sign.length);
+      }
+      parts.push(...this._affixParts(prefix));
+      parts.push(...numeric);
+      parts.push(...this._affixParts(suffix));
+      return parts;
     }
   }
 

@@ -110,7 +110,17 @@ struct Icu {
     ufieldpositer_open: Option<unsafe extern "C" fn(*mut c_int) -> *mut UFieldPositionIterator>,
     ufieldpositer_next: Option<unsafe extern "C" fn(*mut UFieldPositionIterator, *mut c_int, *mut c_int) -> c_int>,
     ufieldpositer_close: Option<unsafe extern "C" fn(*mut UFieldPositionIterator)>,
+    // `Intl.DateTimeFormat.prototype.formatRange` (`udtitvfmt`).
+    udtitvfmt_open: Option<
+        unsafe extern "C" fn(*const c_char, *const u16, c_int, *const u16, c_int, *mut c_int) -> *mut UDateIntervalFormat,
+    >,
+    udtitvfmt_format: Option<
+        unsafe extern "C" fn(*const UDateIntervalFormat, f64, f64, *mut u16, c_int, *mut c_void, *mut c_int) -> c_int,
+    >,
+    udtitvfmt_close: Option<unsafe extern "C" fn(*mut UDateIntervalFormat)>,
 }
+
+type UDateIntervalFormat = c_void;
 
 type UDateFormat = c_void;
 type UDateTimePatternGenerator = c_void;
@@ -174,6 +184,9 @@ fn icu() -> Option<&'static Icu> {
                 ufieldpositer_open: resolve(handle, "ufieldpositer_open"),
                 ufieldpositer_next: resolve(handle, "ufieldpositer_next"),
                 ufieldpositer_close: resolve(handle, "ufieldpositer_close"),
+                udtitvfmt_open: resolve(handle, "udtitvfmt_open"),
+                udtitvfmt_format: resolve(handle, "udtitvfmt_format"),
+                udtitvfmt_close: resolve(handle, "udtitvfmt_close"),
             })
     })
     .as_ref()
@@ -744,4 +757,87 @@ fn intl_datetime_narrow_icu4c_inner(
         date_close(formatter);
     }
     serde_json::to_string(&parts).ok()
+}
+
+/// `__thaw_intl_datetime_range_icu4c(locale, options_json, start_json,
+/// end_json) -> String`: `Intl.DateTimeFormat.prototype.formatRange` via
+/// ICU4C's `UDateIntervalFormat`. Returns an empty string on failure, so
+/// the caller falls back to formatting both endpoints.
+fn intl_datetime_range_icu4c(
+    locale: &str,
+    options_json: &str,
+    start_json: &str,
+    end_json: &str,
+) -> String {
+    intl_datetime_range_icu4c_inner(locale, options_json, start_json, end_json)
+        .unwrap_or_default()
+}
+
+fn intl_datetime_range_icu4c_inner(
+    locale: &str,
+    options_json: &str,
+    start_json: &str,
+    end_json: &str,
+) -> Option<String> {
+    let icu = icu()?;
+    let (Some(open), Some(format), Some(close)) =
+        (icu.udtitvfmt_open, icu.udtitvfmt_format, icu.udtitvfmt_close)
+    else {
+        return None;
+    };
+    let options: serde_json::Value = serde_json::from_str(options_json).ok()?;
+    let start: serde_json::Value = serde_json::from_str(start_json).ok()?;
+    let end: serde_json::Value = serde_json::from_str(end_json).ok()?;
+    let skeleton = datetime_skeleton(&options);
+    if skeleton.is_empty() {
+        return None;
+    }
+    let locale = CString::new(locale).ok()?;
+    let skeleton = utf16(&skeleton);
+    let time_zone = utf16(
+        start
+            .get("timeZone")
+            .and_then(|value| value.as_str())
+            .unwrap_or("UTC"),
+    );
+    let mut status: c_int = 0;
+    let formatter = unsafe {
+        open(
+            locale.as_ptr(),
+            skeleton.as_ptr(),
+            skeleton.len() as c_int,
+            time_zone.as_ptr(),
+            time_zone.len() as c_int,
+            &mut status,
+        )
+    };
+    if formatter.is_null() || status > 0 {
+        return None;
+    }
+    let from = start
+        .get("timestampMs")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let to = end
+        .get("timestampMs")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let mut buffer = vec![0_u16; 512];
+    status = 0;
+    let length = unsafe {
+        format(
+            formatter,
+            from,
+            to,
+            buffer.as_mut_ptr(),
+            buffer.len() as c_int,
+            std::ptr::null_mut(),
+            &mut status,
+        )
+    };
+    unsafe { close(formatter) };
+    if status > 0 || length <= 0 || length as usize > buffer.len() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..length as usize]))
 }
