@@ -619,6 +619,17 @@
         if (parts.length) parts.push({ type: 'literal', value: ' ' });
         parts.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned, this.locale) });
       }
+      // `icu_datetime` renders a non-Gregorian `relatedYear` (Chinese/Dangi)
+      // in Latin digits by design ("always in latin digits according to
+      // spec"), but ICU4C/Node localizes it with the locale's numbering
+      // system (`ar-SA` -> `٢٠٢٤`). Re-localize it here.
+      if (this._useRealLocaleData && typeof __thaw_intl_number_format === 'function') {
+        for (const part of parts) {
+          if (part.type === 'relatedYear' && /^[0-9]+$/.test(part.value)) {
+            part.value = String(__thaw_intl_number_format(this.locale, part.value, false));
+          }
+        }
+      }
       return parts;
     }
 
