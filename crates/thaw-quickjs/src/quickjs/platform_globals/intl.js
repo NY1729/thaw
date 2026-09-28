@@ -460,42 +460,59 @@
         hour12: this._explicitHour12,
         hourCycle: this._explicitHourCycle,
       };
-      const parts = JSON.parse(
-        __thaw_intl_datetime_format_parts(this.locale, JSON.stringify(options), JSON.stringify(zoned)),
-      );
-      // `icu_datetime`'s numeric fields render un-padded by default
-      // (confirmed: `YMD::short()` gives `"7/4/24"`, not `"07/04/24"`)
-      // -- there's no independent "always 2 digits" mode in its simple
-      // Length-based builder (unlike real ECMA-402's `'2-digit'`
-      // option), so zero-pad here, matching real Node's own zero-padded
-      // `'2-digit'` output (confirmed for month/day/hour/minute/second,
-      // including 12-hour-clock hours, e.g. `"01 AM"` for 1am).
-      const twoDigitStyleFor = {
-        year: this._year,
-        month: this._month,
-        day: this._day,
-        hour: this._hour,
-        minute: this._minute,
-        second: this._second,
-      };
-      for (const part of parts) {
-        if (twoDigitStyleFor[part.type] === '2-digit' && /^\d+$/.test(part.value) && part.value.length < 2) {
-          part.value = `0${part.value}`;
-        }
+      // `month:'narrow'`/`weekday:'narrow'` need real ICU4C (`udat`),
+      // since ICU4X's field-set builder has no Narrow `Length` and even
+      // picks the wrong *pattern* (ja narrow is `7月`, MID is `7/04`).
+      // Only when the opt-in backend is compiled in; otherwise the ICU4X
+      // path below degrades narrow to short.
+      let parts = null;
+      if (
+        (this._month === 'narrow' || this._weekday === 'narrow') &&
+        typeof __thaw_intl_datetime_narrow_icu4c === 'function'
+      ) {
+        const icuParts = JSON.parse(
+          __thaw_intl_datetime_narrow_icu4c(this.locale, JSON.stringify(options), JSON.stringify(zoned)),
+        );
+        if (icuParts.length) parts = icuParts;
       }
-      // Conversely, real ECMA-402 `'numeric'` never zero-pads, but some
-      // ICU4X calendar-period patterns do (`ja` `{year,month:'numeric'}`
-      // -> `"2024/07"`, Node `"2024/7"`) -- strip a single leading zero.
-      // Not year (4-digit) nor hour (h23/h24 genuinely pad, per above).
-      const numericUnpadFor = {
-        month: this._month,
-        day: this._day,
-        minute: this._minute,
-        second: this._second,
-      };
-      for (const part of parts) {
-        if (numericUnpadFor[part.type] === 'numeric' && /^0\d$/.test(part.value)) {
-          part.value = part.value.slice(1);
+      if (parts === null) {
+        parts = JSON.parse(
+          __thaw_intl_datetime_format_parts(this.locale, JSON.stringify(options), JSON.stringify(zoned)),
+        );
+        // `icu_datetime`'s numeric fields render un-padded by default
+        // (confirmed: `YMD::short()` gives `"7/4/24"`, not `"07/04/24"`)
+        // -- there's no independent "always 2 digits" mode in its simple
+        // Length-based builder (unlike real ECMA-402's `'2-digit'`
+        // option), so zero-pad here, matching real Node's own zero-padded
+        // `'2-digit'` output (confirmed for month/day/hour/minute/second,
+        // including 12-hour-clock hours, e.g. `"01 AM"` for 1am).
+        const twoDigitStyleFor = {
+          year: this._year,
+          month: this._month,
+          day: this._day,
+          hour: this._hour,
+          minute: this._minute,
+          second: this._second,
+        };
+        for (const part of parts) {
+          if (twoDigitStyleFor[part.type] === '2-digit' && /^\d+$/.test(part.value) && part.value.length < 2) {
+            part.value = `0${part.value}`;
+          }
+        }
+        // Conversely, real ECMA-402 `'numeric'` never zero-pads, but some
+        // ICU4X calendar-period patterns do (`ja` `{year,month:'numeric'}`
+        // -> `"2024/07"`, Node `"2024/7"`) -- strip a single leading zero.
+        // Not year (4-digit) nor hour (h23/h24 genuinely pad, per above).
+        const numericUnpadFor = {
+          month: this._month,
+          day: this._day,
+          minute: this._minute,
+          second: this._second,
+        };
+        for (const part of parts) {
+          if (numericUnpadFor[part.type] === 'numeric' && /^0\d$/.test(part.value)) {
+            part.value = part.value.slice(1);
+          }
         }
       }
       // `icu_datetime` has no `h24` equivalent (only `H23`, hours

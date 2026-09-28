@@ -3696,3 +3696,46 @@ fn intl_plural_rules_select_range_icu4c_matches_real_node() {
         serde_json::to_string("RangeError").unwrap()
     );
 }
+
+/// `Intl.DateTimeFormat month:'narrow'` / `weekday:'narrow'` via the
+/// opt-in ICU4C backend -- ICU4X's field-set builder has no Narrow
+/// `Length` and picks the wrong pattern (`ja` narrow is `7月`, not
+/// `7/04`). Cross-checked against real Node.
+#[cfg(all(feature = "intl", feature = "icu4c"))]
+#[test]
+fn intl_datetime_narrow_icu4c_matches_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts })\n\
+                 .format(new Date(Date.UTC(2024, 6, 4)));\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 show('en-US', { month: 'narrow' }),\n\
+                 show('en-US', { month: 'narrow', day: 'numeric' }),\n\
+                 show('en-US', { month: 'narrow', year: 'numeric' }),\n\
+                 show('en-US', { weekday: 'narrow' }),\n\
+                 show('en-US', { weekday: 'narrow', day: 'numeric' }),\n\
+                 show('en-US', { weekday: 'narrow', month: 'narrow', day: 'numeric' }),\n\
+                 show('de-DE', { month: 'narrow', day: 'numeric' }),\n\
+                 show('de-DE', { weekday: 'narrow', day: 'numeric' }),\n\
+                 show('ja-JP', { month: 'narrow' }),\n\
+                 show('ja-JP', { month: 'narrow', day: 'numeric' }),\n\
+                 show('ja-JP', { weekday: 'narrow' }),\n\
+                 show('fr', { month: 'narrow', day: 'numeric' }),\n\
+                 show('fr', { weekday: 'narrow', day: 'numeric' }),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "J", "J 4", "J 2024", "T", "4 T", "T, J 4", "4. J", "D, 4.", "7月", "7月4日", "木",
+            "4 J", "J 4",
+        ])
+        .unwrap()
+    );
+}
