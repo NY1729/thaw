@@ -3399,3 +3399,47 @@ fn intl_option_validation_matches_real_node() {
         serde_json::to_string(&["search", "false", "word"]).unwrap()
     );
 }
+
+/// `roundingMode` (all nine ECMA-402 modes) for `Intl.NumberFormat` and
+/// `Intl.PluralRules`, previously hardcoded to `halfExpand`.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_number_rounding_mode_matches_real_node() {
+    assert_eq!(
+        load(
+            "function nm(mode) {\n\
+               const f = n => new Intl.NumberFormat('en', { useGrouping: false, maximumFractionDigits: 0, roundingMode: mode }).format(n);\n\
+               return [f(1.5), f(-1.5), f(2.5)];\n\
+             }\n\
+             function all() {\n\
+               return ['ceil', 'floor', 'expand', 'trunc', 'halfCeil', 'halfFloor', 'halfTrunc', 'halfEven', 'halfExpand'].map(nm);\n\
+             }\n\
+             function plural(mode, n) {\n\
+               return new Intl.PluralRules('en', { maximumFractionDigits: 0, roundingMode: mode }).select(n);\n\
+             }\n\
+             function pluralModes() {\n\
+               return [plural('floor', 1.9), plural('ceil', 1.9), plural('halfEven', 2.5)];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::json!([
+            ["2", "-1", "3"],
+            ["1", "-2", "2"],
+            ["2", "-2", "3"],
+            ["1", "-1", "2"],
+            ["2", "-1", "3"],
+            ["1", "-2", "2"],
+            ["1", "-1", "2"],
+            ["2", "-2", "2"],
+            ["2", "-2", "3"],
+        ])
+        .to_string()
+    );
+    assert_eq!(
+        call("pluralModes", "[]"),
+        serde_json::to_string(&["one", "other", "other"]).unwrap()
+    );
+}
