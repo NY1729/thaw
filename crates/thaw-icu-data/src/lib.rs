@@ -148,6 +148,16 @@
 //!    and re-verifying every existing real-Node cross-check test
 //!    afterward) rather than adding a third parallel file -- the
 //!    two-mechanism state should be temporary, not the new norm.
+//! 10. (2026-09-28) `DecimalSymbolsV1` regenerated **alone** (same
+//!     `--use-separate-crates`, `-m icu::decimal::provider::
+//!     DecimalSymbolsV1`, maximal dedup) with `fa` appended to the
+//!     curated list, to vendor the `arabext` numbering system's symbols.
+//!     `Intl.NumberFormat`'s explicit `numberingSystem` resolves a system
+//!     whose symbols differ from Latin through a representative locale
+//!     (`intl_number.rs`), and none of the original 35 defined
+//!     `arabext` -- so `en` + `numberingSystem: 'arabext'` localized its
+//!     digits but kept Latin separators. Only this one marker file
+//!     changed; `fa` is *not* a curated locale for any other marker.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!
