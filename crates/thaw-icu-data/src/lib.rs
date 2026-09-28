@@ -191,6 +191,13 @@
 //!     unchanged (marker names match). Time-zone/segmenter/collation
 //!     markers were deliberately left alone (they come from other
 //!     sources and would risk drift).
+//! 14. (2026-09-28) `DatetimeNamesDayperiodV1` regenerated **alone** with
+//!     `--cldr-tag 48.0.0` (not 48.2.1): Node's ICU 78 bundles CLDR 48.0,
+//!     where ko's `dayPeriods.format.abbreviated` `am`/`pm` are `AM`/`PM`,
+//!     whereas 48.2.1 changed them to `오전`/`오후`. This is the only
+//!     observed 48.0/48.2.1 difference that reached the `formatToParts`
+//!     output; pinning just this marker makes the full locale x month-
+//!     style matrix match Node exactly.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!
