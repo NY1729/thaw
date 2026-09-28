@@ -4054,6 +4054,7 @@ fn intl_datetime_skeleton_matching_matches_real_node() {
                  show('hr', {year:'numeric',month:'long',day:'numeric'}, t),\n\
                  show('sk', {year:'numeric',month:'short',day:'numeric'}, t),\n\
                  show('bg', {year:'numeric',month:'long',day:'numeric'}, t),\n\
+                 show('ko', {hour:'numeric',minute:'numeric'}, Date.UTC(2024, 6, 4, 16, 30)),\n\
                ];\n\
              }"
         ),
@@ -4075,6 +4076,7 @@ fn intl_datetime_skeleton_matching_matches_real_node() {
             "4. srpnja 2024.",
             "4. 7. 2024",
             "4 юли 2024 г.",
+            "PM 4:30",
         ])
         .unwrap()
     );
