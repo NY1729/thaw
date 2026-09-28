@@ -3308,3 +3308,46 @@ fn process_next_tick_runs_before_promise_microtasks_scheduled_earlier() {
         r#"["sync","nextTick","promise","timeout0","immediate"]"#
     );
 }
+
+/// Real ECMA-402 constructors reject an out-of-enum option with a
+/// `RangeError` at construction time; previously `Collator`/`Segmenter`/
+/// `PluralRules`/`ListFormat` silently substituted the default. Also
+/// checks `Collator`'s resolved `usage`/`caseFirst`.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_option_validation_matches_real_node() {
+    assert_eq!(
+        load(
+            "function ctorErrors() {\n\
+               const cases = [\n\
+                 () => new Intl.Collator('en', { sensitivity: 'x' }),\n\
+                 () => new Intl.Collator('en', { usage: 'x' }),\n\
+                 () => new Intl.Collator('en', { caseFirst: 'x' }),\n\
+                 () => new Intl.Segmenter('en', { granularity: 'x' }),\n\
+                 () => new Intl.PluralRules('en', { type: 'x' }),\n\
+                 () => new Intl.NumberFormat('en', { minimumIntegerDigits: 0 }),\n\
+                 () => new Intl.NumberFormat('en', { minimumIntegerDigits: 22 }),\n\
+                 () => new Intl.ListFormat('en', { type: 'x' }),\n\
+                 () => new Intl.ListFormat('en', { style: 'x' }),\n\
+               ];\n\
+               return cases.map(fn => { try { fn(); return 'no-throw'; } catch (error) { return error.constructor.name; } });\n\
+             }\n\
+             function resolved() {\n\
+               return [\n\
+                 new Intl.Collator('en', { usage: 'search' }).resolvedOptions().usage,\n\
+                 new Intl.Collator('en', { caseFirst: false }).resolvedOptions().caseFirst,\n\
+                 new Intl.Segmenter('en', { granularity: 'word' }).resolvedOptions().granularity,\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("ctorErrors", "[]"),
+        serde_json::to_string(&["RangeError"; 9]).unwrap()
+    );
+    assert_eq!(
+        call("resolved", "[]"),
+        serde_json::to_string(&["search", "false", "word"]).unwrap()
+    );
+}

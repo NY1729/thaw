@@ -163,6 +163,15 @@
     throw new RangeError(`Invalid useGrouping: ${text}`);
   }
 
+  // Real ECMA-402 constructors throw a `RangeError` for an option value
+  // outside its enum (rather than silently substituting the default).
+  function intlEnumOption(value, allowed, fallback, name) {
+    if (value === undefined) return fallback;
+    const text = String(value);
+    if (!allowed.includes(text)) throw new RangeError(`Invalid ${name}: ${text}`);
+    return text;
+  }
+
   // Expands `Number.prototype.toPrecision`'s exponential form (`"1.23e+3"`)
   // back into plain decimal (`"1230"`) -- the plural operands and
   // `Intl.NumberFormat`'s own digit string both need a plain decimal, and
@@ -569,7 +578,7 @@
         throw new RangeError(`Invalid currencyDisplay: ${this._currencyDisplay}`);
       }
       this._useGrouping = intlNormalizeUseGrouping(opts.useGrouping);
-      this._minimumIntegerDigits = opts.minimumIntegerDigits || 1;
+      this._minimumIntegerDigits = intlIntegerOption(opts.minimumIntegerDigits, 1, 1, 21);
       this._minimumFractionDigits = opts.minimumFractionDigits;
       this._maximumFractionDigits = opts.maximumFractionDigits;
       this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
@@ -793,8 +802,8 @@
       const opts = options || {};
       this._useRealLocaleData = typeof __thaw_intl_list_format === 'function';
       this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
-      this._type = opts.type === 'disjunction' ? 'disjunction' : opts.type === 'unit' ? 'unit' : 'conjunction';
-      this._style = opts.style === 'short' || opts.style === 'narrow' ? opts.style : 'long';
+      this._type = intlEnumOption(opts.type, ['conjunction', 'disjunction', 'unit'], 'conjunction', 'type');
+      this._style = intlEnumOption(opts.style, ['long', 'short', 'narrow'], 'long', 'style');
     }
 
     format(list) {
@@ -940,7 +949,7 @@
     constructor(locale, options) {
       const opts = options || {};
       this.locale = String(locale === undefined ? 'en-US' : locale);
-      this._type = opts.type === 'ordinal' ? 'ordinal' : 'cardinal';
+      this._type = intlEnumOption(opts.type, ['cardinal', 'ordinal'], 'cardinal', 'type');
       this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
       this._minimumIntegerDigits = intlIntegerOption(opts.minimumIntegerDigits, 1, 1, 21);
       this._minimumFractionDigits = intlIntegerOption(opts.minimumFractionDigits, 0, 0, 100);
@@ -999,12 +1008,11 @@
     constructor(locale, options) {
       const opts = options || {};
       this.locale = String(locale === undefined ? 'en-US' : locale);
-      this._sensitivity = ['base', 'accent', 'case', 'variant'].includes(opts.sensitivity)
-        ? opts.sensitivity
-        : 'variant';
+      this._sensitivity = intlEnumOption(opts.sensitivity, ['base', 'accent', 'case', 'variant'], 'variant', 'sensitivity');
+      this._usage = intlEnumOption(opts.usage, ['sort', 'search'], 'sort', 'usage');
       this._ignorePunctuation = Boolean(opts.ignorePunctuation);
       this._numeric = Boolean(opts.numeric);
-      this._caseFirst = opts.caseFirst === 'upper' || opts.caseFirst === 'lower' ? opts.caseFirst : 'false';
+      this._caseFirst = intlEnumOption(opts.caseFirst, ['upper', 'lower', 'false'], 'false', 'caseFirst');
     }
 
     compare(a, b) {
@@ -1022,7 +1030,7 @@
     resolvedOptions() {
       return {
         locale: this.locale,
-        usage: 'sort',
+        usage: this._usage,
         sensitivity: this._sensitivity,
         ignorePunctuation: this._ignorePunctuation,
         numeric: this._numeric,
@@ -1039,7 +1047,7 @@
     constructor(locale, options) {
       const opts = options || {};
       this.locale = String(locale === undefined ? 'en-US' : locale);
-      this._granularity = ['word', 'sentence'].includes(opts.granularity) ? opts.granularity : 'grapheme';
+      this._granularity = intlEnumOption(opts.granularity, ['grapheme', 'word', 'sentence'], 'grapheme', 'granularity');
     }
 
     resolvedOptions() {
