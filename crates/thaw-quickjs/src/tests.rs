@@ -3443,3 +3443,39 @@ fn intl_number_rounding_mode_matches_real_node() {
         serde_json::to_string(&["one", "other", "other"]).unwrap()
     );
 }
+
+/// `Intl.DateTimeFormat` time fields are independent: a `minute`/`second`
+/// request without `hour` renders only the requested fields (real
+/// ECMA-402: `{second:'numeric'}` -> `"45"`), whereas the ICU backend's
+/// `TimePrecision` would otherwise render a full `h:mm:ss`. Cross-checked
+/// against real Node.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_time_field_independence_matches_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts })\n\
+                 .format(new Date(Date.UTC(2024, 0, 1, 13, 5, 45, 678)));\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 show('en-US', { second: 'numeric' }),\n\
+                 show('en-US', { minute: 'numeric' }),\n\
+                 show('en-US', { minute: 'numeric', second: 'numeric' }),\n\
+                 show('en-US', { minute: '2-digit' }),\n\
+                 show('en-US', { second: 'numeric', fractionalSecondDigits: 3 }),\n\
+                 show('en-US', { minute: '2-digit', second: '2-digit', fractionalSecondDigits: 2 }),\n\
+                 show('en-US', { second: 'numeric', timeZoneName: 'short' }),\n\
+                 show('de-DE', { minute: 'numeric', second: 'numeric' }),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&["45", "5", "05:45", "5", "45.678", "05:45.67", "45 UTC", "05:45",])
+            .unwrap()
+    );
+}
