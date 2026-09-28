@@ -1109,6 +1109,27 @@
       return __thaw_intl_plural_category(this.locale, this._type, this._operandString(value));
     }
 
+    // `Intl.PluralRules.prototype.selectRange` (ECMA-402) with real
+    // ICU4C semantics (opt-in `--icu4c`). ICU4X's vendored plural-range
+    // data diverges from ICU4C/Node, so without the backend this
+    // degrades to the always-valid `"other"` category.
+    selectRange(start, end) {
+      const startNumber = Number(start);
+      const endNumber = Number(end);
+      if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) {
+        throw new RangeError('selectRange requires finite start and end values');
+      }
+      if (typeof __thaw_intl_plural_range_icu4c === 'function') {
+        return __thaw_intl_plural_range_icu4c(
+          this.locale,
+          this._type,
+          this._operandString(startNumber),
+          this._operandString(endNumber),
+        );
+      }
+      return 'other';
+    }
+
     resolvedOptions() {
       const pluralCategories = typeof __thaw_intl_plural_categories === 'function'
         ? JSON.parse(__thaw_intl_plural_categories(this.locale, this._type))

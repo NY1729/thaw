@@ -3647,3 +3647,52 @@ fn intl_collator_search_usage_matches_real_node() {
         serde_json::to_string("search").unwrap()
     );
 }
+
+/// `Intl.PluralRules.prototype.selectRange` via the opt-in ICU4C backend.
+/// ICU4X's vendored plural-range data diverges from ICU4C/Node (e.g.
+/// `en.selectRange(1,1)`), so this uses ICU4C's own
+/// `uplrules_selectForRange`; uncurated locales (here `sl`) work too.
+/// Cross-checked against real Node.
+#[cfg(all(feature = "intl", feature = "icu4c"))]
+#[test]
+fn intl_plural_rules_select_range_icu4c_matches_real_node() {
+    assert_eq!(
+        load(
+            "function range(locale, start, end) {\n\
+               return new Intl.PluralRules(locale).selectRange(start, end);\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 range('en', 1, 1), range('en', 1, 2), range('en', 2, 2),\n\
+                 range('ro', 1, 1), range('ro', 1, 2), range('ro', 2, 3), range('ro', 0, 1),\n\
+                 range('ar', 0, 1), range('ar', 1, 2), range('ar', 2, 3),\n\
+                 range('sl', 1, 1), range('sl', 1, 2), range('sl', 2, 2), range('sl', 0, 1),\n\
+               ];\n\
+             }\n\
+             function withOptions() {\n\
+               return new Intl.PluralRules('en', { maximumFractionDigits: 0 }).selectRange(1.5, 2.5);\n\
+             }\n\
+             function rejectsNaN() {\n\
+               try { new Intl.PluralRules('en').selectRange(NaN, 2); return 'no-throw'; }\n\
+               catch (error) { return error.constructor.name; }\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "other", "other", "other", "other", "few", "few", "few", "zero", "other", "few", "few",
+            "two", "two", "few",
+        ])
+        .unwrap()
+    );
+    assert_eq!(
+        call("withOptions", "[]"),
+        serde_json::to_string("other").unwrap()
+    );
+    assert_eq!(
+        call("rejectsNaN", "[]"),
+        serde_json::to_string("RangeError").unwrap()
+    );
+}
