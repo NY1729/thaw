@@ -7889,6 +7889,61 @@ fn proxy_set_trap_mutation_reaches_the_real_target_through_the_proxy() {
     );
 }
 
+/// round34's own sibling gap, closed: reading a Proxy's own `target`
+/// variable *directly* (bypassing the proxy) after a trap mutation used
+/// to diverge from Node, since `new Proxy(target, handler)`'s own
+/// `target` constructor argument was unconditionally coerced to a fresh
+/// one-off JSON snapshot -- the QuickJS-side Proxy's internal target
+/// was never a live alias of the Thaw-side `target` variable. Fixed
+/// without changing `target`'s own declared type/ABI at all: when
+/// `target` is a simple identifier already declared `Object`/
+/// `Dictionary`-shaped, `lower_var_decl` (statements/declarations.rs)
+/// retains it as an independent, live QuickJS handle up front
+/// (`retainDynamicJson`, reusing the same `JsValue`-target coercion an
+/// unrelated earlier fix already built) and every later read of the
+/// `target` identifier itself in this same function is redirected to
+/// re-read that exact handle (`Expr::Ident`'s own `proxy_target_live_
+/// handles` check, expressions/lowering.rs) instead of `target`'s own
+/// native storage. A read-only handler (no `set` trap at all) and an
+/// object-literal target (not a bare identifier, so unaffected by this
+/// fix) both confirm the untouched snapshot path still works correctly.
+#[test]
+fn proxy_target_identifier_reads_reach_the_same_live_object_the_proxy_mutates() {
+    let source = r#"
+        function main(): void {
+            const target: Record<string, number> = { a: 1 };
+            const proxy = new Proxy(target, {
+                get(obj: Record<string, number>, prop: string): number {
+                    return prop in obj ? obj[prop] : -1;
+                },
+                set(obj: Record<string, number>, prop: string, value: number): boolean {
+                    obj[prop] = value * 2;
+                    return true;
+                },
+            });
+            proxy.b = 5;
+            console.log(target.a, target.b);
+            proxy.b = 100;
+            console.log(target.b);
+
+            const target2: Record<string, number> = { x: 10 };
+            const proxy2 = new Proxy(target2, {
+                get(obj: Record<string, number>, prop: string): number {
+                    return prop in obj ? obj[prop] : -1;
+                },
+            });
+            console.log(proxy2.x, target2.x);
+
+            const proxy3 = new Proxy({ y: 20 }, {});
+            console.log(proxy3.y);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "proxy_target_identifier_reads_live"),
+        "1 10\n200\n10 10\n20\n"
+    );
+}
+
 /// `BigInt` support beyond literals/arithmetic: `console.log`'s `n`
 /// suffix, radix `toString`, `BigInt(number|string|boolean)` conversion,
 /// and `BigInt.asIntN`/`asUintN`. thaw's BigInt is a fixed-width `i64`

@@ -616,6 +616,29 @@ impl<'a> FnLowerer<'a> {
             if self.infer_expr_type(&value)? == *declared {
                 return Ok(value);
             }
+            let actual = self.infer_expr_type(&value)?;
+            // `Dictionary<T>` shares `Json`'s own native layout at the
+            // LLVM level (see `compile_json_value_to_native`'s own
+            // `HirType::Dictionary(_) => Ok(json)` case, thaw-llvm's
+            // `json_bridge/decoding.rs`) -- decoding a `Json`/`JsValue`
+            // source into a `Dictionary` target is a pure type-level
+            // relabeling, the same "readDynamicValue, then pass through
+            // unchanged" shape the `Json`-target branch above already
+            // uses for a `JsValue` source. Without this, a `Dictionary`-
+            // declared slot fed a genuinely dynamic value (e.g. `new
+            // Proxy(target, handler)`'s own `target` re-read through a
+            // live QuickJS handle) hit the `ObjectLit`-only check below
+            // and hard-errored instead.
+            if matches!(actual, HirType::Json | HirType::JsValue) {
+                return if actual == HirType::JsValue {
+                    Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                        vec![value],
+                    ))
+                } else {
+                    Ok(value)
+                };
+            }
             let HirExpr::ObjectLit(fields) = value else {
                 return Err(format!(
                     "dictionary value must be an object literal with {element:?} values"

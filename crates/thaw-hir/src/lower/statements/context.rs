@@ -115,6 +115,7 @@ impl<'a> FnLowerer<'a> {
             sparse_mapping_result: false,
             generator_yields: None,
             generator_finalizers: HashMap::new(),
+            proxy_target_live_handles: HashMap::new(),
         }
     }
 

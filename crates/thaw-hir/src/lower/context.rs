@@ -79,6 +79,22 @@ struct FnLowerer<'a> {
     sparse_mapping_result: bool,
     generator_yields: Option<(Symbol, HirType, Symbol, HirType, Symbol, HirType)>,
     generator_finalizers: HashMap<Symbol, Vec<HirStmt>>,
+    /// `new Proxy(target, handler)`'s own `target` variable, when it was
+    /// a simple identifier declared `Object`/`Dictionary`-shaped in this
+    /// same function: maps the original variable's own symbol to (the
+    /// symbol of a live QuickJS handle holding an independent, retained
+    /// copy of it, the variable's own original declared type). A read of
+    /// the *original* identifier is redirected through this handle
+    /// instead (see the `Expr::Ident` lowering arm) so a `set` trap's
+    /// mutation -- which only ever reaches the QuickJS-side object, not
+    /// this Thaw-side variable's own native storage -- is observable by
+    /// reading the identifier directly, not just through the proxy
+    /// itself. Scoped to the current function only, same precision as
+    /// `scope` itself: a read after the identifier is passed to another
+    /// function, or captured into a closure invoked later, isn't
+    /// redirected (unaffected, not a regression -- that combination
+    /// never worked before this either).
+    proxy_target_live_handles: HashMap<Symbol, (Symbol, HirType)>,
 }
 
 #[derive(Clone)]
