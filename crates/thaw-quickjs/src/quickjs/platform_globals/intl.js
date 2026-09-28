@@ -501,7 +501,15 @@
       // changes here -- rounding, sign, and `style: 'unit'`'s English
       // forms are locale-independent arithmetic already correct as-is.
       this._useRealLocaleData = typeof __thaw_intl_number_format === 'function';
-      this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
+      const localeTag = String(locale === undefined ? 'en-US' : locale);
+      // An explicit `numberingSystem` overrides the locale's own default,
+      // exactly like `DateTimeFormat`'s `calendar`/`numberingSystem`
+      // above (reusing `Intl.Locale`'s own tag rewriting).
+      this.locale = this._useRealLocaleData
+        ? (opts.numberingSystem !== undefined
+            ? new Locale(localeTag, { numberingSystem: opts.numberingSystem }).toString()
+            : localeTag)
+        : 'en-US';
       this._style = opts.style || 'decimal';
       if (!['decimal', 'percent', 'currency', 'unit'].includes(this._style)) throw new RangeError(`Invalid style: ${this._style}`);
       this._unit = opts.unit;
@@ -531,6 +539,24 @@
       if (!['auto', 'never', 'always', 'exceptZero', 'negative'].includes(this._signDisplay)) {
         throw new RangeError(`Invalid signDisplay: ${this._signDisplay}`);
       }
+      this._currencySign = opts.currencySign === undefined ? 'standard' : String(opts.currencySign);
+      if (!['standard', 'accounting'].includes(this._currencySign)) {
+        throw new RangeError(`Invalid currencySign: ${this._currencySign}`);
+      }
+      this._numberingSystem = opts.numberingSystem;
+      const requestedNotation = opts.notation === undefined ? 'standard' : String(opts.notation);
+      if (!['standard', 'scientific', 'engineering', 'compact'].includes(requestedNotation)) {
+        throw new RangeError(`Invalid notation: ${requestedNotation}`);
+      }
+      // `scientific`/`engineering` are implemented for the plain decimal
+      // style only (the overwhelmingly common case); `compact` needs the
+      // CLDR compact-decimal data this crate doesn't vendor. Anything
+      // else keeps real standard formatting and reports `standard`, so
+      // `resolvedOptions` stays truthful about what was actually done.
+      this._notation = this._style === 'decimal' &&
+        (requestedNotation === 'scientific' || requestedNotation === 'engineering')
+        ? requestedNotation
+        : 'standard';
     }
 
     // Real `SetNumberFormatDigitOptions`' `signDisplay` handling: `-0`
@@ -547,10 +573,48 @@
       }
     }
 
+    // The scientific/engineering rendering (`notation`): the digit
+    // options apply to the *mantissa*, and the (locale-rendered)
+    // exponent is appended as `E<exp>`. `engineering` uses an exponent
+    // that's a multiple of 3. `E` (not a locale exponent symbol like
+    // `ar-SA`'s `أس` or `fa`'s `×۱۰^`) is a documented approximation --
+    // it matches every curated locale whose numbering system is Latin
+    // (`en`/`de`/`fr`/`ja`/`ar`/`bn`), where localized exponent symbols
+    // aren't available without new data.
+    _formatScientific(number) {
+      const magnitude = Math.abs(number);
+      const minFrac = this._minimumFractionDigits === undefined ? 0 : this._minimumFractionDigits;
+      const maxFrac = this._maximumFractionDigits === undefined ? 3 : this._maximumFractionDigits;
+      let exponent = 0;
+      if (magnitude !== 0) {
+        exponent = this._notation === 'engineering'
+          ? Math.floor(Math.log10(magnitude) / 3) * 3
+          : Math.floor(Math.log10(magnitude));
+        const mantissa = magnitude / Math.pow(10, exponent);
+        const rounded = this._significant
+          ? intlPluralOperand(mantissa, true, 0, 0, this._minimumSignificantDigits, this._maximumSignificantDigits)
+          : intlPluralOperand(mantissa, false, minFrac, Math.max(minFrac, maxFrac), 0, 0);
+        // Rounding the mantissa can carry it up a magnitude (`9.99` ->
+        // `10`); pair it with the exponent that produced.
+        const roundedMagnitude = Number(rounded);
+        if (roundedMagnitude >= 10) {
+          exponent += this._notation === 'engineering' && roundedMagnitude < 1000 ? 0 : 1;
+        }
+      }
+      const mantissa = magnitude === 0 ? 0 : magnitude / Math.pow(10, exponent);
+      const mantissaText = this._significant
+        ? intlPluralOperand(mantissa, true, 0, 0, this._minimumSignificantDigits, this._maximumSignificantDigits)
+        : intlPluralOperand(mantissa, false, minFrac, Math.max(minFrac, maxFrac), 0, 0);
+      const render = digits => this._useRealLocaleData
+        ? String(__thaw_intl_number_format(this.locale, digits, false))
+        : digits;
+      return `${render(mantissaText)}E${exponent < 0 ? '-' : ''}${render(String(Math.abs(exponent)))}`;
+    }
+
     resolvedOptions() {
       const result = {
         locale: this.locale,
-        numberingSystem: 'latn',
+        numberingSystem: this._numberingSystem || 'latn',
         style: this._style,
         useGrouping: this._useGrouping,
         minimumIntegerDigits: this._minimumIntegerDigits,
@@ -572,7 +636,9 @@
       } else if (this._style === 'currency') {
         result.currency = this._currency;
         result.currencyDisplay = this._currencyDisplay;
+        result.currencySign = this._currencySign;
       }
+      result.notation = this._notation;
       result.signDisplay = this._signDisplay;
       return result;
     }
@@ -581,6 +647,9 @@
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
       const sign = this._signFor(number);
+      if (this._notation !== 'standard') {
+        return `${sign}${this._formatScientific(number)}`;
+      }
       let intPart;
       let fracPart;
       if (this._significant) {
@@ -636,9 +705,17 @@
         const result = __thaw_intl_percent_format(this.locale, signedDigits);
         if (result) return result;
       }
-      if (this._style === 'currency' && typeof __thaw_intl_currency_format === 'function') {
-        const result = __thaw_intl_currency_format(this.locale, signedDigits, this._currency, this._currencyDisplay);
-        if (result) return result;
+      if (this._style === 'currency') {
+        // `currencySign: 'accounting'` renders a negative amount in
+        // parentheses (no minus sign), matching real ECMA-402.
+        const accounting = this._currencySign === 'accounting' && sign === '-';
+        const value = accounting ? digits : signedDigits;
+        if (typeof __thaw_intl_currency_format === 'function') {
+          const result = __thaw_intl_currency_format(this.locale, value, this._currency, this._currencyDisplay);
+          if (result) return accounting ? `(${result})` : result;
+        }
+        const text = `${this._currency} ${value}`;
+        return accounting ? `(${text})` : text;
       }
       if (this._style === 'unit' && typeof __thaw_intl_unit_format === 'function') {
         const result = __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay);

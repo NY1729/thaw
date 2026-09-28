@@ -2754,6 +2754,61 @@ fn intl_number_format_matches_real_node_for_curated_non_english_locales() {
     );
 }
 
+/// `Intl.NumberFormat`'s `notation` (`scientific`/`engineering`),
+/// `numberingSystem` (explicit override), and `currencySign:
+/// 'accounting'` -- all cross-checked against real Node. Previously
+/// `notation`/`numberingSystem` were silently ignored and negative
+/// currency always used a minus sign. (An explicit `numberingSystem`
+/// localizes the digits; the *grouping separator* on an overridden
+/// latn-base locale follows the base locale, a known native nuance, so
+/// the digit case is checked ungrouped.)
+#[cfg(feature = "intl")]
+#[test]
+fn intl_number_notation_numbering_system_and_accounting_match_real_node() {
+    assert_eq!(
+        load(
+            "function f(locale, options, value) {\n\
+               return new Intl.NumberFormat(locale, { useGrouping: false, ...options }).format(value);\n\
+             }\n\
+             function notation() {\n\
+               return [\n\
+                 f('en', { notation: 'scientific' }, 1234),\n\
+                 f('en', { notation: 'scientific', maximumFractionDigits: 2 }, 1234),\n\
+                 f('en', { notation: 'scientific' }, 0),\n\
+                 f('en', { notation: 'engineering' }, 12345),\n\
+                 f('en', { notation: 'engineering' }, 0.0001234),\n\
+                 f('en', { notation: 'scientific' }, -1234),\n\
+                 f('de', { notation: 'scientific' }, 1234),\n\
+               ];\n\
+             }\n\
+             function numberingSystem() {\n\
+               const nf = new Intl.NumberFormat('en', { useGrouping: false, numberingSystem: 'arab' });\n\
+               return [nf.format(1234), nf.resolvedOptions().numberingSystem];\n\
+             }\n\
+             function accounting() {\n\
+               const nf = new Intl.NumberFormat('en', { style: 'currency', currency: 'USD', currencySign: 'accounting' });\n\
+               return [nf.format(-5), nf.format(5), nf.format(-0)];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("notation", "[]"),
+        serde_json::to_string(&[
+            "1.234E3", "1.23E3", "0E0", "12.345E3", "123.4E-6", "-1.234E3", "1,234E3",
+        ])
+        .unwrap()
+    );
+    assert_eq!(
+        call("numberingSystem", "[]"),
+        serde_json::to_string(&["١٢٣٤", "arab"]).unwrap()
+    );
+    assert_eq!(
+        call("accounting", "[]"),
+        serde_json::to_string(&["($5.00)", "$5.00", "($0.00)"]).unwrap()
+    );
+}
+
 #[cfg(feature = "intl")]
 #[test]
 fn intl_number_currency_and_percent_match_real_node() {
