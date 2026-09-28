@@ -216,16 +216,6 @@ cargo build --release -p thaw-cli
 benchmarks/cpu/run.sh target/release/thaw
 ```
 
-## Design documents
-
-- [User modules](docs/design/user-modules.md)
-- [Registry and npm interop](docs/design/registry.md)
-- [npm interop gaps](docs/design/npm-interop-gaps-2026-09.md)
-- [Native add-ons](docs/design/native-addons.md)
-- [C ABI bridge](docs/design/bridge.md)
-- [Async and await](docs/design/async-await.md)
-- [Exceptions](docs/design/exceptions.md)
-
 ## License
 
 Licensed under either of:
