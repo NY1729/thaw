@@ -158,6 +158,14 @@
 //!     `arabext` -- so `en` + `numberingSystem: 'arabext'` localized its
 //!     digits but kept Latin separators. Only this one marker file
 //!     changed; `fa` is *not* a curated locale for any other marker.
+//! 11. (2026-09-28) `DecimalCompactShortV1`/`DecimalCompactLongV1` added
+//!     (same `--use-separate-crates`, `-m`, curated locale list without
+//!     `fa`) for `Intl.NumberFormat`'s `notation: 'compact'`, and
+//!     `icu_decimal` now enables its `unstable` feature in both this
+//!     crate and `thaw-quickjs` (`CompactDecimalFormatter` is unstable).
+//!     icu4x rounds compact mantissas half-to-even while ECMA-402's
+//!     default is `halfExpand`, so exact ties differ -- a documented
+//!     divergence in `thaw-quickjs/src/quickjs/intl_number.rs`.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!

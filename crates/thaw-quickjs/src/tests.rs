@@ -3491,3 +3491,73 @@ fn intl_datetime_time_field_independence_matches_real_node() {
             .unwrap()
     );
 }
+
+/// `Intl.NumberFormat notation: 'compact'` via icu4x's
+/// `CompactDecimalFormatter` -- previously unsupported (fell back to
+/// standard formatting). Every non-tie value is cross-checked against
+/// real Node; the one deliberate, documented divergence is an exact
+/// half-way mantissa (`1650`), where icu4x rounds half-to-even
+/// (`"1.6K"`) while ECMA-402's default is half-to-even's opposite,
+/// `halfExpand` (`Node: "1.7K"`).
+#[cfg(feature = "intl")]
+#[test]
+fn intl_number_compact_notation_matches_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, n) {\n\
+               return new Intl.NumberFormat(locale, { notation: 'compact', ...opts }).format(n);\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 show('en', {}, 999), show('en', {}, 1000), show('en', {}, 1234),\n\
+                 show('en', {}, 1750), show('en', {}, 1950), show('en', {}, 15127),\n\
+                 show('en', {}, 123456), show('en', {}, 3010349), show('en', {}, 999500),\n\
+                 show('en', {}, -13132), show('en', {}, 0.2222),\n\
+                 show('de', {}, 15127), show('de', {}, 3010349), show('de', {}, 1234567),\n\
+                 show('ja', {}, 15127), show('ja', {}, 123456), show('ja', {}, 1234567),\n\
+                 show('en', { compactDisplay: 'long' }, 1000),\n\
+                 show('en', { compactDisplay: 'long' }, 1234),\n\
+               ];\n\
+             }\n\
+             function tie() { return show('en', {}, 1650); }\n\
+             function options() {\n\
+               const r = new Intl.NumberFormat('en', { notation: 'compact', compactDisplay: 'long' }).resolvedOptions();\n\
+               return [r.notation, r.compactDisplay];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "999",
+            "1K",
+            "1.2K",
+            "1.8K",
+            "2K",
+            "15K",
+            "123K",
+            "3M",
+            "1M",
+            "-13K",
+            "0.22",
+            "15.127",
+            "3\u{a0}Mio.",
+            "1,2\u{a0}Mio.",
+            "1.5万",
+            "12万",
+            "123万",
+            "1 thousand",
+            "1.2 thousand",
+        ])
+        .unwrap()
+    );
+    // Known, documented half-even tie divergence (see this test's own doc
+    // comment): pinned deliberately so a future data/rounding change is a
+    // visible, intentional update rather than a silent drift.
+    assert_eq!(call("tie", "[]"), serde_json::to_string("1.6K").unwrap());
+    assert_eq!(
+        call("options", "[]"),
+        serde_json::to_string(&["compact", "long"]).unwrap()
+    );
+}

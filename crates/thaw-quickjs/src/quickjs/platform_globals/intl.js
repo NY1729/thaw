@@ -700,13 +700,12 @@
       if (!['standard', 'scientific', 'engineering', 'compact'].includes(requestedNotation)) {
         throw new RangeError(`Invalid notation: ${requestedNotation}`);
       }
-      // `scientific`/`engineering` are implemented for the plain decimal
-      // style only (the overwhelmingly common case); `compact` needs the
-      // CLDR compact-decimal data this crate doesn't vendor. Anything
-      // else keeps real standard formatting and reports `standard`, so
+      this._compactDisplay = intlEnumOption(opts.compactDisplay, ['short', 'long'], 'short', 'compactDisplay');
+      // `scientific`/`engineering`/`compact` are implemented for the plain
+      // decimal style only (the overwhelmingly common case); anything else
+      // keeps standard formatting and reports `standard`, so
       // `resolvedOptions` stays truthful about what was actually done.
-      this._notation = this._style === 'decimal' &&
-        (requestedNotation === 'scientific' || requestedNotation === 'engineering')
+      this._notation = this._style === 'decimal' && requestedNotation !== 'standard'
         ? requestedNotation
         : 'standard';
     }
@@ -791,6 +790,7 @@
         result.currencySign = this._currencySign;
       }
       result.notation = this._notation;
+      if (this._notation === 'compact') result.compactDisplay = this._compactDisplay;
       result.signDisplay = this._signDisplay;
       result.roundingIncrement = 1;
       result.roundingMode = this._roundingMode;
@@ -803,6 +803,14 @@
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
       const sign = this._signFor(number);
+      if (this._notation === 'compact' && typeof __thaw_intl_compact_number === 'function') {
+        // The compact pattern itself chooses the mantissa's precision, so
+        // the raw number is passed through rather than `intl.js`'s own
+        // rounded digit string. A known divergence: icu4x rounds compact
+        // mantissas half-to-even (real ECMA-402 default is `halfExpand`),
+        // so an exact tie differs (`1650` -> `1.6K` vs Node's `1.7K`).
+        return String(__thaw_intl_compact_number(this.locale, String(number), this._compactDisplay === 'long'));
+      }
       if (this._notation !== 'standard') {
         return `${sign}${this._formatScientific(number)}`;
       }
