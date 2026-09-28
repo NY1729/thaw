@@ -198,6 +198,11 @@
 //!     observed 48.0/48.2.1 difference that reached the `formatToParts`
 //!     output; pinning just this marker makes the full locale x month-
 //!     style matrix match Node exactly.
+//! 15. (2026-09-28) `fa` appended to the curated list; the same 47
+//!     date-path markers regenerated with 48.2.1 for the 41 locales, and
+//!     `DatetimeNamesDayperiodV1` again with 48.0.0 (see step 14).
+//!     `fa` defaults to the Persian calendar and `arabext` numbering, so
+//!     it also exercises the non-Gregorian path.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!
@@ -207,12 +212,12 @@
 //! `src/data/mod.rs` with the new output. No other crate needs to change
 //! for a locale/API combination the regenerated data now covers.
 //!
-//! ## Curated locale list (40 tags)
+//! ## Curated locale list (41 tags)
 //!
 //! `en-US en-GB es es-419 fr de it pt pt-BR nl sv pl ru uk tr ar ar-SA he
 //! hi bn ja ko zh-Hans zh-Hant th vi id ms fil el ro cs hu da fi nb ca hr
-//! sk bg` -- see `docs/design/intl-polyfill.md` for the rationale behind
-//! each locale's inclusion.
+//! sk bg fa` -- see `docs/design/intl-polyfill.md` for the rationale
+//! behind each locale's inclusion.
 #![allow(clippy::redundant_static_lifetimes, clippy::octal_escapes)]
 
 extern crate alloc;

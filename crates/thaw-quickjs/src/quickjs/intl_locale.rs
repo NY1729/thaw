@@ -6,7 +6,7 @@
 // one native primitive before anything locale-sensitive happens: it turns
 // an arbitrary requested BCP-47 tag into the *curated* locale actually
 // used for data lookups (this crate only ships baked data for a fixed,
-// ~40-tag list -- `thaw-icu-data/src/lib.rs`'s doc comment has the exact
+// ~41-tag list -- `thaw-icu-data/src/lib.rs`'s doc comment has the exact
 // list and the reasoning behind each entry), plus the resolved
 // calendar/numbering-system/collation Unicode extension subtags. A tag
 // outside the curated list degrades gracefully to the nearest curated
@@ -28,6 +28,7 @@ const CURATED_LOCALES: &[&str] = &[
     "en-US", "en-GB", "es", "es-419", "fr", "de", "it", "pt", "pt-BR", "nl", "sv", "pl", "ru",
     "uk", "tr", "ar", "ar-SA", "he", "hi", "bn", "ja", "ko", "zh-Hans", "zh-Hant", "th", "vi",
     "id", "ms", "fil", "el", "ro", "cs", "hu", "da", "fi", "nb", "ca", "hr", "sk", "bg",
+    "fa",
 ];
 
 const DEFAULT_CURATED_LOCALE: &str = "en-US";

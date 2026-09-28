@@ -4160,3 +4160,31 @@ fn intl_datetime_weekday_context_and_ms_separator_match_real_node() {
         .unwrap()
     );
 }
+
+/// `fa` (added to the curated list) defaults to the Persian calendar and
+/// `arabext` numbering, exercising the non-Gregorian + non-Latin-digit
+/// path end to end.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_fa_persian_defaults_match_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, ms) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts }).format(new Date(ms));\n\
+             }\n\
+             function all() {\n\
+               const t = Date.UTC(2024, 6, 4);\n\
+               return [\n\
+                 show('fa', {year:'numeric',month:'long',day:'numeric'}, t),\n\
+                 show('fa', {year:'numeric',month:'short',day:'numeric'}, t),\n\
+                 show('fa', {year:'numeric',month:'numeric',day:'numeric'}, t),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&["۱۴ تیر ۱۴۰۳", "۱۴ تیر ۱۴۰۳", "۱۴۰۳/۴/۱۴",]).unwrap()
+    );
+}
