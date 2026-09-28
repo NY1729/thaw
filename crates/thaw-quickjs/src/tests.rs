@@ -3561,3 +3561,52 @@ fn intl_number_compact_notation_matches_real_node() {
         serde_json::to_string(&["compact", "long"]).unwrap()
     );
 }
+
+/// A bare `{month}`/`{year}`/`{year, month}` request -- ICU4X classifies
+/// these as *calendar-period* field sets (`DateFields::M`/`YM`/`Y`),
+/// which `build_date()` rejects, so they previously rendered an empty
+/// string. Now routed through `build_calendar_period()`. Cross-checked
+/// against real Node.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_calendar_period_fields_match_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts })\n\
+                 .format(new Date(Date.UTC(2024, 6, 4)));\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 show('en-US', { month: 'numeric' }),\n\
+                 show('en-US', { month: 'short' }),\n\
+                 show('en-US', { month: 'long' }),\n\
+                 show('en-US', { year: 'numeric' }),\n\
+                 show('en-US', { year: 'numeric', month: 'long' }),\n\
+                 show('en-US', { year: 'numeric', month: 'short' }),\n\
+                 show('de-DE', { month: 'long' }),\n\
+                 show('ja-JP', { month: 'long' }),\n\
+                 show('fr', { month: 'long' }),\n\
+                 show('ja-JP', { year: 'numeric', month: 'numeric' }),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "7",
+            "Jul",
+            "July",
+            "2024",
+            "July 2024",
+            "Jul 2024",
+            "Juli",
+            "7月",
+            "juillet",
+            "2024/7",
+        ])
+        .unwrap()
+    );
+}
