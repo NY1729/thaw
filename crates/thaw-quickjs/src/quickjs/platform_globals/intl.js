@@ -502,10 +502,31 @@
         );
         if (icuParts.length) parts = icuParts;
       }
+      // `dateStyle`/`timeStyle` must use the locale's `dateFormats`
+      // length patterns (ICU4X's field-set builder), not UTS-35
+      // skeleton matching -- real Node renders e.g. de
+      // `dateStyle:'medium'` as `04.07.2024` (the medium dateFormat),
+      // not the `yMMMd` skeleton's `4. Juli 2024`.
+      if (
+        parts === null &&
+        this._dateStyle === undefined &&
+        this._timeStyle === undefined &&
+        typeof __thaw_intl_datetime_skeleton_parts === 'function'
+      ) {
+        const skeletonParts = JSON.parse(
+          __thaw_intl_datetime_skeleton_parts(this.locale, JSON.stringify(options), JSON.stringify(zoned)),
+        );
+        // Non-empty means real UTS-35 skeleton matching ran; its field
+        // widths are already Node-final, so skip the pad/unpad fixups.
+        if (skeletonParts.length) parts = skeletonParts;
+      }
       if (parts === null) {
         parts = JSON.parse(
           __thaw_intl_datetime_format_parts(this.locale, JSON.stringify(options), JSON.stringify(zoned)),
         );
+        // `dateStyle`/`timeStyle` render the locale's `dateFormats` length
+        // pattern verbatim, so its widths are already Node-final.
+        if (this._dateStyle === undefined && this._timeStyle === undefined) {
         // `icu_datetime`'s numeric fields render un-padded by default
         // (confirmed: `YMD::short()` gives `"7/4/24"`, not `"07/04/24"`)
         // -- there's no independent "always 2 digits" mode in its simple
@@ -540,6 +561,7 @@
           if (numericUnpadFor[part.type] === 'numeric' && /^0\d$/.test(part.value)) {
             part.value = part.value.slice(1);
           }
+        }
         }
       }
       // `icu_datetime` has no `h24` equivalent (only `H23`, hours
