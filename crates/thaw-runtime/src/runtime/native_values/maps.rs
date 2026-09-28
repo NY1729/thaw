@@ -111,6 +111,24 @@ impl KeyKind for StrKey {
     }
 }
 
+// `AnyKey` has no real Rust-level access to thaw-std's own `Value` type
+// (see `arrays.rs`'s own doc comment on `thaw_json_strict_equal`/
+// `thaw_json_same_value_zero` for why), so it inspects a key purely
+// through thaw-std's already-exported `Json` accessors instead of
+// pattern-matching a shared type.
+unsafe extern "C" {
+    fn thaw_json_typeof(value: *const u8) -> *const c_char;
+    fn thaw_json_is_null(value: *const u8) -> u8;
+    fn thaw_json_as_number(value: *mut u8) -> f64;
+    fn thaw_json_as_bool(value: *mut u8) -> u8;
+    fn thaw_json_as_string(value: *mut u8) -> *const c_char;
+    // The real reference identity for a `Json` value's own shared
+    // Array/Object container (`Rc::ptr_eq`-equal values must hash
+    // equally, so `hash` below can't use the raw outer pointer, a fresh
+    // `leak`ed wrapper on every read -- see thaw-std's own doc comment).
+    fn thaw_json_identity_key(value: *const u8) -> u64;
+}
+
 /// A `Map<any, V>`/`Set<any>` key -- a `Json` value that can be a real
 /// primitive (unlike every other key kind above/below, where the value at
 /// the key word is either already scalar (`NumKey`) or never dereferenced
@@ -126,30 +144,24 @@ impl KeyKind for StrKey {
 struct AnyKey;
 impl KeyKind for AnyKey {
     fn hash(key: u64) -> u64 {
-        let Some(value) = (unsafe { (key as *const serde_json::Value).as_ref() }) else {
+        let value = key as *const u8;
+        if value.is_null() {
             return mix64(key);
-        };
-        if json_is_napi_undefined(value) {
-            return mix64(1);
         }
-        if let Some(number) = json_non_finite_number(value) {
-            return mix64(canonical_num_key(number));
-        }
-        match value {
-            serde_json::Value::Null => mix64(0),
-            serde_json::Value::Bool(flag) => mix64(u64::from(*flag) + 2),
-            serde_json::Value::Number(number) => {
-                mix64(canonical_num_key(number.as_f64().unwrap_or(0.0)))
-            }
-            serde_json::Value::String(text) => hash_bytes(text.as_bytes()),
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => mix64(key),
+        match unsafe { CStr::from_ptr(thaw_json_typeof(value)) }.to_bytes() {
+            b"undefined" => mix64(1),
+            b"number" => mix64(canonical_num_key(unsafe { thaw_json_as_number(value.cast_mut()) })),
+            b"boolean" => mix64(u64::from(unsafe { thaw_json_as_bool(value.cast_mut()) != 0 }) + 2),
+            b"string" => hash_bytes(
+                unsafe { CStr::from_ptr(thaw_json_as_string(value.cast_mut())) }.to_bytes(),
+            ),
+            // "object": real `null`, or an Array/Object.
+            _ if unsafe { thaw_json_is_null(value) } != 0 => mix64(0),
+            _ => mix64(unsafe { thaw_json_identity_key(value) }),
         }
     }
     fn eq(a: u64, b: u64) -> bool {
-        json_same_value_zero(
-            a as *const serde_json::Value,
-            b as *const serde_json::Value,
-        )
+        json_same_value_zero(a as *const u8, b as *const u8)
     }
 }
 
@@ -732,6 +744,20 @@ mod map_native_tests {
         bits.to_bits()
     }
 
+    // Test-only: builds a real thaw-std `Value` (not a raw
+    // `serde_json::Value`, which no longer shares that type's memory
+    // layout -- see `any_keyed_hashes_a_primitive_by_value_but_an_
+    // object_by_reference`) from JSON source text, the same "resolved at
+    // link time" way `AnyKey`'s own externs above are.
+    unsafe extern "C" {
+        fn thaw_json_parse(text: *const c_char) -> *mut u8;
+    }
+
+    fn json_key(text: &str) -> *mut u8 {
+        let text = CString::new(text).unwrap();
+        unsafe { thaw_json_parse(text.as_ptr()) }
+    }
+
     #[test]
     fn num_keyed_round_trip() {
         let map = unsafe { thaw_map_new() };
@@ -808,39 +834,35 @@ mod map_native_tests {
         let map = unsafe { thaw_map_new() };
         // Two distinct `Json` allocations holding the same primitive
         // number are the same key -- unlike `RefKey`, this is by value.
-        let one_a = Box::into_raw(Box::new(serde_json::json!(1)));
-        let one_b = Box::into_raw(Box::new(serde_json::json!(1)));
+        let one_a = json_key("1");
+        let one_b = json_key("1");
         assert_ne!(one_a, one_b);
-        unsafe { thaw_map_any_set(map, one_a.cast::<u8>(), value(10.0)) };
-        assert_eq!(unsafe { thaw_map_any_has(map, one_b.cast::<u8>()) }, 1);
-        assert_eq!(unsafe { thaw_map_any_get_f64(map, one_b.cast::<u8>()) }, 10.0);
+        unsafe { thaw_map_any_set(map, one_a, value(10.0)) };
+        assert_eq!(unsafe { thaw_map_any_has(map, one_b) }, 1);
+        assert_eq!(unsafe { thaw_map_any_get_f64(map, one_b) }, 10.0);
         assert_eq!(unsafe { thaw_map_size(map) }, 1.0);
         // A string and a number with "the same" text are still distinct
         // keys -- `SameValueZero` never coerces across kinds.
-        let text_one = Box::into_raw(Box::new(serde_json::json!("1")));
-        unsafe { thaw_map_any_set(map, text_one.cast::<u8>(), value(20.0)) };
+        let text_one = json_key(r#""1""#);
+        unsafe { thaw_map_any_set(map, text_one, value(20.0)) };
         assert_eq!(unsafe { thaw_map_size(map) }, 2.0);
         // Two `NaN`s collapse to one key, matching `SameValueZero`
         // (unlike `===`, which `thaw_json_strict_equal` implements).
-        let nan_a = Box::into_raw(Box::new(serde_json::json!(null)));
-        let nan_b = Box::into_raw(Box::new(serde_json::json!(null)));
-        unsafe {
-            // `serde_json` can't hold a real NaN `Number`; reuse the
-            // same non-finite sentinel shape `thaw_json_as_number`
-            // recognizes elsewhere.
-            *nan_a = serde_json::json!({"$__thaw_non_finite$": "NaN"});
-            *nan_b = serde_json::json!({"$__thaw_non_finite$": "NaN"});
-        }
-        unsafe { thaw_map_any_set(map, nan_a.cast::<u8>(), value(30.0)) };
-        assert_eq!(unsafe { thaw_map_any_has(map, nan_b.cast::<u8>()) }, 1);
+        // Plain JSON can't hold a real NaN `Number`; reuse the same
+        // non-finite sentinel shape `thaw_json_as_number` recognizes
+        // elsewhere.
+        let nan_a = json_key(r#"{"$__thaw_non_finite$": "NaN"}"#);
+        let nan_b = json_key(r#"{"$__thaw_non_finite$": "NaN"}"#);
+        unsafe { thaw_map_any_set(map, nan_a, value(30.0)) };
+        assert_eq!(unsafe { thaw_map_any_has(map, nan_b) }, 1);
         assert_eq!(unsafe { thaw_map_size(map) }, 3.0);
         // Two distinct object allocations with identical content are
         // still two different keys -- reference identity, like `RefKey`.
-        let obj_a = Box::into_raw(Box::new(serde_json::json!({"x": 1})));
-        let obj_b = Box::into_raw(Box::new(serde_json::json!({"x": 1})));
-        unsafe { thaw_map_any_set(map, obj_a.cast::<u8>(), value(40.0)) };
-        assert_eq!(unsafe { thaw_map_any_has(map, obj_b.cast::<u8>()) }, 0);
-        assert_eq!(unsafe { thaw_map_any_has(map, obj_a.cast::<u8>()) }, 1);
+        let obj_a = json_key(r#"{"x": 1}"#);
+        let obj_b = json_key(r#"{"x": 1}"#);
+        unsafe { thaw_map_any_set(map, obj_a, value(40.0)) };
+        assert_eq!(unsafe { thaw_map_any_has(map, obj_b) }, 0);
+        assert_eq!(unsafe { thaw_map_any_has(map, obj_a) }, 1);
         assert_eq!(unsafe { thaw_map_size(map) }, 4.0);
     }
 

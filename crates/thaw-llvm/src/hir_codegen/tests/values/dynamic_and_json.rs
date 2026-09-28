@@ -365,7 +365,7 @@ fn deletes_runtime_keyed_dictionary_properties() {
     "#;
     assert_eq!(
         compile_and_run(source, "delete_dictionary_properties"),
-        "9\n5\ntrue\ntrue\n0\ntrue\nkey\ntrue\n0\nobject\ntrue\ntrue\n{}\n"
+        "9\n5\ntrue\ntrue\nNaN\ntrue\nkey\ntrue\nNaN\nobject\ntrue\ntrue\n{}\n"
     );
 }
 
@@ -416,7 +416,7 @@ fn reads_and_writes_json_with_runtime_string_keys() {
     "#;
     assert_eq!(
         compile_and_run(source, "runtime_json_keys"),
-        "one\nfraction\nkey\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"1\":\"one\",\"2\":\"two\",\"value\":2,\"1.5\":\"fraction\",\"-1\":\"negative\",\"extra\":\"text\",\"other\":true}\n0\nasync-index\n11\n30\n[11,30,null,40]\n"
+        "one\nfraction\nkey\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"1\":\"one\",\"2\":\"two\",\"value\":2,\"1.5\":\"fraction\",\"-1\":\"negative\",\"extra\":\"text\",\"other\":true}\nNaN\nasync-index\n11\n30\n[11,30,null,40]\n"
     );
 }
 
@@ -863,10 +863,11 @@ fn compiles_structured_clone_of_a_map_or_set() {
 
 /// `structuredClone` on a dynamic (`any`/`Json`-typed) value -- the common
 /// case for loosely-typed data, as opposed to the fixed-shape native
-/// `Object`/`Array` case above. `Value`'s derived `Clone` is already a
-/// full recursive deep copy, so mutating a top-level field of the clone
-/// (the compiler's existing support for writing an `any`-typed field,
-/// independent of this fix) never touches the original.
+/// `Object`/`Array` case above. The compiler's ordinary `Json` read is a
+/// shallow *sharing* clone (see `nested_dynamic_reads_share_one_reference`),
+/// so `structuredClone` routes through `thaw_json_clone`'s own
+/// `deep_clone`, giving the clone an independent recursive copy -- mutating
+/// a top-level field of the clone never touches the original.
 #[test]
 fn compiles_structured_clone_of_a_dynamic_value() {
     let source = r#"
@@ -922,6 +923,64 @@ fn compiles_nested_dynamic_value_assignment() {
     );
 }
 
+/// The dynamic (`any`/`Json`) `Value` representation shares one
+/// `Rc`-backed container across every read of the same logical
+/// array/object, so a nested read aliased into a local is the *same*
+/// object, not a disconnected deep copy: mutating the local reaches back
+/// through the original, repeated reads of one field compare `===`, and
+/// a `Map<any, V>` keyed by one read finds its entry through another.
+/// Pinned against real Node.
+#[test]
+fn nested_dynamic_reads_share_one_reference() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const obj: any = { c: { d: true }, list: [1, 2, 3] };
+            const inner = obj.c;
+            inner.d = false;
+            console.log(JSON.stringify(obj));
+            console.log(obj.c === inner);
+            console.log(obj.c === obj.c);
+
+            const bucket = obj.list;
+            bucket[0] = 99;
+            console.log(JSON.stringify(obj.list));
+
+            const clone = structuredClone(obj.c);
+            clone.d = "changed";
+            console.log(JSON.stringify(obj.c));
+            console.log(JSON.stringify(clone));
+
+            const key = obj.c;
+            const registry = new Map<any, string>();
+            registry.set(key, "stored");
+            console.log(registry.get(obj.c));
+            console.log(registry.has({ d: false }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_dynamic_reads_share_one_reference"),
+        "{\"c\":{\"d\":false},\"list\":[1,2,3]}\ntrue\ntrue\n[99,2,3]\n{\"d\":false}\n{\"d\":\"changed\"}\nstored\nfalse\n"
+    );
+}
+
+#[test]
+fn json_array_holes_read_as_undefined_but_stringify_as_null() {
+    let source = r#"
+        function main(): void {
+            const arr: any = [10, 20];
+            arr[3] = 40;
+            console.log(arr[2] === undefined);
+            console.log(String(arr[2]));
+            console.log(Number(arr[2]));
+            console.log(JSON.stringify(arr));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_array_holes"),
+        "true\nundefined\nNaN\n[10,20,null,40]\n"
+    );
+}
+
 #[test]
 fn json_stringify_calls_function_replacers() {
     let source = r#"function main(): void {
@@ -952,14 +1011,11 @@ fn json_stringify_calls_function_replacers() {
 /// compares a number/string/boolean by value; an array/object still
 /// compares by reference (`{} === {}` stays `false`).
 ///
-/// Doesn't cover `NaN` assigned through `any`: `number_value` (thaw-std)
-/// falls back to `Value::Null` for any non-finite `f64` (`serde_json::
-/// Number` structurally can't hold one), so a `Json`-typed `NaN` is
-/// already indistinguishable from real `null` well before this equality
-/// fix -- confirmed pre-existing and separate (`typeof` on it already
-/// said `"object"`, `=== null` was already `true`). Left as a documented,
-/// separate, un-fixed gap; asserting today's `NaN === NaN` behavior here
-/// would enshrine that existing bug as if it were this fix's contract.
+/// A non-finite `number` assigned through `any` is now the
+/// `$__thaw_non_finite$` sentinel (`number_value`, thaw-std), which
+/// `thaw_json_strict_equal` handles by value -- so real ECMAScript
+/// `NaN === NaN` is `false` (unlike `SameValueZero`), `NaN !== NaN` is
+/// `true`, and a `NaN` is never `=== null`.
 #[test]
 fn compiles_dynamic_value_strict_equality() {
     let source = r#"
@@ -977,11 +1033,19 @@ fn compiles_dynamic_value_strict_equality() {
             const i: any = {};
             console.log(h === i);
             console.log(h === h);
+            const nan: any = 0 / 0;
+            const nanB: any = 0 / 0;
+            console.log(nan === nan);
+            console.log(nan === nanB);
+            console.log(nan !== nan);
+            console.log(nan === null);
+            const inf: any = 1 / 0;
+            console.log(inf === inf);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "dynamic_value_strict_equality"),
-        "true\ntrue\ntrue\nfalse\ntrue\n"
+        "true\ntrue\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\n"
     );
 }
 
@@ -1503,3 +1567,5 @@ fn compiles_dynamic_uniform_tagged_object_reads_without_nested_tags() {
         "1\nundefined\nundefined\n2\nnull\nundefined\n3\nnull\nundefined\nundefined\n"
     );
 }
+
+

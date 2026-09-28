@@ -2536,18 +2536,22 @@ fn intl_datetime_format_matches_real_node_for_curated_non_english_locales() {
                return new Intl.DateTimeFormat(locale, opts).format(new Date(epochMs));\n\
              }\n\
              function all() {\n\
-               const t = Date.parse('2024-07-04T16:30:45.000Z');\n\
-               return [\n\
-                 show('ja-JP', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
-                 show('ja-JP', {year:'numeric',month:'2-digit',day:'2-digit',timeZone:'UTC'}, t),\n\
-                 show('ja-JP', {weekday:'long',timeZone:'UTC'}, t),\n\
-                 show('de-DE', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
-                 show('de-DE', {hour:'numeric',minute:'numeric',timeZone:'UTC'}, t),\n\
-                 show('fr', {weekday:'long',year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
-                 show('ar-SA', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
-                 show('en-US', {hour:'numeric',timeZone:'UTC'}, t),\n\
-                 show('en-US', {hour:'numeric',hour12:false,timeZone:'UTC'}, t),\n\
-               ];\n\
+                const t = Date.parse('2024-07-04T16:30:45.000Z');\n\
+                const midnight = Date.parse('2024-07-04T00:00:00.000Z');\n\
+                return [\n\
+                  show('ja-JP', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
+                  show('ja-JP', {year:'numeric',month:'2-digit',day:'2-digit',timeZone:'UTC'}, t),\n\
+                  show('ja-JP', {weekday:'long',timeZone:'UTC'}, t),\n\
+                  show('de-DE', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
+                  show('de-DE', {hour:'numeric',minute:'numeric',timeZone:'UTC'}, t),\n\
+                  show('fr', {weekday:'long',year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
+                  show('ar-SA', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
+                  show('en-US', {hour:'numeric',timeZone:'UTC'}, t),\n\
+                  show('en-US', {hour:'numeric',hour12:false,timeZone:'UTC'}, t),\n\
+                  show('en-US', {hour:'2-digit',minute:'2-digit',hourCycle:'h24',timeZone:'UTC'}, midnight),\n\
+                  show('en-US', {hour:'numeric',minute:'2-digit',hourCycle:'h24',timeZone:'UTC'}, midnight),\n\
+                  show('en-US', {hour:'2-digit',minute:'2-digit',hourCycle:'h23',timeZone:'UTC'}, midnight),\n\
+                ];\n\
              }"
         ),
         1
@@ -2564,6 +2568,9 @@ fn intl_datetime_format_matches_real_node_for_curated_non_english_locales() {
             "٤ يوليو ٢٠٢٤",
             "4 PM",
             "16",
+            "24:00",
+            "24:00",
+            "00:00",
         ])
         .unwrap()
     );
@@ -2773,6 +2780,9 @@ fn intl_plural_rules_matches_real_node() {
              function ordinal(locale, n) {\n\
                return new Intl.PluralRules(locale, { type: 'ordinal' }).select(n);\n\
              }\n\
+             function categories(locale) {\n\
+               return new Intl.PluralRules(locale).resolvedOptions().pluralCategories;\n\
+             }\n\
              function all() {\n\
                return [\n\
                  cardinal('en', 1),\n\
@@ -2804,6 +2814,18 @@ fn intl_plural_rules_matches_real_node() {
         ])
         .unwrap()
     );
+    // `resolvedOptions().pluralCategories` (V8/Node ordering, absent
+    // categories skipped) -- previously hardcoded to `["other"]`.
+    assert_eq!(call("categories", "[\"en\"]"), r#"["one","other"]"#);
+    assert_eq!(
+        call("categories", "[\"ru\"]"),
+        r#"["few","many","one","other"]"#
+    );
+    assert_eq!(
+        call("categories", "[\"ar\"]"),
+        r#"["few","many","one","two","zero","other"]"#
+    );
+    assert_eq!(call("categories", "[\"ja\"]"), r#"["other"]"#);
 }
 
 /// `Intl.Collator` (M9, entirely new capability) -- real collation
@@ -2869,7 +2891,15 @@ fn intl_segmenter_matches_real_node() {
              function thaiWord() { return segs('th', 'word', 'สวัสดีชาวโลก'); }\n\
              function enWord() { return segs('en', 'word', 'Hello world!'); }\n\
              function enGrapheme() { return segs('en', 'grapheme', 'a👍bc'); }\n\
-             function enSentence() { return segs('en', 'sentence', 'Hi. Bye!'); }"
+             function enSentence() { return segs('en', 'sentence', 'Hi. Bye!'); }\n\
+             function containing(index) {\n\
+               const seg = new Intl.Segmenter('en', { granularity: 'word' });\n\
+               const s = seg.segment('Hello world').containing(index);\n\
+               return s === undefined ? null : {\n\
+                 segment: s.segment, index: s.index,\n\
+                 isWordLike: s.isWordLike === undefined ? null : s.isWordLike,\n\
+               };\n\
+             }"
         ),
         1
     );
@@ -2889,6 +2919,18 @@ fn intl_segmenter_matches_real_node() {
         call("enSentence", "[]"),
         r#"[{"segment":"Hi. ","index":0,"isWordLike":null},{"segment":"Bye!","index":4,"isWordLike":null}]"#
     );
+    // `Segments.prototype.containing(index)` -- previously a documented
+    // gap (only the iterable protocol was implemented).
+    assert_eq!(
+        call("containing", "[7]"),
+        r#"{"segment":"world","index":6,"isWordLike":true}"#
+    );
+    assert_eq!(
+        call("containing", "[0]"),
+        r#"{"segment":"Hello","index":0,"isWordLike":true}"#
+    );
+    assert_eq!(call("containing", "[99]"), "null");
+    assert_eq!(call("containing", "[-1]"), "null");
 }
 
 /// `Intl.RelativeTimeFormat` (M11, entirely new capability, backed by

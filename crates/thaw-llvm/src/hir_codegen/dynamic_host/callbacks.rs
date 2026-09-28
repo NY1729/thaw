@@ -1153,21 +1153,22 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         json: BasicValueEnum<'ctx>,
     ) -> Result<IntValue<'ctx>, String> {
-        let key = self
-            .builder
-            .build_global_string_ptr("$__thaw_napi_undefined$", "napi_undefined_test_key")
-            .map_err(|error| error.to_string())?;
+        // Delegate to thaw-std's own exact predicate (`is_napi_undefined`:
+        // the sentinel key must map to `true`) rather than merely checking
+        // the key's presence via `thaw_json_has_own` -- an exotic input
+        // like `{"$__thaw_napi_undefined$": false}` is a real object, not
+        // `undefined`.
         let tagged = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_has_own").unwrap(),
-                &[json.into(), key.as_pointer_value().into()],
+                self.module.get_function("thaw_json_is_undefined").unwrap(),
+                &[json.into()],
                 "json_is_napi_undefined",
             )
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or("thaw_json_has_own returned no value")?
+            .ok_or("thaw_json_is_undefined returned no value")?
             .into_int_value();
         self.builder
             .build_int_compare(

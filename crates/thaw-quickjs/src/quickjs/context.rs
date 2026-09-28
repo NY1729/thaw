@@ -1316,6 +1316,12 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl plural-category resolver");
                 #[cfg(feature = "intl")]
+                let intl_plural_categories_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, kind: String| intl_plural_categories(&locale, &kind),
+                )
+                .expect("failed to create JavaScript Intl plural-categories resolver");
+                #[cfg(feature = "intl")]
                 let intl_list_format_function = Function::new(
                     ctx.clone(),
                     |locale: String, kind: String, style: String, items_json: String| {
@@ -1492,6 +1498,13 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_plural_category", intl_plural_category_function)
                     .expect("failed to install JavaScript Intl plural-category resolver");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set(
+                        "__thaw_intl_plural_categories",
+                        intl_plural_categories_function,
+                    )
+                    .expect("failed to install JavaScript Intl plural-categories resolver");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_list_format", intl_list_format_function)

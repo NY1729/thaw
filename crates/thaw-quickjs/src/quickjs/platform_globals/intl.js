@@ -276,6 +276,15 @@
           part.value = `0${part.value}`;
         }
       }
+      // `icu_datetime` has no `h24` equivalent (only `H23`, hours
+      // 0-23), so its midnight hour comes back as `0`/`00`; real
+      // ECMA-402 `hourCycle: 'h24'` renders that same instant as `24`
+      // (the one instant where the two cycles differ).
+      if (this._hourCycle === 'h24') {
+        for (const part of parts) {
+          if (part.type === 'hour' && /^0+$/.test(part.value)) part.value = '24';
+        }
+      }
       if (this._timeZoneName) {
         if (parts.length) parts.push({ type: 'literal', value: ' ' });
         parts.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned, this.locale) });
@@ -638,7 +647,9 @@
 
   // `Intl.PluralRules` (M8) -- entirely new, no prior English-only
   // version existed. `minimumFractionDigits`/significant-digit options
-  // aren't honored (see `intl_plurals.rs`'s own doc comment).
+  // aren't honored (see `intl_plurals.rs`'s own doc comment);
+  // `resolvedOptions().pluralCategories` returns the locale's real
+  // categories via `__thaw_intl_plural_categories`.
   class PluralRules {
     constructor(locale, options) {
       const opts = options || {};
@@ -647,11 +658,24 @@
     }
 
     select(value) {
+      if (typeof __thaw_intl_plural_category !== 'function') return 'other';
       return __thaw_intl_plural_category(this.locale, this._type, String(Number(value)));
     }
 
     resolvedOptions() {
-      return { locale: this.locale, type: this._type, pluralCategories: ['other'] };
+      const pluralCategories = typeof __thaw_intl_plural_categories === 'function'
+        ? JSON.parse(__thaw_intl_plural_categories(this.locale, this._type))
+        : ['other'];
+      return {
+        locale: this.locale,
+        type: this._type,
+        minimumIntegerDigits: 1,
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 3,
+        minimumSignificantDigits: 1,
+        maximumSignificantDigits: 21,
+        pluralCategories,
+      };
     }
   }
 
@@ -695,10 +719,9 @@
     }
   }
 
-  // `Intl.Segmenter` (M10) -- entirely new. Only the iterable protocol
-  // is implemented on the returned `Segments` object (`for (const s of
-  // segmenter.segment(text))`, by far the common usage) -- `.containing
-  // (index)` random access isn't (a documented gap).
+  // `Intl.Segmenter` (M10) -- entirely new. The iterable protocol
+  // (`for (const s of segmenter.segment(text))`, by far the common
+  // usage) and `.containing(index)` random access are both implemented.
   class Segmenter {
     constructor(locale, options) {
       const opts = options || {};
@@ -722,6 +745,18 @@
       return {
         [Symbol.iterator]() {
           return segments[Symbol.iterator]();
+        },
+        // `Segments.prototype.containing(index)` -- real ECMA-402 random
+        // access, previously a documented gap. Returns the segment whose
+        // `[index, index + segment.length)` range contains `index`, or
+        // `undefined` for an out-of-range index.
+        containing(index) {
+          const i = Math.trunc(Number(index));
+          if (!Number.isFinite(i) || i < 0 || i >= input.length) return undefined;
+          for (const entry of segments) {
+            if (entry.index <= i && i < entry.index + entry.segment.length) return entry;
+          }
+          return undefined;
         },
       };
     }

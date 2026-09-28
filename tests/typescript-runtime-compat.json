@@ -1004,6 +1004,26 @@
       "name": "reading a Proxy's own target identifier directly reflects a set trap's mutation",
       "expect": "matched",
       "source": "function main(): void { const target: Record<string, number> = { a: 1 }; const proxy = new Proxy(target, { set(obj: Record<string, number>, prop: string, value: number): boolean { obj[prop] = value * 2; return true; } }); proxy.b = 5; console.log(target.a, target.b); }"
+    },
+    {
+      "name": "a nested any-typed read shares one reference with its source for mutation, ===, and a Map<any, V> key",
+      "expect": "matched",
+      "source": "function main(): void { const obj: any = { c: { d: true }, list: [1, 2, 3] }; const inner = obj.c; inner.d = false; console.log(JSON.stringify(obj)); console.log(obj.c === inner); console.log(obj.c === obj.c); const bucket = obj.list; bucket[0] = 99; console.log(JSON.stringify(obj.list)); const key = obj.c; const registry = new Map<any, string>(); registry.set(key, \"stored\"); console.log(registry.get(obj.c)); console.log(registry.has({ d: false })); }"
+    },
+    {
+      "name": "a missing any-typed key is Number() NaN (never == 0) while explicit null reads as 0",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = { a: 1, c: null }; console.log(Number(o.b)); console.log(o.b == 0); console.log(o.b === undefined); console.log(Number(o.c)); const arr: any = [10, 20]; console.log(Number(arr[1.5])); }"
+    },
+    {
+      "name": "an any-typed array write past the end leaves holes that read undefined but stringify as null",
+      "expect": "matched",
+      "source": "function main(): void { const arr: any = [10, 20]; arr[3] = 40; console.log(arr[2] === undefined); console.log(String(arr[2])); console.log(Number(arr[2])); console.log(JSON.stringify(arr)); }"
+    },
+    {
+      "name": "NaN and Infinity assigned through any follow strict-equality value semantics",
+      "expect": "matched",
+      "source": "function main(): void { const nan: any = 0 / 0; const nanB: any = 0 / 0; console.log(nan === nan); console.log(nan === nanB); console.log(nan !== nan); console.log(nan === null); const inf: any = 1 / 0; console.log(inf === inf); }"
     }
   ]
 }

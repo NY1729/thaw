@@ -14,6 +14,13 @@ serde = "1.0"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 thaw-arena = { version = "0.1.0", path = "../thaw-arena" }
 ureq = "3.4.0"
+# The same insertion-order-preserving map `serde_json::Map` itself wraps
+# under its own `preserve_order` feature -- used directly here (instead
+# of `serde_json::Map<String, Value>`) because `serde_json::Map`'s own
+# trait impls (`FromIterator`, etc.) are hardcoded to its own `Value`
+# type, not generic over an arbitrary value type like this file's own
+# `Value`.
+indexmap = "2"
 
 [dev-dependencies]
 thaw-runtime = { version = "0.1.0", path = "../thaw-runtime" }

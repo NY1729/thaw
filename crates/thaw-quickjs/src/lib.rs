@@ -42,6 +42,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+// `thaw_js_dynamic_object_query` (api.rs) calls thaw-std's `thaw_json_parse`
+// as an `extern "C"` declaration resolved at link time -- this crate has no
+// real Rust-level dependency on thaw-std (see thaw-runtime's own
+// `Cargo.toml` comment for why), so without this marker import `cargo test`
+// never actually links thaw-std's rlib in and that symbol stays unresolved.
+#[cfg(test)]
+use thaw_std as _;
+// thaw-std's own code calls a couple of thaw-runtime helpers the same
+// "resolved at link time" way.
+#[cfg(test)]
+use thaw_runtime as _;
+
 use base64::Engine as _;
 use cbc::cipher::{
     block_padding::{NoPadding, Pkcs7},
