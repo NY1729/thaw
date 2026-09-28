@@ -999,6 +999,11 @@
       "name": "an any-typed RegExp's .test() in a while condition keeps a plain body read of .lastIndex fresh",
       "expect": "matched",
       "source": "function main(): void { const anyRe: any = /a/g; const s = \"aaa\"; while (anyRe.test(s)) { console.log(anyRe.lastIndex); } for (const value of [1, , 3]) { console.log(value); } console.log(\"done\"); }"
+    },
+    {
+      "name": "reading a Proxy's own target identifier directly reflects a set trap's mutation",
+      "expect": "matched",
+      "source": "function main(): void { const target: Record<string, number> = { a: 1 }; const proxy = new Proxy(target, { set(obj: Record<string, number>, prop: string, value: number): boolean { obj[prop] = value * 2; return true; } }); proxy.b = 5; console.log(target.a, target.b); }"
     }
   ]
 }

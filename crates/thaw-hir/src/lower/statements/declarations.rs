@@ -142,6 +142,82 @@ impl<'a> FnLowerer<'a> {
                     .init
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
+                // `const proxy = new Proxy(target, handler)`, when
+                // `target` is a simple identifier already declared
+                // `Object`/`Dictionary`-shaped in this function: retain
+                // its *current* value as an independent, live QuickJS
+                // handle (`retainDynamicJson`, via the existing
+                // `coerce_to_declared` path an unrelated earlier fix
+                // already built for a `JsValue`-declared target with an
+                // `Object`/`Dictionary`-typed source -- see that path's
+                // own doc comment) and bind it as a real, function-scoped
+                // `let` -- emitted here, *before* `init` itself is
+                // lowered below, since only a statement-level `let` (not
+                // an expression-level one-shot IIFE binding) survives
+                // past this one declaration for later statements to read.
+                // `proxy_target_live_handles` records the mapping so (a)
+                // the `Expr::New` Proxy lowering just below reuses this
+                // exact handle as its constructor argument instead of a
+                // fresh snapshot, and (b) every later read of the `target`
+                // identifier itself (`Expr::Ident`'s own check of the
+                // same table) re-reads this handle instead of `target`'s
+                // own native storage -- making a `set` trap's mutation
+                // (which only ever reaches this handle's QuickJS object)
+                // observable from `target` directly, not just through the
+                // proxy. Scoped deliberately narrowly: only a bare
+                // identifier target, not an object literal or other
+                // expression, and only `Object`/`Dictionary`-shaped (the
+                // only two static shapes an existing `JsValue`-target
+                // coercion already supports).
+                if let Expr::New(new_expr) = init {
+                    if let Expr::Ident(class) = new_expr.callee.as_ref() {
+                        if class.sym == *"Proxy" {
+                            if let Some([target_arg, _]) =
+                                new_expr.args.as_deref().and_then(|args| {
+                                    <&[_; 2]>::try_from(args).ok()
+                                })
+                            {
+                                if target_arg.spread.is_none() {
+                                    if let Expr::Ident(target_ident) = target_arg.expr.as_ref() {
+                                        let target_name =
+                                            self.resolve_binding(target_ident.sym.as_ref());
+                                        if let Some(declared_ty) =
+                                            self.scope.get(&target_name).cloned()
+                                        {
+                                            if matches!(
+                                                declared_ty,
+                                                HirType::Object(_) | HirType::Dictionary(_)
+                                            ) {
+                                                let live_value = self.coerce_to_declared(
+                                                    &HirType::JsValue,
+                                                    HirExpr::Var(target_name.clone()),
+                                                )?;
+                                                let handle_name = format!(
+                                                    "__thaw_proxy_target_live_{}",
+                                                    self.next_binding
+                                                );
+                                                self.next_binding += 1;
+                                                self.scope.insert(
+                                                    handle_name.clone(),
+                                                    HirType::JsValue,
+                                                );
+                                                statements.push(HirStmt::Let(
+                                                    handle_name.clone(),
+                                                    HirType::JsValue,
+                                                    live_value,
+                                                ));
+                                                self.proxy_target_live_handles.insert(
+                                                    target_name,
+                                                    (handle_name, declared_ty),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let sparse_array = self.expression_may_be_sparse_array(init);
                 let sparse_array_function = match init {
                     Expr::Arrow(arrow) => arrow_returns_sparse_array(arrow),

@@ -564,6 +564,23 @@ impl<'a> FnLowerer<'a> {
             ])),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
+                // A read of a `new Proxy(target, handler)`'s own `target`
+                // identifier, redirected to re-read the live QuickJS
+                // handle a `set` trap's mutation actually reaches (see
+                // `proxy_target_live_handles`'s own doc comment). Checked
+                // first, ahead of every other narrowing below, since none
+                // of those apply to this variable (it's never re-declared
+                // after becoming a Proxy target in a way that would also
+                // need narrowing).
+                if let Some((handle_name, declared_ty)) =
+                    self.proxy_target_live_handles.get(&name).cloned()
+                {
+                    let json = HirExpr::Call(
+                        Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                        vec![HirExpr::Var(handle_name)],
+                    );
+                    return self.coerce_to_declared(&declared_ty, json);
+                }
                 if !self.scope.contains_key(&name) {
                     if let Some(signature) = self.signatures.get(&name) {
                         if signature.is_extern || !signature.generic_type_params.is_empty() {
@@ -3693,16 +3710,47 @@ impl<'a> FnLowerer<'a> {
                                 class.sym
                             ));
                         }
-                        let values = args
-                            .iter()
-                            .map(|argument| {
-                                let value = self.lower_expr_with_expected_type(
-                                    &argument.expr,
-                                    Some(&HirType::JsValue),
-                                )?;
-                                self.coerce_to_declared(&HirType::Json, value)
-                            })
-                            .collect::<Result<Vec<_>, String>>()?;
+                        // `new Proxy(target, handler)`'s own `target`
+                        // argument, when it's a simple identifier already
+                        // declared `Object`/`Dictionary`-shaped in this
+                        // function: `lower_var_decl` (statements/
+                        // declarations.rs) already detected this exact
+                        // shape ahead of time (before this expression is
+                        // lowered at all) and emitted a `let` binding for
+                        // an *independent*, live QuickJS handle retaining
+                        // `target`'s current value, registering it in
+                        // `proxy_target_live_handles`. Reused here as the
+                        // constructor argument instead of a fresh one-off
+                        // JSON snapshot, so this and every later read of
+                        // the `target` identifier itself (see the
+                        // `Expr::Ident` arm's own check of the same table)
+                        // observe the same handle -- a `set` trap's
+                        // mutation, which lands on this handle's own
+                        // QuickJS object, becomes observable from `target`
+                        // directly, not just through the proxy.
+                        let mut values = Vec::with_capacity(args.len());
+                        for (index, argument) in args.iter().enumerate() {
+                            if class.sym == *"Proxy" && index == 0 {
+                                if let Expr::Ident(target_ident) = argument.expr.as_ref() {
+                                    let target_name =
+                                        self.resolve_binding(target_ident.sym.as_ref());
+                                    if let Some((handle_name, _)) =
+                                        self.proxy_target_live_handles.get(&target_name).cloned()
+                                    {
+                                        values.push(self.coerce_to_declared(
+                                            &HirType::Json,
+                                            HirExpr::Var(handle_name),
+                                        )?);
+                                        continue;
+                                    }
+                                }
+                            }
+                            let value = self.lower_expr_with_expected_type(
+                                &argument.expr,
+                                Some(&HirType::JsValue),
+                            )?;
+                            values.push(self.coerce_to_declared(&HirType::Json, value)?);
+                        }
                         let values =
                             self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
                         let constructor = HirExpr::Call(
