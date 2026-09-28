@@ -1024,6 +1024,36 @@
       "name": "NaN and Infinity assigned through any follow strict-equality value semantics",
       "expect": "matched",
       "source": "function main(): void { const nan: any = 0 / 0; const nanB: any = 0 / 0; console.log(nan === nan); console.log(nan === nanB); console.log(nan !== nan); console.log(nan === null); const inf: any = 1 / 0; console.log(inf === inf); }"
+    },
+    {
+      "name": "Intl.NumberFormat compact notation",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"en\", { notation: \"compact\" }).format(1234)); console.log(new Intl.NumberFormat(\"en\", { notation: \"compact\", compactDisplay: \"long\" }).format(1234)); console.log(new Intl.NumberFormat(\"ja\", { notation: \"compact\" }).format(15127)); console.log(new Intl.NumberFormat(\"de\", { notation: \"compact\" }).format(3010349)); }"
+    },
+    {
+      "name": "Intl.NumberFormat signDisplay modes",
+      "expect": "matched",
+      "source": "function main(): void { const f = (s: string, n: number): string => new Intl.NumberFormat(\"en\", { signDisplay: s }).format(n); console.log(f(\"always\", 5), f(\"always\", 0), f(\"always\", -5), f(\"never\", -5), f(\"exceptZero\", 0), f(\"negative\", -0)); }"
+    },
+    {
+      "name": "Intl.NumberFormat roundingMode floor and ceil",
+      "expect": "matched",
+      "source": "function main(): void { const f = (m: string, n: number): string => new Intl.NumberFormat(\"en\", { useGrouping: false, maximumFractionDigits: 0, roundingMode: m }).format(n); console.log(f(\"floor\", 1.9), f(\"ceil\", 1.1), f(\"halfEven\", 2.5), f(\"expand\", -1.1)); }"
+    },
+    {
+      "name": "Intl.NumberFormat numberingSystem arab localizes separators",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"en\", { numberingSystem: \"arab\" }).format(1234)); console.log(new Intl.NumberFormat(\"en\", { numberingSystem: \"arabext\" }).format(1234567.5)); }"
+    },
+    {
+      "name": "Intl.DateTimeFormat dateStyle and timeStyle",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(Date.UTC(2024, 6, 4, 16, 30, 45)); console.log(new Intl.DateTimeFormat(\"en-US\", { timeZone: \"UTC\", dateStyle: \"full\" }).format(d)); console.log(new Intl.DateTimeFormat(\"en-US\", { timeZone: \"UTC\", timeStyle: \"short\" }).format(d)); console.log(new Intl.DateTimeFormat(\"de-DE\", { timeZone: \"UTC\", dateStyle: \"medium\" }).format(d)); }"
+    },
+    {
+      "name": "Intl.DateTimeFormat fractionalSecondDigits and second-only",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 1, 13, 5, 45, 678)); console.log(new Intl.DateTimeFormat(\"en-US\", { timeZone: \"UTC\", second: \"numeric\", fractionalSecondDigits: 3 }).format(d)); console.log(new Intl.DateTimeFormat(\"en-US\", { timeZone: \"UTC\", second: \"numeric\" }).format(d)); }"
     }
   ]
 }
