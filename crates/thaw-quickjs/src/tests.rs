@@ -4121,3 +4121,42 @@ fn intl_datetime_default_fields_and_era_match_real_node() {
         .unwrap()
     );
 }
+
+/// Format-vs-StandAlone weekday context (ICU gives `c`/`e` a different
+/// `dtTypes` value than `E`, so fi's standard full pattern `cccc d. MMMM
+/// y` loses to the availableFormats `yMMMMEd` -> `E d. MMMM y` widened to
+/// `EEEE` -> the adessive "torstaina"), and the locale `ms` separator for
+/// `{minute, second}` (id/da/fi use `.`).
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_weekday_context_and_ms_separator_match_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, ms) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts }).format(new Date(ms));\n\
+             }\n\
+             function all() {\n\
+               const t = Date.UTC(2024, 6, 4, 16, 30, 45);\n\
+               return [\n\
+                 show('fi', {weekday:'long',year:'numeric',month:'long',day:'numeric'}, t),\n\
+                 show('id', {minute:'numeric',second:'numeric'}, t),\n\
+                 show('da', {minute:'numeric',second:'numeric'}, t),\n\
+                 show('fi', {minute:'numeric',second:'numeric'}, t),\n\
+                 show('en-US', {minute:'2-digit'}, t),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "torstaina 4. heinäkuuta 2024",
+            "30.45",
+            "30.45",
+            "30.45",
+            "30",
+        ])
+        .unwrap()
+    );
+}

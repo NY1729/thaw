@@ -1,10 +1,14 @@
 // UTS-35 classical skeleton matching for `Intl.DateTimeFormat`.
 //
-// Ported from icu4x 2.3.0's `icu_datetime::provider::skeleton::helpers`
+// Based on icu4x 2.3.0's `icu_datetime::provider::skeleton::helpers`
 // (Apache-2.0/MIT), which upstream gates behind its `datagen` feature --
-// so it isn't reachable at runtime. The algorithm and distance constants
-// are copied verbatim; the only change is operating on plain `Vec<Field>`
-// skeletons and the `availableFormats` table baked by
+// so it isn't reachable at runtime. The matching/adjustment structure is
+// its, but the distance is ICU4C's own `dtTypes`/`DateTimeMatcher::
+// getDistance` model (numeric widths equivalent, text widths 1-3 "short",
+// `L`/`c`/`e` context offsets, 12h/24h distinguished) and the width
+// adjustment follows ICU's `adjustFieldTypes` using the matched skeleton
+// key's widths -- both tuned against Node/ICU 78. It operates on plain
+// `Vec<Field>` skeletons and the `availableFormats` table baked by
 // `crates/thaw-icu-data/tools/gen_datetime_skeletons.py`, instead of
 // icu4x's datagen-only `reference::Skeleton`/`components::Bag` types.
 //
@@ -48,7 +52,7 @@ enum TextOrNumeric {
 /// ICU's `dtTypes` type value for a field: the basis of
 /// `DateTimeMatcher::getDistance`.
 fn field_type_value(field: &Field) -> i32 {
-    use icu_datetime::provider::fields::{Hour, TimeZone, Year};
+    use icu_datetime::provider::fields::{Hour, Month, TimeZone, Weekday, Year};
     use FieldSymbol as S;
     let text = |length: FieldLength| match length {
         FieldLength::Four => DT_LONG,
@@ -60,12 +64,28 @@ fn field_type_value(field: &Field) -> i32 {
         S::Era => text(field.length),
         S::Year(Year::Cyclic) => text(field.length),
         S::Year(_) => DT_NUMERIC,
-        S::Month(_) => match field.length {
-            FieldLength::One | FieldLength::Two | FieldLength::NumericOverride(_) => DT_NUMERIC,
-            _ => text(field.length),
-        },
+        S::Month(month) => {
+            let base = match field.length {
+                FieldLength::One | FieldLength::Two | FieldLength::NumericOverride(_) => DT_NUMERIC,
+                _ => text(field.length),
+            };
+            match month {
+                Month::Format => base,
+                // `L` is `M` +/- `DT_DELTA` (ICU `dtTypes`).
+                Month::StandAlone if base == DT_NUMERIC => base + DT_DELTA,
+                Month::StandAlone => base - DT_DELTA,
+            }
+        }
         S::Week(_) | S::Day(_) => DT_NUMERIC,
-        S::Weekday(_) => text(field.length),
+        S::Weekday(weekday) => {
+            let base = text(field.length);
+            // `e` is `E` - `DT_DELTA`, `c` is `E` - 2*`DT_DELTA` (ICU `dtTypes`).
+            match weekday {
+                Weekday::Format => base,
+                Weekday::Local => base - DT_DELTA,
+                Weekday::StandAlone => base - 2 * DT_DELTA,
+            }
+        }
         S::DayPeriod(_) => text(field.length),
         S::Hour(hour) => match hour {
             Hour::H11 => DT_NUMERIC + DT_DELTA,
@@ -176,7 +196,7 @@ fn length_from_count(count: u8) -> Option<FieldLength> {
 /// (`Q`/`w`/`W`/...); such a skeleton must be *skipped* entirely rather
 /// than have the field dropped, or `MMMMW` would masquerade as `MMMM`.
 pub fn parse_skeleton(skeleton: &str) -> Option<Vec<Field>> {
-    use icu_datetime::provider::fields::{DayPeriod, Hour, Month, Weekday};
+    use icu_datetime::provider::fields::{DayPeriod, Hour};
 
     let mut fields: Vec<Field> = Vec::new();
     let mut iter = skeleton.chars().peekable();
@@ -197,10 +217,11 @@ pub fn parse_skeleton(skeleton: &str) -> Option<Vec<Field>> {
             (ch, count)
         };
         let mut symbol = FieldSymbol::try_from(symbol).ok()?;
-        // Skeletons only use the format/format-hour variants.
+        // Keep the Month/Weekday Format-vs-StandAlone context (ICU's
+        // `dtTypes` gives `L`/`c`/`e` a different type value from `M`/`E`,
+        // which matters for matching); only day periods and the 12-hour
+        // variants are normalized.
         symbol = match symbol {
-            FieldSymbol::Month(_) => FieldSymbol::Month(Month::Format),
-            FieldSymbol::Weekday(_) => FieldSymbol::Weekday(Weekday::Format),
             FieldSymbol::DayPeriod(DayPeriod::AmPm | DayPeriod::NoonMidnight) => continue,
             FieldSymbol::Hour(Hour::H11 | Hour::H12) => FieldSymbol::Hour(Hour::H12),
             other => other,
