@@ -473,6 +473,24 @@
       this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
       this._minimumSignificantDigits = intlIntegerOption(opts.minimumSignificantDigits, 1, 1, 21);
       this._maximumSignificantDigits = intlIntegerOption(opts.maximumSignificantDigits, Math.max(this._minimumSignificantDigits, 21), this._minimumSignificantDigits, 21);
+      this._signDisplay = opts.signDisplay === undefined ? 'auto' : String(opts.signDisplay);
+      if (!['auto', 'never', 'always', 'exceptZero', 'negative'].includes(this._signDisplay)) {
+        throw new RangeError(`Invalid signDisplay: ${this._signDisplay}`);
+      }
+    }
+
+    // Real `SetNumberFormatDigitOptions`' `signDisplay` handling: `-0`
+    // counts as negative for `auto`/`always` (so `-0` renders `"-0"`)
+    // but not for `negative`/`exceptZero` (which treat it as zero).
+    _signFor(number) {
+      const negative = number < 0 || Object.is(number, -0);
+      switch (this._signDisplay) {
+        case 'never': return '';
+        case 'always': return negative ? '-' : '+';
+        case 'exceptZero': return number === 0 ? '' : (negative ? '-' : '+');
+        case 'negative': return number < 0 ? '-' : '';
+        default: return negative ? '-' : '';
+      }
     }
 
     resolvedOptions() {
@@ -501,13 +519,14 @@
         result.currency = this._currency;
         result.currencyDisplay = this._currencyDisplay;
       }
+      result.signDisplay = this._signDisplay;
       return result;
     }
 
     format(value) {
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
-      const negative = number < 0 || Object.is(number, -0);
+      const sign = this._signFor(number);
       let intPart;
       let fracPart;
       if (this._significant) {
@@ -558,7 +577,7 @@
       }
       while (intPart.length < this._minimumIntegerDigits) intPart = `0${intPart}`;
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
-      const signedDigits = negative ? `-${digits}` : digits;
+      const signedDigits = `${sign}${digits}`;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
         const result = __thaw_intl_percent_format(this.locale, signedDigits);
         if (result) return result;
@@ -578,7 +597,7 @@
         ? __thaw_intl_number_format(this.locale, digits, this._useGrouping)
         : (this._useGrouping ? intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : intPart) +
           (fracPart ? `.${fracPart}` : '');
-      const signed = negative ? `-${rendered}` : rendered;
+      const signed = `${sign}${rendered}`;
       if (this._style === 'percent') return `${signed}%`;
       if (this._style === 'currency') return `${this._currency} ${signed}`;
       if (this._style !== 'unit') return signed;

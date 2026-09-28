@@ -1911,6 +1911,17 @@ fn intl_number_format_and_list_format_match_real_node() {
                const f = (opts, n) => new Intl.NumberFormat('en-US', { useGrouping: false, ...opts }).format(n);\n\
                return [f({ maximumSignificantDigits: 3 }, 1234), f({ maximumSignificantDigits: 3 }, 1.2345), f({ minimumSignificantDigits: 3 }, 2), f({ maximumSignificantDigits: 2, style: 'percent' }, 0.1234)];\n\
              }\n\
+             function signDisplays() {\n\
+               const f = (s, n) => new Intl.NumberFormat('en-US', { useGrouping: false, signDisplay: s }).format(n);\n\
+               return [\n\
+                 f('auto', 5), f('auto', 0), f('auto', -5), f('auto', -0),\n\
+                 f('never', -5),\n\
+                 f('always', 5), f('always', 0), f('always', -5), f('always', -0),\n\
+                 f('exceptZero', 5), f('exceptZero', 0),\n\
+                 f('negative', -0),\n\
+                 new Intl.NumberFormat('en-US', { useGrouping: false, style: 'percent', signDisplay: 'always' }).format(0.5),\n\
+               ];\n\
+             }\n\
              function unitDurations() {\n\
                const of = (n, unit, unitDisplay) => new Intl.NumberFormat('en-US', { style: 'unit', unit, unitDisplay }).format(n);\n\
                return [of(3, 'day', 'long'), of(1, 'day', 'long'), of(3, 'hour', 'short'), of(3, 'year', 'short'), of(3, 'day', 'narrow')];\n\
@@ -1928,6 +1939,10 @@ fn intl_number_format_and_list_format_match_real_node() {
     assert_eq!(
         call("significantDigits", "[]"),
         r#"["1230","1.23","2.00","12%"]"#
+    );
+    assert_eq!(
+        call("signDisplays", "[]"),
+        r#"["5","0","-5","-0","5","+5","+0","-5","-0","+5","0","0","+50%"]"#
     );
     assert_eq!(
         call("unitDurations", "[]"),
