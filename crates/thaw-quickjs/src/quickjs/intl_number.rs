@@ -74,8 +74,7 @@ fn intl_number_format(locale_tag: &str, digits: &str, use_grouping: bool) -> Str
 /// A curated locale that natively uses the given numbering system, used
 /// to source that system's symbols when it's been explicitly requested on
 /// a locale that doesn't define them (see `intl_number_format`'s own
-/// comment). Only the non-Latin systems `thaw-icu-data`'s curated locale
-/// list can actually define.
+/// comment).
 fn intl_numbering_system_representative(numbering_system: &str) -> Option<&'static str> {
     // Only the systems whose CLDR *separators* differ from Latin
     // (grouping `٬`, decimal `٫`): a system that differs from Latin only
@@ -85,6 +84,7 @@ fn intl_numbering_system_representative(numbering_system: &str) -> Option<&'stat
     // `1234567` as `1,234,567`, not Bengali's `12,34,567`).
     match numbering_system {
         "arab" => Some("ar-SA"),
+        "arabext" => Some("fa"),
         _ => None,
     }
 }

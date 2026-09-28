@@ -2892,6 +2892,7 @@ fn intl_number_notation_numbering_system_and_accounting_match_real_node() {
                const g = (nu, n) => new Intl.NumberFormat('en', { numberingSystem: nu }).format(n);\n\
                return [\n\
                  g('arab', 1234), g('arab', 1234567),\n\
+                 g('arabext', 1234567.5),\n\
                  g('beng', 1234567), g('deva', 1234567), g('thai', 1234567), g('hanidec', 1234567),\n\
                  new Intl.NumberFormat('en', { numberingSystem: 'arab' }).resolvedOptions().numberingSystem,\n\
                ];\n\
@@ -2915,6 +2916,7 @@ fn intl_number_notation_numbering_system_and_accounting_match_real_node() {
         serde_json::to_string(&[
             "١٬٢٣٤",
             "١٬٢٣٤٬٥٦٧",
+            "۱٬۲۳۴٬۵۶۷٫۵",
             "১,২৩৪,৫৬৭",
             "१,२३४,५६७",
             "๑,๒๓๔,๕๖๗",
