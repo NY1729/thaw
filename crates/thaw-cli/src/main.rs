@@ -9,7 +9,7 @@ include!("compat.rs");
 include!("node_compat.rs");
 include!("completeness.rs");
 
-const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw x <package>[@<version>] [--] [arguments...]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--no-install] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw completeness [--json] [--with-node]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
+const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw x <package>[@<version>] [--] [arguments...]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--no-install] [--icu4c] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw completeness [--json] [--with-node]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -616,6 +616,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut static_link = false;
     let mut embed_native_addons = true;
     let mut install_missing = true;
+    let mut icu4c = false;
     let mut registry_was_explicit = false;
 
     let mut i = 0;
@@ -671,6 +672,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
             "--static" => static_link = true,
             "--external-native" => embed_native_addons = false,
             "--no-install" => install_missing = false,
+            "--icu4c" => icu4c = true,
             other => {
                 if input.is_some() {
                     return Err(format!("unexpected extra argument `{other}`"));
@@ -736,6 +738,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
         assets.as_deref(),
         embed_native_addons,
         install_missing,
+        icu4c,
     );
     if let Some(path) = generated_input {
         let _ = std::fs::remove_file(path);

@@ -99,6 +99,7 @@ fn build_fetches_a_missing_bare_import_when_enabled() {
         None,
         true,
         true,
+        false,
     )
     .unwrap();
     let result = Command::new(&output).output().unwrap();
