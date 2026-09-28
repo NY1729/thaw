@@ -312,7 +312,10 @@ impl writeable::PartsWrite for DateTimePartsRecorder {
     }
 }
 
-fn recorder_to_json_parts(mut recorder: DateTimePartsRecorder) -> String {
+fn recorder_to_json_parts(
+    mut recorder: DateTimePartsRecorder,
+    month_override: Option<&str>,
+) -> String {
     recorder.spans.sort_by_key(|(start, _, _)| *start);
     let mut parts = Vec::new();
     let mut cursor = 0;
@@ -320,7 +323,14 @@ fn recorder_to_json_parts(mut recorder: DateTimePartsRecorder) -> String {
         if start > cursor {
             parts.push((&recorder.buffer[cursor..start], "literal"));
         }
-        parts.push((&recorder.buffer[start..end], value));
+        // `month_override` replaces the numeric month (e.g. icu4x's Hebrew
+        // code number with the CLDR/ICU4C ordinal).
+        let text = if value == "month" {
+            month_override.unwrap_or(&recorder.buffer[start..end])
+        } else {
+            &recorder.buffer[start..end]
+        };
+        parts.push((text, value));
         cursor = end;
     }
     if cursor < recorder.buffer.len() {
@@ -344,13 +354,16 @@ fn recorder_to_json_parts(mut recorder: DateTimePartsRecorder) -> String {
 fn write_parts_json(formatted: &impl writeable::Writeable) -> Option<String> {
     let mut recorder = DateTimePartsRecorder::default();
     writeable::Writeable::write_to_parts(formatted, &mut recorder).ok()?;
-    Some(recorder_to_json_parts(recorder))
+    Some(recorder_to_json_parts(recorder, None))
 }
 
-fn write_try_parts_json(formatted: &impl writeable::TryWriteable) -> Option<String> {
+fn write_try_parts_json(
+    formatted: &impl writeable::TryWriteable,
+    month_override: Option<&str>,
+) -> Option<String> {
     let mut recorder = DateTimePartsRecorder::default();
     match writeable::TryWriteable::try_write_to_parts(formatted, &mut recorder) {
-        Ok(Ok(())) => Some(recorder_to_json_parts(recorder)),
+        Ok(Ok(())) => Some(recorder_to_json_parts(recorder, month_override)),
         _ => None,
     }
 }
@@ -605,6 +618,29 @@ fn format_skeleton_pattern(
         })
         .collect();
 
+    // icu4x renders a Hebrew numeric month with its code number (and a
+    // `6a`/`6b` leap suffix), but CLDR/ICU4C use the *ordinal* month
+    // (`MonthInfo::ordinal`, which counts Adar I). Compute it once and swap
+    // the rendered month part below.
+    let month_override = if kind == icu_calendar::AnyCalendarKind::Hebrew
+        && pattern_fields.iter().any(|field| {
+            matches!(field.symbol, FieldSymbol::Month(_))
+                && matches!(field.length, FieldLength::One | FieldLength::Two)
+        })
+    {
+        let hebrew = iso_date.to_calendar(icu_calendar::cal::Hebrew::new());
+        let ordinal = hebrew.month().ordinal;
+        let decimal = icu_decimal::DecimalFormatter::try_new_unstable(
+            provider,
+            icu_decimal::DecimalFormatterPreferences::from(&prefs),
+            icu_decimal::options::GroupingStrategy::Never.into(),
+        )
+        .ok()?;
+        Some(decimal.format(&icu_decimal::input::Decimal::from(ordinal as i64)).to_string())
+    } else {
+        None
+    };
+
     macro_rules! format_cal {
         ($C:ty, $FSet:ty, $input:expr) => {{
             use icu_datetime::pattern::{
@@ -696,7 +732,7 @@ fn format_skeleton_pattern(
                 .ok()?;
             let formatter = names.with_pattern_unchecked(&pattern);
             let formatted = formatter.format(&$input);
-            write_try_parts_json(&formatted)
+            write_try_parts_json(&formatted, month_override.as_deref())
         }};
     }
     macro_rules! go {

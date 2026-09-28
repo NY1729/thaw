@@ -4260,3 +4260,41 @@ fn intl_datetime_patternmap_selection_matches_real_node() {
         .unwrap()
     );
 }
+
+/// icu4x renders a Hebrew numeric month with its code number (and a
+/// `6a`/`6b` leap suffix), but CLDR/ICU4C use the ordinal month (Adar I
+/// counts), so `Intl.DateTimeFormat` swaps in `MonthInfo::ordinal` for a
+/// numeric month pattern.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_hebrew_ordinal_month_matches_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, ms) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts }).format(new Date(ms));\n\
+             }\n\
+             function all() {\n\
+               const opts = { calendar: 'hebrew', year: 'numeric', month: 'long', day: 'numeric' };\n\
+               return [\n\
+                 show('ja', opts, Date.UTC(2024, 6, 4)),\n\
+                 show('ja', opts, Date.UTC(2023, 6, 4)),\n\
+                 show('ja', opts, Date.UTC(2024, 1, 15)),\n\
+                 show('ja', opts, Date.UTC(2024, 2, 15)),\n\
+                 show('ja', { calendar: 'hebrew', year: 'numeric', month: 'numeric', day: 'numeric' }, Date.UTC(2024, 8, 15)),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "AM5784年10月28日",
+            "AM5783年10月15日",
+            "AM5784年6月6日",
+            "AM5784年7月5日",
+            "AM5784/13/12",
+        ])
+        .unwrap()
+    );
+}
