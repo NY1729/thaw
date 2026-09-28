@@ -65,6 +65,33 @@
     return text.length >= width ? text : '0'.repeat(width - text.length) + text;
   }
 
+  // Splits two endpoint part lists into their shared prefix/suffix and the
+  // differing middles -- the shape ECMA-402 range `formatToParts` needs
+  // (`shared`/`startRange`/`endRange`). Used only when the opt-in ICU4C
+  // backend isn't available, where the exact locale range pattern isn't
+  // accessible.
+  function intlPartitionRange(startParts, endParts) {
+    const equal = (a, b) => a.type === b.type && a.value === b.value;
+    let prefix = 0;
+    while (prefix < startParts.length && prefix < endParts.length && equal(startParts[prefix], endParts[prefix])) {
+      prefix += 1;
+    }
+    let suffix = 0;
+    while (
+      suffix < startParts.length - prefix &&
+      suffix < endParts.length - prefix &&
+      equal(startParts[startParts.length - 1 - suffix], endParts[endParts.length - 1 - suffix])
+    ) {
+      suffix += 1;
+    }
+    return {
+      shared: startParts.slice(0, prefix),
+      startMiddle: startParts.slice(prefix, startParts.length - suffix),
+      endMiddle: endParts.slice(prefix, endParts.length - suffix),
+      trailing: startParts.slice(startParts.length - suffix),
+    };
+  }
+
   // Real Intl's own `timeZoneName: 'shortOffset'`/`'longOffset'` (and
   // this polyfill's honest fallback for `'short'`/`'long'`/`*Generic`
   // when `jiff`'s abbreviation isn't a plain alphabetic code, or for
@@ -720,8 +747,16 @@
         );
         if (formatted) return formatted;
       }
-      if (startMs === endMs) return this.format(startDate);
-      return `${this.format(startDate)} \u2013 ${this.format(endDate)}`;
+      const startParts = this.formatToParts(startDate);
+      if (startMs === endMs) return startParts.map(part => part.value).join('');
+      const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
+        startParts,
+        this.formatToParts(endDate),
+      );
+      const separator = '\u2009\u2013\u2009';
+      return [...shared, ...startMiddle, { value: separator }, ...endMiddle, ...trailing]
+        .map(part => part.value)
+        .join('');
     }
 
     // `Intl.DateTimeFormat.prototype.formatRangeToParts` -- ICU4C marks
@@ -752,10 +787,21 @@
         );
         if (parts.length) return parts;
       }
+      const startParts = this.formatToParts(startDate);
       if (startMs === endMs) {
-        return this.formatToParts(startDate).map(part => ({ ...part, source: 'shared' }));
+        return startParts.map(part => ({ ...part, source: 'shared' }));
       }
-      return [{ type: 'literal', value: this.formatRange(startDate, endDate), source: 'shared' }];
+      const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
+        startParts,
+        this.formatToParts(endDate),
+      );
+      return [
+        ...shared.map(part => ({ ...part, source: 'shared' })),
+        ...startMiddle.map(part => ({ ...part, source: 'startRange' })),
+        { type: 'literal', value: '\u2009\u2013\u2009', source: 'shared' },
+        ...endMiddle.map(part => ({ ...part, source: 'endRange' })),
+        ...trailing.map(part => ({ ...part, source: 'shared' })),
+      ];
     }
   }
 
@@ -1313,7 +1359,34 @@
         if (formatted) return formatted;
       }
       if (startNumber === endNumber) return `~${this.format(start)}`;
-      return `${this.format(start)}\u2013${this.format(end)}`;
+      const separator = this._numberRangeSeparator();
+      if (!this._rangeSharesAffixes()) {
+        return `${this.format(start)}${separator}${this.format(end)}`;
+      }
+      const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
+        this.formatToParts(start),
+        this.formatToParts(end),
+      );
+      return [...shared, ...startMiddle, { value: separator }, ...endMiddle, ...trailing]
+        .map(part => part.value)
+        .join('');
+    }
+
+    _numberRangeSeparator() {
+      return this._notation === 'compact' || this._style === 'currency' || this._style === 'percent'
+        ? ' \u2013 '
+        : '\u2013';
+    }
+
+    // Currency/percent symbols (and compact suffixes) repeat on *both*
+    // endpoints, so they aren't shared range text; every other style's
+    // common affixes (a unit's `" days"`, decimal digits) are.
+    _rangeSharesAffixes() {
+      return !(
+        this._notation === 'compact' ||
+        this._style === 'currency' ||
+        this._style === 'percent'
+      );
     }
 
     // `Intl.NumberFormat.prototype.formatRangeToParts` -- ICU4C number
@@ -1342,7 +1415,25 @@
           ...this.formatToParts(start).map(part => ({ ...part, source: 'shared' })),
         ];
       }
-      return [{ type: 'literal', value: this.formatRange(start, end), source: 'shared' }];
+      const separator = this._numberRangeSeparator();
+      if (!this._rangeSharesAffixes()) {
+        return [
+          ...this.formatToParts(start).map(part => ({ ...part, source: 'startRange' })),
+          { type: 'literal', value: separator, source: 'shared' },
+          ...this.formatToParts(end).map(part => ({ ...part, source: 'endRange' })),
+        ];
+      }
+      const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
+        this.formatToParts(start),
+        this.formatToParts(end),
+      );
+      return [
+        ...shared.map(part => ({ ...part, source: 'shared' })),
+        ...startMiddle.map(part => ({ ...part, source: 'startRange' })),
+        { type: 'literal', value: separator, source: 'shared' },
+        ...endMiddle.map(part => ({ ...part, source: 'endRange' })),
+        ...trailing.map(part => ({ ...part, source: 'shared' })),
+      ];
     }
   }
 

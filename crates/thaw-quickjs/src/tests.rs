@@ -3954,3 +3954,73 @@ fn intl_number_format_to_parts_compact_and_scientific_match_real_node() {
         r#"[{"type":"integer","value":"1"},{"type":"decimal","value":"."},{"type":"fraction","value":"2"},{"type":"literal","value":" "},{"type":"compact","value":"thousand"}]"#
     );
 }
+
+/// Without the opt-in ICU4C backend, the range methods use a real
+/// shared/startRange/endRange partition of the two endpoints rather than
+/// collapsing to a single part. Cross-checked against real Node for the
+/// cases the locale-independent separator matches (en date, and en
+/// numbers).
+#[cfg(all(feature = "intl", not(feature = "icu4c")))]
+#[test]
+fn intl_range_fallback_partitions_endpoints_like_real_node() {
+    assert_eq!(
+        load(
+            "function dateRange() {\n\
+               return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' })\n\
+                 .formatRange(new Date(Date.UTC(2024, 6, 4)), new Date(Date.UTC(2024, 6, 5)));\n\
+             }\n\
+             function dateParts() {\n\
+               return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' })\n\
+                 .formatRangeToParts(new Date(Date.UTC(2024, 6, 4)), new Date(Date.UTC(2024, 6, 5)));\n\
+             }\n\
+             function num(locale, opts, start, end) {\n\
+               return new Intl.NumberFormat(locale, opts).formatRange(start, end);\n\
+             }\n\
+             function numParts() {\n\
+               return new Intl.NumberFormat('en-US', { style: 'unit', unit: 'day' }).formatRangeToParts(3, 5);\n\
+             }\n\
+             function currencyParts() {\n\
+               return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).formatRangeToParts(3, 5);\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 num('en-US', {}, 3, 5),\n\
+                 num('en-US', {}, 3, 3),\n\
+                 num('en-US', { style: 'currency', currency: 'USD' }, 3, 5),\n\
+                 num('en-US', { style: 'percent' }, 0.03, 0.05),\n\
+                 num('en-US', { style: 'unit', unit: 'day' }, 3, 5),\n\
+                 num('en-US', { notation: 'compact' }, 3000, 5000),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("dateRange", "[]"),
+        serde_json::to_string("Jul 4\u{2009}\u{2013}\u{2009}5, 2024").unwrap()
+    );
+    assert_eq!(
+        call("dateParts", "[]"),
+        r#"[{"type":"month","value":"Jul","source":"shared"},{"type":"literal","value":" ","source":"shared"},{"type":"day","value":"4","source":"startRange"},{"type":"literal","value":" – ","source":"shared"},{"type":"day","value":"5","source":"endRange"},{"type":"literal","value":", ","source":"shared"},{"type":"year","value":"2024","source":"shared"}]"#
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "3\u{2013}5",
+            "~3",
+            "$3.00 \u{2013} $5.00",
+            "3% \u{2013} 5%",
+            "3\u{2013}5 days",
+            "3K \u{2013} 5K",
+        ])
+        .unwrap()
+    );
+    assert_eq!(
+        call("numParts", "[]"),
+        r#"[{"type":"integer","value":"3","source":"startRange"},{"type":"literal","value":"–","source":"shared"},{"type":"integer","value":"5","source":"endRange"},{"type":"literal","value":" ","source":"shared"},{"type":"unit","value":"days","source":"shared"}]"#
+    );
+    assert_eq!(
+        call("currencyParts", "[]"),
+        r#"[{"type":"currency","value":"$","source":"startRange"},{"type":"integer","value":"3","source":"startRange"},{"type":"decimal","value":".","source":"startRange"},{"type":"fraction","value":"00","source":"startRange"},{"type":"literal","value":" – ","source":"shared"},{"type":"currency","value":"$","source":"endRange"},{"type":"integer","value":"5","source":"endRange"},{"type":"decimal","value":".","source":"endRange"},{"type":"fraction","value":"00","source":"endRange"}]"#
+    );
+}
