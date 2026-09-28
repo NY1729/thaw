@@ -1315,6 +1315,28 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript Intl collator");
+                #[cfg(feature = "icu4c")]
+                let intl_collator_compare_search_function = Function::new(
+                    ctx.clone(),
+                    |locale: String,
+                     sensitivity: String,
+                     ignore_punctuation: bool,
+                     numeric: bool,
+                     case_first: String,
+                     a: String,
+                     b: String| {
+                        intl_collator_compare_search(
+                            &locale,
+                            &sensitivity,
+                            ignore_punctuation,
+                            numeric,
+                            &case_first,
+                            &a,
+                            &b,
+                        )
+                    },
+                )
+                .expect("failed to create JavaScript Intl search collator");
                 #[cfg(feature = "intl")]
                 let intl_plural_category_function = Function::new(
                     ctx.clone(),
@@ -1509,6 +1531,13 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_collator_compare", intl_collator_compare_function)
                     .expect("failed to install JavaScript Intl collator");
+                #[cfg(feature = "icu4c")]
+                ctx.globals()
+                    .set(
+                        "__thaw_intl_collator_compare_search",
+                        intl_collator_compare_search_function,
+                    )
+                    .expect("failed to install JavaScript Intl search collator");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_plural_category", intl_plural_category_function)

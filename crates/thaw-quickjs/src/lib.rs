@@ -766,6 +766,9 @@ include!("quickjs/intl_plurals.rs");
 #[cfg(feature = "intl")]
 include!("quickjs/intl_collator.rs");
 
+#[cfg(feature = "icu4c")]
+include!("quickjs/intl_collator_icu4c.rs");
+
 #[cfg(feature = "intl")]
 include!("quickjs/intl_segmenter.rs");
 

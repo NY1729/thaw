@@ -3610,3 +3610,40 @@ fn intl_datetime_calendar_period_fields_match_real_node() {
         .unwrap()
     );
 }
+
+/// `Intl.Collator` with `usage: 'search'` via the opt-in ICU4C backend
+/// (feature `icu4c`, default off) -- ICU4X has no search-collation
+/// concept. Cross-checked against real Node.
+#[cfg(all(feature = "intl", feature = "icu4c"))]
+#[test]
+fn intl_collator_search_usage_matches_real_node() {
+    assert_eq!(
+        load(
+            "function cmp(locale, opts, a, b) {\n\
+               const sign = n => n < 0 ? -1 : n > 0 ? 1 : 0;\n\
+               return sign(new Intl.Collator(locale, { usage: 'search', ...opts }).compare(a, b));\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 cmp('en', {}, 'a', 'A'), cmp('en', {}, 'a', 'á'), cmp('en', {}, 'æ', 'ae'),\n\
+                 cmp('en', {}, 'ß', 'ss'), cmp('en', {}, 'e', 'é'),\n\
+                 cmp('de', {}, 'a', 'ä'), cmp('de', {}, 'ss', 'ß'),\n\
+                 cmp('en', { sensitivity: 'base' }, 'a', 'á'),\n\
+                 cmp('en', {}, '\u{0627}', '\u{0623}'), cmp('ja', {}, '\u{3042}', '\u{30a2}'),\n\
+               ];\n\
+             }\n\
+             function usageOption() {\n\
+               return new Intl.Collator('en', { usage: 'search' }).resolvedOptions().usage;\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[-1, -1, 1, 1, -1, -1, -1, 0, -1, -1]).unwrap()
+    );
+    assert_eq!(
+        call("usageOption", "[]"),
+        serde_json::to_string("search").unwrap()
+    );
+}

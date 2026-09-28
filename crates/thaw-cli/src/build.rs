@@ -258,6 +258,7 @@ fn build_with_assets(
         assets,
         true,
         false,
+        false,
     )
 }
 
@@ -278,6 +279,11 @@ fn build_with_native_mode(
     // `false` (tests, and `--no-install` on the CLI) keeps the build
     // offline and reports the existing "run `thaw install`" help instead.
     install_missing: bool,
+    // `thaw build --icu4c`: compile the opt-in ICU4C backend into the
+    // QuickJS staticlib for `Intl.Collator usage: 'search'`. ICU4C is
+    // resolved at runtime via `dlopen`, so this only selects the feature
+    // (no linker changes, and a program still runs without ICU4C).
+    icu4c: bool,
 ) -> Result<(), String> {
     if static_link && !embed_native_addons {
         return Err("--static and --external-native cannot be used together".into());
@@ -566,6 +572,9 @@ fn build_with_native_mode(
             }
             if uses_intl {
                 features.push("intl");
+            }
+            if icu4c {
+                features.push("icu4c");
             }
             if features.len() == 3 {
                 build_staticlib("thaw-quickjs")

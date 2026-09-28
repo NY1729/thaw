@@ -33,6 +33,12 @@ intl = [
     "dep:icu_time",
     "dep:writeable",
 ]
+# Optional, default-off ICU4C backend for the few ECMA-402 behaviors
+# ICU4X cannot express (`Intl.Collator`'s `usage: 'search'`). Selecting
+# it makes the generated program link the system `libicui18n`/`libicuuc`
+# dynamically, so it is opt-in via `thaw build --icu4c` and never part
+# of the default/static build.
+icu4c = []
 
 [dependencies]
 aes = "0.8"
