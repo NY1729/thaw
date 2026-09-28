@@ -228,6 +228,7 @@ fn find_best_skeleton<'a>(
 ) -> Option<SkeletonMatch<'a>> {
     let mut closest: Option<SkeletonMatch<'a>> = None;
     let mut closest_distance = u32::MAX;
+    let mut closest_exact = false;
 
     for (skeleton, value) in skeletons {
         let mut missing_fields = 0usize;
@@ -271,8 +272,16 @@ fn find_best_skeleton<'a>(
             }
         }
 
-        if distance < closest_distance {
+        // On a distance tie, prefer a candidate whose skeleton exactly
+        // equals the request (same fields and lengths): ICU's
+        // `PatternMap` resolves an exact requested skeleton to its
+        // availableFormat entry, so e.g. en-GB `{year,month,day}` keeps
+        // `yMd`'s `dd/MM/y` instead of the wider `yMMdd`'s narrowing.
+        let exact = skeleton.len() == fields.len()
+            && skeleton.iter().zip(fields.iter()).all(|(a, b)| a == b);
+        if distance < closest_distance || (distance == closest_distance && exact && !closest_exact) {
             closest_distance = distance;
+            closest_exact = exact;
             closest = Some(SkeletonMatch {
                 skeleton,
                 value,

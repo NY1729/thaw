@@ -4081,3 +4081,43 @@ fn intl_datetime_skeleton_matching_matches_real_node() {
         .unwrap()
     );
 }
+
+/// ECMA-402 `ToDateTimeOptions(options, "any", "date")` defaulting
+/// (no date *or* time field -> `{year,month,day:'numeric'}`; `era` is not
+/// a date field for this check) and ICU's exact-skeleton tie-break
+/// (en-GB keeps `yMd`'s `dd/MM/y` for a `{year,month,day}` request).
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_default_fields_and_era_match_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, ms) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts }).format(new Date(ms));\n\
+             }\n\
+             function all() {\n\
+               const t = Date.UTC(2024, 6, 4);\n\
+               return [\n\
+                 show('en-US', {}, t),\n\
+                 show('en-US', {era:'long'}, t),\n\
+                 show('en-GB', {year:'numeric',month:'numeric',day:'numeric'}, t),\n\
+                 show('en-GB', {era:'long'}, t),\n\
+                 show('fr', {year:'numeric',month:'numeric',day:'numeric'}, t),\n\
+                 show('de', {era:'long'}, t),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "7/4/2024",
+            "7/4/2024 Anno Domini",
+            "04/07/2024",
+            "04/07/2024 Anno Domini",
+            "04/07/2024",
+            "04.07.2024 n. Chr.",
+        ])
+        .unwrap()
+    );
+}
