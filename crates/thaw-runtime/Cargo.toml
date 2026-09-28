@@ -28,3 +28,14 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bun
 # Non-ISO calendar systems for Temporal's `PlainDate`-family `calendarId`
 # (`hebrew`, `japanese`, `islamic-*`, ...). jiff is ISO-only.
 icu_calendar = "2.3.0"
+
+[dev-dependencies]
+# Test-only, mirroring thaw-std's own `[dev-dependencies]` back on this
+# crate -- `thaw_json_strict_equal`/`thaw_json_same_value_zero`/the
+# `Json` accessors `AnyKey` (`native_values/maps.rs`) calls are `extern
+# "C"` declarations resolved at link time (see their own doc comments),
+# not a real Cargo dependency, so `cargo test -p thaw-runtime` in
+# isolation needs thaw-std's rlib linked in to resolve them; the final
+# compiled-program build links both crates' *staticlibs* together
+# instead (thaw-cli's own linking step), where this entry plays no part.
+thaw-std = { path = "../thaw-std" }

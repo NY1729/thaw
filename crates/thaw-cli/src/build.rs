@@ -609,9 +609,21 @@ fn build_with_native_mode(
     if static_link {
         linker.arg("-static").arg("-Wl,--no-dynamic-linker");
     }
+    linker.arg(&obj_path).arg(&arena_lib);
+    // `std_lib`/`runtime_lib` have a genuine two-way symbol dependency:
+    // thaw-std's `json.rs` calls a couple of thaw-runtime date/string
+    // helpers, and thaw-runtime's `AnyKey`/any-array search call
+    // thaw-std's `Json` comparison helpers (see thaw-std's own doc
+    // comment on `thaw_json_strict_equal`). A single left-to-right
+    // archive scan only resolves the *forward* direction (an archive
+    // can't be reopened for a symbol that only becomes outstanding once
+    // a *later* archive is scanned) -- listed twice each here, a
+    // portable fix needing no `--start-group`/`--end-group`
+    // linker-specific support, so the second `std_lib` pass picks up
+    // what the first `runtime_lib` pass left outstanding.
     linker
-        .arg(&obj_path)
-        .arg(&arena_lib)
+        .arg(&std_lib)
+        .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
         .arg(&jit_lib);
@@ -621,6 +633,12 @@ fn build_with_native_mode(
     if let Some(napi_lib) = napi_lib {
         linker.arg(napi_lib);
     }
+    // thaw-quickjs (`thaw_js_dynamic_object_query`) and thaw-napi also call
+    // back into thaw-std's `Json` helpers the same "resolved at link time"
+    // way -- another trailing pass over `std_lib`/`runtime_lib` after both
+    // archives, for the same backward-reference reason as the doubled
+    // pair above.
+    linker.arg(&std_lib).arg(&runtime_lib);
     linker
         // QuickJS-NG's C code calls libm math functions directly; `rustc`
         // normally adds `-lm` automatically when it does the final link,

@@ -124,6 +124,12 @@ fn compile_and_run_output_with_env(
     let link_status = cc_command()
         .arg(&obj_path)
         .arg(&arena_lib)
+        // `std_lib`/`runtime_lib` have a genuine two-way symbol
+        // dependency now (see the sibling `compile_and_invoke_lambda`'s
+        // own comment on this same pattern) -- listed twice each so a
+        // single left-to-right archive scan resolves both directions.
+        .arg(&std_lib)
+        .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
         .arg(&quickjs_lib)
@@ -213,11 +219,25 @@ fn compile_and_invoke_lambda(source: &str, test_name: &str, event_body: &str) ->
     let exe_path = dir.join("out");
     compiler.write_object_file(&obj_path).unwrap();
 
+    let std_lib = build_staticlib("thaw-std");
+    let runtime_lib = build_staticlib("thaw-runtime");
     let link_status = cc_command()
         .arg(&obj_path)
         .arg(build_staticlib("thaw-arena"))
-        .arg(build_staticlib("thaw-std"))
-        .arg(build_staticlib("thaw-runtime"))
+        // `std_lib`/`runtime_lib` now have a genuine two-way symbol
+        // dependency (thaw-std's `json.rs` calls a couple of
+        // thaw-runtime date/string helpers; thaw-runtime's `AnyKey`/
+        // any-array search call thaw-std's `Json` comparison helpers,
+        // see thaw-std's own doc comment on `thaw_json_strict_equal`) --
+        // a single left-to-right archive scan only resolves the
+        // *forward* direction, so each is listed twice (a portable fix
+        // that needs no `--start-group`/`--end-group` linker-specific
+        // support): the second `std_lib` pass picks up what the first
+        // `runtime_lib` pass left outstanding.
+        .arg(&std_lib)
+        .arg(&runtime_lib)
+        .arg(&std_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()

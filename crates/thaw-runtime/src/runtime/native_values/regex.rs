@@ -11,9 +11,27 @@ thread_local! {
 }
 
 struct RegexMatchMeta {
-    groups: serde_json::Value,
+    groups: *mut u8,
     index: f64,
     input: String,
+}
+
+// `thaw-runtime` has no Rust-level access to thaw-std's `Json` `Value`
+// type (see `AnyKey`'s own doc comment in `maps.rs`), so the named-capture
+// object is built through thaw-std's exported JSON entry point: serialize
+// the (string-valued) groups to JSON text and parse it back as a live
+// `Json` value. `thaw_json_parse` returns a leaked, shared value, so the
+// pointer stays valid/identity-stable for the process lifetime.
+unsafe extern "C" {
+    fn thaw_json_parse(text: *const std::os::raw::c_char) -> *mut u8;
+}
+
+fn groups_json_pointer(groups: serde_json::Map<String, serde_json::Value>) -> *mut u8 {
+    let text = serde_json::to_string(&serde_json::Value::Object(groups)).unwrap_or_default();
+    let Ok(text) = std::ffi::CString::new(text) else {
+        return std::ptr::null_mut();
+    };
+    unsafe { thaw_json_parse(text.as_ptr()) }
 }
 
 /// A compiled pattern: the `regex` crate when it can compile the pattern,
@@ -540,7 +558,7 @@ pub unsafe extern "C" fn thaw_regex_exec(
                 .collect();
             Some((
                 captures.into_positional(),
-                serde_json::Value::Object(groups),
+                groups_json_pointer(groups),
                 index,
             ))
         })
@@ -573,7 +591,7 @@ pub unsafe extern "C" fn thaw_regex_exec(
 ///
 /// # Safety
 /// `matches` must be null or an array handle returned by Thaw.
-pub unsafe extern "C" fn thaw_regex_exec_groups(matches: *const u8) -> *mut serde_json::Value {
+pub unsafe extern "C" fn thaw_regex_exec_groups(matches: *const u8) -> *mut u8 {
     if matches.is_null() {
         return std::ptr::null_mut();
     }
@@ -583,9 +601,9 @@ pub unsafe extern "C" fn thaw_regex_exec_groups(matches: *const u8) -> *mut serd
     }
     REGEX_META.with(|stored| {
         stored
-            .borrow_mut()
-            .get_mut(&(matches as usize))
-            .map_or(std::ptr::null_mut(), |meta| &mut meta.groups)
+            .borrow()
+            .get(&(matches as usize))
+            .map_or(std::ptr::null_mut(), |meta| meta.groups)
     })
 }
 
@@ -740,7 +758,7 @@ pub unsafe extern "C" fn thaw_regex_match(
                             })
                         })
                         .collect();
-                    meta = Some((serde_json::Value::Object(groups), index));
+                    meta = Some((groups_json_pointer(groups), index));
                     captures.into_positional()
                 }
                 None => Vec::new(),
@@ -846,7 +864,7 @@ pub unsafe extern "C" fn thaw_regex_match_all(
                     .collect();
                 (
                     captures.into_positional(),
-                    serde_json::Value::Object(groups),
+                    groups_json_pointer(groups),
                     index,
                 )
             })

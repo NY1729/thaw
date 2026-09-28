@@ -20,6 +20,21 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize,
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+// With the `quickjs` feature (on by default), this crate transitively
+// needs thaw-quickjs's `thaw_js_dynamic_object_query`, which calls
+// thaw-std's `thaw_json_parse` as an `extern "C"` declaration resolved at
+// link time (no real Rust-level dependency between these archives -- see
+// thaw-runtime's own `Cargo.toml` comment) -- without this marker import,
+// `cargo test` never actually links thaw-std's rlib in and that symbol
+// stays unresolved.
+#[cfg(test)]
+use thaw_std as _;
+// thaw-std's own code calls a couple of thaw-runtime helpers the same
+// "resolved at link time" way (`thaw_date_to_iso_string`/
+// `thaw_string_to_number`/the `fetch`/`http` event-loop hooks).
+#[cfg(test)]
+use thaw_runtime as _;
+
 type NapiEnv = *mut Env;
 type NapiValue = *mut Value;
 type NapiCallbackInfo = *mut CallbackInfo;

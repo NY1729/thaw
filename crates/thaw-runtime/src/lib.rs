@@ -30,6 +30,18 @@ use std::time::{Duration, Instant};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
+// `arrays.rs`/`maps.rs` call several `Json` helpers (`thaw_json_strict_
+// equal`, `thaw_json_typeof`, ...) that are `extern "C"` declarations
+// resolved at link time against thaw-std's own staticlib (see their own
+// doc comments -- not a real Cargo dependency, so `thaw-std` only exists
+// as a `[dev-dependencies]` entry here, the same way thaw-std's own
+// `http.rs` mirrors this back with `#[cfg(test)] use thaw_runtime as
+// _;`). Without this marker import, `cargo test -p thaw-runtime` in
+// isolation never actually links thaw-std's rlib in (nothing here
+// references it by path), and those externs are left unresolved.
+#[cfg(test)]
+use thaw_std as _;
+
 include!("runtime/native_values/numbers.rs");
 include!("runtime/native_values/strings.rs");
 include!("runtime/native_values/arrays.rs");

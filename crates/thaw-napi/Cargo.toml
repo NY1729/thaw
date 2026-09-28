@@ -21,3 +21,16 @@ libc = "0.2"
 serde_json = "1"
 tempfile = "3"
 thaw-quickjs = { path = "../thaw-quickjs", optional = true, default-features = false }
+
+[dev-dependencies]
+# Test-only: with the `quickjs` feature (on by default), this crate
+# transitively needs thaw-quickjs's `thaw_js_dynamic_object_query`, which
+# calls thaw-std's `thaw_json_parse` as an `extern "C"` declaration
+# resolved at link time (no real Rust-level dependency between these
+# archives -- see thaw-runtime's own `Cargo.toml` comment) -- this
+# crate's own unit tests need thaw-std's rlib linked in to resolve it.
+# thaw-std in turn calls a couple of thaw-runtime helpers the same way
+# (`thaw_date_to_iso_string`/`thaw_string_to_number`/the `fetch`/`http`
+# event-loop hooks), so thaw-runtime needs to come along too.
+thaw-std = { path = "../thaw-std" }
+thaw-runtime = { path = "../thaw-runtime" }

@@ -802,12 +802,23 @@ pub unsafe extern "C" fn thaw_js_dynamic_object_query(
     });
     match result {
         Ok(json) => {
-            // Build the JIT dictionary (`*mut serde_json::Value`) directly:
-            // the same layout thaw-std's dictionary host reads. `preserve_order`
-            // keeps key insertion order.
-            let value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
-            let leaked = Box::into_raw(Box::new(value));
-            f64::from_bits(leaked as usize as u64)
+            // Hand the JIT dictionary back as a live thaw-std `Json`
+            // value (its own `Value` layout now, not `serde_json::Value`)
+            // via thaw-std's exported parser -- the same "resolved at
+            // link time" boundary `thaw-runtime`'s `AnyKey` uses.
+            unsafe extern "C" {
+                fn thaw_json_parse(text: *const c_char) -> *mut u8;
+            }
+            let Ok(text) = CString::new(json) else {
+                if let Some(error) = error.as_mut() {
+                    *error = CString::new("dynamic object query produced a NUL")
+                        .unwrap_or_default()
+                        .into_raw();
+                }
+                return 0.0;
+            };
+            let parsed = unsafe { thaw_json_parse(text.as_ptr()) };
+            f64::from_bits(parsed as usize as u64)
         }
         Err(message) => {
             if let Some(error) = error.as_mut() {

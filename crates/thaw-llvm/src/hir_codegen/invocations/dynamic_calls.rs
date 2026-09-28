@@ -101,7 +101,16 @@ impl<'ctx> HirCompiler<'ctx> {
         self.uses_quickjs_handles = true;
         let compiling_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = true;
-        let value = self.compile_expr(value);
+        // A caller may reach this intrinsic with a bare native object
+        // literal (`retainDynamicJson({})`, an internal-builtin call some
+        // tests exercise directly) rather than the already-`Json`-coerced
+        // argument the compiler's own emit sites pass -- compile such a
+        // literal through the JSON builder so the runtime sees a real
+        // shared `Json` value, not a fixed-layout native object.
+        let value = match value {
+            HirExpr::ObjectLit(fields) => self.compile_json_object_lit(fields, &HirType::Json),
+            _ => self.compile_expr(value),
+        };
         self.compiling_quickjs_dynamic_arguments = compiling_dynamic_arguments;
         let value = value?.into_pointer_value();
         let json = self

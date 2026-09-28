@@ -31,8 +31,9 @@
 // at all -- `month: 'narrow'` degrades to the same rendering as
 // `'short'` (a known, documented gap, not a silent wrong answer).
 // `hourCycle: 'h24'` (hours 1-24, real ECMA-402) maps to icu4x's `H23`
-// (hours 0-23) since icu4x has no h24 equivalent -- differs only at the
-// midnight instant, also a known documented gap. `era` is only accepted
+// (hours 0-23) here since icu4x has no h24 equivalent; `intl.js`'s
+// `_formatToPartsRealLocale` post-processes the midnight hour back to
+// `24`, so the two cycles agree after all. `era` is only accepted
 // by the builder when both `month` and `day` are also present
 // (confirmed empirically: `YearStyle::WithEra` with `DateFields::Y`/`YM`
 // fails with `InvalidDateFields`) -- a bare `{year,era}` request (no

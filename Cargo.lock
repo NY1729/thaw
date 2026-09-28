@@ -2990,6 +2990,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thaw-quickjs",
+ "thaw-runtime",
+ "thaw-std",
 ]
 
 [[package]]
@@ -3047,6 +3049,8 @@ dependencies = [
  "sha2",
  "signature 2.2.0",
  "thaw-icu-data",
+ "thaw-runtime",
+ "thaw-std",
  "wasmi",
  "wasmi_wasi",
  "webpki-roots",
@@ -3086,6 +3090,7 @@ dependencies = [
  "ryu",
  "serde_json",
  "thaw-arena",
+ "thaw-std",
  "webpki-roots",
 ]
 
@@ -3093,6 +3098,7 @@ dependencies = [
 name = "thaw-std"
 version = "0.1.0"
 dependencies = [
+ "indexmap",
  "serde",
  "serde_json",
  "thaw-arena",

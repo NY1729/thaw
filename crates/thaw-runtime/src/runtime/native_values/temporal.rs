@@ -1476,13 +1476,27 @@ pub unsafe extern "C" fn thaw_temporal_duration_nanos_from_string(
 /// Reads one numeric field of a `Duration` components JSON object.
 ///
 /// # Safety
-/// `components` must point to a live `serde_json::Value` object.
+/// `components` must point to a live thaw-std `Json` object.
 unsafe fn duration_component(components: *const u8, name: &str) -> f64 {
     if components.is_null() {
         return 0.0;
     }
-    let value = unsafe { &*(components as *const serde_json::Value) };
-    value.get(name).and_then(serde_json::Value::as_f64).unwrap_or(0.0)
+    // `components` is a thaw-std `Json` value (its own `Value` layout, not
+    // `serde_json::Value`) -- read through thaw-std's exported accessors
+    // rather than reinterpreting the pointer here (see `maps.rs`'s
+    // `AnyKey` doc comment for why a Rust-level dependency isn't possible).
+    unsafe extern "C" {
+        fn thaw_json_get(value: *mut u8, key: *const c_char) -> *mut u8;
+        fn thaw_json_as_number(value: *mut u8) -> f64;
+    }
+    let Ok(key) = std::ffi::CString::new(name) else {
+        return 0.0;
+    };
+    let field = unsafe { thaw_json_get(components.cast_mut(), key.as_ptr()) };
+    if field.is_null() {
+        return 0.0;
+    }
+    unsafe { thaw_json_as_number(field) }
 }
 
 #[no_mangle]
