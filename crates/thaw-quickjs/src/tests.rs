@@ -2640,6 +2640,72 @@ fn intl_datetime_dispatches_non_gregorian_calendars_matching_real_node() {
     );
 }
 
+/// `dateStyle`/`timeStyle` (ECMA-402) expand into the individual field
+/// options with the locale's own CLDR patterns, cross-checked against
+/// real Node -- previously silently ignored (a Python-style default
+/// numeric date was rendered instead).
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_styles_match_real_node() {
+    assert_eq!(
+        load(
+            "function show(opts) {\n\
+               return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', ...opts })\n\
+                 .format(new Date(Date.UTC(2024, 6, 4, 16, 30, 45)));\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 show({ dateStyle: 'full' }),\n\
+                 show({ dateStyle: 'long' }),\n\
+                 show({ dateStyle: 'medium' }),\n\
+                 show({ dateStyle: 'short' }),\n\
+                 show({ timeStyle: 'full' }),\n\
+                 show({ timeStyle: 'long' }),\n\
+                 show({ timeStyle: 'medium' }),\n\
+                 show({ timeStyle: 'short' }),\n\
+                 show({ dateStyle: 'full', timeStyle: 'short' }),\n\
+               ];\n\
+             }\n\
+             function styleOption() {\n\
+               return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', dateStyle: 'short' })\n\
+                 .resolvedOptions().dateStyle;\n\
+             }\n\
+             function rejectsMixed() {\n\
+               try {\n\
+                 new Intl.DateTimeFormat('en-US', { dateStyle: 'short', year: 'numeric' });\n\
+                 return 'no-throw';\n\
+               } catch (error) {\n\
+                 return error.constructor.name;\n\
+               }\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "Thursday, July 4, 2024",
+            "July 4, 2024",
+            "Jul 4, 2024",
+            "7/4/24",
+            "4:30:45 PM Coordinated Universal Time",
+            "4:30:45 PM UTC",
+            "4:30:45 PM",
+            "4:30 PM",
+            "Thursday, July 4, 2024 at 4:30 PM",
+        ])
+        .unwrap()
+    );
+    assert_eq!(
+        call("styleOption", "[]"),
+        serde_json::to_string("short").unwrap()
+    );
+    assert_eq!(
+        call("rejectsMixed", "[]"),
+        serde_json::to_string("TypeError").unwrap()
+    );
+}
+
 /// Real multi-locale `Intl.NumberFormat` (M6 of docs/design/
 /// intl-polyfill.md's "Real CLDR data via icu4x" plan) --
 /// `intl_number.rs`'s `__thaw_intl_number_format`, replacing the

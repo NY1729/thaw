@@ -237,6 +237,51 @@
       this._minute = opts.minute;
       this._second = opts.second;
       this._timeZoneName = opts.timeZoneName;
+      // `dateStyle`/`timeStyle` (ECMA-402) expand into the individual
+      // field options with the locale's own CLDR patterns for that
+      // style -- the same field-ordering machinery already used for an
+      // explicit `{year, month, ...}` request, so no separate Rust path
+      // is needed. Individual field options and a style are mutually
+      // exclusive (real ECMA-402 throws `TypeError`).
+      this._dateStyle = opts.dateStyle;
+      this._timeStyle = opts.timeStyle;
+      if (this._dateStyle !== undefined || this._timeStyle !== undefined) {
+        if (['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second'].some(key => opts[key] !== undefined)) {
+          throw new TypeError('dateStyle/timeStyle can not be used with individual field options');
+        }
+        for (const [key, value] of [['dateStyle', this._dateStyle], ['timeStyle', this._timeStyle]]) {
+          if (value !== undefined && !['full', 'long', 'medium', 'short'].includes(value)) {
+            throw new RangeError(`Invalid ${key}: ${value}`);
+          }
+        }
+        const dateStyles = {
+          full: { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' },
+          long: { year: 'numeric', month: 'long', day: 'numeric' },
+          medium: { year: 'numeric', month: 'short', day: 'numeric' },
+          short: { year: '2-digit', month: 'numeric', day: 'numeric' },
+        };
+        const timeStyles = {
+          full: { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'long' },
+          long: { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short' },
+          medium: { hour: 'numeric', minute: '2-digit', second: '2-digit' },
+          short: { hour: 'numeric', minute: '2-digit' },
+        };
+        const expanded = {
+          ...(this._dateStyle ? dateStyles[this._dateStyle] : {}),
+          ...(this._timeStyle ? timeStyles[this._timeStyle] : {}),
+        };
+        this._weekday = expanded.weekday;
+        this._era = expanded.era;
+        this._year = expanded.year;
+        this._month = expanded.month;
+        this._day = expanded.day;
+        this._hour = expanded.hour;
+        this._minute = expanded.minute;
+        this._second = expanded.second;
+        // `format` includes the zone name for `full`/`long`, but
+        // `resolvedOptions` (matching Node) omits it for a style.
+        this._timeZoneName = expanded.timeZoneName;
+      }
       // Kept separate from `this._hourCycle` below (which always
       // forces a concrete value for the legacy English-only path's own
       // internal am/pm logic): the *real* per-locale path must leave
@@ -264,6 +309,15 @@
         numberingSystem: 'latn',
         timeZone: this._timeZone,
       };
+      if (this._dateStyle !== undefined || this._timeStyle !== undefined) {
+        if (this._hour) {
+          result.hourCycle = this._hourCycle;
+          result.hour12 = this._hourCycle === 'h11' || this._hourCycle === 'h12';
+        }
+        if (this._dateStyle) result.dateStyle = this._dateStyle;
+        if (this._timeStyle) result.timeStyle = this._timeStyle;
+        return result;
+      }
       if (this._weekday) result.weekday = this._weekday;
       if (this._era) result.era = this._era;
       if (this._year) result.year = this._year;
