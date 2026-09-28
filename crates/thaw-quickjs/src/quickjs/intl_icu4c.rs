@@ -118,7 +118,14 @@ struct Icu {
         unsafe extern "C" fn(*const UDateIntervalFormat, f64, f64, *mut u16, c_int, *mut c_void, *mut c_int) -> c_int,
     >,
     udtitvfmt_close: Option<unsafe extern "C" fn(*mut UDateIntervalFormat)>,
+    // Number range result extraction (`Intl.NumberFormat.formatRange`).
+    unumrf_result_as_value:
+        Option<unsafe extern "C" fn(*const UFormattedNumberRange, *mut c_int) -> *const UFormattedValue>,
+    ufmtval_get_string:
+        Option<unsafe extern "C" fn(*const UFormattedValue, *mut c_int, *mut c_int) -> *const u16>,
 }
+
+type UFormattedValue = c_void;
 
 type UDateIntervalFormat = c_void;
 
@@ -187,6 +194,8 @@ fn icu() -> Option<&'static Icu> {
                 udtitvfmt_open: resolve(handle, "udtitvfmt_open"),
                 udtitvfmt_format: resolve(handle, "udtitvfmt_format"),
                 udtitvfmt_close: resolve(handle, "udtitvfmt_close"),
+                unumrf_result_as_value: resolve(handle, "unumrf_resultAsValue"),
+                ufmtval_get_string: resolve(handle, "ufmtval_getString"),
             })
     })
     .as_ref()
@@ -840,4 +849,91 @@ fn intl_datetime_range_icu4c_inner(
         return None;
     }
     Some(String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+// `UNumberRangeIdentityFallback::UNUM_IDENTITY_FALLBACK_APPROXIMATELY`
+// (equal endpoints render as `~n`, matching real Node's number range).
+const UNUM_IDENTITY_FALLBACK_APPROXIMATELY: c_int = 2;
+
+/// `__thaw_intl_number_range_icu4c(locale, skeleton, start, end) ->
+/// String`: `Intl.NumberFormat.prototype.formatRange` via ICU4C's
+/// `UNumberRangeFormatter` over the already-digit-optioned decimal
+/// strings. Returns an empty string on failure so the caller can fall
+/// back to joining the two `format()` results.
+fn intl_number_range_icu4c(locale: &str, skeleton: &str, start: &str, end: &str) -> String {
+    intl_number_range_icu4c_inner(locale, skeleton, start, end).unwrap_or_default()
+}
+
+fn intl_number_range_icu4c_inner(
+    locale: &str,
+    skeleton: &str,
+    start: &str,
+    end: &str,
+) -> Option<String> {
+    let icu = icu()?;
+    let (Some(open), Some(open_result), Some(format_range), Some(result_as_value), Some(get_string), Some(close_result)) = (
+        icu.unumrf_open,
+        icu.unumrf_open_result,
+        icu.unumrf_format_decimal_range,
+        icu.unumrf_result_as_value,
+        icu.ufmtval_get_string,
+        icu.unumrf_close_result,
+    ) else {
+        return None;
+    };
+    let locale = CString::new(locale).ok()?;
+    let skeleton = utf16(skeleton);
+    let (Ok(start), Ok(end)) = (CString::new(start), CString::new(end)) else {
+        return None;
+    };
+    let mut status: c_int = 0;
+    let formatter = unsafe {
+        open(
+            skeleton.as_ptr(),
+            skeleton.len() as c_int,
+            UNUM_RANGE_COLLAPSE_AUTO,
+            UNUM_IDENTITY_FALLBACK_APPROXIMATELY,
+            locale.as_ptr(),
+            std::ptr::null_mut(),
+            &mut status,
+        )
+    };
+    if formatter.is_null() || status > 0 {
+        return None;
+    }
+    let result = unsafe { open_result(&mut status) };
+    if result.is_null() || status > 0 {
+        return None;
+    }
+    unsafe {
+        format_range(
+            formatter,
+            start.as_ptr(),
+            start.as_bytes().len() as c_int,
+            end.as_ptr(),
+            end.as_bytes().len() as c_int,
+            result,
+            &mut status,
+        )
+    };
+    if status > 0 {
+        unsafe { close_result(result) };
+        return None;
+    }
+    let value = unsafe { result_as_value(result, &mut status) };
+    let mut length: c_int = 0;
+    let text = if value.is_null() || status > 0 {
+        std::ptr::null()
+    } else {
+        unsafe { get_string(value, &mut length, &mut status) }
+    };
+    let output = if !text.is_null() && status <= 0 && length > 0 {
+        Some(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(text, length as usize)
+        }))
+    } else {
+        None
+    };
+    unsafe { close_result(result) };
+    output
 }

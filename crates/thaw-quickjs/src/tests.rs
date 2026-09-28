@@ -3808,3 +3808,45 @@ fn intl_number_format_to_parts_matches_real_node() {
         r#"[[{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"5"}],[{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"5"}],[{"type":"integer","value":"56"},{"type":"percentSign","value":"%"}],[{"type":"currency","value":"$"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}],[{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}],[{"type":"integer","value":"3"},{"type":"literal","value":" "},{"type":"unit","value":"days"}],[{"type":"literal","value":"("},{"type":"currency","value":"$"},{"type":"integer","value":"5"},{"type":"decimal","value":"."},{"type":"fraction","value":"00"},{"type":"literal","value":")"}]]"#
     );
 }
+
+/// `Intl.NumberFormat.prototype.formatRange` via the opt-in ICU4C number
+/// range formatter. Cross-checked against real Node (locale range
+/// separators, per-style spacing, `~n` for equal endpoints).
+#[cfg(all(feature = "intl", feature = "icu4c"))]
+#[test]
+fn intl_number_format_range_icu4c_matches_real_node() {
+    assert_eq!(
+        load(
+            "function range(locale, opts, start, end) {\n\
+               return new Intl.NumberFormat(locale, opts).formatRange(start, end);\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 range('en-US', {}, 3, 5),\n\
+                 range('en-US', {}, 3, 3),\n\
+                 range('en-US', { maximumFractionDigits: 2 }, 3.14159, 5.2),\n\
+                 range('en-US', { style: 'currency', currency: 'USD' }, 3, 5),\n\
+                 range('de-DE', { style: 'currency', currency: 'EUR' }, 3, 5),\n\
+                 range('en-US', { style: 'percent' }, 0.03, 0.05),\n\
+                 range('en-US', { style: 'unit', unit: 'day' }, 3, 5),\n\
+                 range('en-US', { notation: 'compact' }, 3000, 5000),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "3\u{2013}5",
+            "~3",
+            "3.14\u{2013}5.2",
+            "$3.00 \u{2013} $5.00",
+            "3,00\u{2013}5,00\u{00a0}\u{20ac}",
+            "3% \u{2013} 5%",
+            "3\u{2013}5 days",
+            "3K \u{2013} 5K",
+        ])
+        .unwrap()
+    );
+}

@@ -1364,6 +1364,14 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript Intl ICU4C date-range formatter");
+                #[cfg(feature = "icu4c")]
+                let intl_number_range_icu4c_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, skeleton: String, start: String, end: String| {
+                        intl_number_range_icu4c(&locale, &skeleton, &start, &end)
+                    },
+                )
+                .expect("failed to create JavaScript Intl ICU4C number-range formatter");
                 #[cfg(feature = "intl")]
                 let intl_plural_category_function = Function::new(
                     ctx.clone(),
@@ -1586,6 +1594,13 @@ fn ensure_context() {
                         intl_datetime_range_icu4c_function,
                     )
                     .expect("failed to install JavaScript Intl ICU4C date-range formatter");
+                #[cfg(feature = "icu4c")]
+                ctx.globals()
+                    .set(
+                        "__thaw_intl_number_range_icu4c",
+                        intl_number_range_icu4c_function,
+                    )
+                    .expect("failed to install JavaScript Intl ICU4C number-range formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_plural_category", intl_plural_category_function)
