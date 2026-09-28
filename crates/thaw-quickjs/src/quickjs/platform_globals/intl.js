@@ -487,9 +487,19 @@
       // instead; a date+time combination still goes through ICU for its
       // locale-specific glue.
       const hasDateFields = Boolean(this._weekday || this._era || this._year || this._month || this._day);
-      if (!hasDateFields && !this._hour && (this._minute || this._second || this._fractionalSecondDigits !== undefined)) {
-        return this._formatTimeOnlyParts(zoned);
-      }
+      // A `minute`/`second` request without `hour` (and without any date
+      // field) must not go through the builder -- it would render the
+      // hour. The skeleton native handles it correctly (`ms` -> `mm.ss`),
+      // so try it first and only fall back to `_formatTimeOnlyParts`.
+      const timeOnlyNoHour =
+        !hasDateFields && !this._hour &&
+        (this._minute !== undefined || this._second !== undefined || this._fractionalSecondDigits !== undefined);
+      // ...but only `minute`+`second` together (the locale's `ms` pattern,
+      // whose separator differs per locale) can use the skeleton native;
+      // a bare minute is not zero-padded even for `'2-digit'` (Node:
+      // `{minute:'2-digit'}` -> `"5"`), which `_formatTimeOnlyParts` handles.
+      const skeletonTimeOnly =
+        !hasDateFields && !this._hour && this._minute !== undefined && this._second !== undefined;
       const options = {
         weekday: this._weekday,
         era: this._era,
@@ -524,6 +534,7 @@
       // not the `yMMMd` skeleton's `4. Juli 2024`.
       if (
         parts === null &&
+        (!timeOnlyNoHour || skeletonTimeOnly) &&
         this._dateStyle === undefined &&
         this._timeStyle === undefined &&
         typeof __thaw_intl_datetime_skeleton_parts === 'function'
@@ -534,6 +545,9 @@
         // Non-empty means real UTS-35 skeleton matching ran; its field
         // widths are already Node-final, so skip the pad/unpad fixups.
         if (skeletonParts.length) parts = skeletonParts;
+      }
+      if (parts === null && timeOnlyNoHour) {
+        return this._formatTimeOnlyParts(zoned);
       }
       if (parts === null) {
         parts = JSON.parse(
