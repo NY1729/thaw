@@ -4050,6 +4050,10 @@ fn intl_datetime_skeleton_matching_matches_real_node() {
                  show('ru', {year:'numeric',month:'2-digit',day:'numeric'}, t),\n\
                  show('en-US', {year:'numeric',month:'short',day:'numeric'}, t),\n\
                  show('en-US', {weekday:'long'}, t),\n\
+                 show('ca', {year:'numeric',month:'short',day:'numeric'}, t),\n\
+                 show('hr', {year:'numeric',month:'long',day:'numeric'}, t),\n\
+                 show('sk', {year:'numeric',month:'short',day:'numeric'}, t),\n\
+                 show('bg', {year:'numeric',month:'long',day:'numeric'}, t),\n\
                ];\n\
              }"
         ),
@@ -4067,6 +4071,10 @@ fn intl_datetime_skeleton_matching_matches_real_node() {
             "4.07.2024",
             "Jul 4, 2024",
             "Thursday",
+            "4 de jul. del 2024",
+            "4. srpnja 2024.",
+            "4. 7. 2024",
+            "4 юли 2024 г.",
         ])
         .unwrap()
     );

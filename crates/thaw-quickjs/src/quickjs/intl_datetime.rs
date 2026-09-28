@@ -570,16 +570,15 @@ fn intl_datetime_skeleton_parts_native(
     options_json: &str,
     zoned_parts_json: &str,
 ) -> String {
-    use std::str::FromStr;
-
     let Some(parts) = intl_datetime_skeleton_parts_json(locale_tag, options_json, zoned_parts_json)
     else {
         return "[]".to_string();
     };
-    let is_en = icu_locale::Locale::from_str(locale_tag)
-        .map(|locale| locale.id.language.as_str() == "en")
-        .unwrap_or(false);
-    if is_en { parts.replace('\u{202f}', " ") } else { parts }
+    // CLDR patterns use U+202F (narrow no-break space) e.g. before ru/bg's
+    // `г.` era, but real Node's DateTimeFormat always renders a plain space
+    // (verified across every curated locale) -- unlike NumberFormat, where
+    // fr's U+202F grouping is legitimate.
+    parts.replace('\u{202f}', " ")
 }
 
 #[allow(deprecated)] // `AnyCalendarKind::JapaneseExtended` is a deprecated alias for `Japanese`.
@@ -872,19 +871,11 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
         (false, false) => None,
     };
     let formatted = formatted.unwrap_or_else(|| "[]".to_string());
-    // The vendored CLDR data renders U+202F (narrow no-break space)
-    // between a numeric hour and the day-period marker for English
-    // (e.g. `"4\u{202f}PM"`) -- confirmed against real Node across every
-    // field combination that includes both (hour-only, hour+minute,
-    // hour+minute+second, and a full date+time), real Node always
-    // renders a plain space instead, never U+202F, for English
-    // specifically. Scoped to `en*` only: French's own real grouping
-    // separator legitimately *is* U+202F (confirmed in `intl_number.rs`'s
-    // own cross-checks), so this must not become a blanket global
-    // replace.
-    if locale.id.language.as_str() == "en" {
-        formatted.replace('\u{202f}', " ")
-    } else {
-        formatted
-    }
+    // CLDR patterns use U+202F (narrow no-break space) e.g. between a
+    // numeric hour and the day-period marker for English (`4\u{202f}PM`)
+    // or before ru/bg's `г.` era, but real Node's DateTimeFormat always
+    // renders a plain space (verified across every curated locale and
+    // field combination). Unlike NumberFormat, where fr's U+202F grouping
+    // is legitimate, so this must not leak into `intl_number.rs`.
+    formatted.replace('\u{202f}', " ")
 }
