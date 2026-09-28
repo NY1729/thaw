@@ -49,10 +49,10 @@ enum TextOrNumeric {
     Numeric,
 }
 
-/// ICU's `dtTypes` type value for a field: the basis of
-/// `DateTimeMatcher::getDistance`.
+/// ICU's `dtTypes` type value for a field (numeric/text/width bracket), the
+/// primary term of `DateTimeMatcher::getDistance`.
 fn field_type_value(field: &Field) -> i32 {
-    use icu_datetime::provider::fields::{Hour, Month, TimeZone, Weekday, Year};
+    use icu_datetime::provider::fields::{Day, Hour, Month, TimeZone, Weekday, Year};
     use FieldSymbol as S;
     let text = |length: FieldLength| match length {
         FieldLength::Four => DT_LONG,
@@ -76,7 +76,12 @@ fn field_type_value(field: &Field) -> i32 {
                 Month::StandAlone => base - DT_DELTA,
             }
         }
-        S::Week(_) | S::Day(_) => DT_NUMERIC,
+        S::Week(_) => DT_NUMERIC,
+        // ICU puts `D`/`F` in different field categories from `d`; without
+        // the offset they tie (both numeric) and the earlier bucket wins.
+        S::Day(Day::DayOfYear) => DT_NUMERIC + 0x1000,
+        S::Day(Day::DayOfWeekInMonth) => DT_NUMERIC + 0x2000,
+        S::Day(_) => DT_NUMERIC,
         S::Weekday(weekday) => {
             let base = text(field.length);
             // `e` is `E` - `DT_DELTA`, `c` is `E` - 2*`DT_DELTA` (ICU `dtTypes`).
@@ -249,11 +254,13 @@ fn find_best_skeleton<'a>(
 ) -> Option<SkeletonMatch<'a>> {
     let mut closest: Option<SkeletonMatch<'a>> = None;
     let mut closest_distance = u32::MAX;
+    let mut closest_width = u32::MAX;
     let mut closest_exact = false;
 
     for (skeleton, value) in skeletons {
         let mut missing_fields = 0usize;
         let mut distance = 0u32;
+        let mut width_distance = 0u32;
 
         let mut requested = fields.iter().peekable();
         let mut skeleton_fields = skeleton.iter().peekable();
@@ -277,6 +284,11 @@ fn find_best_skeleton<'a>(
                     distance += (field_type_value(requested_field)
                         - field_type_value(skeleton_field))
                     .unsigned_abs();
+                    if field_length_ord(requested_field.length)
+                        != field_length_ord(skeleton_field.length)
+                    {
+                        width_distance += 1;
+                    }
                     requested.next();
                     skeleton_fields.next();
                 }
@@ -293,15 +305,24 @@ fn find_best_skeleton<'a>(
             }
         }
 
-        // On a distance tie, prefer a candidate whose skeleton exactly
-        // equals the request (same fields and lengths): ICU's
-        // `PatternMap` resolves an exact requested skeleton to its
-        // availableFormat entry, so e.g. en-GB `{year,month,day}` keeps
-        // `yMd`'s `dd/MM/y` instead of the wider `yMMdd`'s narrowing.
+        // Break ties (the primary type distance treats numeric widths as
+        // equal, which Chinese/Dangi's `rU` patterns need) by the number of
+        // field-width mismatches, then by an exact skeleton match. This is
+        // ICU's `dtTypes` numeric `+length` term, applied only when the
+        // primary distance is equal -- so `it`/`uk` `{month:'2-digit'}`
+        // prefer `yMd` over `yyMMdd`, while Chinese keeps its `yyyyMMMMd`
+        // (which already wins on the primary distance).
         let exact = skeleton.len() == fields.len()
             && skeleton.iter().zip(fields.iter()).all(|(a, b)| a == b);
-        if distance < closest_distance || (distance == closest_distance && exact && !closest_exact) {
+        let better = distance < closest_distance
+            || (distance == closest_distance && width_distance < closest_width)
+            || (distance == closest_distance
+                && width_distance == closest_width
+                && exact
+                && !closest_exact);
+        if better {
             closest_distance = distance;
+            closest_width = width_distance;
             closest_exact = exact;
             closest = Some(SkeletonMatch {
                 skeleton,

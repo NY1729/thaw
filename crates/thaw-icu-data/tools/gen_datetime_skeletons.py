@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """Generate `src/datetime_skeletons_data.rs` from CLDR JSON.
 
-Vendors the CLDR `dateTimeFormats.availableFormats` skeleton table and the
-`dateTimeFormats-atTime` date/time glue patterns for the curated locale list,
-so `thaw-quickjs`'s `Intl.DateTimeFormat` can run UTS-35 skeleton matching at
-runtime (matching Node/ICU4C) instead of icu4x's length-pattern formatting.
+Vendors, for each curated locale and calendar, a candidate table mirroring
+ICU's `DateTimePatternGenerator` `PatternMap` -- its canonical single-field
+items, its standard `dateFormats`/`timeFormats` (added with `override=false`,
+so only the first pattern per *base skeleton* survives), and its
+`availableFormats` -- plus the `dateTimeFormats-atTime` glue patterns and the
+locale's default hour cycle.
 
-Non-Gregorian calendars inherit their date patterns from the Gregorian
-calendar of the same locale (per CLDR calendar inheritance), so each
-non-Gregorian table is the Gregorian table overlaid with the calendar's own
-`availableFormats`/glue.
+`thaw-quickjs`'s runtime matcher (`intl_datetime_skeleton.rs`) then runs
+ICU's `DateTimeMatcher::getDistance`/`adjustFieldTypes` over that set,
+reproducing Node/ICU4C's pattern choice instead of icu4x's length-pattern
+formatting.
+
+Non-Gregorian calendars use their own `ca-*.json` (era-prefixed skeletons),
+not an overlay of Gregorian.
 
 Usage:
-    gen_datetime_skeletons.py <cldr-json-full.zip | extracted-root> <out.rs>
+    gen_datetime_skeletons.py <cldr-json-full.zip | extracted-root> <out.rs.data>
 
 The curated locale list is read from `intl_locale.rs`, so this stays in sync.
 """
@@ -142,69 +147,140 @@ def pattern_to_skeleton(pattern):
     return "".join(out)
 
 
-# Canonical UTS-35 field order (matches `intl_datetime_skeleton.rs`'s
-# `skeleton_idx`), used to dedupe skeletons that differ only in symbol order
-# (`dMMMy` vs `yMMMd`).
-_SKELETON_ORDER = {
+# UTS-35 field categories in ICU's `Canonical_Items` order
+# ("GyQMwWEDFdaHmsSv"), used for canonical/base skeletons and the runtime
+# type-array distance.
+_UDATPG_CATEGORY = {
     "G": 0,
-    "y": 1, "Y": 1, "u": 1, "U": 1, "r": 1,
-    "M": 2, "L": 2, "l": 2,
-    "w": 3, "W": 3,
-    "d": 4, "D": 4, "F": 4, "g": 4,
-    "E": 5, "c": 5, "e": 5,
-    "a": 6, "b": 6, "B": 6,
-    "h": 7, "H": 7, "K": 7, "k": 7, "J": 7, "C": 7,
-    "m": 8,
-    "s": 9, "A": 9,
-    "z": 10, "Z": 10, "O": 10, "v": 10, "V": 10, "x": 10, "X": 10,
+    "y": 1, "Y": 1, "u": 1, "r": 1,
+    "Q": 2,
+    "M": 3, "L": 3, "l": 3,
+    "w": 4,
+    "W": 5,
+    "E": 6, "c": 6, "e": 6,
+    "D": 7,
+    "F": 8,
+    "d": 9, "g": 9,
+    "a": 10, "b": 10, "B": 10,
+    "H": 11, "h": 11, "K": 11, "k": 11, "J": 11, "C": 11,
+    "m": 12,
+    "s": 13, "A": 13,
+    "S": 14,
+    "z": 15, "Z": 15, "O": 15, "v": 15, "V": 15, "x": 15, "X": 15,
 }
 
 
-def canonical_skeleton(skeleton):
-    """Canonicalize a skeleton string (sorted fields) so skeletons that
-    differ only in symbol order collide. Returns `None` for a skeleton with
-    a field this crate can't represent (`Q`/`w`/`W`/...), which the runtime
-    matcher skips anyway."""
-    fields = []
+def _dt_min_len(ch, length):
+    """ICU `dtTypes` `minLen` for the row matching `ch` at `length`: text
+    fields keep their width bracket's minimum, numeric fields collapse to 1.
+    This is what `PtnSkeleton::baseOriginal` (and thus `getBasePattern`)
+    stores, so `MMMM` -> 4 but `MM` -> 1."""
+    if ch in "ML":
+        return length if length >= 3 else 1
+    if ch in "GzZEce":
+        return length if length >= 4 else 1
+    if ch in "abB":
+        return length if length >= 4 else 1
+    if ch in "vVO":
+        return length if length >= 4 else 1
+    if ch in "xX":
+        return length if length >= 4 else 1
+    return 1
+
+
+def _parse_runs(skeleton):
+    """Split a skeleton into `[(category, char, count)]`, or `None` for a
+    field this crate can't represent (`Q`/`w`/`W`/...)."""
+    runs = []
     i, n = 0, len(skeleton)
     while i < n:
         ch = skeleton[i]
-        if ch not in _SKELETON_ORDER:
+        if ch not in _UDATPG_CATEGORY:
             return None
         j = i
         while j < n and skeleton[j] == ch:
             j += 1
-        fields.append((_SKELETON_ORDER[ch], ch, j - i))
+        runs.append((_UDATPG_CATEGORY[ch], ch, j - i))
         i = j
-    fields.sort()
-    return "".join(ch * count for _, ch, count in fields)
+    return runs
+
+
+def canonical_skeleton(skeleton):
+    """Sorted (category-order) skeleton with actual lengths, or `None`."""
+    runs = _parse_runs(skeleton)
+    if runs is None:
+        return None
+    runs.sort()
+    return "".join(ch * count for _, ch, count in runs)
+
+
+def base_skeleton(skeleton):
+    """ICU `getBasePattern`: category-order, text widths kept at their
+    bracket minimum, numeric widths collapsed to 1."""
+    runs = _parse_runs(skeleton)
+    if runs is None:
+        return None
+    runs.sort()
+    return "".join(ch * _dt_min_len(ch, count) for _, ch, count in runs)
 
 
 def candidate_formats(cal):
-    """The full match table for a calendar: its standard date/time patterns
-    (by derived skeleton) overridden by its `availableFormats`. Mirrors
-    ICU's `addICUPatterns` (standard patterns) + `addCLDRData`
-    (`availableFormats`, which override duplicates). Deliberately does *not*
-    inherit Gregorian `availableFormats`: ICU's non-Gregorian calendars only
-    carry era-prefixed skeletons, and their own standard date patterns are
-    what produce e.g. Thai Buddhist's era-less `d MMM y`.
+    """The full match table for a calendar, mirroring ICU's `PatternMap`
+    construction (`addCanonicalItems` + `addICUPatterns` + `addCLDRData`):
 
-    Keys are canonicalized so an `availableFormats` entry overrides a
-    standard pattern with the same field set -- e.g. ca `availableFormats`
-    `yMMMd` (`d MMM 'del' y`) must beat the standard medium `d MMM y`
-    (same canonical `yMMMd`), as ICU's `PatternMap` does."""
+    - canonical single-field items first (pattern = the char);
+    - standard `dateFormats`/`timeFormats` (full/long/medium/short) added
+      with `override=false`, so only the *first* pattern for a given
+      `base_skeleton` survives. The base keeps text widths (`MMMM` -> 4)
+      but collapses numeric widths (`MM` -> 1), which is why fr's short
+      `dd/MM/y` (base `yMd`, distinct from long `d MMMM y`'s `yMMMMd`)
+      survives while cs's short `dd.MM.yy` (base `yMd`, same as medium
+      `d. M. y`) does not;
+    - `availableFormats` last, overwriting the value of an existing
+      `(base, skeleton)` entry in place.
+
+    Deliberately does *not* inherit Gregorian `availableFormats`: ICU's
+    non-Gregorian calendars only carry era-prefixed skeletons, and their own
+    standard date patterns are what produce e.g. Thai Buddhist's era-less
+    `d MMM y`."""
     out = {}
+    bases = set()
+
+    def add_standard(pattern):
+        skeleton = canonical_skeleton(pattern_to_skeleton(pattern))
+        if skeleton is None:
+            return
+        base = base_skeleton(skeleton)
+        if base in bases:
+            return  # override=false: first pattern per base wins
+        bases.add(base)
+        out.setdefault(skeleton, pattern)
+
+    def add_available(skeleton_key, pattern):
+        canonical = canonical_skeleton(skeleton_key)
+        if canonical is None:
+            return
+        out[canonical] = pattern  # overwrite value in place if duplicate
+        bases.add(base_skeleton(canonical))
+
+    for ch in "GyQMwWEDFdaHmsSv":
+        out.setdefault(ch, ch)
+        bases.add(ch)
     for section in ("dateFormats", "timeFormats"):
         for key in ("full", "long", "medium", "short"):
-            pattern = val(cal[section][key])
-            skeleton = canonical_skeleton(pattern_to_skeleton(pattern))
-            if skeleton:
-                out.setdefault(skeleton, pattern)
+            add_standard(val(cal[section][key]))
     for skeleton, pattern in available_formats(cal).items():
-        canonical = canonical_skeleton(skeleton)
-        if canonical:
-            out[canonical] = pattern
+        add_available(skeleton, pattern)
     return out
+
+
+def _bucket(skeleton):
+    """ICU `PatternMap` bucket index (A-Z then a-z) of a skeleton's base."""
+    base = base_skeleton(skeleton) or skeleton
+    c = base[0]
+    if "A" <= c <= "Z":
+        return ord(c) - ord("A")
+    return 26 + ord(c) - ord("a")
 
 
 def glue(cal):
@@ -248,7 +324,8 @@ def main():
             if tag not in hour_cycles:
                 gregorian = cldr.calendar("gregorian", locale_dir)
                 hour_cycles[tag] = preferred_hour_cycle(gregorian or cal)
-            entries.append((calendar, tag, sorted(candidate_formats(cal).items()), glue(cal)))
+            formats = sorted(candidate_formats(cal).items(), key=lambda kv: _bucket(kv[0]))
+            entries.append((calendar, tag, formats, glue(cal)))
 
     with open(out_path, "w") as f:
         f.write("// @generated by tools/gen_datetime_skeletons.py -- do not edit.\n")
