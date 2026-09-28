@@ -1426,6 +1426,14 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript Intl datetime formatter");
+                #[cfg(feature = "intl")]
+                let intl_datetime_skeleton_parts_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, options_json: String, zoned_parts_json: String| {
+                        intl_datetime_skeleton_parts_native(&locale, &options_json, &zoned_parts_json)
+                    },
+                )
+                .expect("failed to create JavaScript Intl datetime skeleton formatter");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -1661,6 +1669,13 @@ fn ensure_context() {
                         intl_datetime_format_parts_function,
                     )
                     .expect("failed to install JavaScript Intl datetime formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set(
+                        "__thaw_intl_datetime_skeleton_parts",
+                        intl_datetime_skeleton_parts_function,
+                    )
+                    .expect("failed to install JavaScript Intl datetime skeleton formatter");
                 ctx.globals()
                     .set("__thaw_hpack_huffman_encode", hpack_huffman_encode)
                     .expect("failed to install HPACK Huffman encoder");

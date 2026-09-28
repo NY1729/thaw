@@ -347,6 +347,375 @@ fn write_parts_json(formatted: &impl writeable::Writeable) -> Option<String> {
     Some(recorder_to_json_parts(recorder))
 }
 
+fn write_try_parts_json(formatted: &impl writeable::TryWriteable) -> Option<String> {
+    let mut recorder = DateTimePartsRecorder::default();
+    match writeable::TryWriteable::try_write_to_parts(formatted, &mut recorder) {
+        Ok(Ok(())) => Some(recorder_to_json_parts(recorder)),
+        _ => None,
+    }
+}
+
+/// Maps a resolved `AnyCalendarKind` to the CLDR calendar key used by
+/// `thaw_icu_data::datetime_skeletons`.
+#[allow(deprecated)] // `AnyCalendarKind::JapaneseExtended` is a deprecated alias for `Japanese`.
+fn skeleton_calendar_name(kind: icu_calendar::AnyCalendarKind) -> Option<&'static str> {
+    use icu_calendar::AnyCalendarKind as K;
+    Some(match kind {
+        K::Gregorian => "gregorian",
+        K::Buddhist => "buddhist",
+        K::Chinese => "chinese",
+        K::Coptic => "coptic",
+        K::Dangi => "dangi",
+        K::Ethiopian | K::EthiopianAmeteAlem => "ethiopian",
+        K::Hebrew => "hebrew",
+        K::Indian => "indian",
+        K::Japanese | K::JapaneseExtended => "japanese",
+        K::Persian => "persian",
+        K::Roc => "roc",
+        K::HijriUmmAlQura
+        | K::HijriTabularTypeIIFriday
+        | K::HijriSimulatedMecca
+        | K::HijriTabularTypeIIThursday => "hijri",
+        _ => return None,
+    })
+}
+
+/// Builds the UTS-35 classical skeleton for an ECMA-402 option set --
+/// the piece icu4x's own `FieldSetBuilder` gets wrong (it derives widths
+/// from the locale's `dateFormats` length patterns instead of the
+/// requested option widths). Returns the fields plus the requested hour
+/// symbol (kept separately so the matched pattern's hour can be forced to
+/// it, e.g. `K` for `hourCycle: 'h11'`, which CLDR has no skeleton for).
+fn skeleton_fields(
+    options: &DateTimeOptions,
+    locale_hour_cycle: Option<&str>,
+) -> (Vec<Field>, Option<FieldSymbol>) {
+    use icu_datetime::provider::fields::{
+        Day, Field, FieldLength, FieldSymbol, Hour, Month, Second, Weekday, Year,
+    };
+
+    fn name_length(style: &str) -> FieldLength {
+        match style {
+            "long" => FieldLength::Four,
+            "narrow" => FieldLength::Five,
+            _ => FieldLength::Three,
+        }
+    }
+    fn numeric_length(style: &str) -> FieldLength {
+        if style == "2-digit" {
+            FieldLength::Two
+        } else {
+            FieldLength::One
+        }
+    }
+
+    let mut fields = Vec::new();
+    if let Some(style) = options.era.as_deref() {
+        fields.push(Field { symbol: FieldSymbol::Era, length: name_length(style) });
+    }
+    if let Some(style) = options.year.as_deref() {
+        fields.push(Field { symbol: FieldSymbol::Year(Year::Calendar), length: numeric_length(style) });
+    }
+    if let Some(style) = options.month.as_deref() {
+        let length = match style {
+            "2-digit" => FieldLength::Two,
+            "short" => FieldLength::Three,
+            "long" => FieldLength::Four,
+            "narrow" => FieldLength::Five,
+            _ => FieldLength::One,
+        };
+        fields.push(Field { symbol: FieldSymbol::Month(Month::Format), length });
+    }
+    if let Some(style) = options.day.as_deref() {
+        fields.push(Field { symbol: FieldSymbol::Day(Day::DayOfMonth), length: numeric_length(style) });
+    }
+    if let Some(style) = options.weekday.as_deref() {
+        fields.push(Field { symbol: FieldSymbol::Weekday(Weekday::Format), length: name_length(style) });
+    }
+    let mut hour_symbol = None;
+    if let Some(style) = options.hour.as_deref() {
+        let cycle = options
+            .hour_cycle
+            .as_deref()
+            .or(match options.hour12 {
+                Some(true) => Some("h12"),
+                Some(false) => Some("h23"),
+                None => None,
+            })
+            .or(locale_hour_cycle)
+            .unwrap_or("h23");
+        let symbol = match cycle {
+            "h11" => Hour::H11,
+            "h12" => Hour::H12,
+            // No `k`/h24 in icu4x; h24 is fixed up JS-side at the midnight instant.
+            _ => Hour::H23,
+        };
+        hour_symbol = Some(FieldSymbol::Hour(symbol));
+        fields.push(Field { symbol: FieldSymbol::Hour(symbol), length: numeric_length(style) });
+    }
+    if let Some(style) = options.minute.as_deref() {
+        fields.push(Field { symbol: FieldSymbol::Minute, length: numeric_length(style) });
+    }
+    if let Some(style) = options.second.as_deref() {
+        fields.push(Field { symbol: FieldSymbol::Second(Second::Second), length: numeric_length(style) });
+    }
+    fields.sort_by(field_cmp);
+    (fields, hour_symbol)
+}
+
+/// `Intl.DateTimeFormat.formatToParts` via real UTS-35 skeleton matching
+/// against CLDR `availableFormats` -- matching Node/ICU4C's choice of
+/// pattern. Returns `None` (caller falls back to the icu4x field-set
+/// builder) for an unsupported calendar or if anything fails.
+fn intl_datetime_skeleton_parts_json(
+    locale_tag: &str,
+    options_json: &str,
+    zoned_parts_json: &str,
+) -> Option<String> {
+    use std::str::FromStr;
+
+    let locale = icu_locale::Locale::from_str(locale_tag).ok()?;
+    let curated_tag = resolve_curated_locale(&locale.id);
+    let curated_locale: icu_locale::Locale = curated_tag.parse().ok()?;
+    let mut prefs = icu_datetime::DateTimeFormatterPreferences::from(&curated_locale);
+    let requested_prefs = icu_datetime::DateTimeFormatterPreferences::from(&locale);
+    prefs.calendar_algorithm = requested_prefs.calendar_algorithm;
+    prefs.numbering_system = requested_prefs.numbering_system;
+
+    let options = DateTimeOptions::from_json(options_json);
+    prefs.hour_cycle = options.hour_cycle().or(requested_prefs.hour_cycle);
+
+    let provider = &thaw_icu_data::ThawIcuDataProvider;
+    // Resolve the calendar exactly as `DateTimeFormatter` would (explicit
+    // `-u-ca-` or the locale's CLDR-default), via a throwaway formatter.
+    let probe = icu_datetime::DateTimeFormatter::try_new_unstable(
+        provider,
+        prefs,
+        icu_datetime::fieldsets::YMD::medium(),
+    )
+    .ok()?;
+    let kind = probe.calendar().kind();
+    let calendar_name = skeleton_calendar_name(kind)?;
+
+    let (formats, glue) = thaw_icu_data::datetime_skeletons(calendar_name, curated_tag)?;
+    let skeletons: Vec<(Vec<Field>, Pattern<'static>)> = formats
+        .iter()
+        .filter_map(|(skeleton, pattern)| {
+            Some((parse_skeleton(skeleton)?, pattern.parse::<Pattern>().ok()?))
+        })
+        .collect();
+
+    let locale_hour_cycle = thaw_icu_data::preferred_hour_cycle(curated_tag);
+    let (fields, hour_symbol) = skeleton_fields(&options, locale_hour_cycle);
+    if fields.is_empty() {
+        return None;
+    }
+
+    let pattern = create_best_pattern_for_fields(&skeletons, glue, &fields, hour_symbol)?;
+
+    let zoned: serde_json::Value = serde_json::from_str(zoned_parts_json).ok()?;
+    let get = |name: &str| zoned.get(name).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let iso_date =
+        icu_calendar::Date::try_new_iso(get("year"), get("month") as u8, get("day") as u8).ok()?;
+    let time = icu_time::Time::try_new(
+        get("hour") as u8,
+        get("minute") as u8,
+        get("second") as u8,
+        0,
+    )
+    .ok()?;
+
+    let has_date = fields.iter().any(|field| {
+        matches!(
+            field.symbol,
+            FieldSymbol::Era
+                | FieldSymbol::Year(_)
+                | FieldSymbol::Month(_)
+                | FieldSymbol::Week(_)
+                | FieldSymbol::Day(_)
+                | FieldSymbol::Weekday(_)
+        )
+    });
+    let has_time = fields.iter().any(|field| {
+        matches!(
+            field.symbol,
+            FieldSymbol::DayPeriod(_)
+                | FieldSymbol::Hour(_)
+                | FieldSymbol::Minute
+                | FieldSymbol::Second(_)
+                | FieldSymbol::DecimalSecond(_)
+        )
+    });
+
+    format_skeleton_pattern(
+        kind,
+        provider,
+        prefs,
+        &pattern,
+        iso_date,
+        time,
+        has_date,
+        has_time,
+    )
+}
+
+/// `__thaw_intl_datetime_skeleton_parts(locale, options_json,
+/// zoned_parts_json) -> parts JSON`, or `"[]"` when skeleton matching
+/// isn't available (caller then falls back to the icu4x field-set
+/// builder, which needs its own width fixups JS-side). When this returns
+/// non-empty, the pattern's field widths are already Node-final, so the
+/// caller must *not* zero-pad/unpad.
+fn intl_datetime_skeleton_parts_native(
+    locale_tag: &str,
+    options_json: &str,
+    zoned_parts_json: &str,
+) -> String {
+    use std::str::FromStr;
+
+    let Some(parts) = intl_datetime_skeleton_parts_json(locale_tag, options_json, zoned_parts_json)
+    else {
+        return "[]".to_string();
+    };
+    let is_en = icu_locale::Locale::from_str(locale_tag)
+        .map(|locale| locale.id.language.as_str() == "en")
+        .unwrap_or(false);
+    if is_en { parts.replace('\u{202f}', " ") } else { parts }
+}
+
+#[allow(deprecated)] // `AnyCalendarKind::JapaneseExtended` is a deprecated alias for `Japanese`.
+#[allow(clippy::too_many_arguments)]
+fn format_skeleton_pattern(
+    kind: icu_calendar::AnyCalendarKind,
+    provider: &thaw_icu_data::ThawIcuDataProvider,
+    prefs: icu_datetime::DateTimeFormatterPreferences,
+    pattern: &Pattern<'static>,
+    iso_date: icu_calendar::Date<icu_calendar::Iso>,
+    time: icu_time::Time,
+    has_date: bool,
+    has_time: bool,
+) -> Option<String> {
+    use icu_datetime::fieldsets::enums::{DateAndTimeFieldSet, DateFieldSet, TimeFieldSet};
+
+    let pattern_str = pattern.to_string();
+    let pattern_fields: Vec<Field> = pattern
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            PatternItem::Field(field) => Some(field),
+            PatternItem::Literal(_) => None,
+        })
+        .collect();
+
+    macro_rules! format_cal {
+        ($C:ty, $FSet:ty, $input:expr) => {{
+            use icu_datetime::pattern::{
+                DayPeriodNameLength, MonthNameLength, WeekdayNameLength, YearNameLength,
+            };
+            let mut names =
+                icu_datetime::pattern::FixedCalendarDateTimeNames::<$C, $FSet>::try_new_unstable(
+                    provider, prefs,
+                )
+                .ok()?;
+            // Load only the name data this pattern actually references.
+            // (`load_for_pattern` would also demand time-zone data this
+            // polyfill deliberately doesn't vendor -- `timeZoneName` is
+            // rendered JS-side -- so load names explicitly instead.)
+            for field in &pattern_fields {
+                match field.symbol {
+                    FieldSymbol::Month(month) => {
+                        use icu_datetime::provider::fields::Month;
+                        let standalone = month == Month::StandAlone;
+                        let length = match (field.length, standalone) {
+                            (FieldLength::One | FieldLength::Two, false) => {
+                                MonthNameLength::Numeric
+                            }
+                            (FieldLength::One | FieldLength::Two, true) => {
+                                MonthNameLength::StandaloneNumeric
+                            }
+                            (FieldLength::Four, false) => MonthNameLength::Wide,
+                            (FieldLength::Four, true) => MonthNameLength::StandaloneWide,
+                            (FieldLength::Five, false) => MonthNameLength::Narrow,
+                            (FieldLength::Five, true) => MonthNameLength::StandaloneNarrow,
+                            (_, false) => MonthNameLength::Abbreviated,
+                            (_, true) => MonthNameLength::StandaloneAbbreviated,
+                        };
+                        let _ = names.load_month_names(provider, length);
+                    }
+                    FieldSymbol::Weekday(weekday) => {
+                        use icu_datetime::provider::fields::Weekday;
+                        let standalone = weekday == Weekday::StandAlone;
+                        let length = match (field.length, standalone) {
+                            (FieldLength::Four, false) => WeekdayNameLength::Wide,
+                            (FieldLength::Five, false) => WeekdayNameLength::Narrow,
+                            (FieldLength::Four, true) => WeekdayNameLength::StandaloneWide,
+                            (FieldLength::Five, true) => WeekdayNameLength::StandaloneNarrow,
+                            (_, false) => WeekdayNameLength::Abbreviated,
+                            (_, true) => WeekdayNameLength::StandaloneAbbreviated,
+                        };
+                        let _ = names.load_weekday_names(provider, length);
+                    }
+                    FieldSymbol::Era | FieldSymbol::Year(_) => {
+                        let length = match field.length {
+                            FieldLength::Four => YearNameLength::Wide,
+                            FieldLength::Five => YearNameLength::Narrow,
+                            _ => YearNameLength::Abbreviated,
+                        };
+                        let _ = names.load_year_names(provider, length);
+                    }
+                    FieldSymbol::DayPeriod(_) => {
+                        let length = match field.length {
+                            FieldLength::Four => DayPeriodNameLength::Wide,
+                            FieldLength::Five => DayPeriodNameLength::Narrow,
+                            _ => DayPeriodNameLength::Abbreviated,
+                        };
+                        let _ = names.load_day_period_names(provider, length);
+                    }
+                    _ => {}
+                }
+            }
+            let pattern = icu_datetime::pattern::DateTimePattern::try_from_pattern_str(&pattern_str)
+                .ok()?;
+            let formatter = names.with_pattern_unchecked(&pattern);
+            let formatted = formatter.format(&$input);
+            write_try_parts_json(&formatted)
+        }};
+    }
+    macro_rules! go {
+        ($C:ty) => {{
+            if has_date && has_time {
+                let date = iso_date.to_calendar(<$C>::default());
+                let datetime = icu_datetime::input::DateTime { date, time };
+                format_cal!($C, DateAndTimeFieldSet, datetime)
+            } else if has_date {
+                let date = iso_date.to_calendar(<$C>::default());
+                format_cal!($C, DateFieldSet, date)
+            } else {
+                format_cal!($C, TimeFieldSet, time)
+            }
+        }};
+    }
+
+    use icu_calendar::AnyCalendarKind as K;
+    match kind {
+        K::Gregorian => go!(icu_calendar::cal::Gregorian),
+        K::Buddhist => go!(icu_calendar::cal::Buddhist),
+        K::Japanese | K::JapaneseExtended => go!(icu_calendar::cal::Japanese),
+        K::Coptic => go!(icu_calendar::cal::Coptic),
+        K::Indian => go!(icu_calendar::cal::Indian),
+        K::Ethiopian | K::EthiopianAmeteAlem => go!(icu_calendar::cal::Ethiopian),
+        K::Chinese => go!(icu_calendar::cal::ChineseTraditional),
+        K::Dangi => go!(icu_calendar::cal::KoreanTraditional),
+        K::Hebrew => go!(icu_calendar::cal::Hebrew),
+        K::HijriUmmAlQura
+        | K::HijriTabularTypeIIFriday
+        | K::HijriSimulatedMecca
+        | K::HijriTabularTypeIIThursday => go!(icu_calendar::cal::Hijri<icu_calendar::cal::hijri::UmmAlQura>),
+        K::Persian => go!(icu_calendar::cal::Persian),
+        K::Roc => go!(icu_calendar::cal::Roc),
+        _ => None,
+    }
+}
+
 /// `__thaw_intl_datetime_format_parts(locale, options_json,
 /// zoned_parts_json) -> JSON array of `{"type":..,"value":..}``,
 /// matching `Intl.DateTimeFormat.prototype.formatToParts()`'s shape for

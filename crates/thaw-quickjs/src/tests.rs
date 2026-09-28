@@ -4024,3 +4024,50 @@ fn intl_range_fallback_partitions_endpoints_like_real_node() {
         r#"[{"type":"currency","value":"$","source":"startRange"},{"type":"integer","value":"3","source":"startRange"},{"type":"decimal","value":".","source":"startRange"},{"type":"fraction","value":"00","source":"startRange"},{"type":"literal","value":" – ","source":"shared"},{"type":"currency","value":"$","source":"endRange"},{"type":"integer","value":"5","source":"endRange"},{"type":"decimal","value":".","source":"endRange"},{"type":"fraction","value":"00","source":"endRange"}]"#
     );
 }
+
+/// UTS-35 skeleton matching (`intl_datetime_skeleton.rs`) against real
+/// Node: icu4x's own `fieldsets::YMD` derives the requested field widths
+/// from the locale's `dateFormats` length patterns, so `de`
+/// `{month:'short'}` came out numeric (`4.07.2024`) instead of Node's
+/// `4. Juli 2024`. These cases all exercised that divergence.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_skeleton_matching_matches_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, ms) {\n\
+               return new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...opts }).format(new Date(ms));\n\
+             }\n\
+             function all() {\n\
+               const t = Date.UTC(2024, 6, 4);\n\
+               return [\n\
+                 show('de-DE', {year:'numeric',month:'short',day:'numeric'}, t),\n\
+                 show('de-DE', {year:'numeric',month:'2-digit',day:'numeric'}, t),\n\
+                 show('ja-JP', {year:'numeric',month:'short',day:'numeric'}, t),\n\
+                 show('ko', {year:'numeric',month:'short',day:'numeric'}, t),\n\
+                 show('ar', {year:'numeric',month:'short',day:'numeric'}, t),\n\
+                 show('fr', {year:'numeric',month:'2-digit',day:'numeric'}, t),\n\
+                 show('ru', {year:'numeric',month:'2-digit',day:'numeric'}, t),\n\
+                 show('en-US', {year:'numeric',month:'short',day:'numeric'}, t),\n\
+                 show('en-US', {weekday:'long'}, t),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "4. Juli 2024",
+            "4.07.2024",
+            "2024年7月4日",
+            "2024년 7월 4일",
+            "4 يوليو 2024",
+            "4/07/2024",
+            "4.07.2024",
+            "Jul 4, 2024",
+            "Thursday",
+        ])
+        .unwrap()
+    );
+}
