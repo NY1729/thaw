@@ -88,3 +88,55 @@ fn intl_numbering_system_representative(numbering_system: &str) -> Option<&'stat
         _ => None,
     }
 }
+
+/// `__thaw_intl_compact_number(locale, digits, long) -> String`:
+/// `notation: 'compact'` rendering via icu4x's `CompactDecimalFormatter`
+/// (`digits` is the plain ASCII number, not pre-rounded by `intl.js` --
+/// the compact pattern itself chooses the mantissa's precision). Falls
+/// back to `digits` unchanged if the locale/format fails to resolve.
+///
+/// Known, documented divergence: icu4x rounds compact mantissas
+/// half-to-even, while ECMA-402's default is `halfExpand`, so an exact
+/// tie differs (`1650` -> `"1.6K"` here, `"1.7K"` in real Node); every
+/// non-tie value matches Node.
+fn intl_compact_number(locale_tag: &str, digits: &str, long: bool) -> String {
+    use std::str::FromStr;
+
+    let Ok(decimal) = icu_decimal::input::Decimal::from_str(digits) else {
+        return digits.to_string();
+    };
+    let Ok(locale) = icu_locale::Locale::from_str(locale_tag) else {
+        return digits.to_string();
+    };
+    let curated_tag = resolve_curated_locale(&locale.id);
+    let curated_locale: icu_locale::Locale =
+        curated_tag.parse().expect("resolve_curated_locale returns a valid tag");
+    let requested_prefs = icu_decimal::DecimalFormatterPreferences::from(&locale);
+    let base_locale = requested_prefs
+        .numbering_system
+        .as_ref()
+        .and_then(|nu| intl_numbering_system_representative(nu.as_str()))
+        .and_then(|tag| tag.parse::<icu_locale::Locale>().ok())
+        .unwrap_or(curated_locale);
+    let mut prefs =
+        icu_decimal::preferences::CompactDecimalFormatterPreferences::from(&base_locale);
+    prefs.numbering_system = requested_prefs.numbering_system;
+    let options = icu_decimal::options::CompactDecimalFormatterOptions::default();
+    let formatter = if long {
+        icu_decimal::CompactDecimalFormatter::try_new_long_unstable(
+            &thaw_icu_data::ThawIcuDataProvider,
+            prefs,
+            options,
+        )
+    } else {
+        icu_decimal::CompactDecimalFormatter::try_new_short_unstable(
+            &thaw_icu_data::ThawIcuDataProvider,
+            prefs,
+            options,
+        )
+    };
+    match formatter {
+        Ok(formatter) => formatter.format(&decimal).to_string(),
+        Err(_) => digits.to_string(),
+    }
+}

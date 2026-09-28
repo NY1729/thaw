@@ -1228,6 +1228,14 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl number formatter");
                 #[cfg(feature = "intl")]
+                let intl_compact_number_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, digits: String, long: bool| {
+                        intl_compact_number(&locale, &digits, long)
+                    },
+                )
+                .expect("failed to create JavaScript Intl compact number formatter");
+                #[cfg(feature = "intl")]
                 let intl_currency_fraction_digits_function =
                     Function::new(ctx.clone(), |currency: String| {
                         intl_currency_fraction_digits(&currency).map(i32::from)
@@ -1456,6 +1464,13 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_number_format", intl_number_format_function)
                     .expect("failed to install JavaScript Intl number formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set(
+                        "__thaw_intl_compact_number",
+                        intl_compact_number_function,
+                    )
+                    .expect("failed to install JavaScript Intl compact number formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set(
