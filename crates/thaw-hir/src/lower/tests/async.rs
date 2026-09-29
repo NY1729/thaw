@@ -465,15 +465,45 @@ fn lowers_fetch_and_json_parse_field_access() {
             ),
         )
     );
+    // A `Json` field read is guarded against a nullish receiver, which
+    // throws the same tagged `TypeError` real JS does.
+    let guarded_json_get = |receiver: &str, field: &str| {
+        HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: receiver.into(),
+                    ty: HirType::Json,
+                }],
+                HirType::Json,
+                Box::new(HirExpr::Block(vec![
+                    HirStmt::If(
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                            vec![HirExpr::Var(receiver.into())],
+                        ),
+                        vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                            format!(
+                                "\u{1}TypeError\u{1}Cannot read properties of null (reading '{field}')"
+                            ),
+                        )))],
+                        Vec::new(),
+                    ),
+                    HirStmt::Return(Some(HirExpr::JsonGet(
+                        Box::new(HirExpr::Var(receiver.into())),
+                        field.into(),
+                    ))),
+                ])),
+            )),
+            vec![HirExpr::Var("data".into())],
+        )
+    };
     assert_eq!(
         f.body[2],
         HirStmt::Let(
             "name".into(),
             HirType::Str,
-            HirExpr::JsonAsString(Box::new(HirExpr::JsonGet(
-                Box::new(HirExpr::Var("data".into())),
-                "name".into(),
-            ))),
+            HirExpr::JsonAsString(Box::new(guarded_json_get("__thaw_json_receiver_0", "name"))),
         )
     );
     assert_eq!(
@@ -482,10 +512,7 @@ fn lowers_fetch_and_json_parse_field_access() {
             "count".into(),
             HirType::F64,
             HirExpr::JsonAsNumber(Box::new(HirExpr::JsonIndex(
-                Box::new(HirExpr::JsonGet(
-                    Box::new(HirExpr::Var("data".into())),
-                    "items".into(),
-                )),
+                Box::new(guarded_json_get("__thaw_json_receiver_1", "items")),
                 Box::new(HirExpr::Lit(HirLit::F64(0.0))),
             ))),
         )

@@ -194,7 +194,7 @@
   };
   globalThis.__thaw_json_safe_stringify = function (value) {
     const ancestors = [];
-    return JSON.stringify(value, function (key, nested) {
+    const text = JSON.stringify(value, function (key, nested) {
       nested = globalThis.__thaw_json_binary_replacer.call(this, key, nested);
       // `NaN`/`Infinity`/`-Infinity` have no JSON representation --
       // real `JSON.stringify` collapses them to `null`, indistinguishable
@@ -219,4 +219,25 @@
       }
       return nested;
     });
+    if (text === undefined) return undefined;
+    // Well-formed `JSON.stringify` escapes a lone surrogate as `\uXXXX`,
+    // but if the engine left one raw it would break the native Rust
+    // `String` conversion -- escape any that remain.
+    let escaped = '';
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code >= 0xD800 && code <= 0xDFFF) {
+        const paired = code <= 0xDBFF && i + 1 < text.length
+          && text.charCodeAt(i + 1) >= 0xDC00 && text.charCodeAt(i + 1) <= 0xDFFF;
+        if (paired) {
+          escaped += text[i] + text[i + 1];
+          i++;
+        } else {
+          escaped += '\\u' + code.toString(16).padStart(4, '0');
+        }
+      } else {
+        escaped += text[i];
+      }
+    }
+    return escaped;
   };

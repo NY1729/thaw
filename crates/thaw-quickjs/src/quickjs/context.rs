@@ -1296,8 +1296,8 @@ fn ensure_context() {
                 #[cfg(feature = "intl")]
                 let intl_segment_function = Function::new(
                     ctx.clone(),
-                    |locale: String, granularity: String, text: String| {
-                        intl_segment(&locale, &granularity, &text)
+                    |locale: String, granularity: String, text: crate::Wtf8String| {
+                        intl_segment(&locale, &granularity, &text.0)
                     },
                 )
                 .expect("failed to create JavaScript Intl segmenter");
@@ -1309,9 +1309,9 @@ fn ensure_context() {
                      ignore_punctuation: bool,
                      numeric: bool,
                      case_first: String,
-                     a: String,
-                     b: String| {
-                        intl_collator_compare(&locale, &sensitivity, ignore_punctuation, numeric, &case_first, &a, &b)
+                     a: crate::Wtf8String,
+                     b: crate::Wtf8String| {
+                        intl_collator_compare(&locale, &sensitivity, ignore_punctuation, numeric, &case_first, &a.0, &b.0)
                     },
                 )
                 .expect("failed to create JavaScript Intl collator");
@@ -1323,16 +1323,16 @@ fn ensure_context() {
                      ignore_punctuation: bool,
                      numeric: bool,
                      case_first: String,
-                     a: String,
-                     b: String| {
+                     a: crate::Wtf8String,
+                     b: crate::Wtf8String| {
                         intl_collator_compare_search(
                             &locale,
                             &sensitivity,
                             ignore_punctuation,
                             numeric,
                             &case_first,
-                            &a,
-                            &b,
+                            &a.0,
+                            &b.0,
                         )
                     },
                 )

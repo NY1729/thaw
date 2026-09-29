@@ -122,6 +122,14 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let inferred = self.infer_expr_type(&value)?;
+        // A callback value whose parameter object types are a width-subtype
+        // (prefix) of the declared callback's -- e.g. a `createServer`
+        // handler annotated with a narrower request/response than
+        // `IncomingMessage`/`ServerResponse` -- is layout-compatible and
+        // needs no adapter.
+        if callable_value_compatible(declared, &inferred) {
+            return Ok(value);
+        }
         if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _)) {
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("registerNativeCallback".to_string())),

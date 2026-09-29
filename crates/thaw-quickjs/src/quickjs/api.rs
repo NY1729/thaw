@@ -1,3 +1,77 @@
+thread_local! {
+    /// Compiled `new Function(...)` results, keyed by the JSON array of
+    /// its string arguments (so repeated identical sources reuse the same
+    /// JS function object instead of re-parsing/re-compiling each time).
+    static DYNAMIC_FUNCTIONS: std::cell::RefCell<std::collections::HashMap<String, u64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// `new Function(...args)` via the JS realm's own `Function` constructor,
+/// with a source-keyed cache of the retained function handles. `args_json`
+/// is the JSON array of the constructor's string arguments (the last is
+/// the body). Returns a live function handle (with an error on failure).
+#[no_mangle]
+pub extern "C" fn thaw_js_new_function(args_json: *const c_char) -> ThawHandleResult {
+    let args_json = to_str(args_json);
+    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+        if let Some(handle) = DYNAMIC_FUNCTIONS.with(|cache| cache.borrow().get(&args_json).copied())
+        {
+            return Ok(handle);
+        }
+        let json: Object = ctx.globals().get("JSON").map_err(|e| e.to_string())?;
+        let parse: Function = json.get("parse").map_err(|e| e.to_string())?;
+        let arguments: Array = parse
+            .call((args_json.as_str(),))
+            .map_err(|e| format!("invalid `new Function` arguments: {e}"))?;
+        let constructor: Function = ctx.globals().get("Function").map_err(|e| e.to_string())?;
+        let mut call_args = Args::new_unsized(ctx.clone());
+        for index in 0..arguments.len() {
+            let argument: Value = arguments.get(index).map_err(|e| e.to_string())?;
+            call_args.push_arg(argument).map_err(|e| e.to_string())?;
+        }
+        let function: Value = constructor.call_arg(call_args).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+            error => error.to_string(),
+        })?;
+        let handle = retain_value(&ctx, function)?;
+        DYNAMIC_FUNCTIONS.with(|cache| cache.borrow_mut().insert(args_json.clone(), handle));
+        Ok(handle)
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+/// A JS string decoded as its WTF-8 bytes. `rquickjs::String::to_string()`
+/// rejects a lone UTF-16 surrogate (QuickJS's own `JS_ToCStringLen` emits
+/// WTF-8, which is not valid UTF-8), so a native callback that receives
+/// user text takes this instead of `String`.
+#[cfg_attr(not(feature = "intl"), allow(dead_code))]
+pub(crate) struct Wtf8String(pub(crate) Vec<u8>);
+
+#[cfg_attr(not(feature = "intl"), allow(dead_code))]
+impl<'js> FromJs<'js> for Wtf8String {
+    fn from_js(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Self> {
+        let type_name = value.type_name();
+        let string = value
+            .into_string()
+            .ok_or_else(|| rquickjs::Error::new_from_js(type_name, "string"))?;
+        let cstring = string.to_cstring()?;
+        let bytes =
+            unsafe { std::slice::from_raw_parts(cstring.as_ptr() as *const u8, cstring.len()) }
+                .to_vec();
+        let _ = ctx;
+        Ok(Wtf8String(bytes))
+    }
+}
+
 #[cfg(unix)]
 fn native_promise_state(promise: *const c_void) -> u8 {
     unsafe {
@@ -333,7 +407,6 @@ fn invoke_impl<'js>(
         .globals()
         .get("__thaw_json_date_reviver")
         .map_err(to_string_err)?;
-
     let args_array: Array = parse
         .call((args_json, date_reviver))
         .map_err(|e| format!("args_json is not a valid JSON array: {e}"))?;
@@ -343,7 +416,6 @@ fn invoke_impl<'js>(
         let arg: Value = args_array.get(i).map_err(to_string_err)?;
         call_args.push_arg(arg).map_err(to_string_err)?;
     }
-
     let result: Value = target.call_arg(call_args).map_err(|e| match e {
         rquickjs::Error::Exception if preserve_error => describe_tagged_exception(&ctx),
         rquickjs::Error::Exception => describe_host_exception(&ctx, label),
@@ -728,20 +800,78 @@ fn process_exit_code(ctx: &Ctx<'_>) -> i32 {
 }
 
 #[no_mangle]
+/// Encodes UTF-16 code units as WTF-8 (a lone surrogate kept as its
+/// 3-byte sequence) so a JS string can cross into a native string without
+/// `rquickjs`'s own Rust-`String` conversion rejecting it.
+fn wtf8_from_units(units: &[u16]) -> Vec<u8> {
+    fn push(bytes: &mut Vec<u8>, code: u32) {
+        if code < 0x80 {
+            bytes.push(code as u8);
+        } else if code < 0x800 {
+            bytes.push(0xC0 | (code >> 6) as u8);
+            bytes.push(0x80 | (code & 0x3F) as u8);
+        } else if code < 0x10000 {
+            bytes.push(0xE0 | (code >> 12) as u8);
+            bytes.push(0x80 | ((code >> 6) & 0x3F) as u8);
+            bytes.push(0x80 | (code & 0x3F) as u8);
+        } else {
+            bytes.push(0xF0 | (code >> 18) as u8);
+            bytes.push(0x80 | ((code >> 12) & 0x3F) as u8);
+            bytes.push(0x80 | ((code >> 6) & 0x3F) as u8);
+            bytes.push(0x80 | (code & 0x3F) as u8);
+        }
+    }
+    let mut bytes = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            let code = 0x10000
+                + ((u32::from(unit) - 0xD800) << 10)
+                + (u32::from(units[index + 1]) - 0xDC00);
+            push(&mut bytes, code);
+            index += 2;
+        } else {
+            push(&mut bytes, u32::from(unit));
+            index += 1;
+        }
+    }
+    bytes
+}
+
+/// `String(value)` as WTF-8 bytes: the JS string's code units are read
+/// out one at a time (via `charCodeAt`) so a lone surrogate survives --
+/// `rquickjs`'s direct `String` -> Rust `String` conversion rejects it.
+fn js_handle_string_wtf8<'js>(ctx: &Ctx<'js>, value: rquickjs::Value<'js>) -> Result<Vec<u8>, String> {
+    let format: Function = ctx
+        .eval(
+            "(value) => { const s = String(value); const parts = []; \
+             for (let i = 0; i < s.length; i++) parts.push(s.charCodeAt(i)); \
+             return parts.join(','); }",
+        )
+        .map_err(|error| error.to_string())?;
+    let units: String = format.call((value,)).map_err(|error| match error {
+        rquickjs::Error::Exception => describe_exception(ctx),
+        error => error.to_string(),
+    })?;
+    let units: Vec<u16> = units
+        .split(',')
+        .filter_map(|part| part.parse::<u16>().ok())
+        .collect();
+    Ok(wtf8_from_units(&units))
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
-    let text = with_active_or_context(|ctx| -> Result<String, String> {
+    let bytes = with_active_or_context(|ctx| -> Result<Vec<u8>, String> {
         let value = value_for_handle(&ctx, handle)?;
-        let string: Function = ctx
-            .globals()
-            .get("String")
-            .map_err(|error| error.to_string())?;
-        string.call((value,)).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
-            error => error.to_string(),
-        })
+        js_handle_string_wtf8(&ctx, value)
     })
-    .unwrap_or_else(|_| "[invalid JsValue]".to_string());
-    CString::new(text).unwrap_or_default().into_raw()
+    .unwrap_or_else(|_| b"[invalid JsValue]".to_vec());
+    CString::new(bytes).unwrap_or_default().into_raw()
 }
 
 /// Like `thaw_js_handle_to_string`, but for `console.log` specifically --
@@ -753,18 +883,27 @@ pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
 /// couldn't silently break any of those.
 #[no_mangle]
 pub extern "C" fn thaw_js_handle_to_console_string(handle: u64) -> *const c_char {
-    let text = with_active_or_context(|ctx| -> Result<String, String> {
+    let bytes = with_active_or_context(|ctx| -> Result<Vec<u8>, String> {
         let value = value_for_handle(&ctx, handle)?;
         let format: Function = ctx
-            .eval("(value) => typeof value === 'bigint' ? String(value) + 'n' : String(value)")
+            .eval(
+                "(value) => { const s = typeof value === 'bigint' ? String(value) + 'n' : String(value); \
+                 const parts = []; for (let i = 0; i < s.length; i++) parts.push(s.charCodeAt(i)); \
+                 return parts.join(','); }",
+            )
             .map_err(|error| error.to_string())?;
-        format.call((value,)).map_err(|error| match error {
+        let units: String = format.call((value,)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_exception(&ctx),
             error => error.to_string(),
-        })
+        })?;
+        let units: Vec<u16> = units
+            .split(',')
+            .filter_map(|part| part.parse::<u16>().ok())
+            .collect();
+        Ok(wtf8_from_units(&units))
     })
-    .unwrap_or_else(|_| "[invalid JsValue]".to_string());
-    CString::new(text).unwrap_or_default().into_raw()
+    .unwrap_or_else(|_| b"[invalid JsValue]".to_vec());
+    CString::new(bytes).unwrap_or_default().into_raw()
 }
 
 /// The residual JIT's `dynamic_object_query` host ABI: operation `0`

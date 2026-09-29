@@ -1,3 +1,139 @@
+/// Is a callback whose parameter is typed `actual` usable where one
+/// whose parameter is typed `expected` is wanted? The caller will
+/// hand the callback an `expected`, so `actual` may be a *narrower*
+/// object that names only a leading subset of `expected`'s fields
+/// (width subtyping, as in TS: a `(r: { method; url }) => void`
+/// handler is fine for a slot that provides `{ method; url; body;
+/// ... }`). Restricted to a matching *prefix* so the handler's
+/// field offsets still line up with the value it's handed; the
+/// reverse -- naming a field the caller won't provide, or a
+/// different order -- stays rejected. Real trigger: `createServer`
+/// handlers annotated `{ method; url; statusCode; body }` after
+/// `IncomingMessage` grew an `on` member.
+///
+fn callback_param_compatible(expected: &HirType, actual: &HirType) -> bool {
+    if expected == actual {
+        return true;
+    }
+    // `expected`'s own omittable slots (a `CallableFunction`'s
+    // `fixed` params, e.g. `TemplateFunction = (data?: Data) =>
+    // string`) are wrapped in `Optional`/`Nullish`
+    // (`optional_parameter_type`, thaw-hir's `lower_ts_type` for a
+    // `TsFnType`) so the callable's *own body* can synthesize a
+    // real default when a caller omits that argument -- a
+    // parallel `HirOptionalMask` already conveys the same
+    // omittability to any external arity check, which is all that
+    // matters when checking whether some other value's parameter
+    // list can stand in for this one. A plain adapter `Function`
+    // (the generated wrapper around a dynamic call's returned JS
+    // closure, real example: ejs's own `compile(...):
+    // TemplateFunction`) always supplies a definite value at every
+    // declared slot, so its own matching param position stays
+    // unwrapped -- `Optional(Json)` has no direct match against a
+    // bare `Json` above, rejecting every such returned-callable
+    // value outright, whether it was ever invoked or not (an
+    // unconditionally-processed Fallback declaration). Retry
+    // against the unwrapped inner type before giving up; checked
+    // *after* the exact-match attempt above so two independently
+    // wrapped shapes (a callback-typed slot, which this same
+    // wrapping applies to on both sides) still compare equal
+    // first, rather than each losing its wrapper and potentially
+    // matching something it shouldn't.
+    if let HirType::Optional(inner) | HirType::Nullish(inner) = expected {
+        if callback_param_compatible(inner, actual) {
+            return true;
+        }
+    }
+    if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) = (expected, actual) {
+        return actual_fields.len() <= expected_fields.len()
+            && actual_fields.iter().zip(expected_fields).all(
+                |((name, actual_ty), (expected_name, expected_ty))| {
+                    name == expected_name && callback_param_compatible(expected_ty, actual_ty)
+                },
+            );
+    }
+    matches!(
+        (expected, actual),
+        (
+            HirType::Json,
+            HirType::F64
+                | HirType::I64
+                | HirType::Bool
+                | HirType::Undefined
+                | HirType::Null
+                | HirType::Str
+                | HirType::StrLiteral(_)
+                | HirType::Dictionary(_)
+                | HirType::Array(_)
+                | HirType::Tuple(_)
+                | HirType::Object(_)
+                | HirType::Union(_)
+                | HirType::Optional(_)
+                | HirType::Nullable(_)
+                | HirType::Nullish(_)
+                | HirType::JsValue
+        ) | (HirType::JsValue, HirType::Json)
+    )
+}
+
+/// A callback parameter declared to return `void` accepts a function
+/// value of any return type, including `Promise<T>` -- the caller has
+/// stated it discards whatever comes back, so an `async` handler
+/// passed where a `=> void` callback is declared (e.g. `createServer`'s
+/// handler, which may legitimately be written either plain or `async`)
+/// is compatible. This mirrors TypeScript's own contextual typing of
+/// void-returning callback types (what lets `async` callbacks pass to
+/// `Array.prototype.forEach` etc.).
+///
+/// An expected `JsValue` return (a `(...) => any` callback whose declared
+/// return type genuinely accepts anything, including nothing) also accepts
+/// a real, concrete callback that returns void -- otherwise an ordinary
+/// `function(x) { ... }` with no explicit `return` (inferred `Void`) never
+/// satisfied it. Real trigger: a generic Events-map method's callback
+/// parameter (`handler: (...args: Events[Event]) => any`, e.g.
+/// `minipass`'s `.on()`).
+fn callable_return_compatible(expected_ret: &HirType, ret: &HirType) -> bool {
+    expected_ret == ret || *expected_ret == HirType::Void || *expected_ret == HirType::JsValue
+}
+
+/// Whether a `Function`/`CallableFunction` value of type `actual` can stand
+/// in where `expected` is declared: return-type compatibility (ignoring
+/// `void`) plus per-parameter width subtyping.
+fn callable_value_compatible(expected: &HirType, actual: &HirType) -> bool {
+    match (expected, actual) {
+        (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {
+            callable_return_compatible(expected_ret, ret)
+                && expected_params.len() == params.len()
+                && expected_params
+                    .iter()
+                    .zip(params)
+                    .all(|(expected, actual)| callback_param_compatible(expected, actual))
+        }
+        (
+            HirType::CallableFunction(fixed, _, rest, expected_ret),
+            HirType::Function(params, ret),
+        ) => {
+            callable_return_compatible(expected_ret, ret)
+                && params.len() >= fixed.len()
+                && fixed
+                    .iter()
+                    .zip(params)
+                    .all(|(expected, actual)| callback_param_compatible(expected, actual))
+                && match rest {
+                    Some(rest) => {
+                        let tail = &params[fixed.len()..];
+                        tail == [HirType::Array(rest.clone())]
+                            || tail
+                                .iter()
+                                .all(|ty| callback_param_compatible(rest, ty))
+                    }
+                    None => params.len() == fixed.len(),
+                }
+        }
+        _ => false,
+    }
+}
+
 impl<'a> FnLowerer<'a> {
     fn expect_type(
         &self,
@@ -6,141 +142,7 @@ impl<'a> FnLowerer<'a> {
         context: &str,
     ) -> Result<(), String> {
         let actual = self.infer_expr_type(value)?;
-        // Is a callback whose parameter is typed `actual` usable where one
-        // whose parameter is typed `expected` is wanted? The caller will
-        // hand the callback an `expected`, so `actual` may be a *narrower*
-        // object that names only a leading subset of `expected`'s fields
-        // (width subtyping, as in TS: a `(r: { method; url }) => void`
-        // handler is fine for a slot that provides `{ method; url; body;
-        // ... }`). Restricted to a matching *prefix* so the handler's
-        // field offsets still line up with the value it's handed; the
-        // reverse -- naming a field the caller won't provide, or a
-        // different order -- stays rejected. Real trigger: `createServer`
-        // handlers annotated `{ method; url; statusCode; body }` after
-        // `IncomingMessage` grew an `on` member.
-        fn callback_param_compatible(expected: &HirType, actual: &HirType) -> bool {
-            if expected == actual {
-                return true;
-            }
-            // `expected`'s own omittable slots (a `CallableFunction`'s
-            // `fixed` params, e.g. `TemplateFunction = (data?: Data) =>
-            // string`) are wrapped in `Optional`/`Nullish`
-            // (`optional_parameter_type`, thaw-hir's `lower_ts_type` for a
-            // `TsFnType`) so the callable's *own body* can synthesize a
-            // real default when a caller omits that argument -- a
-            // parallel `HirOptionalMask` already conveys the same
-            // omittability to any external arity check, which is all that
-            // matters when checking whether some other value's parameter
-            // list can stand in for this one. A plain adapter `Function`
-            // (the generated wrapper around a dynamic call's returned JS
-            // closure, real example: ejs's own `compile(...):
-            // TemplateFunction`) always supplies a definite value at every
-            // declared slot, so its own matching param position stays
-            // unwrapped -- `Optional(Json)` has no direct match against a
-            // bare `Json` above, rejecting every such returned-callable
-            // value outright, whether it was ever invoked or not (an
-            // unconditionally-processed Fallback declaration). Retry
-            // against the unwrapped inner type before giving up; checked
-            // *after* the exact-match attempt above so two independently
-            // wrapped shapes (a callback-typed slot, which this same
-            // wrapping applies to on both sides) still compare equal
-            // first, rather than each losing its wrapper and potentially
-            // matching something it shouldn't.
-            if let HirType::Optional(inner) | HirType::Nullish(inner) = expected {
-                if callback_param_compatible(inner, actual) {
-                    return true;
-                }
-            }
-            if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) =
-                (expected, actual)
-            {
-                return actual_fields.len() <= expected_fields.len()
-                    && actual_fields.iter().zip(expected_fields).all(
-                        |((name, actual_ty), (expected_name, expected_ty))| {
-                            name == expected_name
-                                && callback_param_compatible(expected_ty, actual_ty)
-                        },
-                    );
-            }
-            matches!(
-                (expected, actual),
-                (
-                    HirType::Json,
-                    HirType::F64
-                        | HirType::I64
-                        | HirType::Bool
-                        | HirType::Undefined
-                        | HirType::Null
-                        | HirType::Str
-                        | HirType::StrLiteral(_)
-                        | HirType::Dictionary(_)
-                        | HirType::Array(_)
-                        | HirType::Tuple(_)
-                        | HirType::Object(_)
-                        | HirType::Union(_)
-                        | HirType::Optional(_)
-                        | HirType::Nullable(_)
-                        | HirType::Nullish(_)
-                        | HirType::JsValue
-                )
-                    | (HirType::JsValue, HirType::Json)
-            )
-        }
-        // A callback parameter declared to return `void` accepts a function
-        // value of any return type, including `Promise<T>` -- the caller has
-        // stated it discards whatever comes back, so an `async` handler
-        // passed where a `=> void` callback is declared (e.g. `createServer`'s
-        // handler, which may legitimately be written either plain or `async`)
-        // is compatible. This mirrors TypeScript's own contextual typing of
-        // void-returning callback types (what lets `async` callbacks pass to
-        // `Array.prototype.forEach` etc.).
-        let return_compatible = |expected_ret: &HirType, ret: &HirType| {
-            // An expected `JsValue` return (a `(...) => any` callback
-            // whose declared return type genuinely accepts anything,
-            // including nothing) also accepts a real, concrete callback
-            // that returns void -- otherwise an ordinary `function(x) {
-            // ... }` with no explicit `return` (inferred `Void`) never
-            // satisfied it, even though real Node's `=> any` callback
-            // signatures are routinely written exactly that way. Real
-            // trigger: a generic Events-map method's callback parameter
-            // (`handler: (...args: Events[Event]) => any`, e.g.
-            // `minipass`'s `.on()`), whose classified return type widens
-            // to `JsValue` per `contextual_dynamic_type`'s own existing
-            // "any" handling.
-            expected_ret == ret || *expected_ret == HirType::Void || *expected_ret == HirType::JsValue
-        };
-        let callable_compatible = match (expected, &actual) {
-            (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {
-                return_compatible(expected_ret, ret)
-                    && expected_params.len() == params.len()
-                    && expected_params
-                        .iter()
-                        .zip(params)
-                        .all(|(expected, actual)| callback_param_compatible(expected, actual))
-            }
-            (
-                HirType::CallableFunction(fixed, _, rest, expected_ret),
-                HirType::Function(params, ret),
-            ) => {
-                return_compatible(expected_ret, ret)
-                    && params.len() >= fixed.len()
-                    && fixed
-                        .iter()
-                        .zip(params)
-                        .all(|(expected, actual)| callback_param_compatible(expected, actual))
-                    && match rest {
-                        Some(rest) => {
-                            let tail = &params[fixed.len()..];
-                            tail == [HirType::Array(rest.clone())]
-                                || tail
-                                    .iter()
-                                    .all(|ty| callback_param_compatible(rest, ty))
-                        }
-                        None => params.len() == fixed.len(),
-                    }
-            }
-            _ => false,
-        };
+        let callable_compatible = callable_value_compatible(expected, &actual);
         // `Bytes` and `Array(F64)` are one physical layout; the separate
         // identity is only for method dispatch, so they assign either
         // way (a `Buffer` into a `number[]` slot and back).
@@ -202,7 +204,7 @@ impl<'a> FnLowerer<'a> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Ok(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Ok(HirType::I64),
-            HirExpr::Lit(HirLit::Str(_)) => Ok(HirType::Str),
+            HirExpr::Lit(HirLit::Str(_)) | HirExpr::Lit(HirLit::Wtf8(_)) => Ok(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Ok(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Ok(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Ok(HirType::Null),
@@ -937,6 +939,7 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_string_trim_end"
                     | "__thaw_string_to_lower_case"
                     | "__thaw_string_to_upper_case"
+                    | "__thaw_string_to_well_formed"
                     | "__thaw_atob"
                     | "__thaw_btoa"
                     | "__thaw_escape"
@@ -946,6 +949,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
                         return Ok(HirType::Str);
+                    }
+                    "__thaw_string_is_well_formed" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("string well-formed check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "string well-formed receiver")?;
+                        return Ok(HirType::Bool);
                     }
                     "__thaw_string_to_locale_lower_case"
                     | "__thaw_string_to_locale_upper_case" => {
@@ -2121,6 +2131,7 @@ impl<'a> FnLowerer<'a> {
                     // args in and a `Json` result out.
                     "loadScript" => return Ok(HirType::Bool),
                     "callDynamic" => return Ok(HirType::Json),
+                    "newDynamicFunction" => return Ok(HirType::JsValue),
                     "getDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValue" => return Ok(HirType::Json),
                     "callNativeAddonValue" => return Ok(HirType::Json),

@@ -185,6 +185,16 @@ pub enum HirLit {
     F64(f64),
     I64(i64),
     Str(String),
+    /// A string literal that contains at least one lone UTF-16 surrogate,
+    /// stored as WTF-8 bytes (UTF-8 extended to encode unpaired
+    /// surrogates as their 3-byte sequence). A Rust `String` cannot hold
+    /// a lone surrogate, so such literals need their own representation;
+    /// every other string literal (and every identifier / property name /
+    /// key) stays `Str`. At codegen time both become the same
+    /// NUL-terminated byte buffer; the runtime string functions decode
+    /// WTF-8 (of which UTF-8 is a subset), so a `Wtf8` value flows through
+    /// `length`/`charCodeAt`/`slice`/... with its surrogates intact.
+    Wtf8(Vec<u8>),
     Bool(bool),
     Undefined,
     ArrayHole,

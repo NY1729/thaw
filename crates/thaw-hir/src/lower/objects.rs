@@ -2206,7 +2206,36 @@ impl<'a> FnLowerer<'a> {
                     HirType::Union(elements) => {
                         self.lower_union_property_read(obj, elements, prop.sym.as_ref())
                     }
-                    HirType::Json => Ok(HirExpr::JsonGet(Box::new(obj), prop.sym.to_string())),
+                    HirType::Json => {
+                        // `obj.x` on a JSON `null`/`undefined` throws in JS;
+                        // a bare `JsonGet` would otherwise read a missing key
+                        // as `null`. Guard the receiver first, throwing the
+                        // same tagged `TypeError` `catch` decodes (and
+                        // `z?.x` already short-circuits before this).
+                        let receiver = format!("__thaw_json_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver.clone(), HirType::Json);
+                        let var = HirExpr::Var(receiver.clone());
+                        let is_nullish = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                            vec![var.clone()],
+                        );
+                        let get = HirExpr::JsonGet(Box::new(var), prop.sym.to_string());
+                        self.wrap_call_argument_bindings(
+                            HirExpr::Block(vec![
+                                HirStmt::If(
+                                    is_nullish,
+                                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                                        "\u{1}TypeError\u{1}Cannot read properties of null (reading '{}')",
+                                        prop.sym
+                                    ))))],
+                                    Vec::new(),
+                                ),
+                                HirStmt::Return(Some(get)),
+                            ]),
+                            &[(receiver, HirType::Json, obj)],
+                        )
+                    }
                     HirType::Dictionary(element) => self.typed_dictionary_read(
                         obj,
                         HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
@@ -2231,6 +2260,24 @@ impl<'a> FnLowerer<'a> {
     fn lower_optional_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         let object = self.lower_expr(&member.obj)?;
         let object_type = self.infer_expr_type(&object)?;
+        // A dynamic `any` value (`Json`) short-circuits to `undefined` for
+        // a nullish receiver -- read the key directly, without the
+        // TypeError guard the non-optional `Json` read now applies.
+        if object_type == HirType::Json {
+            let field = match &member.prop {
+                MemberProp::Ident(field) => field.sym.to_string(),
+                MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                    Expr::Lit(Lit::Str(field)) => field.value.to_string_lossy().into_owned(),
+                    _ => {
+                        return Err(
+                            "optional computed object keys must be string literals".into()
+                        )
+                    }
+                },
+                _ => return Err("unsupported optional object member".into()),
+            };
+            return Ok(HirExpr::JsonGet(Box::new(object), field));
+        }
         let (payload, absence_kind) = match object_type.clone() {
             HirType::Optional(payload) => (payload, 0),
             HirType::Nullable(payload) => (payload, 1),

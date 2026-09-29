@@ -48,7 +48,6 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::rc::Rc;
 
-use serde::Serialize;
 
 /// A live-shared native array -- `Rc` gives every read of the same
 /// logical array (via `Value::clone`) a handle to the *same* underlying
@@ -90,6 +89,11 @@ pub(crate) enum Value {
     Bool(bool),
     Number(serde_json::Number),
     String(String),
+    /// A string containing at least one lone UTF-16 surrogate, held as
+    /// WTF-8 bytes (a Rust `String` cannot represent it). Only ever
+    /// produced from a native string crossing into JSON; serde_json is
+    /// bypassed when serializing it (see `write_json_value`).
+    Wtf8(Vec<u8>),
     Array(SharedArray),
     Object(SharedObject),
 }
@@ -162,31 +166,9 @@ impl Value {
         matches!(self, Value::Array(_))
     }
 
-    /// Converts a plain, freshly-parsed/constructed `serde_json::Value`
-    /// (no sharing possible yet -- it was never touched by any of this
-    /// file's own `Value`) into this file's shared representation,
-    /// wrapping every `Object`/`Array` node (at every depth) in its own
-    /// fresh `Rc<UnsafeCell<...>>`.
-    fn from_plain(value: serde_json::Value) -> Value {
-        match value {
-            serde_json::Value::Null => Value::Null,
-            serde_json::Value::Bool(value) => Value::Bool(value),
-            serde_json::Value::Number(value) => Value::Number(value),
-            serde_json::Value::String(value) => Value::String(value),
-            serde_json::Value::Array(items) => {
-                Value::shared_array(items.into_iter().map(Value::from_plain).collect())
-            }
-            serde_json::Value::Object(fields) => Value::shared_object(
-                fields
-                    .into_iter()
-                    .map(|(key, value)| (key, Value::from_plain(value)))
-                    .collect(),
-            ),
-        }
-    }
-
-    /// The reverse of `from_plain` -- rebuilds an ordinary, independent
-    /// `serde_json::Value` tree for text serialization
+    /// Rebuilds an ordinary, independent `serde_json::Value` tree (used
+    /// only for the JS boundary, which cannot carry a lone surrogate --
+    /// `Value::Wtf8` projects lossily here)
     /// (`serde_json::to_string`/`Serializer` have no notion of this
     /// file's `Rc<UnsafeCell<...>>` sharing and need a plain tree to
     /// walk). This is a genuine deep copy of the *current* snapshot, same
@@ -199,6 +181,7 @@ impl Value {
             Value::Bool(value) => serde_json::Value::Bool(*value),
             Value::Number(value) => serde_json::Value::Number(value.clone()),
             Value::String(value) => serde_json::Value::String(value.clone()),
+            Value::Wtf8(bytes) => serde_json::Value::String(wtf8_to_string(bytes)),
             Value::Array(items) => serde_json::Value::Array(
                 unsafe { &*items.get() }
                     .iter()
@@ -225,6 +208,7 @@ impl Value {
             Value::Bool(value) => Value::Bool(*value),
             Value::Number(value) => Value::Number(value.clone()),
             Value::String(value) => Value::String(value.clone()),
+            Value::Wtf8(bytes) => Value::Wtf8(bytes.clone()),
             Value::Array(items) => Value::shared_array(
                 unsafe { &*items.get() }
                     .iter()
@@ -308,10 +292,38 @@ fn object_identity_key(object: &Value) -> Option<usize> {
     }
 }
 
+/// Decodes native WTF-8 bytes to a `String`, replacing each lone
+/// surrogate (a 3-byte WTF-8 sequence) with a single U+FFFD -- where
+/// `from_utf8_lossy` would emit one per invalid byte (3). A `String`
+/// cannot hold a lone surrogate, so this is the lossy projection used
+/// wherever a value must become a `serde_json::String` (the JS boundary)
+/// or a Rust `&str`.
+fn wtf8_to_string(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let mut fixed = Vec::with_capacity(bytes.len());
+            let mut index = 0;
+            while index < bytes.len() {
+                if bytes[index] == 0xED
+                    && index + 2 < bytes.len()
+                    && (0xA0..=0xBF).contains(&bytes[index + 1])
+                    && bytes[index + 2] & 0xC0 == 0x80
+                {
+                    fixed.extend_from_slice("\u{FFFD}".as_bytes());
+                    index += 3;
+                } else {
+                    fixed.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            String::from_utf8_lossy(&fixed).into_owned()
+        }
+    }
+}
+
 fn to_str(ptr: *const c_char) -> String {
-    unsafe { CStr::from_ptr(ptr) }
-        .to_string_lossy()
-        .into_owned()
+    wtf8_to_string(unsafe { CStr::from_ptr(ptr) }.to_bytes())
 }
 
 /// A native string *value* being marshaled into JSON. Thaw's `HirType::Str`
@@ -327,7 +339,13 @@ fn string_value(value: *const c_char) -> Value {
     if value.is_null() {
         Value::Null
     } else {
-        Value::String(to_str(value))
+        // Keep the raw WTF-8 bytes so a lone surrogate survives to the
+        // serializer; a valid-UTF-8 string stays the common `Value::String`.
+        let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
+        match std::str::from_utf8(bytes) {
+            Ok(text) => Value::String(text.to_string()),
+            Err(_) => Value::Wtf8(bytes.to_vec()),
+        }
     }
 }
 
@@ -652,10 +670,295 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[String]) -> Value {
 }
 
 #[no_mangle]
+/// Encodes UTF-16 code units to WTF-8, combining a valid surrogate pair
+/// into one astral code point and leaving a lone surrogate as a 3-byte
+/// sequence.
+fn wtf8_encode_utf16(units: &[u16]) -> Vec<u8> {
+    fn push(bytes: &mut Vec<u8>, code: u32) {
+        if code < 0x80 {
+            bytes.push(code as u8);
+        } else if code < 0x800 {
+            bytes.push(0xC0 | (code >> 6) as u8);
+            bytes.push(0x80 | (code & 0x3F) as u8);
+        } else if code < 0x10000 {
+            bytes.push(0xE0 | (code >> 12) as u8);
+            bytes.push(0x80 | ((code >> 6) & 0x3F) as u8);
+            bytes.push(0x80 | (code & 0x3F) as u8);
+        } else {
+            bytes.push(0xF0 | (code >> 18) as u8);
+            bytes.push(0x80 | ((code >> 12) & 0x3F) as u8);
+            bytes.push(0x80 | ((code >> 6) & 0x3F) as u8);
+            bytes.push(0x80 | (code & 0x3F) as u8);
+        }
+    }
+    let mut bytes = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            let code = 0x10000
+                + ((u32::from(unit) - 0xD800) << 10)
+                + (u32::from(units[index + 1]) - 0xDC00);
+            push(&mut bytes, code);
+            index += 2;
+        } else {
+            push(&mut bytes, u32::from(unit));
+            index += 1;
+        }
+    }
+    bytes
+}
+
+/// A minimal JSON parser producing this module's own `Value` directly.
+/// `serde_json` is unusable for `JSON.parse` here because it rejects a
+/// lone-surrogate `\uXXXX` escape (turning `JSON.parse('"\\ud800"')` into
+/// `null`); this parser keeps it as a `Value::Wtf8`.
+struct JsonParser<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> JsonParser<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.position).copied()
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(byte) = self.peek() {
+            if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') {
+                self.position += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn parse(&mut self) -> Option<Value> {
+        self.skip_whitespace();
+        self.parse_value()
+    }
+
+    fn parse_value(&mut self) -> Option<Value> {
+        self.skip_whitespace();
+        match self.peek()? {
+            b'{' => self.parse_object(),
+            b'[' => self.parse_array(),
+            b'"' => self.parse_string(),
+            b't' => self.consume(b"true").map(|_| Value::Bool(true)),
+            b'f' => self.consume(b"false").map(|_| Value::Bool(false)),
+            b'n' => self.consume(b"null").map(|_| Value::Null),
+            _ => self.parse_number(),
+        }
+    }
+
+    fn consume(&mut self, literal: &[u8]) -> Option<()> {
+        self.bytes[self.position..]
+            .starts_with(literal)
+            .then(|| self.position += literal.len())
+    }
+
+    fn parse_number(&mut self) -> Option<Value> {
+        let start = self.position;
+        while let Some(byte) = self.peek() {
+            if matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+                self.position += 1;
+            } else {
+                break;
+            }
+        }
+        let text = std::str::from_utf8(&self.bytes[start..self.position]).ok()?;
+        let number: serde_json::Number = serde_json::from_str(text).ok()?;
+        Some(Value::Number(number))
+    }
+
+    fn parse_string(&mut self) -> Option<Value> {
+        // Current byte is the opening quote.
+        self.position += 1;
+        let mut units: Vec<u16> = Vec::new();
+        loop {
+            match self.peek()? {
+                b'"' => {
+                    self.position += 1;
+                    break;
+                }
+                b'\\' => {
+                    self.position += 1;
+                    let escape = self.peek()?;
+                    self.position += 1;
+                    match escape {
+                        b'"' => units.push(0x22),
+                        b'\\' => units.push(0x5C),
+                        b'/' => units.push(0x2F),
+                        b'b' => units.push(0x08),
+                        b'f' => units.push(0x0C),
+                        b'n' => units.push(0x0A),
+                        b'r' => units.push(0x0D),
+                        b't' => units.push(0x09),
+                        b'u' => units.push(self.parse_hex4()?),
+                        _ => return None,
+                    }
+                }
+                0x00..=0x1F => return None,
+                _ => {
+                    let (width, code) = self.decode_utf8()?;
+                    if code >= 0x10000 {
+                        let code = code - 0x10000;
+                        units.push(0xD800 + (code >> 10) as u16);
+                        units.push(0xDC00 + (code & 0x3FF) as u16);
+                    } else {
+                        units.push(code as u16);
+                    }
+                    self.position += width;
+                }
+            }
+        }
+        // A lone surrogate survives as `Value::Wtf8`; otherwise a plain
+        // `String`.
+        let lone = units.iter().enumerate().any(|(index, &unit)| {
+            if !(0xD800..=0xDFFF).contains(&unit) {
+                return false;
+            }
+            if (0xD800..=0xDBFF).contains(&unit) {
+                // High surrogate: paired when the next unit is a low one.
+                !units
+                    .get(index + 1)
+                    .is_some_and(|next| (0xDC00..=0xDFFF).contains(next))
+            } else {
+                // Low surrogate: paired when the previous unit is a high one.
+                !(index > 0 && (0xD800..=0xDBFF).contains(&units[index - 1]))
+            }
+        });
+        if lone {
+            Some(Value::Wtf8(wtf8_encode_utf16(&units)))
+        } else {
+            String::from_utf16(&units).ok().map(Value::String)
+        }
+    }
+
+    fn parse_hex4(&mut self) -> Option<u16> {
+        let mut value = 0u16;
+        for _ in 0..4 {
+            let digit = (self.peek()? as char).to_digit(16)? as u16;
+            value = value * 16 + digit;
+            self.position += 1;
+        }
+        Some(value)
+    }
+
+    fn decode_utf8(&self) -> Option<(usize, u32)> {
+        let bytes = &self.bytes[self.position..];
+        let first = *bytes.first()?;
+        let continuation = |byte: u8| byte & 0xC0 == 0x80;
+        if first < 0x80 {
+            Some((1, u32::from(first)))
+        } else if (0xC2..=0xDF).contains(&first) && bytes.len() >= 2 && continuation(bytes[1]) {
+            Some((
+                2,
+                ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[1]) & 0x3F),
+            ))
+        } else if (0xE0..=0xEF).contains(&first)
+            && bytes.len() >= 3
+            && continuation(bytes[1])
+            && continuation(bytes[2])
+        {
+            Some((
+                3,
+                ((u32::from(first) & 0x0F) << 12)
+                    | ((u32::from(bytes[1]) & 0x3F) << 6)
+                    | (u32::from(bytes[2]) & 0x3F),
+            ))
+        } else if (0xF0..=0xF4).contains(&first)
+            && bytes.len() >= 4
+            && continuation(bytes[1])
+            && continuation(bytes[2])
+            && continuation(bytes[3])
+        {
+            Some((
+                4,
+                ((u32::from(first) & 0x07) << 18)
+                    | ((u32::from(bytes[1]) & 0x3F) << 12)
+                    | ((u32::from(bytes[2]) & 0x3F) << 6)
+                    | (u32::from(bytes[3]) & 0x3F),
+            ))
+        } else {
+            Some((1, 0xFFFD))
+        }
+    }
+
+    fn parse_array(&mut self) -> Option<Value> {
+        self.position += 1; // '['
+        let mut items = Vec::new();
+        self.skip_whitespace();
+        if self.peek()? == b']' {
+            self.position += 1;
+            return Some(Value::shared_array(items));
+        }
+        loop {
+            items.push(self.parse_value()?);
+            self.skip_whitespace();
+            match self.peek()? {
+                b',' => self.position += 1,
+                b']' => {
+                    self.position += 1;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        Some(Value::shared_array(items))
+    }
+
+    fn parse_object(&mut self) -> Option<Value> {
+        self.position += 1; // '{'
+        let mut fields = indexmap::IndexMap::new();
+        self.skip_whitespace();
+        if self.peek()? == b'}' {
+            self.position += 1;
+            return Some(Value::shared_object(fields));
+        }
+        loop {
+            self.skip_whitespace();
+            if self.peek()? != b'"' {
+                return None;
+            }
+            let key = match self.parse_string()? {
+                Value::String(text) => text,
+                Value::Wtf8(bytes) => wtf8_to_string(&bytes),
+                _ => return None,
+            };
+            self.skip_whitespace();
+            if self.peek()? != b':' {
+                return None;
+            }
+            self.position += 1;
+            let value = self.parse_value()?;
+            fields.insert(key, value);
+            self.skip_whitespace();
+            match self.peek()? {
+                b',' => self.position += 1,
+                b'}' => {
+                    self.position += 1;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        Some(Value::shared_object(fields))
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
-    let text = to_str(text);
-    let plain: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-    leak(Value::from_plain(plain))
+    let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
+    let value = JsonParser::new(bytes).parse().unwrap_or(Value::Null);
+    leak(value)
 }
 
 /// # Safety
@@ -882,6 +1185,7 @@ fn inspect_json_value(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::String(value) => inspect_string_literal(value),
+        Value::Wtf8(bytes) => inspect_string_literal(&wtf8_to_string(bytes)),
         Value::Array(items) => {
             let items = shared_array_ref(items);
             if items.is_empty() {
@@ -967,27 +1271,196 @@ fn is_valid_identifier_key(key: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
 }
 
-fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
-    // `serde_json::to_string`/`Serializer` know nothing about this file's
-    // own `Value` (its `Rc<UnsafeCell<...>>` sharing has no serde impl,
-    // deliberately -- see `Value::to_plain`'s own doc comment), so this
-    // is the one place every stringify path converges on a plain,
-    // independent `serde_json::Value` tree right before handing it to
-    // serde.
-    let value = value.to_plain();
-    if indent.is_empty() {
-        let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
-        return CString::new(text).unwrap_or_default().into_raw();
+/// Decodes WTF-8 bytes to UTF-16 code units, preserving lone surrogates
+/// (a compact copy of the runtime codec -- `thaw-std` cannot reach
+/// `thaw-runtime`'s private helpers).
+fn wtf8_decode_utf16(bytes: &[u8]) -> Vec<u16> {
+    let continuation = |byte: u8| byte & 0xC0 == 0x80;
+    let mut units = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let first = bytes[index];
+        let (width, code) = if first < 0x80 {
+            (1, u32::from(first))
+        } else if (0xC2..=0xDF).contains(&first)
+            && index + 1 < bytes.len()
+            && continuation(bytes[index + 1])
+        {
+            (2, ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F))
+        } else if (0xE0..=0xEF).contains(&first)
+            && index + 2 < bytes.len()
+            && continuation(bytes[index + 1])
+            && continuation(bytes[index + 2])
+        {
+            (
+                3,
+                ((u32::from(first) & 0x0F) << 12)
+                    | ((u32::from(bytes[index + 1]) & 0x3F) << 6)
+                    | (u32::from(bytes[index + 2]) & 0x3F),
+            )
+        } else if (0xF0..=0xF4).contains(&first)
+            && index + 3 < bytes.len()
+            && continuation(bytes[index + 1])
+            && continuation(bytes[index + 2])
+            && continuation(bytes[index + 3])
+        {
+            (
+                4,
+                ((u32::from(first) & 0x07) << 18)
+                    | ((u32::from(bytes[index + 1]) & 0x3F) << 12)
+                    | ((u32::from(bytes[index + 2]) & 0x3F) << 6)
+                    | (u32::from(bytes[index + 3]) & 0x3F),
+            )
+        } else {
+            units.push(0xFFFD);
+            index += 1;
+            continue;
+        };
+        if width == 4 && (0x10000..=0x10FFFF).contains(&code) {
+            let code = code - 0x10000;
+            units.push(0xD800 + (code >> 10) as u16);
+            units.push(0xDC00 + (code & 0x3FF) as u16);
+        } else {
+            units.push(code as u16);
+        }
+        index += width;
     }
+    units
+}
+
+/// Writes `bytes` (WTF-8) as a JSON string literal, escaping a lone
+/// surrogate as `\uXXXX` -- which `serde_json` cannot, since it only
+/// handles valid UTF-8.
+fn write_json_string(bytes: &[u8], out: &mut Vec<u8>) {
+    out.push(b'"');
+    let units = wtf8_decode_utf16(bytes);
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        match unit {
+            0x22 => out.extend_from_slice(b"\\\""),
+            0x5C => out.extend_from_slice(b"\\\\"),
+            0x08 => out.extend_from_slice(b"\\b"),
+            0x0C => out.extend_from_slice(b"\\f"),
+            0x0A => out.extend_from_slice(b"\\n"),
+            0x0D => out.extend_from_slice(b"\\r"),
+            0x09 => out.extend_from_slice(b"\\t"),
+            0x00..=0x1F => {
+                out.extend_from_slice(format!("\\u{unit:04x}").as_bytes());
+            }
+            0xD800..=0xDBFF
+                if index + 1 < units.len() && (0xDC00..=0xDFFF).contains(&units[index + 1]) =>
+            {
+                let code = 0x10000
+                    + ((u32::from(unit) - 0xD800) << 10)
+                    + (u32::from(units[index + 1]) - 0xDC00);
+                let mut buffer = [0u8; 4];
+                let text = char::from_u32(code).expect("astral code point").encode_utf8(&mut buffer);
+                out.extend_from_slice(text.as_bytes());
+                index += 2;
+                continue;
+            }
+            0xD800..=0xDFFF => {
+                out.extend_from_slice(format!("\\u{unit:04x}").as_bytes());
+            }
+            _ => {
+                let mut buffer = [0u8; 4];
+                let text = char::from_u32(u32::from(unit))
+                    .expect("BMP code unit")
+                    .encode_utf8(&mut buffer);
+                out.extend_from_slice(text.as_bytes());
+            }
+        }
+        index += 1;
+    }
+    out.push(b'"');
+}
+
+fn write_json_indent(out: &mut Vec<u8>, indent: &[u8], depth: usize) {
+    out.push(b'\n');
+    for _ in 0..depth {
+        out.extend_from_slice(indent);
+    }
+}
+
+/// Serializes a `Value` directly (bypassing `serde_json`, which cannot
+/// represent a lone surrogate) to JSON text.
+fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, depth: usize) {
+    match value {
+        Value::Null => out.extend_from_slice(b"null"),
+        Value::Bool(true) => out.extend_from_slice(b"true"),
+        Value::Bool(false) => out.extend_from_slice(b"false"),
+        Value::Number(number) => {
+            // A JSON number with an exponent (`-2e3`) parses to an `f64`;
+            // Node's `JSON.stringify` writes an integral value without a
+            // trailing `.0`, so normalize within the exact-integer range.
+            if let Some(value) = number.as_f64() {
+                if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15 {
+                    out.extend_from_slice(format!("{}", value as i64).as_bytes());
+                    return;
+                }
+            }
+            out.extend_from_slice(number.to_string().as_bytes());
+        }
+        Value::String(text) => write_json_string(text.as_bytes(), out),
+        Value::Wtf8(bytes) => write_json_string(bytes, out),
+        Value::Array(items) => {
+            let items = unsafe { &*items.get() };
+            if items.is_empty() {
+                out.extend_from_slice(b"[]");
+                return;
+            }
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                if let Some(indent) = indent {
+                    write_json_indent(out, indent, depth + 1);
+                }
+                write_json_value(item, out, indent, depth + 1);
+            }
+            if let Some(indent) = indent {
+                write_json_indent(out, indent, depth);
+            }
+            out.push(b']');
+        }
+        Value::Object(fields) => {
+            let fields = unsafe { &*fields.get() };
+            if fields.is_empty() {
+                out.extend_from_slice(b"{}");
+                return;
+            }
+            out.push(b'{');
+            for (index, (key, value)) in fields.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                if let Some(indent) = indent {
+                    write_json_indent(out, indent, depth + 1);
+                }
+                write_json_string(key.as_bytes(), out);
+                out.push(b':');
+                if indent.is_some() {
+                    out.push(b' ');
+                }
+                write_json_value(value, out, indent, depth + 1);
+            }
+            if let Some(indent) = indent {
+                write_json_indent(out, indent, depth);
+            }
+            out.push(b'}');
+        }
+    }
+}
+
+fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
+    // Serialized directly rather than through `serde_json`, so a
+    // `Value::Wtf8` string keeps its lone surrogate as a `\uXXXX` escape.
+    let indent = if indent.is_empty() { None } else { Some(indent) };
     let mut output = Vec::new();
-    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
-    let mut serializer = serde_json::Serializer::with_formatter(&mut output, formatter);
-    let text = if value.serialize(&mut serializer).is_ok() {
-        String::from_utf8(output).unwrap_or_else(|_| "null".to_string())
-    } else {
-        "null".to_string()
-    };
-    CString::new(text).unwrap_or_default().into_raw()
+    write_json_value(value, &mut output, indent, 0);
+    CString::new(output).unwrap_or_default().into_raw()
 }
 
 fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
@@ -1277,6 +1750,7 @@ fn json_to_number(value: &Value) -> f64 {
         Value::Null => 0.0,
         Value::Bool(flag) => f64::from(*flag),
         Value::String(text) => javascript_string_to_number(text),
+        Value::Wtf8(bytes) => javascript_string_to_number(&wtf8_to_string(bytes)),
         // `Number([])` is `0` (empty join is `""`), `Number([x])` is
         // `x`'s own `ToNumber` (a one-element join has no comma), and
         // anything else is `NaN` (a multi-element join always contains a
@@ -1337,6 +1811,11 @@ fn javascript_string_to_number(text: &str) -> f64 {
 #[no_mangle]
 pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
+    // A lone-surrogate string keeps its raw WTF-8 bytes (a `String`
+    // couldn't hold them).
+    if let Value::Wtf8(bytes) = value {
+        return CString::new(bytes.clone()).unwrap_or_default().into_raw();
+    }
     let text = match value {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -1372,7 +1851,7 @@ pub unsafe extern "C" fn thaw_json_typeof(value: *const Value) -> *const c_char 
         Value::Null | Value::Array(_) | Value::Object(_) => c"object".as_ptr(),
         Value::Bool(_) => c"boolean".as_ptr(),
         Value::Number(_) => c"number".as_ptr(),
-        Value::String(_) => c"string".as_ptr(),
+        Value::String(_) | Value::Wtf8(_) => c"string".as_ptr(),
     }
 }
 
@@ -1391,6 +1870,7 @@ pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
         Value::Bool(value) => u8::from(*value),
         Value::Number(value) => u8::from(value.as_f64().is_some_and(|value| value != 0.0)),
         Value::String(value) => u8::from(!value.is_empty()),
+        Value::Wtf8(bytes) => u8::from(!bytes.is_empty()),
         Value::Array(_) | Value::Object(_) => 1,
     }
 }

@@ -62,7 +62,7 @@ use cbc::cipher::{
 use rquickjs::function::Args;
 #[cfg(feature = "wasm")]
 use rquickjs::Persistent;
-use rquickjs::{Array, ArrayBuffer, Context, Ctx, Function, Object, Runtime, Value};
+use rquickjs::{Array, ArrayBuffer, Context, Ctx, FromJs, Function, Object, Runtime, Value};
 #[cfg(feature = "tls")]
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,

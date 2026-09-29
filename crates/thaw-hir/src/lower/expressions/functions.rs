@@ -879,6 +879,11 @@ impl<'a> FnLowerer<'a> {
         } else {
             parameter_types.to_vec()
         };
+        // The callback's *declared* (contextual) parameter types, before the
+        // arrow's own annotations are substituted in. Used below to decide
+        // whether a mutated parameter really is handed over as a live JS
+        // value (a dynamic/`any` slot) or as a native object.
+        let expected_parameter_types = parameter_types.to_vec();
         let parameter_types = declared_parameter_types.as_slice();
         let sparse_mapping_result = self.sparse_mapping_result;
         self.sparse_mapping_result = false;
@@ -891,7 +896,7 @@ impl<'a> FnLowerer<'a> {
         let result = (|| {
             let mut params = Vec::with_capacity(parameter_types.len());
             let mut destructuring = Vec::new();
-            for (pat, ty) in arrow.params.iter().zip(parameter_types) {
+            for (index, (pat, ty)) in arrow.params.iter().zip(parameter_types).enumerate() {
                 let source_name = match pat {
                     Pat::Ident(binding) => binding.id.sym.to_string(),
                     Pat::Assign(assignment) => match assignment.left.as_ref() {
@@ -945,8 +950,28 @@ impl<'a> FnLowerer<'a> {
                     ty,
                     HirType::Dictionary(_) | HirType::Object(_)
                 ) && parameter_has_explicit_type_annotation(pat);
-                let ty = if (matches!(ty, HirType::Dynamic | HirType::Json)
-                    || is_annotated_dictionary_or_object)
+                // Only retype a mutated parameter when the *caller* really
+                // hands a live JS value. Two cases retype: a dynamic/`any`
+                // slot (a JSON snapshot that must be written back live), and
+                // an object-literal method whose declared type came from its
+                // own annotation (a JS-side handler like a `Proxy` trap).
+                // An *arrow argument* whose annotation was overridden by a
+                // concrete native callback type (e.g. `createServer`'s
+                // `ServerResponse`) is passed a native object that supports
+                // field assignment directly -- retyping it to `JsValue`
+                // would change the callback ABI and crash.
+                let expected_index = expected_parameter_types.get(index);
+                let expected_is_dynamic = expected_index.is_none_or(|expected| {
+                    matches!(
+                        expected,
+                        HirType::Dynamic | HirType::Json | HirType::JsValue
+                    )
+                });
+                let expected_matches_declared = expected_index == parameter_types.get(index);
+                let allow_mutation_retype = expected_is_dynamic || expected_matches_declared;
+                let ty = if allow_mutation_retype
+                    && (matches!(ty, HirType::Dynamic | HirType::Json)
+                        || is_annotated_dictionary_or_object)
                     && arrow_body_mutates(&source_name, arrow)
                 {
                     HirType::JsValue

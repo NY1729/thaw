@@ -32,12 +32,16 @@ fn intl_collator_compare(
     ignore_punctuation: bool,
     numeric: bool,
     case_first: &str,
-    a: &str,
-    b: &str,
+    a: &[u8],
+    b: &[u8],
 ) -> i32 {
     use std::str::FromStr;
 
-    let codepoint_fallback = || match a.encode_utf16().cmp(b.encode_utf16()) {
+    // A lone surrogate is substituted with U+FFFD for icu4x; the
+    // codepoint fallback compares the real UTF-16 units.
+    let a_text = wtf8_to_icu_text(a);
+    let b_text = wtf8_to_icu_text(b);
+    let codepoint_fallback = || match wtf8_decode_utf16(a).cmp(&wtf8_decode_utf16(b)) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
@@ -81,7 +85,7 @@ fn intl_collator_compare(
     else {
         return codepoint_fallback();
     };
-    match collator.as_borrowed().compare(a, b) {
+    match collator.as_borrowed().compare(&a_text, &b_text) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,

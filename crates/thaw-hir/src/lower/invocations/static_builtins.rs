@@ -206,7 +206,7 @@ impl<'a> FnLowerer<'a> {
             (object, property),
             ("Array", "of" | "from" | "isArray" | "fromAsync")
                 | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
-                | ("Uint8Array", "fromHex" | "fromBase64")
+                | ("Uint8Array", "fromHex" | "fromBase64" | "from")
                 | ("BigInt", "asIntN" | "asUintN")
                 | ("Error", "isError")
                 | ("Proxy", "revocable")
@@ -1490,6 +1490,32 @@ impl<'a> FnLowerer<'a> {
                             &bindings,
                         );
                     }
+                    if object.sym == *"Uint8Array" && property.sym == *"from" {
+                        // `Uint8Array.from(array)` -- the same byte-clamped
+                        // copy `Buffer.from(number[])` performs. A mapper
+                        // argument isn't supported (no `thisArg` machinery
+                        // here); `Buffer.from` has the same limit.
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Uint8Array.from")?;
+                        let [source] = arguments.as_slice() else {
+                            return Err(
+                                "`Uint8Array.from` expects exactly one array source".into()
+                            );
+                        };
+                        let source_type = self.infer_expr_type(source)?;
+                        if !matches!(source_type, HirType::Array(_) | HirType::Bytes) {
+                            return Err(format!(
+                                "`Uint8Array.from` expects an array source, got {source_type:?}"
+                            ));
+                        }
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_bytes_from_array".to_string())),
+                                vec![source.clone()],
+                            ),
+                            &bindings,
+                        );
+                    }
                     if object.sym == *"JSON" && property.sym == *"parse" {
                         if call.args.iter().any(|argument| argument.spread.is_some()) {
                             return Err("`JSON.parse` does not support spread arguments".into());
@@ -1700,6 +1726,77 @@ impl<'a> FnLowerer<'a> {
                             value
                         };
                         let value_type = self.infer_expr_type(&value)?;
+                        // A fixed object with function-valued fields
+                        // (shorthand methods / arrow properties): Node omits
+                        // functions when serializing, and calls `toJSON()`
+                        // first when one is present. Those fields encode as
+                        // opaque `JsValue`s the native JSON bridge rejects,
+                        // so drop them (or serialize `toJSON()`'s result).
+                        let (value, value_type) = match &value_type {
+                            HirType::Object(fields)
+                                if fields.iter().any(|(_, ty)| {
+                                    matches!(
+                                        ty,
+                                        HirType::Function(_, _)
+                                            | HirType::CallableFunction(..)
+                                            | HirType::JsValue
+                                    )
+                                }) =>
+                            {
+                                if let Some((_, HirType::Function(params, _))) =
+                                    fields.iter().find(|(name, _)| name == "toJSON")
+                                {
+                                    if params.is_empty() {
+                                        let call = HirExpr::Call(
+                                            Box::new(HirExpr::PropAccess(
+                                                Box::new(value),
+                                                value_type.clone(),
+                                                "toJSON".to_string(),
+                                            )),
+                                            Vec::new(),
+                                        );
+                                        let ty = self.infer_expr_type(&call)?;
+                                        (call, ty)
+                                    } else {
+                                        (value, value_type.clone())
+                                    }
+                                } else {
+                                    // Shallow copy of the non-function
+                                    // fields into a fresh object (a nested
+                                    // object with its own methods is left
+                                    // as-is, so it still fails loudly
+                                    // rather than silently losing fields).
+                                    let source =
+                                        format!("__thaw_json_object_{}", self.next_binding);
+                                    self.next_binding += 1;
+                                    self.scope.insert(source.clone(), value_type.clone());
+                                    let mut snapshot = Vec::new();
+                                    for (name, ty) in fields {
+                                        if matches!(
+                                            ty,
+                                            HirType::Function(_, _)
+                                                | HirType::CallableFunction(..)
+                                                | HirType::JsValue
+                                        ) {
+                                            continue;
+                                        }
+                                        let read = self.lower_fixed_object_property_read(
+                                            HirExpr::Var(source.clone()),
+                                            fields,
+                                            name,
+                                        )?;
+                                        snapshot.push((name.clone(), read));
+                                    }
+                                    let materialized = self.wrap_call_argument_bindings(
+                                        HirExpr::ObjectLit(snapshot),
+                                        &[(source, value_type.clone(), value)],
+                                    )?;
+                                    let ty = self.infer_expr_type(&materialized)?;
+                                    (materialized, ty)
+                                }
+                            }
+                            _ => (value, value_type.clone()),
+                        };
                         let live_accessor_replacer = native_accessor_fields.is_some()
                             && replacer_array.is_some();
                         let value = if live_accessor_replacer {

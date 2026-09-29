@@ -927,6 +927,8 @@ fn source_uses_quickjs(source: &str) -> bool {
     [
         "loadScript(",
         "callDynamic(",
+        "eval(",
+        "new Function(",
         "getDynamicValue(",
         "callDynamicValue(",
         "callDynamicValueHandle(",

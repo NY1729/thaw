@@ -38,7 +38,7 @@ intl = [
 # it makes the generated program link the system `libicui18n`/`libicuuc`
 # dynamically, so it is opt-in via `thaw build --icu4c` and never part
 # of the default/static build.
-icu4c = []
+icu4c = ["intl"]
 
 [dependencies]
 aes = "0.8"

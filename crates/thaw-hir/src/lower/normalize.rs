@@ -15,7 +15,9 @@ fn eval_enum_initializer(
 ) -> Result<HirLit, String> {
     match expr {
         Expr::Lit(Lit::Num(value)) => Ok(HirLit::F64(value.value)),
-        Expr::Lit(Lit::Str(value)) => Ok(HirLit::Str(value.value.to_string_lossy().into_owned())),
+        Expr::Lit(Lit::Str(value)) => {
+            Ok(hir_string_literal_from_wtf8(value.value.as_wtf8().as_bytes()))
+        }
         Expr::Paren(value) => eval_enum_initializer(&value.expr, enum_name, values),
         Expr::Unary(unary) => {
             let HirLit::F64(value) = eval_enum_initializer(&unary.arg, enum_name, values)? else {

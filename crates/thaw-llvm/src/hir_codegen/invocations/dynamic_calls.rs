@@ -8,6 +8,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "loadScript" => self.compile_load_script(args),
             "callDynamic" => self.compile_call_dynamic(args),
             "getDynamicValue" => self.compile_get_dynamic_value(args),
+            "newDynamicFunction" => self.compile_new_dynamic_function(args),
             "callDynamicValue" => self.compile_call_dynamic_value(args),
             "callNativeAddonValue" => self.compile_call_native_addon_value(args),
             "callDynamicValueHandle" => self.compile_call_dynamic_value_handle(args),

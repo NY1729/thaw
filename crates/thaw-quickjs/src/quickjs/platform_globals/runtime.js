@@ -33,6 +33,22 @@
   globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
+  globalThis.__thaw_to_iterator = value => {
+    const iterator =
+      value != null && typeof value[Symbol.iterator] === 'function'
+        ? value[Symbol.iterator]()
+        : value;
+    if (iterator == null || typeof iterator.next !== 'function') return iterator;
+    return {
+      next: () => iterator.next(),
+      return: typeof iterator.return === 'function'
+        ? () => iterator.return()
+        : () => ({ value: undefined, done: true }),
+      throw: typeof iterator.throw === 'function'
+        ? error => iterator.throw(error)
+        : () => ({ value: undefined, done: true }),
+    };
+  };
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
     JSON.stringify(value, replacer, space);
   globalThis.__thaw_object_with_native_getters = (keys, readable, ...getters) => {

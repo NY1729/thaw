@@ -9279,3 +9279,200 @@ fn compiles_string_raw() {
         "a\\nb1c\na1b\n"
     );
 }
+
+/// `WeakRef<T>` (a one-element-array model), `Uint8Array.from`, and
+/// `Uint8Array.prototype.set` -- the three gaps closed after the
+/// `tests/builtins-compat.json` coverage pass.
+#[test]
+fn compiles_weakref_uint8array_from_and_set() {
+    let source = r#"
+        function main(): void {
+            const target: object = { value: 1 };
+            const reference: WeakRef<object> = new WeakRef(target);
+            console.log(reference.deref() === target);
+            console.log(Uint8Array.from([1, 2, 3]).join(","));
+            const bytes: Uint8Array = new Uint8Array(4);
+            bytes[0] = 9;
+            bytes.set([1, 2], 1);
+            console.log(bytes[0], bytes[1], bytes[2], bytes[3]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "weakref_uint8array_from_set"),
+        "true\n1,2,3\n9 1 2 0\n"
+    );
+}
+
+/// Typed arrays (modeled as `Bytes`) and `Atomics` on a
+/// `SharedArrayBuffer`-backed `Int32Array`.
+#[test]
+fn compiles_typed_arrays_and_atomics() {
+    let source = r#"
+        function main(): void {
+            const a: Int32Array = new Int32Array(4);
+            a[0] = 5;
+            console.log(a[0], a.length);
+            const from: Int32Array = new Int32Array([1, 2, 3]);
+            console.log(from[0], from[1], from[2]);
+            const f: Float64Array = new Float64Array(2);
+            f[0] = 1.5;
+            console.log(f[0]);
+            const shared: Int32Array = new Int32Array(new SharedArrayBuffer(8));
+            console.log(Atomics.store(shared, 0, 42), Atomics.load(shared, 0));
+            console.log(Atomics.add(shared, 0, 5), Atomics.load(shared, 0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_arrays_and_atomics"),
+        "5 4\n1 2 3\n1.5\n42 42\n42 47\n"
+    );
+}
+
+/// A custom iterable (`{ [Symbol.iterator]() {...} }`, with the
+/// `Iterable<T>`/`Iterator<T>`/`IteratorResult<T>` annotations) works in
+/// both `for...of` and array spread `[...it]`.
+#[test]
+fn compiles_custom_iterable_for_of_and_spread() {
+    let source = r#"
+        function main(): void {
+            const it: Iterable<number> = {
+                [Symbol.iterator](): Iterator<number> {
+                    let i: number = 0;
+                    return {
+                        next(): IteratorResult<number> {
+                            return i < 3 ? { value: i++, done: false } : { value: 0, done: true };
+                        },
+                    };
+                },
+            };
+            const collected: number[] = [];
+            for (const value of it) collected.push(value);
+            console.log(collected.join(","));
+            console.log([...it].join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "custom_iterable_for_of_and_spread"),
+        "0,1,2\n0,1,2\n"
+    );
+}
+
+/// `JSON.stringify` omits method fields (and calls `toJSON`), and a
+/// property read on a nullish `any` value throws a catchable TypeError
+/// while `?.` still short-circuits.
+#[test]
+fn compiles_json_stringify_methods_and_json_null_guard() {
+    let source = r#"
+        function main(): void {
+            const plain = { a: 1, b(): number { return 2; } };
+            console.log(JSON.stringify(plain));
+            const withToJson = { a: 1, toJSON(): number { return 7; } };
+            console.log(JSON.stringify(withToJson));
+            const z: any = null;
+            try {
+                z.x;
+                console.log("no-throw");
+            } catch (error) {
+                console.log("threw");
+            }
+            const n: any = null;
+            console.log(n?.x);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_methods_and_json_null_guard"),
+        "{\"a\":1}\n7\nthrew\nundefined\n"
+    );
+}
+
+/// Lone UTF-16 surrogates are preserved through literals, `fromCharCode`,
+/// `slice`, string iteration, and `isWellFormed`/`toWellFormed` (WTF-8).
+#[test]
+fn compiles_lone_surrogate_strings() {
+    let source = r#"
+        function main(): void {
+            const s = "\ud800";
+            console.log(s.length, s.charCodeAt(0), s.isWellFormed());
+            console.log(s.toWellFormed().length, s.toWellFormed().charCodeAt(0));
+            console.log(String.fromCharCode(0xD800).charCodeAt(0));
+            console.log("a\ud800b".slice(1, 2).charCodeAt(0));
+            console.log("\ud800\udc00".isWellFormed(), "\ud800\udc00".length);
+            console.log([..."a\ud800b"].length, [..."a\ud800b"][1].charCodeAt(0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "lone_surrogate_strings"),
+        "1 55296 false\n1 65533\n55296\n55296\ntrue 2\n3 55296\n"
+    );
+}
+
+/// `JSON.stringify` preserves a lone surrogate as a `\uXXXX` escape (the
+/// custom serializer bypasses `serde_json`), and still matches its
+/// pretty-print format.
+#[test]
+fn compiles_json_stringify_lone_surrogate() {
+    let source = r#"
+        function main(): void {
+            console.log(JSON.stringify("\ud800"));
+            console.log(JSON.stringify({ a: "\ud800" }));
+            console.log(JSON.stringify({ a: 1 }, null, 2));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_lone_surrogate"),
+        "\"\\ud800\"\n{\"a\":\"\\ud800\"}\n{\n  \"a\": 1\n}\n"
+    );
+}
+
+/// `JSON.parse` keeps a lone-surrogate `\uXXXX` escape (custom parser) and
+/// normalizes an exponent number the way Node does.
+#[test]
+fn compiles_json_parse_lone_surrogate_and_numbers() {
+    let source = r#"
+        function main(): void {
+            console.log(JSON.stringify(JSON.parse('"\\ud800"')));
+            console.log(JSON.stringify(JSON.parse('{"a":1,"b":[true,null,1.5,-2e3]}')));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_parse_lone_surrogate_and_numbers"),
+        "\"\\ud800\"\n{\"a\":1,\"b\":[true,null,1.5,-2000]}\n"
+    );
+}
+
+/// `eval(code)` lowers to the QuickJS realm's global `eval` (indirect
+/// eval semantics).
+#[test]
+fn compiles_eval_through_quickjs() {
+    let source = r#"
+        function main(): void {
+            console.log(eval("1+1"));
+            console.log(eval("'a' + 'b'"));
+            console.log(eval("var q = 5; q * 2"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "eval_through_quickjs"),
+        "2\nab\n10\n"
+    );
+}
+
+/// `new Function(...)` goes to the JS realm's `Function` constructor
+/// (source-keyed cache) and the result is callable.
+#[test]
+fn compiles_new_function_constructor() {
+    let source = r#"
+        function main(): void {
+            const add = new Function("a", "b", "return a + b");
+            console.log(add(1, 2));
+            const answer = new Function("return 42");
+            console.log(answer());
+            const double = new Function("x", "return x * 2");
+            console.log(double(21));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "new_function_constructor"),
+        "3\n42\n42\n"
+    );
+}

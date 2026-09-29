@@ -691,7 +691,9 @@ impl<'a> FnLowerer<'a> {
                         | "getOrInsert"
                         | "getOrInsertComputed"
                 ) && (self.receiver_is_map_or_set(&member.obj)
-                    || self.peek_type_without_lowering(&member.obj) == Some(HirType::Json))
+                    || self.peek_type_without_lowering(&member.obj) == Some(HirType::Json)
+                    || (property.sym == *"set"
+                        && self.peek_type_without_lowering(&member.obj) == Some(HirType::Bytes)))
                 {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
@@ -946,6 +948,21 @@ impl<'a> FnLowerer<'a> {
                     ),
                 )],
             );
+        }
+
+        // `eval(code)` -- an AOT compiler can't evaluate in the compiled
+        // scope, so this is lowered to the QuickJS realm's own global
+        // `eval` (`callDynamic("eval", [code])`), i.e. the semantics of
+        // *indirect* eval: it sees globals, not local bindings.
+        if callee_name == "eval"
+            && !self.scope.contains_key(&callee_name)
+            && !self.signatures.contains_key(&callee_name)
+        {
+            let values = self.dynamic_call_args_json(&call.args)?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("callDynamic".into())),
+                vec![HirExpr::Lit(HirLit::Str("eval".into())), values],
+            ));
         }
 
         if self.scope.get(&callee_name) == Some(&HirType::JsValue) {
