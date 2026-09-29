@@ -1624,10 +1624,15 @@ fn lowers_static_block_super_fields_methods_and_accessors() {
         }
         function main(): number { return Derived.after; }"#,
     );
+    // Skip the class-token `loadScript` init statements (one per
+    // value-referenced class) and find the static-block statement itself.
     let block = program
         .initializers
         .iter()
-        .find(|step| matches!(step, HirInitStep::Statement(_)))
+        .find(|step| {
+            matches!(step, HirInitStep::Statement(_))
+                && format!("{step:?}").contains("__thaw_class_Base_static_setter_current")
+        })
         .unwrap();
     let debug = format!("{block:?}");
     assert!(debug.contains("__thaw_class_Base_static_setter_current"));
