@@ -1569,13 +1569,84 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
     // callback with an untyped/`any` chunk parameter).
     let result = match json_array_or_buffer_data(value) {
         Some(items) if key == "length" => Value::Number((items.len() as u64).into()),
-        _ => value
-            .as_object()
-            .and_then(|fields| fields.get(&key))
-            .cloned()
-            .unwrap_or_else(napi_undefined_value),
+        _ => json_get_with_prototype(value, &key),
     };
     leak(result)
+}
+
+/// `object[key]` with prototype-chain lookup: own field, else walk the
+/// prototypes recorded by `Object.create`/`Object.setPrototypeOf`
+/// (`PROTOTYPES`), stopping at a missing/null prototype or a depth cap
+/// (cycle guard). Returns `undefined` when not found. An inherited *getter*
+/// isn't modelled (the prototype stores plain values).
+fn json_get_with_prototype(value: &Value, key: &str) -> Value {
+    let mut current = value.clone();
+    for _ in 0..64 {
+        if let Some(found) = current.as_object().and_then(|fields| fields.get(key)) {
+            return found.clone();
+        }
+        let Some(identity) = object_identity_key(&current) else {
+            break;
+        };
+        let Some(prototype) = PROTOTYPES.with(|table| table.borrow().get(&identity).copied())
+        else {
+            break;
+        };
+        if prototype.is_null() {
+            break;
+        }
+        current = unsafe { (*prototype).clone() };
+        if matches!(current, Value::Null) {
+            break;
+        }
+    }
+    napi_undefined_value()
+}
+
+/// `key in object` with prototype-chain lookup (the `HasProperty` used by
+/// `in`), unlike `thaw_json_has_own` (`hasOwnProperty`). Own-ness of a key
+/// on one link of the chain is `json_has_own_value` (so an array's
+/// `length`/index keys count, matching `thaw_json_has_own`).
+#[no_mangle]
+pub extern "C" fn thaw_json_has(value: *mut Value, key: *const c_char) -> u8 {
+    let key = to_str(key);
+    let value = unsafe { &*value };
+    let mut current = value.clone();
+    for _ in 0..64 {
+        if json_has_own_value(&current, &key) {
+            return 1;
+        }
+        let Some(identity) = object_identity_key(&current) else {
+            return 0;
+        };
+        let Some(prototype) = PROTOTYPES.with(|table| table.borrow().get(&identity).copied())
+        else {
+            return 0;
+        };
+        if prototype.is_null() {
+            return 0;
+        }
+        current = unsafe { (*prototype).clone() };
+        if matches!(current, Value::Null) {
+            return 0;
+        }
+    }
+    0
+}
+
+/// Own-key check for one link of a prototype chain: object fields, plus an
+/// array's `length`/in-range index keys (the same set `thaw_json_has_own`
+/// reports).
+fn json_has_own_value(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Object(fields) => shared_object_ref(fields).contains_key(key),
+        Value::Array(_) if key == "length" => true,
+        Value::Array(items) => key
+            .parse::<usize>()
+            .ok()
+            .is_some_and(|index| index.to_string() == key && index < shared_array_ref(items).len()),
+        _ => false,
+    }
 }
 
 /// Takes one field while consuming a temporary JSON object.
@@ -2722,15 +2793,9 @@ pub unsafe extern "C" fn thaw_json_object_from_json_entries(entries: *const u8) 
 pub unsafe extern "C" fn thaw_json_has_own(value: *const Value, key: *const c_char) -> u8 {
     let key = to_str(key);
     match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => shared_object_ref(fields).contains_key(&key),
-        Some(Value::Array(_)) if key == "length" => true,
-        Some(Value::Array(items)) => key
-            .parse::<usize>()
-            .ok()
-            .is_some_and(|index| index.to_string() == key && index < shared_array_ref(items).len()),
-        _ => false,
+        Some(value) => json_has_own_value(value, &key).into(),
+        None => 0,
     }
-    .into()
 }
 
 fn json_number_is(left: f64, right: f64) -> bool {
@@ -3586,6 +3651,28 @@ mod tests {
         let stable_key = CString::new("stable").unwrap();
         let stable = thaw_json_get(value, stable_key.as_ptr());
         assert_eq!(thaw_json_as_bool(stable), 0);
+    }
+
+    #[test]
+    fn walks_the_prototype_chain_for_dynamic_objects() {
+        let proto = parse(r#"{"inherited": 7}"#);
+        let object = parse("{}");
+        unsafe { thaw_json_set_prototype(object, proto) };
+
+        let inherited = CString::new("inherited").unwrap();
+        assert_eq!(
+            thaw_json_as_number(thaw_json_get(object, inherited.as_ptr())),
+            7.0
+        );
+        assert_eq!(thaw_json_has(object, inherited.as_ptr()), 1);
+        assert_eq!(unsafe { thaw_json_has_own(object, inherited.as_ptr()) }, 0);
+
+        let missing = CString::new("missing").unwrap();
+        assert_eq!(
+            read_c_string(unsafe { thaw_json_typeof(thaw_json_get(object, missing.as_ptr())) }),
+            "undefined"
+        );
+        assert_eq!(thaw_json_has(object, missing.as_ptr()), 0);
     }
 
     #[test]
