@@ -2087,6 +2087,30 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                 }
+                // `.prototype` on a first-class *function* value -- a
+                // function declaration/expression used as a constructor
+                // (real trigger: the test262 harness's own `Test262Error`,
+                // whose `.prototype.toString` is assigned right after its
+                // declaration). Coerce the function to a live realm function
+                // and read its real `.prototype` object.
+                if prop.sym == *"prototype"
+                    && matches!(
+                        obj_ty,
+                        HirType::Function(_, _)
+                            | HirType::CallableFunction(_, _, _, _)
+                            | HirType::JsValue
+                    )
+                {
+                    let object = if obj_ty == HirType::JsValue {
+                        obj
+                    } else {
+                        self.coerce_to_declared(&HirType::JsValue, obj)?
+                    };
+                    return self.lower_dynamic_value_property_read(
+                        object,
+                        HirExpr::Lit(HirLit::Str("prototype".to_string())),
+                    );
+                }
                 match &obj_ty {
                     HirType::Array(_) | HirType::Tuple(_) if prop.sym == *"length" => {
                         Ok(HirExpr::ArrayLen(Box::new(obj)))
