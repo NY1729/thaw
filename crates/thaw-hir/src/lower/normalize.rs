@@ -1106,6 +1106,21 @@ pub fn normalize_implicit_returns(module: &Module) -> Module {
     module
 }
 
+/// `(name, function)` for a single-declarator `var F = function () {...}`
+/// binding, else `None`.
+fn var_decl_function(var: &swc_ecma_ast::VarDecl) -> Option<(Symbol, &swc_ecma_ast::Function)> {
+    let [declarator] = var.decls.as_slice() else {
+        return None;
+    };
+    let swc_ecma_ast::Pat::Ident(binding) = &declarator.name else {
+        return None;
+    };
+    let swc_ecma_ast::Expr::Fn(function) = declarator.init.as_deref()? else {
+        return None;
+    };
+    Some((binding.id.sym.to_string(), &function.function))
+}
+
 /// Rewrites the classic constructor-function pattern into a class, so it
 /// reuses thaw's native class machinery (`this`, `new F()`,
 /// `instanceof F`, static dispatch) instead of failing on `this` in a plain
@@ -1155,22 +1170,31 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
         }
     }
 
-    let mut candidates: HashMap<Symbol, (&FnDecl, bool)> = HashMap::new();
+    let eligible = |function: &Function, name: &str| {
+        !function.is_async
+            && !function.is_generator
+            && function.body.is_some()
+            && function.this_param.is_none()
+            && !rebound.contains(name)
+    };
+    let mut candidates: HashMap<Symbol, bool> = HashMap::new();
     for item in &module.body {
-        if let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item {
-            let name = function.ident.sym.to_string();
-            if function.function.is_async
-                || function.function.is_generator
-                || function.function.body.is_none()
-                || function.function.this_param.is_some()
-                || rebound.contains(&name)
-            {
-                continue;
+        let (name, function) = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => {
+                (function.ident.sym.to_string(), &*function.function)
             }
-            let uses_this = constructor_function_uses_this(&function.function);
-            if uses_this || assignments.contains_key(&name) {
-                candidates.insert(name, (function, uses_this));
-            }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) => match var_decl_function(var) {
+                Some(found) => found,
+                None => continue,
+            },
+            _ => continue,
+        };
+        if !eligible(function, &name) {
+            continue;
+        }
+        let uses_this = constructor_function_uses_this(function);
+        if uses_this || assignments.contains_key(&name) {
+            candidates.insert(name, uses_this);
         }
     }
     if candidates.is_empty() {
@@ -1184,6 +1208,7 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
             ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => {
                 Some((function.ident.sym.to_string(), &*function.function))
             }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) => var_decl_function(var),
             _ => None,
         })
         .collect();
@@ -1192,28 +1217,45 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
     let mut class_for: HashMap<usize, ClassDecl> = HashMap::new();
     let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (index, item) in module.body.iter().enumerate() {
-        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item else {
+        let (name, ident, function) = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => (
+                function.ident.sym.to_string(),
+                function.ident.clone(),
+                (*function.function).clone(),
+            ),
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) => {
+                let Some((name, function)) = var_decl_function(var) else {
+                    continue;
+                };
+                let Pat::Ident(binding) = &var.decls[0].name else {
+                    continue;
+                };
+                (name, binding.id.clone(), function.clone())
+            }
+            _ => continue,
+        };
+        let Some(is_constructor) = candidates.get(&name) else {
             continue;
         };
-        let Some((_, is_constructor)) = candidates.get(function.ident.sym.as_ref()) else {
-            continue;
-        };
-        let list = assignments
-            .remove(function.ident.sym.as_ref())
-            .unwrap_or_default();
+        let list = assignments.remove(&name).unwrap_or_default();
         for (item_index, ..) in &list {
             consumed.insert(*item_index);
         }
         let refs: Vec<(bool, Symbol, &Expr)> = list
             .iter()
-            .map(|(_, on_prototype, name, right)| (*on_prototype, name.clone(), *right))
+            .map(|(_, on_prototype, member, right)| (*on_prototype, member.clone(), *right))
             .collect();
         if !*is_constructor {
-            namespaces.insert(function.ident.sym.to_string());
+            namespaces.insert(name.clone());
         }
+        let declaration = FnDecl {
+            ident,
+            declare: false,
+            function: Box::new(function),
+        };
         class_for.insert(
             index,
-            constructor_class(function, &refs, *is_constructor, &functions)?,
+            constructor_class(&declaration, &refs, *is_constructor, &functions)?,
         );
     }
 
