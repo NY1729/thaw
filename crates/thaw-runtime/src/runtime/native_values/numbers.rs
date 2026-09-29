@@ -168,18 +168,49 @@ pub extern "C" fn thaw_number_to_fixed(value: f64, digits: f64) -> *const c_char
         return thaw_number_to_string(value);
     }
     let negative = value < 0.0;
-    let magnitude = if negative { -value } else { value };
+    let magnitude = value.abs();
     if magnitude >= 1e21 {
         return thaw_number_to_string(value);
     }
     let digits = digits as usize;
-    let formatted = format!("{magnitude:.digits$}");
+    // `toFixed` rounds half *away from zero* (spec: pick the larger `n` on
+    // a tie), whereas Rust's `{:.digits$}` rounds half to even (so
+    // `(2.5).toFixed(0)` would be `"2"` instead of `"3"`). Only a *genuine*
+    // exact tie (a `...5000` tail in the value's exact decimal expansion)
+    // needs bumping -- `4.35` is really `4.3499...` and must stay `"4.3"`.
+    let high = format!("{magnitude:.110}");
+    let fractional = high.split('.').nth(1).unwrap_or("");
+    let fractional = fractional.as_bytes();
+    let scale = 10f64.powi(digits as i32);
+    let scaled = magnitude * scale;
+    let is_tie = fractional.len() > digits
+        && fractional[digits] == b'5'
+        && fractional[digits + 1..].iter().all(|digit| *digit == b'0');
+    let formatted = if is_tie && scaled < 9e15 {
+        insert_decimal_point(&format!("{:.0}", scaled.floor() + 1.0), digits)
+    } else {
+        format!("{magnitude:.digits$}")
+    };
     let text = if negative {
         format!("-{formatted}")
     } else {
         formatted
     };
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// Inserts a decimal point `digits` from the right of an integer string
+/// (`"100"`, 2 -> `"1.00"`; `"5"`, 2 -> `"0.05"`).
+fn insert_decimal_point(integer: &str, digits: usize) -> String {
+    if digits == 0 {
+        return integer.to_string();
+    }
+    if integer.len() > digits {
+        let split = integer.len() - digits;
+        format!("{}.{}", &integer[..split], &integer[split..])
+    } else {
+        format!("0.{}{integer}", "0".repeat(digits - integer.len()))
+    }
 }
 
 /// Formats a non-negative, finite `magnitude` with exactly `precision`
