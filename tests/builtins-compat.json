@@ -50,6 +50,30 @@
     },
     {
       "group": "Object",
+      "name": "Object.getPrototypeOf-class-instance",
+      "expect": "matched",
+      "source": "class A { x: number = 1; } function main(): void { console.log(Object.getPrototypeOf(new A()) === A.prototype); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getPrototypeOf-class-stable",
+      "expect": "matched",
+      "source": "class A {} function main(): void { console.log(Object.getPrototypeOf(new A()) === Object.getPrototypeOf(new A())); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getPrototypeOf-subclass-instance",
+      "expect": "matched",
+      "source": "class A { x: number = 1; } class B extends A { y: number = 2; } function main(): void { const b: B = new B(); console.log(Object.getPrototypeOf(b) === B.prototype, Object.getPrototypeOf(b) === A.prototype); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getPrototypeOf-instance-variable",
+      "expect": "matched",
+      "source": "class A { x: number = 1; } function main(): void { const a: A = new A(); console.log(Object.getPrototypeOf(a) === A.prototype); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.defineProperty",
       "expect": "matched",
       "source": "function main(): void { const o: any = {}; Object.defineProperty(o,\"x\",{value:5,enumerable:true}); console.log(o.x); }"

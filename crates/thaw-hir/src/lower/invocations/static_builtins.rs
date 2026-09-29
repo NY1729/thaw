@@ -542,8 +542,26 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
-                        // Approx: thaw models no prototype chain for a
-                        // fixed-layout native object, so report `null`.
+                        // A native class instance's real prototype is its
+                        // class token's `.prototype` (the same stable
+                        // `JsValue` a bare `C.prototype` resolves to, see
+                        // `class_decorator_token_init`), so
+                        // `Object.getPrototypeOf(new C()) === C.prototype`
+                        // holds. Any other fixed-layout native object still
+                        // has no modeled prototype, so report `null`.
+                        let argument_type = self.infer_expr_type(&arguments[0])?;
+                        if let Some(class_name) = class_name_from_type(&argument_type) {
+                            let token = class_decorator_token_symbol(class_name);
+                            if self.scope.contains_key(&token) {
+                                let prototype = self.lower_dynamic_value_property_read(
+                                    HirExpr::Var(token),
+                                    HirExpr::Lit(HirLit::Str("prototype".to_string())),
+                                )?;
+                                return self.wrap_call_argument_bindings(prototype, &bindings);
+                            }
+                        }
+                        // Approx: thaw models no prototype chain for any
+                        // other fixed-layout native object, so report `null`.
                         return self.wrap_call_argument_bindings(
                             HirExpr::Lit(HirLit::Null),
                             &bindings,
