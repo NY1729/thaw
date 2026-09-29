@@ -1489,6 +1489,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     | HirType::Null
                     | HirType::Undefined
                     | HirType::Object(_)
+                    | HirType::Array(_)
+                    | HirType::Tuple(_)
                     | HirType::Function(..)
                     | HirType::CallableFunction(..)
             ) {
@@ -1518,6 +1520,45 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_typeof returned no value")?
             .into_pointer_value();
+        // An array/tuple member is discriminated the same way an object is
+        // (`typeof === "object"`), so when a union carries one, `Array.isArray`
+        // (the `thaw_json_is_array` runtime) is computed once and used both
+        // to match that member and to keep an *object* member from claiming a
+        // genuine array (real Node: an array is an object, but a union that
+        // names both must resolve to its array member).
+        let has_array_member = elements.iter().any(|element| {
+            let scalar = match element {
+                HirType::Promise(resolved) => resolved.as_ref(),
+                other => other,
+            };
+            matches!(scalar, HirType::Array(_) | HirType::Tuple(_))
+        });
+        let is_array_json = if has_array_member {
+            let raw = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_is_array").unwrap(),
+                    &[json.into()],
+                    "dynamic_union_is_array",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_is_array returned no value")?
+                .into_int_value();
+            Some(
+                self.builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        raw,
+                        raw.get_type().const_zero(),
+                        "dynamic_union_is_array_bool",
+                    )
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
         let mut remaining: Option<inkwell::basic_block::BasicBlock<'ctx>> = None;
         for (index, element) in elements.iter().enumerate() {
             if let Some(block) = remaining {
@@ -1539,8 +1580,40 @@ impl<'ctx> HirCompiler<'ctx> {
                         .builder
                         .build_not(is_null, "dynamic_union_object_not_null")
                         .map_err(|error| error.to_string())?;
-                    self.builder
+                    let base = self
+                        .builder
                         .build_and(is_object, is_not_null, "dynamic_union_is_object")
+                        .map_err(|error| error.to_string())?;
+                    // Only exclude arrays when the union also names an
+                    // array/tuple member (otherwise an object member keeps
+                    // accepting an array, as before).
+                    match is_array_json {
+                        Some(is_array) => {
+                            let not_array = self
+                                .builder
+                                .build_not(is_array, "dynamic_union_object_not_array")
+                                .map_err(|error| error.to_string())?;
+                            self.builder
+                                .build_and(base, not_array, "dynamic_union_is_plain_object")
+                                .map_err(|error| error.to_string())?
+                        }
+                        None => base,
+                    }
+                }
+                HirType::Array(_) | HirType::Tuple(_) => {
+                    let is_object = self.compile_typeof_matches(typeof_string, "object")?;
+                    let is_not_null = self
+                        .builder
+                        .build_not(is_null, "dynamic_union_array_not_null")
+                        .map_err(|error| error.to_string())?;
+                    let base = self
+                        .builder
+                        .build_and(is_object, is_not_null, "dynamic_union_is_object_for_array")
+                        .map_err(|error| error.to_string())?;
+                    let is_array = is_array_json
+                        .ok_or("array union member requires array discrimination")?;
+                    self.builder
+                        .build_and(base, is_array, "dynamic_union_is_array_member")
                         .map_err(|error| error.to_string())?
                 }
                 // A returned JS function's own `typeof` can't tell apart

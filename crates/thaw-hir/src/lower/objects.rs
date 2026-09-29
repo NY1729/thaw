@@ -1065,6 +1065,21 @@ impl<'a> FnLowerer<'a> {
             HirType::Optional(payload) => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
             HirType::Nullable(payload) => Ok(HirExpr::NullableNone(payload.as_ref().clone())),
             HirType::Nullish(payload) => Ok(HirExpr::NullishUndefined(payload.as_ref().clone())),
+            // A tagged union's placeholder injects the first member's own
+            // placeholder at tag 0. Without this, generating an instance
+            // method's *unbound* variant (compiled only for a detached
+            // `this`, but always lowered) failed for any method that read a
+            // union-typed field from `this`.
+            HirType::Union(elements) => {
+                let first = elements
+                    .first()
+                    .ok_or("unreachable union has no members")?;
+                Ok(HirExpr::UnionInject(
+                    Box::new(Self::unreachable_value(first)?),
+                    0,
+                    elements.clone(),
+                ))
+            }
             HirType::Function(params, result) => Ok(HirExpr::Lambda(
                 Vec::new(),
                 params

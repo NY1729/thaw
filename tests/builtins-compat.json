@@ -182,6 +182,18 @@
     },
     {
       "group": "Object",
+      "name": "union-field-method-read",
+      "expect": "matched",
+      "source": "class A { u: number | string = 1; echo(): string { return \"\" + this.u; } } function main(): void { const a = new A(); console.log(a.echo()); }"
+    },
+    {
+      "group": "Object",
+      "name": "union-array-member-decode",
+      "expect": "matched",
+      "source": "class A { u: number[] | string = [1, 2]; setU(): void { this.u = \"x\"; } touch(): void {} } function main(): void { const a: any = new (A as any)(); console.log(JSON.stringify(a.u)); a.setU(); console.log(typeof a.u, a.u); }"
+    },
+    {
+      "group": "Object",
       "name": "class-name",
       "expect": "matched",
       "source": "class Animal { name: string = \"a\"; } function main(): void { console.log(Animal.name, Animal.prototype.constructor.name); }"
