@@ -116,6 +116,13 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"set" {
                     let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    // `Uint8Array.prototype.set` shares the `.set` name
+                    // with `Map`, so dispatch on the receiver type first.
+                    // `infer_expr_type` normalizes `Bytes` away, so use
+                    // the un-normalized inference for this check.
+                    if self.infer_expr_type_inner(&receiver)? == HirType::Bytes {
+                        return self.lower_native_bytes_set(receiver, call);
+                    }
                     // `.set()` on a `Map` value stored in `any` -- Stage
                     // B. Unlike Stage A's read-only methods, a mutation
                     // has to be visible to every other reader of the

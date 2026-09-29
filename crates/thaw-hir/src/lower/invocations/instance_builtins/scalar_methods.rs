@@ -666,17 +666,19 @@ impl<'a> FnLowerer<'a> {
                         &receiver,
                         &format!("string {} receiver", property.sym),
                     )?;
-                    if property.sym == *"toWellFormed" {
-                        return Ok(receiver);
-                    }
-                    let receiver_name =
-                        format!("__thaw_well_formed_receiver_{}", self.next_binding);
-                    self.next_binding += 1;
-                    self.scope.insert(receiver_name.clone(), HirType::Str);
-                    return self.wrap_call_argument_bindings(
-                        HirExpr::Lit(HirLit::Bool(true)),
-                        &[(receiver_name, HirType::Str, receiver)],
-                    );
+                    // Real WTF-8-aware runtime checks: `isWellFormed`
+                    // detects a lone surrogate; `toWellFormed` replaces it
+                    // with U+FFFD (it used to be a no-op because literals
+                    // were already lossily replaced at parse time).
+                    let intrinsic = if property.sym == *"toWellFormed" {
+                        "__thaw_string_to_well_formed"
+                    } else {
+                        "__thaw_string_is_well_formed"
+                    };
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(intrinsic.to_string())),
+                        vec![receiver],
+                    ));
                 }
         unreachable!("instance builtin category was checked before lowering")
     }

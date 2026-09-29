@@ -232,6 +232,37 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &bindings)
     }
 
+    /// `Uint8Array.prototype.set(source, offset?)` -- copies `source`
+    /// (a numeric array or byte buffer) into the receiver starting at
+    /// `offset` (default 0). The inverse of `Buffer.prototype.copy`:
+    /// the receiver is the copy *target*, so it reuses the same in-place
+    /// copy with the operands swapped.
+    fn lower_native_bytes_set(
+        &mut self,
+        receiver: HirExpr,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let (arguments, bindings) =
+            self.lower_native_spread_values(&call.args, "Uint8Array.set")?;
+        let (source, offset) = match arguments.as_slice() {
+            [source] => (source.clone(), HirExpr::Lit(HirLit::F64(0.0))),
+            [source, offset] => (source.clone(), offset.clone()),
+            _ => return Err("native `.set()` expects a source and an optional offset".into()),
+        };
+        let offset = self.coerce_primitive_to_number(offset)?;
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_copy".to_string())),
+            vec![
+                source,
+                receiver,
+                offset,
+                HirExpr::Lit(HirLit::F64(0.0)),
+                HirExpr::Lit(HirLit::F64(-1.0)),
+            ],
+        );
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     /// `buf.indexOf` / `includes` / `lastIndexOf` with a string or
     /// sub-buffer needle -- a byte-subsequence search. The needle is
     /// normalised to a byte buffer (a string decodes as `utf8`, a number

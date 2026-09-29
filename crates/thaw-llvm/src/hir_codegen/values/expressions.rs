@@ -52,6 +52,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|e| e.to_string())?;
                 Ok(global.as_pointer_value().into())
             }
+            HirExpr::Lit(HirLit::Wtf8(bytes)) => {
+                // WTF-8 bytes may be invalid UTF-8 (a lone surrogate), so
+                // `build_global_string_ptr(&str)` can't be used -- build the
+                // NUL-terminated `[N x i8]` global directly and GEP to its
+                // first byte.
+                let array = self.context.const_string(bytes, true);
+                let global = self.module.add_global(array.get_type(), None, "strlit_wtf8");
+                global.set_initializer(&array);
+                global.set_constant(true);
+                let zero = self.context.i32_type().const_zero();
+                let ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        array.get_type(),
+                        global.as_pointer_value(),
+                        &[zero, zero],
+                        "strlit_wtf8_ptr",
+                    )
+                }
+                .map_err(|e| e.to_string())?;
+                Ok(ptr.into())
+            }
 
             HirExpr::Var(name) => {
                 let (ptr, ty) = *self

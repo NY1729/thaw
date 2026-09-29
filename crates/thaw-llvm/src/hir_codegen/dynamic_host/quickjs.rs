@@ -323,6 +323,70 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_backend_call(args, "thaw_js_call_handle_result", "callDynamicValue")
     }
 
+    /// `newDynamicFunction(args_json): JsValue` -- `new Function(...)` via
+    /// the JS realm, with a source-keyed cache in `thaw_js_new_function`.
+    fn compile_new_dynamic_function(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let [call_args] = args else {
+            return Err("newDynamicFunction expects exactly one argument".into());
+        };
+        let call_args = self.compile_expr(call_args)?;
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[call_args.into()],
+                "new_function_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_js_new_function").unwrap(),
+                &[args_json.into()],
+                "new_function_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "new_function_value")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "new_function_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[args_json.into()],
+                "destroy_new_function_args_string",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[call_args.into()],
+                "destroy_new_function_args",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+
     fn compile_call_native_addon_value(
         &mut self,
         args: &[HirExpr],

@@ -160,13 +160,18 @@ impl<'a> FnLowerer<'a> {
             }
             _ => return Err("Promise callback is not a function value".into()),
         };
-        if params.len() > parameter_types.len() || params != parameter_types[..params.len()] {
+        if params.len() > parameter_types.len()
+            || !params
+                .iter()
+                .zip(parameter_types)
+                .all(|(actual, expected)| callback_param_compatible(expected, actual))
+        {
             return Err(format!(
                 "Promise callback has parameters {params:?}, expected a prefix of {parameter_types:?}"
             ));
         }
         if let Some(expected) = expected_return {
-            if *ret != *expected {
+            if !callable_return_compatible(expected, &ret) {
                 return Err(format!(
                     "Promise callback returns {:?}, expected {expected:?}",
                     ret
@@ -209,6 +214,34 @@ impl<'a> FnLowerer<'a> {
             }
             _ => Err(format!("{label} must be an arrow or function value")),
         }
+    }
+
+    /// `new Function(...args)` -- the args are the parameter names followed
+    /// by the body. An AOT compiler can't compile a runtime source string,
+    /// so this is lowered to the JS realm's own `Function` constructor via
+    /// `newDynamicFunction`, which caches the compiled function per source
+    /// (`thaw_js_new_function`).
+    fn lower_function_constructor(
+        &mut self,
+        new_expr: &swc_ecma_ast::NewExpr,
+    ) -> Result<HirExpr, String> {
+        let args = new_expr.args.clone().unwrap_or_default();
+        if args.iter().any(|argument| argument.spread.is_some()) {
+            return Err("`new Function()` does not support spread arguments".into());
+        }
+        // A: a dynamic source string goes to the JS realm's own `Function`
+        // constructor (cached per source in `thaw_js_new_function`).
+        let mut values = Vec::with_capacity(args.len());
+        for argument in &args {
+            let value = self.lower_expr(&argument.expr)?;
+            let value = self.coerce_primitive_to_string(value)?;
+            values.push(self.coerce_to_declared(&HirType::Json, value)?);
+        }
+        let args_json = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("newDynamicFunction".into())),
+            vec![args_json],
+        ))
     }
 
     fn lower_promise_new(&mut self, new_expr: &swc_ecma_ast::NewExpr) -> Result<HirExpr, String> {

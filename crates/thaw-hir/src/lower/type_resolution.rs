@@ -582,6 +582,54 @@ fn lower_ts_type(
                     interfaces,
                     generic_interfaces,
                 )?))),
+                // `WeakRef<T>` is modeled as a one-element array holding a
+                // strong reference (see `new WeakRef()` in expression
+                // lowering), so `.deref()` is a plain index-0 read.
+                (Some("WeakRef"), Some(inner)) => Ok(HirType::Array(Box::new(lower_ts_type(
+                    inner,
+                    interfaces,
+                    generic_interfaces,
+                )?))),
+                // Structural iteration annotations, common in real TS.
+                // `IteratorResult<T>`/`Iterator<T>`/`Iterable<T>` resolve
+                // to the object shapes the iteration lowering already
+                // recognizes (`next` returning `{ value, done }`; a
+                // `[Symbol.iterator]` method normalized to
+                // `__thaw_symbol_iterator`), so an object literal
+                // implementing them type-checks and `for...of`/spread work.
+                (Some("IteratorResult"), Some(elem)) => {
+                    let value = lower_ts_type(elem, interfaces, generic_interfaces)?;
+                    Ok(HirType::Object(vec![
+                        ("value".into(), value),
+                        ("done".into(), HirType::Bool),
+                    ]))
+                }
+                (Some("Iterator"), Some(elem)) => {
+                    let value = lower_ts_type(elem, interfaces, generic_interfaces)?;
+                    let result = HirType::Object(vec![
+                        ("value".into(), value),
+                        ("done".into(), HirType::Bool),
+                    ]);
+                    Ok(HirType::Object(vec![(
+                        "next".into(),
+                        HirType::Function(Vec::new(), Box::new(result)),
+                    )]))
+                }
+                (Some("Iterable"), Some(elem)) => {
+                    let value = lower_ts_type(elem, interfaces, generic_interfaces)?;
+                    let result = HirType::Object(vec![
+                        ("value".into(), value),
+                        ("done".into(), HirType::Bool),
+                    ]);
+                    let iterator = HirType::Object(vec![(
+                        "next".into(),
+                        HirType::Function(Vec::new(), Box::new(result)),
+                    )]);
+                    Ok(HirType::Object(vec![(
+                        "__thaw_symbol_iterator".into(),
+                        HirType::Function(Vec::new(), Box::new(iterator)),
+                    )]))
+                }
                 (Some("Readonly"), Some(inner)) => {
                     lower_ts_type(inner, interfaces, generic_interfaces)
                 }

@@ -1,3 +1,243 @@
+// ---- WTF-8 <-> UTF-16 codec -------------------------------------------------
+//
+// Thaw native strings are NUL-terminated WTF-8: ordinary UTF-8, extended so
+// a lone UTF-16 surrogate (which valid UTF-8 cannot represent) is encoded as
+// its 3-byte WTF-8 sequence. `wtf8_decode_utf16` preserves lone surrogates
+// where `std::str::from_utf8_lossy` would replace one with 3 U+FFFD (one per
+// invalid byte of the 3-byte surrogate sequence).
+
+fn wtf8_continuation(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
+/// Decodes WTF-8 bytes to UTF-16 code units, preserving lone surrogates.
+/// Malformed bytes decode as U+FFFD (one per stray byte).
+fn wtf8_decode_utf16(bytes: &[u8]) -> Vec<u16> {
+    let mut units = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let first = bytes[index];
+        if first < 0x80 {
+            units.push(u16::from(first));
+            index += 1;
+        } else if (0xC2..=0xDF).contains(&first) {
+            if index + 1 < bytes.len() && wtf8_continuation(bytes[index + 1]) {
+                let code =
+                    ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F);
+                units.push(code as u16);
+                index += 2;
+            } else {
+                units.push(0xFFFD);
+                index += 1;
+            }
+        } else if (0xE0..=0xEF).contains(&first) {
+            if index + 2 < bytes.len()
+                && wtf8_continuation(bytes[index + 1])
+                && wtf8_continuation(bytes[index + 2])
+            {
+                let code = ((u32::from(first) & 0x0F) << 12)
+                    | ((u32::from(bytes[index + 1]) & 0x3F) << 6)
+                    | (u32::from(bytes[index + 2]) & 0x3F);
+                // 0xD800-0xDFFF is allowed here: a lone surrogate.
+                units.push(code as u16);
+                index += 3;
+            } else {
+                units.push(0xFFFD);
+                index += 1;
+            }
+        } else if (0xF0..=0xF4).contains(&first) {
+            if index + 3 < bytes.len()
+                && wtf8_continuation(bytes[index + 1])
+                && wtf8_continuation(bytes[index + 2])
+                && wtf8_continuation(bytes[index + 3])
+            {
+                let code = ((u32::from(first) & 0x07) << 18)
+                    | ((u32::from(bytes[index + 1]) & 0x3F) << 12)
+                    | ((u32::from(bytes[index + 2]) & 0x3F) << 6)
+                    | (u32::from(bytes[index + 3]) & 0x3F);
+                if (0x10000..=0x10FFFF).contains(&code) {
+                    let code = code - 0x10000;
+                    units.push(0xD800 + (code >> 10) as u16);
+                    units.push(0xDC00 + (code & 0x3FF) as u16);
+                    index += 4;
+                } else {
+                    units.push(0xFFFD);
+                    index += 1;
+                }
+            } else {
+                units.push(0xFFFD);
+                index += 1;
+            }
+        } else {
+            units.push(0xFFFD);
+            index += 1;
+        }
+    }
+    units
+}
+
+/// Appends the WTF-8 encoding of a single code point (allowing a lone
+/// surrogate in 0xD800-0xDFFF as its 3-byte sequence).
+fn wtf8_push_code_point(bytes: &mut Vec<u8>, code: u32) {
+    if code < 0x80 {
+        bytes.push(code as u8);
+    } else if code < 0x800 {
+        bytes.push(0xC0 | (code >> 6) as u8);
+        bytes.push(0x80 | (code & 0x3F) as u8);
+    } else if code < 0x10000 {
+        bytes.push(0xE0 | (code >> 12) as u8);
+        bytes.push(0x80 | ((code >> 6) & 0x3F) as u8);
+        bytes.push(0x80 | (code & 0x3F) as u8);
+    } else {
+        bytes.push(0xF0 | (code >> 18) as u8);
+        bytes.push(0x80 | ((code >> 12) & 0x3F) as u8);
+        bytes.push(0x80 | ((code >> 6) & 0x3F) as u8);
+        bytes.push(0x80 | (code & 0x3F) as u8);
+    }
+}
+
+/// Encodes UTF-16 code units to WTF-8, combining a valid surrogate pair
+/// into one astral code point and leaving a lone surrogate as a 3-byte
+/// sequence.
+fn wtf8_encode_utf16(units: &[u16]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            let code = 0x10000
+                + ((u32::from(unit) - 0xD800) << 10)
+                + (u32::from(units[index + 1]) - 0xDC00);
+            wtf8_push_code_point(&mut bytes, code);
+            index += 2;
+        } else {
+            wtf8_push_code_point(&mut bytes, u32::from(unit));
+            index += 1;
+        }
+    }
+    bytes
+}
+
+/// `true` when `bytes` contain no lone surrogate (i.e. are valid UTF-8).
+fn wtf8_is_well_formed(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0xED
+            && index + 2 < bytes.len()
+            && (0xA0..=0xBF).contains(&bytes[index + 1])
+            && wtf8_continuation(bytes[index + 2])
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Replaces every *lone* surrogate with U+FFFD (the `toWellFormed` result),
+/// leaving valid surrogate pairs untouched.
+fn wtf8_to_well_formed(bytes: &[u8]) -> Vec<u8> {
+    let units = wtf8_decode_utf16(bytes);
+    let mut out = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            out.push(unit);
+            out.push(units[index + 1]);
+            index += 2;
+        } else if (0xD800..=0xDFFF).contains(&unit) {
+            out.push(0xFFFD);
+            index += 1;
+        } else {
+            out.push(unit);
+            index += 1;
+        }
+    }
+    wtf8_encode_utf16(&out)
+}
+
+/// Reads a native string pointer as its raw WTF-8 bytes.
+///
+/// # Safety
+/// `value` must be non-null and reference a NUL-terminated byte string.
+unsafe fn wtf8_bytes<'a>(value: *const c_char) -> &'a [u8] {
+    unsafe { CStr::from_ptr(value) }.to_bytes()
+}
+
+/// `character` upper- or lower-cased (which can expand to several chars).
+fn case_map(character: char, upper: bool) -> String {
+    if upper {
+        character.to_uppercase().collect()
+    } else {
+        character.to_lowercase().collect()
+    }
+}
+
+/// Case-maps a WTF-8 string, preserving lone surrogates (which have no
+/// case mapping).
+///
+/// # Safety
+/// `value` must be non-null and reference a NUL-terminated WTF-8 string.
+unsafe fn wtf8_case_map(value: *const c_char, upper: bool) -> *const c_char {
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let mut out: Vec<u16> = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            let code = 0x10000
+                + ((u32::from(unit) - 0xD800) << 10)
+                + (u32::from(units[index + 1]) - 0xDC00);
+            let character = char::from_u32(code).unwrap_or('\u{FFFD}');
+            let mapped: String = if upper {
+                character.to_uppercase().collect()
+            } else {
+                character.to_lowercase().collect()
+            };
+            out.extend(mapped.encode_utf16());
+            index += 2;
+        } else if (0xD800..=0xDFFF).contains(&unit) {
+            out.push(unit);
+            index += 1;
+        } else {
+            let character = char::from_u32(u32::from(unit)).unwrap_or('\u{FFFD}');
+            let mapped: String = if upper {
+                character.to_uppercase().collect()
+            } else {
+                character.to_lowercase().collect()
+            };
+            out.extend(mapped.encode_utf16());
+            index += 1;
+        }
+    }
+    arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// Allocates a NUL-terminated copy of raw WTF-8 bytes in the arena,
+/// mirroring `arena_c_string` (which requires valid UTF-8 and so cannot
+/// carry a lone surrogate).
+fn arena_wtf8(bytes: &[u8]) -> Option<*const u8> {
+    let destination = thaw_arena::thaw_arena_alloc(bytes.len() + 1, 1);
+    if destination.is_null() {
+        return None;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len());
+        destination.add(bytes.len()).write(0);
+    }
+    Some(destination)
+}
+
 #[no_mangle]
 /// Compares UTF-8 native strings using JavaScript's UTF-16 code-unit order.
 ///
@@ -8,10 +248,8 @@ pub unsafe extern "C" fn thaw_string_compare(left: *const c_char, right: *const 
     if left.is_null() || right.is_null() {
         return 0;
     }
-    let left = unsafe { CStr::from_ptr(left) }.to_string_lossy();
-    let right = unsafe { CStr::from_ptr(right) }.to_string_lossy();
-    let left = left.encode_utf16().collect::<Vec<_>>();
-    let right = right.encode_utf16().collect::<Vec<_>>();
+    let left = wtf8_decode_utf16(unsafe { wtf8_bytes(left) });
+    let right = wtf8_decode_utf16(unsafe { wtf8_bytes(right) });
     match left.cmp(&right) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -26,8 +264,7 @@ pub unsafe extern "C" fn thaw_string_to_lower_case(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    arena_c_string(&value.to_lowercase()).map_or(std::ptr::null(), |value| value.cast())
+    unsafe { wtf8_case_map(value, false) }
 }
 
 #[no_mangle]
@@ -37,8 +274,7 @@ pub unsafe extern "C" fn thaw_string_to_upper_case(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    arena_c_string(&value.to_uppercase()).map_or(std::ptr::null(), |value| value.cast())
+    unsafe { wtf8_case_map(value, true) }
 }
 
 unsafe fn thaw_string_to_locale_case(
@@ -49,30 +285,50 @@ unsafe fn thaw_string_to_locale_case(
     if value.is_null() || locale.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let locale = unsafe { CStr::from_ptr(locale) }.to_string_lossy();
     let language = locale.split('-').next().unwrap_or("").to_ascii_lowercase();
     let turkic = matches!(language.as_str(), "tr" | "az");
-    let result: String = value
-        .chars()
-        .flat_map(|character| {
-            if turkic {
-                match (upper, character) {
-                    (false, 'I') => return "ı".chars().collect::<Vec<_>>(),
-                    (false, 'İ') => return "i".chars().collect::<Vec<_>>(),
-                    (true, 'i') => return "İ".chars().collect::<Vec<_>>(),
-                    (true, 'ı') => return "I".chars().collect::<Vec<_>>(),
-                    _ => {}
-                }
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let mut out: Vec<u16> = Vec::with_capacity(units.len());
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        let character = if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            let code = 0x10000
+                + ((u32::from(unit) - 0xD800) << 10)
+                + (u32::from(units[index + 1]) - 0xDC00);
+            index += 2;
+            Some(char::from_u32(code).unwrap_or('\u{FFFD}'))
+        } else if (0xD800..=0xDFFF).contains(&unit) {
+            // A lone surrogate has no case mapping: pass it through.
+            index += 1;
+            None
+        } else {
+            index += 1;
+            Some(char::from_u32(u32::from(unit)).unwrap_or('\u{FFFD}'))
+        };
+        match character {
+            None => out.push(unit),
+            Some(character) => {
+                let mapped: String = if turkic {
+                    match (upper, character) {
+                        (false, 'I') => "ı".to_string(),
+                        (false, 'İ') => "i".to_string(),
+                        (true, 'i') => "İ".to_string(),
+                        (true, 'ı') => "I".to_string(),
+                        _ => case_map(character, upper),
+                    }
+                } else {
+                    case_map(character, upper)
+                };
+                out.extend(mapped.encode_utf16());
             }
-            if upper {
-                character.to_uppercase().collect()
-            } else {
-                character.to_lowercase().collect()
-            }
-        })
-        .collect();
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+        }
+    }
+    arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -243,16 +499,17 @@ pub unsafe extern "C" fn thaw_string_repeat(value: *const c_char, count: f64) ->
     if value.is_null() || !count.is_finite() || count < 0.0 {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    // Repeat the raw WTF-8 bytes so a lone surrogate survives.
+    let bytes = unsafe { wtf8_bytes(value) };
     let count = count as usize;
-    let Some(capacity) = value.len().checked_mul(count) else {
+    let Some(capacity) = bytes.len().checked_mul(count) else {
         return std::ptr::null();
     };
-    let mut output = String::with_capacity(capacity);
+    let mut output = Vec::with_capacity(capacity + 1);
     for _ in 0..count {
-        output.push_str(&value);
+        output.extend_from_slice(bytes);
     }
-    arena_c_string(&output).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
 fn expand_replacement(
@@ -414,17 +671,16 @@ unsafe fn thaw_string_pad(
     if value.is_null() || pad.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let pad = unsafe { CStr::from_ptr(pad) }.to_string_lossy();
-    let units: Vec<u16> = value.encode_utf16().collect();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let pad_units = wtf8_decode_utf16(unsafe { wtf8_bytes(pad) });
     let target_length = if target_length.is_finite() && target_length > 0.0 {
         target_length as usize
     } else {
         0
     };
-    let pad_units: Vec<u16> = pad.encode_utf16().collect();
     if target_length <= units.len() || pad_units.is_empty() {
-        return arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast());
+        return arena_wtf8(&wtf8_encode_utf16(&units))
+            .map_or(std::ptr::null(), |value| value.cast());
     }
     let needed = target_length - units.len();
     let mut filler = Vec::with_capacity(needed);
@@ -437,8 +693,7 @@ unsafe fn thaw_string_pad(
     } else {
         units.into_iter().chain(filler).collect()
     };
-    let combined = String::from_utf16_lossy(&combined);
-    arena_c_string(&combined).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&wtf8_encode_utf16(&combined)).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -493,14 +748,8 @@ unsafe fn utf16_strings(
     if value.is_null() || search.is_null() {
         return None;
     }
-    let value = unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .collect();
-    let search = unsafe { CStr::from_ptr(search) }
-        .to_string_lossy()
-        .encode_utf16()
-        .collect();
+    let value = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let search = wtf8_decode_utf16(unsafe { wtf8_bytes(search) });
     Some((value, search))
 }
 
@@ -613,8 +862,7 @@ pub unsafe extern "C" fn thaw_string_slice(
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let units = value.encode_utf16().collect::<Vec<_>>();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let index = |position: f64| {
         if position.is_nan() {
             0
@@ -626,7 +874,7 @@ pub unsafe extern "C" fn thaw_string_slice(
     };
     let start = index(start);
     let end = index(end).max(start);
-    arena_c_string(&String::from_utf16_lossy(&units[start..end]))
+    arena_wtf8(&wtf8_encode_utf16(&units[start..end]))
         .map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -646,8 +894,7 @@ pub unsafe extern "C" fn thaw_string_substring(
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let units = value.encode_utf16().collect::<Vec<_>>();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let length = units.len() as f64;
     let clamp = |position: f64| {
         if position.is_nan() {
@@ -663,10 +910,8 @@ pub unsafe extern "C" fn thaw_string_substring(
     } else {
         (end, start)
     };
-    arena_c_string(&String::from_utf16_lossy(
-        &units[start as usize..end as usize],
-    ))
-    .map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&wtf8_encode_utf16(&units[start as usize..end as usize]))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -684,8 +929,7 @@ pub unsafe extern "C" fn thaw_string_substr(
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let units = value.encode_utf16().collect::<Vec<_>>();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let count = units.len() as f64;
     let start = if start.is_nan() { 0.0 } else { start.trunc() };
     let start = if start < 0.0 {
@@ -699,10 +943,8 @@ pub unsafe extern "C" fn thaw_string_substr(
     } else {
         length.min(count - start as f64)
     } as usize;
-    arena_c_string(&String::from_utf16_lossy(
-        &units[start..start + length],
-    ))
-    .map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&wtf8_encode_utf16(&units[start..start + length]))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 fn is_javascript_whitespace(character: char) -> bool {
@@ -719,6 +961,30 @@ fn is_javascript_whitespace(character: char) -> bool {
                 | '\u{2028}'
                 | '\u{2029}'
     )
+}
+
+#[no_mangle]
+/// `String.prototype.isWellFormed`: `false` when the string contains a
+/// lone UTF-16 surrogate.
+///
+/// # Safety
+/// `value` must be null or point to a NUL-terminated WTF-8 string.
+pub unsafe extern "C" fn thaw_string_is_well_formed(value: *const c_char) -> bool {
+    value.is_null() || wtf8_is_well_formed(unsafe { wtf8_bytes(value) })
+}
+
+#[no_mangle]
+/// `String.prototype.toWellFormed`: replaces every lone surrogate with
+/// U+FFFD, leaving valid surrogate pairs (astral code points) untouched.
+///
+/// # Safety
+/// `value` must be null or point to a NUL-terminated WTF-8 string.
+pub unsafe extern "C" fn thaw_string_to_well_formed(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let bytes = unsafe { wtf8_bytes(value) };
+    arena_wtf8(&wtf8_to_well_formed(bytes)).map_or(std::ptr::null(), |value| value.cast())
 }
 
 unsafe fn trim_javascript_string(value: *const c_char, start: bool, end: bool) -> *const c_char {
@@ -773,10 +1039,7 @@ pub unsafe extern "C" fn thaw_string_length(value: *const c_char) -> f64 {
     if value.is_null() {
         return 0.0;
     }
-    unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .count() as f64
+    wtf8_decode_utf16(unsafe { wtf8_bytes(value) }).len() as f64
 }
 
 #[no_mangle]
@@ -793,11 +1056,9 @@ pub unsafe extern "C" fn thaw_string_char_code_at(value: *const c_char, index: f
     if index < 0.0 || index > usize::MAX as f64 {
         return f64::NAN;
     }
-    unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .nth(index as usize)
-        .map_or(f64::NAN, f64::from)
+    wtf8_decode_utf16(unsafe { wtf8_bytes(value) })
+        .get(index as usize)
+        .map_or(f64::NAN, |unit| f64::from(*unit))
 }
 
 #[no_mangle]
@@ -818,15 +1079,13 @@ pub unsafe extern "C" fn thaw_string_at(value: *const c_char, index: f64) -> *co
     if value.is_null() || index < 0.0 {
         return std::ptr::null();
     }
-    let units: Vec<u16> = unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .collect();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let Some(&unit) = units.get(index as usize) else {
         return std::ptr::null();
     };
-    let text = String::from_utf16_lossy(&[unit]);
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    // WTF-8-encode the single unit so a lone surrogate is preserved.
+    let text = wtf8_encode_utf16(&[unit]);
+    arena_wtf8(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -844,10 +1103,7 @@ pub unsafe extern "C" fn thaw_string_code_point_at(value: *const c_char, index: 
     if value.is_null() || !index.is_finite() || index < 0.0 || index > usize::MAX as f64 {
         return -1.0;
     }
-    let units: Vec<u16> = unsafe { CStr::from_ptr(value) }
-        .to_string_lossy()
-        .encode_utf16()
-        .collect();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let index = index as usize;
     let Some(&unit) = units.get(index) else {
         return -1.0;
@@ -877,8 +1133,9 @@ pub extern "C" fn thaw_string_from_char_code(code: f64) -> *const c_char {
         0
     }
     .rem_euclid(65536) as u16;
-    let text = String::from_utf16_lossy(&[unit]);
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    // A lone surrogate is preserved (WTF-8), not replaced with U+FFFD.
+    let text = wtf8_encode_utf16(&[unit]);
+    arena_wtf8(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]

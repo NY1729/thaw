@@ -208,7 +208,7 @@ fn discriminant_literal(ty: &TsType, generic: &GenericInterfaces<'_>) -> Option<
         return None;
     };
     match &literal.lit {
-        TsLit::Str(value) => Some(HirLit::Str(value.value.to_string_lossy().into_owned())),
+        TsLit::Str(value) => Some(hir_string_literal_from_wtf8(value.value.as_wtf8().as_bytes())),
         TsLit::Number(value) => Some(HirLit::F64(value.value)),
         TsLit::Bool(value) => Some(HirLit::Bool(value.value)),
         _ => None,

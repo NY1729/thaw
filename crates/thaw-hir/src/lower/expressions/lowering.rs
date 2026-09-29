@@ -549,8 +549,8 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
-            Expr::Lit(Lit::Str(s)) => Ok(HirExpr::Lit(HirLit::Str(
-                s.value.to_string_lossy().into_owned(),
+            Expr::Lit(Lit::Str(s)) => Ok(HirExpr::Lit(hir_string_literal_from_wtf8(
+                s.value.as_wtf8().as_bytes(),
             ))),
             Expr::Lit(Lit::Bool(b)) => Ok(HirExpr::Lit(HirLit::Bool(b.value))),
             Expr::Lit(Lit::Null(_)) => Ok(HirExpr::Lit(HirLit::Null)),
@@ -997,13 +997,14 @@ impl<'a> FnLowerer<'a> {
             Expr::Tpl(template) => {
                 let mut parts = Vec::with_capacity(template.quasis.len() + template.exprs.len());
                 for (index, quasi) in template.quasis.iter().enumerate() {
-                    let text = quasi
-                        .cooked
-                        .as_ref()
-                        .map(|cooked| cooked.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| quasi.raw.to_string());
-                    if !text.is_empty() {
-                        parts.push(HirExpr::Lit(HirLit::Str(text)));
+                    let literal = match quasi.cooked.as_ref() {
+                        Some(cooked) => {
+                            hir_string_literal_from_wtf8(cooked.as_wtf8().as_bytes())
+                        }
+                        None => HirLit::Str(quasi.raw.to_string()),
+                    };
+                    if !matches!(&literal, HirLit::Str(text) if text.is_empty()) {
+                        parts.push(HirExpr::Lit(literal));
                     }
                     if let Some(expression) = template.exprs.get(index) {
                         let mut value = self.lower_expr(expression)?;
@@ -1063,12 +1064,13 @@ impl<'a> FnLowerer<'a> {
                 let mut cooked_strings = Vec::with_capacity(template.quasis.len());
                 let mut raw_strings = Vec::with_capacity(template.quasis.len());
                 for quasi in &template.quasis {
-                    let cooked_text = quasi
-                        .cooked
-                        .as_ref()
-                        .map(|cooked| cooked.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| quasi.raw.to_string());
-                    cooked_strings.push(HirExpr::Lit(HirLit::Str(cooked_text)));
+                    let cooked = match quasi.cooked.as_ref() {
+                        Some(cooked) => {
+                            hir_string_literal_from_wtf8(cooked.as_wtf8().as_bytes())
+                        }
+                        None => HirLit::Str(quasi.raw.to_string()),
+                    };
+                    cooked_strings.push(HirExpr::Lit(cooked));
                     raw_strings.push(HirExpr::Lit(HirLit::Str(quasi.raw.to_string())));
                 }
                 // The tag function receives `cooked` -- `strings.raw` is a
@@ -2652,6 +2654,33 @@ impl<'a> FnLowerer<'a> {
                                     vec![value],
                                 )),
                             );
+                        } else if matches!(spread_source_type, HirType::Object(_)) {
+                            // A custom iterable object
+                            // (`{ [Symbol.iterator]() { ... } }`): call its
+                            // `[Symbol.iterator]()` (normalized to the
+                            // `__thaw_symbol_iterator` field), adapt the
+                            // returned iterator object, and collect it into
+                            // an array -- the same path `for...of` uses.
+                            let iterator = HirExpr::Call(
+                                Box::new(HirExpr::PropAccess(
+                                    Box::new(value.clone()),
+                                    spread_source_type.clone(),
+                                    "__thaw_symbol_iterator".to_string(),
+                                )),
+                                Vec::new(),
+                            );
+                            let iterator_type = self.infer_expr_type(&iterator)?;
+                            let name = format!("__thaw_iterator_{}", self.next_binding);
+                            self.next_binding += 1;
+                            if let Some((producer, producer_type)) =
+                                iterator_object_adapter(self, iterator, &iterator_type, name)
+                            {
+                                if let Some((collected, _)) = self
+                                    .collect_generator_for_array_spread(producer, &producer_type)?
+                                {
+                                    value = collected;
+                                }
+                            }
                         }
                         let HirType::Array(spread_element) = self.infer_expr_type(&value)? else {
                             return Err("array spread source must be a typed array".into());
@@ -2919,6 +2948,9 @@ impl<'a> FnLowerer<'a> {
 
             Expr::New(new_expr) => {
                 if let Expr::Ident(class) = new_expr.callee.as_ref() {
+                    if class.sym == *"Function" {
+                        return self.lower_function_constructor(new_expr);
+                    }
                     if matches!(
                         class.sym.as_ref(),
                         "AbortController"

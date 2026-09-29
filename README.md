@@ -189,6 +189,7 @@ cargo test --workspace
 target/release/thaw compat tests/typescript-compat.json
 target/release/thaw node-compat tests/typescript-runtime-compat.json
 target/release/thaw node-compat tests/node-compat.json
+target/release/thaw node-compat tests/builtins-compat.json  # ECMAScript built-ins (needs Node >= 22)
 ```
 
 A single, trend-tracking snapshot of how much of the target surface is

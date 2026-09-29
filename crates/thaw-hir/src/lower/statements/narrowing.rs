@@ -792,7 +792,7 @@ impl<'a> FnLowerer<'a> {
         let literal_value = |value: &Expr| match value {
             Expr::Lit(Lit::Num(value)) => Some(HirLit::F64(value.value)),
             Expr::Lit(Lit::Str(value)) => {
-                Some(HirLit::Str(value.value.to_string_lossy().into_owned()))
+                Some(hir_string_literal_from_wtf8(value.value.as_wtf8().as_bytes()))
             }
             Expr::Lit(Lit::Bool(value)) => Some(HirLit::Bool(value.value)),
             _ => None,

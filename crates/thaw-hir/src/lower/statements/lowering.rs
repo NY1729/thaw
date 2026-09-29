@@ -1403,6 +1403,20 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                     if values_type == HirType::JsValue {
+                        let helper = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("__thaw_to_iterator".into()))],
+                        );
+                        let argument =
+                            self.coerce_to_declared(&HirType::Json, values.clone())?;
+                        let arguments = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![argument]),
+                        )?;
+                        values = HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+                            vec![helper, arguments],
+                        );
                         let name = format!("__thaw_iterator_{}", self.next_binding);
                         self.next_binding += 1;
                         let (producer, producer_type) =

@@ -17,18 +17,28 @@ pub unsafe extern "C" fn thaw_string_split(
     if value.is_null() || separator.is_null() {
         return std::ptr::null_mut();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut parts: Vec<String> = if separator.is_empty() {
+    let value = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let separator = wtf8_decode_utf16(unsafe { wtf8_bytes(separator) });
+    let mut parts: Vec<Vec<u8>> = if separator.is_empty() {
         value
-            .encode_utf16()
-            .map(|unit| String::from_utf16_lossy(&[unit]))
+            .iter()
+            .map(|unit| wtf8_encode_utf16(&[*unit]))
             .collect()
     } else {
-        value
-            .split(separator.as_ref())
-            .map(str::to_string)
-            .collect()
+        let mut parts = Vec::new();
+        let mut start = 0;
+        let mut index = 0;
+        while index + separator.len() <= value.len() {
+            if value[index..index + separator.len()] == separator[..] {
+                parts.push(wtf8_encode_utf16(&value[start..index]));
+                index += separator.len();
+                start = index;
+            } else {
+                index += 1;
+            }
+        }
+        parts.push(wtf8_encode_utf16(&value[start..]));
+        parts
     };
     let limit = if limit == -1.0 {
         usize::MAX
@@ -46,7 +56,7 @@ pub unsafe extern "C" fn thaw_string_split(
         output.cast::<u64>().write(parts.len() as u64);
     }
     for (index, part) in parts.into_iter().enumerate() {
-        let Some(part) = arena_c_string(&part) else {
+        let Some(part) = arena_wtf8(&part) else {
             return std::ptr::null_mut();
         };
         unsafe {
@@ -70,8 +80,24 @@ pub unsafe extern "C" fn thaw_string_to_array(value: *const c_char) -> *mut u8 {
     if value.is_null() {
         return std::ptr::null_mut();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let characters = value.chars().collect::<Vec<_>>();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    // The string iterator yields one slot per code point: a valid surrogate
+    // pair becomes one astral character, a lone surrogate stays one unit.
+    let mut characters: Vec<Vec<u8>> = Vec::new();
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit)
+            && index + 1 < units.len()
+            && (0xDC00..=0xDFFF).contains(&units[index + 1])
+        {
+            characters.push(wtf8_encode_utf16(&[unit, units[index + 1]]));
+            index += 2;
+        } else {
+            characters.push(wtf8_encode_utf16(&[unit]));
+            index += 1;
+        }
+    }
     let output = thaw_arena::thaw_arena_alloc((characters.len() + 1) * 8, 8);
     if output.is_null() {
         return std::ptr::null_mut();
@@ -80,7 +106,7 @@ pub unsafe extern "C" fn thaw_string_to_array(value: *const c_char) -> *mut u8 {
         output.cast::<u64>().write(characters.len() as u64);
     }
     for (index, character) in characters.into_iter().enumerate() {
-        let Some(character) = arena_c_string(&character.to_string()) else {
+        let Some(character) = arena_wtf8(&character) else {
             return std::ptr::null_mut();
         };
         unsafe {

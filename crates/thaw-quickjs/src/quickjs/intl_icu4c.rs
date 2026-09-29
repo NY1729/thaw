@@ -342,10 +342,14 @@ fn intl_collator_compare_search(
     ignore_punctuation: bool,
     numeric: bool,
     case_first: &str,
-    a: &str,
-    b: &str,
+    a: &[u8],
+    b: &[u8],
 ) -> i32 {
-    let codepoint_fallback = || match a.encode_utf16().cmp(b.encode_utf16()) {
+    // `ucol_strcollUTF8` needs valid UTF-8, so substitute U+FFFD for a
+    // lone surrogate; the fallback compares the real UTF-16 units.
+    let a_text = wtf8_to_icu_text(a);
+    let b_text = wtf8_to_icu_text(b);
+    let codepoint_fallback = || match wtf8_decode_utf16(a).cmp(&wtf8_decode_utf16(b)) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
@@ -367,10 +371,10 @@ fn intl_collator_compare_search(
     let result = unsafe {
         (icu.strcoll_utf8)(
             collator,
-            a.as_ptr().cast::<c_char>(),
-            a.len() as c_int,
-            b.as_ptr().cast::<c_char>(),
-            b.len() as c_int,
+            a_text.as_ptr().cast::<c_char>(),
+            a_text.len() as c_int,
+            b_text.as_ptr().cast::<c_char>(),
+            b_text.len() as c_int,
             &mut status,
         )
     };

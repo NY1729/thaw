@@ -923,6 +923,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_string_trim_end",
             "thaw_string_to_lower_case",
             "thaw_string_to_upper_case",
+            "thaw_string_to_well_formed",
             "thaw_atob",
             "thaw_btoa",
             "thaw_escape",
@@ -931,6 +932,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, string_transform_type, Some(Linkage::External));
         }
+        self.module.add_function(
+            "thaw_string_is_well_formed",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         let locale_string_case_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         for name in [
             "thaw_string_to_locale_lower_case",
@@ -2200,6 +2206,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     ],
                     false,
                 ),
+            Some(Linkage::External),
+        );
+        // `new Function(...)` -- (args_json) -> a retained function handle
+        // (or an error).
+        self.module.add_function(
+            "thaw_js_new_function",
+            self.context
+                .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false)
+                .fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

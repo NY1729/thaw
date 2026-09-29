@@ -164,6 +164,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_string_trim_end"
             | "__thaw_string_to_lower_case"
             | "__thaw_string_to_upper_case"
+            | "__thaw_string_to_well_formed"
+            | "__thaw_string_is_well_formed"
             | "__thaw_atob"
             | "__thaw_btoa"
             | "__thaw_escape"

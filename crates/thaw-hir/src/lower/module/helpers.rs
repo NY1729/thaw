@@ -105,7 +105,36 @@ fn is_opaque_global_type(name: &str) -> bool {
             | "SharedArrayBuffer"
             | "DataView"
             | "BufferSource"
+            // Non-`Uint8Array` typed arrays stay real QuickJS typed
+            // arrays (`JsValue`): that keeps their per-element-width
+            // coercion (Int8 wrap, Uint8Clamped clamp, Float32 rounding,
+            // ...) exact, which a flat `Bytes`/`Array(F64)` model cannot
+            // reproduce. `Uint8Array`/`Buffer` are the only spellings
+            // routed to native `Bytes`.
+            | "Int8Array"
+            | "Uint8ClampedArray"
+            | "Int16Array"
+            | "Uint16Array"
+            | "Int32Array"
+            | "Uint32Array"
+            | "Float16Array"
+            | "Float32Array"
+            | "Float64Array"
+            | "BigInt64Array"
+            | "BigUint64Array"
     )
+}
+
+/// Builds the HIR literal for a source string given its WTF-8 bytes: a
+/// plain `HirLit::Str` when the text is valid UTF-8, or `HirLit::Wtf8`
+/// when it contains a lone UTF-16 surrogate (which a Rust `String`
+/// cannot hold). SWC's AST already carries the WTF-8 bytes, so this is
+/// where a literal like `"\uD800"` stops being replaced with U+FFFD.
+fn hir_string_literal_from_wtf8(bytes: &[u8]) -> HirLit {
+    match std::str::from_utf8(bytes) {
+        Ok(valid) => HirLit::Str(valid.to_string()),
+        Err(_) => HirLit::Wtf8(bytes.to_vec()),
+    }
 }
 
 /// An object-literal accessor's backing closure is stored as a hidden
