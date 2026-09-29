@@ -146,6 +146,18 @@
     },
     {
       "group": "Object",
+      "name": "class-method-untouched-field-identity",
+      "expect": "matched",
+      "source": "class A { obj: { v: number } = { v: 1 }; cb: () => number = () => 41; touch(): void {} } function main(): void { const o: any = new (A as any)(); const beforeObj = o.obj; const beforeCb = o.cb; o.touch(); console.log(beforeObj === o.obj, beforeCb === o.cb, o.cb()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-method-nested-call-mutation",
+      "expect": "matched",
+      "source": "class A { count: number = 0; inc(): void { this.count = this.count + 1; } touch(): void { this.inc(); } } function main(): void { const o: any = new (A as any)(); o.touch(); o.touch(); console.log(o.count); }"
+    },
+    {
+      "group": "Object",
       "name": "class-name",
       "expect": "matched",
       "source": "class Animal { name: string = \"a\"; } function main(): void { console.log(Animal.name, Animal.prototype.constructor.name); }"
