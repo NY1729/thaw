@@ -165,13 +165,13 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_shared_env_init", shared_env_init)
                     .expect("failed to install shared Worker environment initializer");
-                let stdout = Function::new(ctx.clone(), |text: String| {
-                    print!("{text}");
+                let stdout = Function::new(ctx.clone(), |text: crate::Wtf8String| {
+                    print!("{}", crate::wtf8_display(&text.0));
                     let _ = io::stdout().flush();
                 })
                 .expect("failed to create JavaScript stdout writer");
-                let stderr = Function::new(ctx.clone(), |text: String| {
-                    eprint!("{text}");
+                let stderr = Function::new(ctx.clone(), |text: crate::Wtf8String| {
+                    eprint!("{}", crate::wtf8_display(&text.0));
                     let _ = io::stderr().flush();
                 })
                 .expect("failed to create JavaScript stderr writer");
@@ -219,11 +219,17 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_process_cwd", cwd)
                     .expect("failed to install process cwd bridge");
-                let chdir = Function::new(ctx.clone(), |path: String| -> rquickjs::Result<()> {
-                    std::env::set_current_dir(path).map_err(|error| {
-                        rquickjs::Error::new_from_js_message("process", "chdir", error.to_string())
+                let chdir =
+                    Function::new(ctx.clone(), |path: crate::Wtf8String| -> rquickjs::Result<()> {
+                        std::env::set_current_dir(String::from_utf8_lossy(&path.0).as_ref())
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "process",
+                                    "chdir",
+                                    error.to_string(),
+                                )
+                            })
                     })
-                })
                 .expect("failed to create process chdir bridge");
                 ctx.globals()
                     .set("__thaw_process_chdir", chdir)

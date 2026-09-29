@@ -96,6 +96,40 @@ fn callable_return_compatible(expected_ret: &HirType, ret: &HirType) -> bool {
     expected_ret == ret || *expected_ret == HirType::Void || *expected_ret == HirType::JsValue
 }
 
+/// Whether a `Function` value of type `actual` can stand in where `declared`
+/// is expected *without an adapter*: same parameter count and per-parameter
+/// physical layout (identical types, or a narrower `Object` whose fields are
+/// a prefix of the declared object's -- same offsets), and an identical
+/// return (`void` discards any). Unlike `callable_value_compatible` this
+/// deliberately rejects `Optional`/`CallableFunction` differences, which
+/// change the ABI and need a real adapter (e.g. a default-argument wrapper).
+fn callable_abi_compatible(declared: &HirType, actual: &HirType) -> bool {
+    let (HirType::Function(declared_params, declared_ret), HirType::Function(params, ret)) =
+        (declared, actual)
+    else {
+        return false;
+    };
+    (declared_ret == ret || **declared_ret == HirType::Void)
+        && declared_params.len() == params.len()
+        && declared_params
+            .iter()
+            .zip(params)
+            .all(|(declared, actual)| {
+                declared == actual
+                    || match (declared, actual) {
+                        (HirType::Object(declared_fields), HirType::Object(actual_fields)) => {
+                            actual_fields.len() <= declared_fields.len()
+                                && actual_fields.iter().zip(declared_fields).all(
+                                    |((actual_name, actual_ty), (declared_name, declared_ty))| {
+                                        actual_name == declared_name && actual_ty == declared_ty
+                                    },
+                                )
+                        }
+                        _ => false,
+                    }
+            })
+}
+
 /// Whether a `Function`/`CallableFunction` value of type `actual` can stand
 /// in where `expected` is declared: return-type compatibility (ignoring
 /// `void`) plus per-parameter width subtyping.

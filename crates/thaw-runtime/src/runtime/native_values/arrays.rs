@@ -1769,11 +1769,13 @@ pub unsafe extern "C" fn thaw_string_array_join(
     if separator.is_null() {
         return std::ptr::null();
     }
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut result = String::new();
+    // WTF-8-preserving: concatenate raw bytes so a lone surrogate in an
+    // element round-trips (the display path lossily renders it, not `join`).
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result: Vec<u8> = Vec::new();
     for index in 0..length {
         if index != 0 {
-            result.push_str(&separator);
+            result.extend_from_slice(separator);
         }
         if !unsafe { array_index_present(presence, index) } {
             continue;
@@ -1785,10 +1787,10 @@ pub unsafe extern "C" fn thaw_string_array_join(
                 .read_unaligned()
         };
         if !slot.is_null() {
-            result.push_str(&unsafe { CStr::from_ptr(slot) }.to_string_lossy());
+            result.extend_from_slice(unsafe { wtf8_bytes(slot) });
         }
     }
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1914,11 +1916,11 @@ pub unsafe extern "C" fn thaw_tagged_array_join(
         return std::ptr::null();
     }
     let tags = if kind == 5 { unsafe { CStr::from_ptr(tags) }.to_bytes() } else { &[] };
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut result = String::new();
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result: Vec<u8> = Vec::new();
     for index in 0..length {
         if index != 0 {
-            result.push_str(&separator);
+            result.extend_from_slice(separator);
         }
         if kind == 4 || !unsafe { array_index_present(presence, index) } {
             continue;
@@ -1935,21 +1937,26 @@ pub unsafe extern "C" fn thaw_tagged_array_join(
             match kind { 0 => b'n', 1 => b's', 2 => b'b', 3 => b'o', _ => b'u' }
         };
         match value_kind {
-            b'n' => result.push_str(&javascript_number_string(unsafe {
-                payload.cast::<f64>().read_unaligned()
-            })),
+            b'n' => result.extend_from_slice(
+                javascript_number_string(unsafe { payload.cast::<f64>().read_unaligned() })
+                    .as_bytes(),
+            ),
             b's' => {
                 let string = unsafe { payload.cast::<*const c_char>().read_unaligned() };
                 if !string.is_null() {
-                    result.push_str(&unsafe { CStr::from_ptr(string) }.to_string_lossy());
+                    result.extend_from_slice(unsafe { wtf8_bytes(string) });
                 }
             }
-            b'b' => result.push_str(if unsafe { payload.read() } == 0 { "false" } else { "true" }),
-            b'o' => result.push_str("[object Object]"),
+            b'b' => result.extend_from_slice(if unsafe { payload.read() } == 0 {
+                b"false"
+            } else {
+                b"true"
+            }),
+            b'o' => result.extend_from_slice(b"[object Object]"),
             _ => {}
         }
     }
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 fn array_search_start(length: usize, from_index: f64) -> usize {

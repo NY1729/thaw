@@ -53,6 +53,30 @@ pub extern "C" fn thaw_js_new_function(args_json: *const c_char) -> ThawHandleRe
 /// rejects a lone UTF-16 surrogate (QuickJS's own `JS_ToCStringLen` emits
 /// WTF-8, which is not valid UTF-8), so a native callback that receives
 /// user text takes this instead of `String`.
+/// Best-effort display of WTF-8 bytes: a lone surrogate becomes one U+FFFD
+/// (where `str::from_utf8_lossy` would emit one per invalid byte, i.e. 3).
+pub(crate) fn wtf8_display(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut fixed = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0xED
+            && index + 2 < bytes.len()
+            && (0xA0..=0xBF).contains(&bytes[index + 1])
+            && bytes[index + 2] & 0xC0 == 0x80
+        {
+            fixed.extend_from_slice("\u{FFFD}".as_bytes());
+            index += 3;
+        } else {
+            fixed.push(bytes[index]);
+            index += 1;
+        }
+    }
+    std::borrow::Cow::Owned(String::from_utf8_lossy(&fixed).into_owned())
+}
+
 #[cfg_attr(not(feature = "intl"), allow(dead_code))]
 pub(crate) struct Wtf8String(pub(crate) Vec<u8>);
 
