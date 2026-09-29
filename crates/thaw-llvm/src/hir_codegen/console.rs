@@ -278,6 +278,20 @@ impl<'ctx> HirCompiler<'ctx> {
         name: &str,
         descriptor: u64,
     ) -> Result<(), String> {
+        // Render WTF-8 lossily: a lone surrogate prints as one U+FFFD (Node's
+        // own terminal output) instead of leaking its 3 raw bytes.
+        let value = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_string_to_display").unwrap(),
+                &[value.into()],
+                "console_display",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_string_to_display returned no value")?
+            .into_pointer_value();
         let format = self
             .builder
             .build_global_string_ptr(if newline { "%s\n" } else { "%s" }, &format!("{name}_fmt"))
@@ -321,7 +335,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let text = self
             .builder
             .build_call(
-                self.module.get_function("thaw_number_to_string").unwrap(),
+                self.module
+                    .get_function("thaw_number_to_console_string")
+                    .unwrap(),
                 &[value.into()],
                 &format!("{name}_text"),
             )

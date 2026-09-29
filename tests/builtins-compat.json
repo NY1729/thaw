@@ -8,6 +8,12 @@
     },
     {
       "group": "Object",
+      "name": "Object.assign-overwrite",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Object.assign({a:1,b:2},{b:3,c:4}))); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.create",
       "expect": "matched",
       "source": "function main(): void { const o: any = Object.create(null); o.a = 1; console.log(o.a); }"
@@ -26,6 +32,12 @@
     },
     {
       "group": "Object",
+      "name": "Object.entries-order",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Object.entries({b:1,a:2,2:3,1:4}))); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.freeze",
       "expect": "matched",
       "source": "function main(): void { const o: any = {a:1}; Object.freeze(o); let ok: boolean = true; try { o.a = 2; } catch (e) { ok = false; } console.log(Object.isFrozen(o), o.a, ok); }"
@@ -38,6 +50,12 @@
     },
     {
       "group": "Object",
+      "name": "Object.fromEntries-overwrite",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Object.fromEntries([[\"a\",1],[\"a\",2]]))); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.getOwnPropertyDescriptors",
       "expect": "matched",
       "source": "function main(): void { const d = Object.getOwnPropertyDescriptors({a:1}); console.log(d.a.value); }"
@@ -47,6 +65,12 @@
       "name": "Object.getOwnPropertyNames",
       "expect": "matched",
       "source": "function main(): void { console.log(Object.getOwnPropertyNames({a:1,b:2}).join(\",\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.getOwnPropertyNames-order",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.getOwnPropertyNames({b:1,a:2}).join(\",\")); }"
     },
     {
       "group": "Object",
@@ -92,6 +116,12 @@
     },
     {
       "group": "Array",
+      "name": "Array.fill-negative",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3,4].fill(0,-2).join(\",\")); }"
+    },
+    {
+      "group": "Array",
       "name": "Array.filter",
       "expect": "matched",
       "source": "function main(): void { console.log([1,2,3,4].filter((x: number): boolean => x % 2 === 0).join(\",\")); }"
@@ -104,9 +134,21 @@
     },
     {
       "group": "Array",
+      "name": "Array.findLast",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3,4].findLast((x: number): boolean => x < 4), [1,2,3,4].findLastIndex((x: number): boolean => x < 4)); }"
+    },
+    {
+      "group": "Array",
       "name": "Array.flat",
       "expect": "matched",
       "source": "function main(): void { const a: number[][] = [[1,2],[3,4]]; console.log(a.flat().join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.flat-infinity",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[][] = [[1,2],[3,4]]; console.log(a.flat(Infinity).join(\",\")); }"
     },
     {
       "group": "Array",
@@ -122,15 +164,33 @@
     },
     {
       "group": "Array",
+      "name": "Array.from-map",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Array.from([1,2,3],(x: number): number => x*x).join(\",\")); }"
+    },
+    {
+      "group": "Array",
       "name": "Array.includes",
       "expect": "matched",
       "source": "function main(): void { console.log([1,2,3].includes(2), [1,2,3].includes(9)); }"
     },
     {
       "group": "Array",
+      "name": "Array.includes-nan",
+      "expect": "matched",
+      "source": "function main(): void { console.log([NaN].includes(NaN), [1,2,3].includes(NaN as any)); }"
+    },
+    {
+      "group": "Array",
       "name": "Array.isArray",
       "expect": "matched",
       "source": "function main(): void { console.log(Array.isArray([]), Array.isArray({})); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.join-holes",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [1,,3]; console.log(a.join(\"-\")); }"
     },
     {
       "group": "Array",
@@ -152,6 +212,12 @@
     },
     {
       "group": "Array",
+      "name": "Array.of-empty",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Array.of<number>().length, Array.of(1).length); }"
+    },
+    {
+      "group": "Array",
       "name": "Array.push-pop-shift-unshift",
       "expect": "matched",
       "source": "function main(): void { const a: number[] = [1]; a.push(2); a.unshift(0); console.log(a.join(\",\"), a.pop(), a.shift(), a.join(\",\")); }"
@@ -161,6 +227,12 @@
       "name": "Array.reduce",
       "expect": "matched",
       "source": "function main(): void { console.log([1,2,3].reduce((a: number, b: number): number => a+b, 0)); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.reduceRight",
+      "expect": "matched",
+      "source": "function main(): void { console.log([\"a\",\"b\",\"c\"].reduceRight((acc: string, x: string): string => acc + x, \"\")); }"
     },
     {
       "group": "Array",
@@ -179,6 +251,12 @@
       "name": "Array.sort",
       "expect": "matched",
       "source": "function main(): void { console.log([3,1,2].sort((a: number,b: number): number => a-b).join(\",\")); }"
+    },
+    {
+      "group": "Array",
+      "name": "Array.splice-insert",
+      "expect": "matched",
+      "source": "function main(): void { const a: number[] = [1,2,3]; a.splice(1,0,9,8); console.log(a.join(\",\")); }"
     },
     {
       "group": "Array",
@@ -205,6 +283,12 @@
       "source": "function main(): void { console.log([1,2,3].with(1,9).join(\",\")); }"
     },
     {
+      "group": "Array",
+      "name": "Array.with-negative",
+      "expect": "matched",
+      "source": "function main(): void { console.log([1,2,3].with(-1,9).join(\",\")); }"
+    },
+    {
       "group": "String",
       "name": "String.at",
       "expect": "matched",
@@ -212,9 +296,21 @@
     },
     {
       "group": "String",
+      "name": "String.at-out-of-range",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abc\".at(9), \"abc\".at(-9)); }"
+    },
+    {
+      "group": "String",
       "name": "String.charCodeAt",
       "expect": "matched",
       "source": "function main(): void { console.log(\"A\".charCodeAt(0), \"abc\".codePointAt(0)); }"
+    },
+    {
+      "group": "String",
+      "name": "String.codePointAt-astral",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"\\u{1F600}\".codePointAt(0)); }"
     },
     {
       "group": "String",
@@ -230,6 +326,12 @@
     },
     {
       "group": "String",
+      "name": "String.localeCompare",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"a\".localeCompare(\"b\") < 0, \"b\".localeCompare(\"a\") > 0, \"a\".localeCompare(\"a\")); }"
+    },
+    {
+      "group": "String",
       "name": "String.match",
       "expect": "matched",
       "source": "function main(): void { const m: any = \"a1b2\".match(/[0-9]/g); console.log(m[0], m[1]); }"
@@ -242,9 +344,27 @@
     },
     {
       "group": "String",
+      "name": "String.matchAll-index",
+      "expect": "matched",
+      "source": "function main(): void { const out: string[] = []; for (const m of \"a1b2\".matchAll(/\\d/g)) out.push(String(m.index)); console.log(out.join(\",\")); }"
+    },
+    {
+      "group": "String",
       "name": "String.normalize",
       "expect": "matched",
       "source": "function main(): void { console.log(\"e\\u0301\".normalize(\"NFC\") === \"\\u00e9\"); }"
+    },
+    {
+      "group": "String",
+      "name": "String.normalize-NFKD",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"\u00e9\".normalize(\"NFKD\").length); }"
+    },
+    {
+      "group": "String",
+      "name": "String.pad-noop",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abcd\".padStart(2,\"x\"), \"abcd\".padEnd(2,\"x\")); }"
     },
     {
       "group": "String",
@@ -266,9 +386,21 @@
     },
     {
       "group": "String",
+      "name": "String.repeat-zero",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(\"ab\".repeat(0))); }"
+    },
+    {
+      "group": "String",
       "name": "String.replace",
       "expect": "matched",
       "source": "function main(): void { console.log(\"aaa\".replace(\"a\",\"b\"), \"aaa\".replaceAll(\"a\",\"b\")); }"
+    },
+    {
+      "group": "String",
+      "name": "String.replace-dollar-amp",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"abc\".replace(\"b\",\"[$&]\")); }"
     },
     {
       "group": "String",
@@ -302,9 +434,21 @@
     },
     {
       "group": "Number",
+      "name": "Number.isInteger-edge",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Number.isInteger(-0), Number.isInteger(1.0), Number.isInteger(NaN)); }"
+    },
+    {
+      "group": "Number",
       "name": "Number.isNaN-isFinite",
       "expect": "matched",
       "source": "function main(): void { console.log(Number.isNaN(NaN), Number.isFinite(1), Number.isFinite(Infinity)); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.parse-hex",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Number(\"0x10\"), Number(\"  42  \"), Number(\"\")); }"
     },
     {
       "group": "Number",
@@ -320,9 +464,21 @@
     },
     {
       "group": "Number",
+      "name": "Number.toFixed-round",
+      "expect": "unsupported",
+      "source": "function main(): void { console.log((2.5).toFixed(0), (2.05).toFixed(1), (1.005).toFixed(2)); }"
+    },
+    {
+      "group": "Number",
       "name": "Number.toPrecision-toExponential",
       "expect": "matched",
       "source": "function main(): void { console.log((123.456).toPrecision(4), (123.456).toExponential(2)); }"
+    },
+    {
+      "group": "Number",
+      "name": "Number.toString-radix",
+      "expect": "matched",
+      "source": "function main(): void { console.log((255).toString(16), (5).toString(2)); }"
     },
     {
       "group": "Math",
@@ -338,9 +494,21 @@
     },
     {
       "group": "Math",
+      "name": "Math.max-empty",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.max(), Math.min()); }"
+    },
+    {
+      "group": "Math",
       "name": "Math.min-max-round",
       "expect": "matched",
       "source": "function main(): void { console.log(Math.min(3,1,2), Math.max(3,1,2), Math.round(2.5), Math.round(-2.5)); }"
+    },
+    {
+      "group": "Math",
+      "name": "Math.pow-fractional",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.pow(9,0.5), Math.pow(8,1/3)); }"
     },
     {
       "group": "Math",
@@ -350,15 +518,39 @@
     },
     {
       "group": "Math",
+      "name": "Math.round-negative-half",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.round(-0.5), Math.round(-1.5)); }"
+    },
+    {
+      "group": "Math",
       "name": "Math.sign-trunc-floor-ceil",
       "expect": "matched",
       "source": "function main(): void { console.log(Math.sign(-3), Math.trunc(2.9), Math.floor(-2.1), Math.ceil(2.1)); }"
     },
     {
       "group": "Math",
+      "name": "Math.sign-zero",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Math.sign(-0), 1 / Math.sign(-0)); }"
+    },
+    {
+      "group": "Math",
       "name": "Math.trig-log",
       "expect": "matched",
       "source": "function main(): void { console.log(Math.sin(0), Math.cos(0), Math.atan2(1,1).toFixed(4), Math.log(Math.E).toFixed(4)); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.parse-duplicate-keys",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(JSON.parse('{\"a\":1,\"a\":2}'))); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.parse-whitespace",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(JSON.parse('  [ 1 , 2 ]  '))); }"
     },
     {
       "group": "JSON",
@@ -380,6 +572,18 @@
     },
     {
       "group": "JSON",
+      "name": "JSON.stringify-nested",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({a:[1,{b:2}],c:null})); }"
+    },
+    {
+      "group": "JSON",
+      "name": "JSON.stringify-number-precision",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(0.1), JSON.stringify(1e21), JSON.stringify(-0)); }"
+    },
+    {
+      "group": "JSON",
       "name": "JSON.stringify.replacer",
       "expect": "matched",
       "source": "function main(): void { console.log(JSON.stringify({a:1,b:2},[\"a\"])); }"
@@ -398,9 +602,27 @@
     },
     {
       "group": "Date",
+      "name": "Date.UTC-overflow",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Date.UTC(2024,12,0), Date.UTC(2024,0,32)); }"
+    },
+    {
+      "group": "Date",
       "name": "Date.UTC-parse",
       "expect": "matched",
       "source": "function main(): void { console.log(Date.UTC(2024,0,1), Date.parse(\"2024-01-01T00:00:00.000Z\")); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.compare",
+      "expect": "unsupported",
+      "source": "function main(): void { console.log(new Date(0) < new Date(1), new Date(0).getTime() === 0); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.getDay",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Date(Date.UTC(2024,0,15)).getUTCDay()); }"
     },
     {
       "group": "Date",
@@ -416,6 +638,18 @@
     },
     {
       "group": "Date",
+      "name": "Date.invalid-toJSON",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify({d: new Date(\"nope\")})); }"
+    },
+    {
+      "group": "Date",
+      "name": "Date.setFullYear-month",
+      "expect": "matched",
+      "source": "function main(): void { const d: Date = new Date(Date.UTC(2020,0,31)); d.setUTCMonth(1); console.log(d.toISOString()); }"
+    },
+    {
+      "group": "Date",
       "name": "Date.setUTCFullYear",
       "expect": "matched",
       "source": "function main(): void { const d: Date = new Date(0); d.setUTCFullYear(2000); console.log(d.getUTCFullYear()); }"
@@ -428,9 +662,27 @@
     },
     {
       "group": "RegExp",
+      "name": "RegExp.backreference",
+      "expect": "matched",
+      "source": "function main(): void { console.log(/(a)\\1/.test(\"aa\"), /(a)\\1/.test(\"ab\")); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.case-insensitive",
+      "expect": "matched",
+      "source": "function main(): void { console.log(/abc/i.test(\"ABC\")); }"
+    },
+    {
+      "group": "RegExp",
       "name": "RegExp.global-flags",
       "expect": "matched",
       "source": "function main(): void { const r: RegExp = /ab/gi; console.log(r.global, r.ignoreCase, r.source); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.lastIndex-global",
+      "expect": "matched",
+      "source": "function main(): void { const r: RegExp = /a/g; console.log(r.exec(\"aa\")!.index, r.lastIndex, r.exec(\"aa\")!.index); }"
     },
     {
       "group": "RegExp",
@@ -440,9 +692,27 @@
     },
     {
       "group": "RegExp",
+      "name": "RegExp.replace-groups",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"2024-01\".replace(/(?<y>\\d{4})-(?<m>\\d{2})/,\"$<m>/$<y>\")); }"
+    },
+    {
+      "group": "RegExp",
       "name": "RegExp.replace.fn",
       "expect": "matched",
       "source": "function main(): void { console.log(\"a1b2\".replace(/[0-9]/g,(s: string): string => String(Number(s)*2))); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.split-capture",
+      "expect": "matched",
+      "source": "function main(): void { console.log(\"a1b2\".split(/(\\d)/).join(\"|\")); }"
+    },
+    {
+      "group": "RegExp",
+      "name": "RegExp.sticky",
+      "expect": "matched",
+      "source": "function main(): void { const r: RegExp = /a/y; console.log(r.test(\"ab\"), r.lastIndex, r.test(\"ab\")); }"
     },
     {
       "group": "RegExp",
@@ -457,6 +727,12 @@
       "source": "function main(): void { console.log(/\\u{1F600}/u.test(\"\\u{1F600}\")); }"
     },
     {
+      "group": "RegExp",
+      "name": "RegExp.unicode-property",
+      "expect": "matched",
+      "source": "function main(): void { console.log(/\\p{Letter}/u.test(\"a\"), /\\p{Number}/u.test(\"1\")); }"
+    },
+    {
       "group": "Map",
       "name": "Map.basic",
       "expect": "matched",
@@ -467,6 +743,12 @@
       "name": "Map.clear",
       "expect": "matched",
       "source": "function main(): void { const e: [number, number][] = [[1,1]]; const m: Map<number, number> = new Map<number, number>(e); m.clear(); console.log(m.size); }"
+    },
+    {
+      "group": "Map",
+      "name": "Map.forEach",
+      "expect": "matched",
+      "source": "function main(): void { const m: Map<string, number> = new Map([[\"a\",1],[\"b\",2]]); const out: string[] = []; m.forEach((v: number, k: string): void => { out.push(k+v); }); console.log(out.join(\",\")); }"
     },
     {
       "group": "Map",
@@ -491,6 +773,18 @@
       "name": "Set.basic",
       "expect": "matched",
       "source": "function main(): void { const s: Set<number> = new Set([1,2,2,3]); console.log(s.size, s.has(2)); s.delete(2); console.log(s.has(2)); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.dedupe",
+      "expect": "matched",
+      "source": "function main(): void { console.log([...new Set([1,1,2,3,3])].join(\",\")); }"
+    },
+    {
+      "group": "Set",
+      "name": "Set.delete-size",
+      "expect": "matched",
+      "source": "function main(): void { const s: Set<number> = new Set([1,2,3]); s.delete(2); console.log(s.size, [...s].join(\",\")); }"
     },
     {
       "group": "Set",
@@ -584,9 +878,21 @@
     },
     {
       "group": "BigInt",
+      "name": "BigInt.asUintN-neg",
+      "expect": "matched",
+      "source": "function main(): void { console.log(BigInt.asUintN(8, -1n), BigInt.asIntN(8, 200n)); }"
+    },
+    {
+      "group": "BigInt",
       "name": "BigInt.compare",
       "expect": "matched",
       "source": "function main(): void { console.log(2n > 1n, 1n === 1n); }"
+    },
+    {
+      "group": "BigInt",
+      "name": "BigInt.toString-radix",
+      "expect": "matched",
+      "source": "function main(): void { console.log((255n).toString(16), (5n).toString(2)); }"
     },
     {
       "group": "ArrayBuffer",
@@ -728,6 +1034,12 @@
     },
     {
       "group": "Promise",
+      "name": "Promise.finally",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { let seen = false; const r: number = await Promise.resolve(5).finally((): void => { seen = true; }); console.log(r, seen); }"
+    },
+    {
+      "group": "Promise",
       "name": "Promise.race",
       "expect": "matched",
       "source": "async function main(): Promise<void> { const r: number = await Promise.race([Promise.resolve(1), Promise.resolve(2)]); console.log(r); }"
@@ -737,6 +1049,12 @@
       "name": "Promise.then",
       "expect": "matched",
       "source": "function main(): void { new Promise<number>((resolve: (v: number) => void): void => resolve(1)).then((v: number): void => { console.log(v); }); }"
+    },
+    {
+      "group": "Promise",
+      "name": "Promise.then-chain",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const r: number = await Promise.resolve(1).then((x: number): number => x + 1).then((x: number): number => x * 10); console.log(r); }"
     },
     {
       "group": "Promise",
@@ -842,9 +1160,27 @@
     },
     {
       "group": "Intl",
+      "name": "Intl.DateTimeFormat.de-month",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.DateTimeFormat(\"de-DE\",{timeZone:\"UTC\",year:\"numeric\",month:\"long\",day:\"numeric\"}).format(new Date(Date.UTC(2024,0,15)))); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.DateTimeFormat.weekday",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.DateTimeFormat(\"en-US\",{timeZone:\"UTC\",weekday:\"long\"}).format(new Date(Date.UTC(2024,0,15)))); }"
+    },
+    {
+      "group": "Intl",
       "name": "Intl.DisplayNames",
       "expect": "matched",
       "source": "function main(): void { const d = new Intl.DisplayNames([\"en\"],{type:\"region\"}); console.log(d.of(\"US\"), d.of(\"JP\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.DisplayNames.language",
+      "expect": "matched",
+      "source": "function main(): void { const d = new Intl.DisplayNames([\"en\"],{type:\"language\"}); console.log(d.of(\"de\"), d.of(\"fr\")); }"
     },
     {
       "group": "Intl",
@@ -854,9 +1190,39 @@
     },
     {
       "group": "Intl",
+      "name": "Intl.ListFormat.disjunction",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.ListFormat(\"en-US\",{style:\"short\",type:\"disjunction\"}).format([\"a\",\"b\",\"c\"])); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.Locale",
+      "expect": "matched",
+      "source": "function main(): void { const l = new Intl.Locale(\"en-US\"); console.log(l.language, l.region, l.toString()); }"
+    },
+    {
+      "group": "Intl",
       "name": "Intl.NumberFormat",
       "expect": "matched",
       "source": "function main(): void { console.log(new Intl.NumberFormat(\"en-US\").format(1234567.89)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.NumberFormat.decimals",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"en-US\",{minimumFractionDigits:2,maximumFractionDigits:2}).format(1.5)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.NumberFormat.grouping",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"de-DE\").format(1234567.89)); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.NumberFormat.percent",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.NumberFormat(\"en-US\",{style:\"percent\"}).format(0.25)); }"
     },
     {
       "group": "Intl",
@@ -866,15 +1232,33 @@
     },
     {
       "group": "Intl",
+      "name": "Intl.PluralRules.ordinal",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.PluralRules(\"en-US\",{type:\"ordinal\"}).select(1), new Intl.PluralRules(\"en-US\",{type:\"ordinal\"}).select(2)); }"
+    },
+    {
+      "group": "Intl",
       "name": "Intl.RelativeTimeFormat",
       "expect": "matched",
       "source": "function main(): void { console.log(new Intl.RelativeTimeFormat(\"en-US\",{numeric:\"always\"}).format(-1,\"day\")); }"
     },
     {
       "group": "Intl",
+      "name": "Intl.RelativeTimeFormat.auto",
+      "expect": "matched",
+      "source": "function main(): void { console.log(new Intl.RelativeTimeFormat(\"en-US\",{numeric:\"auto\"}).format(-1,\"day\")); }"
+    },
+    {
+      "group": "Intl",
       "name": "Intl.Segmenter",
       "expect": "matched",
       "source": "function main(): void { const s = new Intl.Segmenter(\"en\",{granularity:\"word\"}); const out: string[] = []; for (const seg of s.segment(\"a b c\")) out.push(seg.segment); console.log(out.join(\"|\")); }"
+    },
+    {
+      "group": "Intl",
+      "name": "Intl.getCanonicalLocales",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Intl.getCanonicalLocales(\"EN-us\")[0]); }"
     },
     {
       "group": "Function",

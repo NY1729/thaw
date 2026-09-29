@@ -238,7 +238,10 @@ pub unsafe extern "C" fn thaw_error_message(message: *const c_char) -> *const c_
     if message.is_null() {
         return std::ptr::null();
     }
-    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    // WTF-8-aware lossy decode: a lone surrogate becomes one U+FFFD, not
+    // `std`'s one-per-invalid-byte (3 for a 3-byte WTF-8 surrogate).
+    let bytes = unsafe { wtf8_bytes(message) };
+    let text = String::from_utf8(wtf8_to_well_formed(bytes)).unwrap_or_default();
     let (_, body) = split_error_tag(&text);
     arena_c_string(body).map_or(std::ptr::null(), |value| value.cast())
 }

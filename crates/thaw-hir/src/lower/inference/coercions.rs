@@ -126,8 +126,11 @@ impl<'a> FnLowerer<'a> {
         // (prefix) of the declared callback's -- e.g. a `createServer`
         // handler annotated with a narrower request/response than
         // `IncomingMessage`/`ServerResponse` -- is layout-compatible and
-        // needs no adapter.
-        if callable_value_compatible(declared, &inferred) {
+        // needs no adapter. Deliberately narrower than
+        // `callable_value_compatible`: an `Optional`/`CallableFunction`
+        // difference still falls through to the adapter path (e.g. a
+        // default-argument wrapper).
+        if callable_abi_compatible(declared, &inferred) {
             return Ok(value);
         }
         if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _)) {

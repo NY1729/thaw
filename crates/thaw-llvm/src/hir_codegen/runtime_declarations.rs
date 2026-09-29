@@ -355,6 +355,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_number_to_console_string",
+            number_to_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_string_from_char_code",
             number_to_string_type,
             Some(Linkage::External),
@@ -924,6 +929,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_string_to_lower_case",
             "thaw_string_to_upper_case",
             "thaw_string_to_well_formed",
+            "thaw_string_to_display",
             "thaw_atob",
             "thaw_btoa",
             "thaw_escape",

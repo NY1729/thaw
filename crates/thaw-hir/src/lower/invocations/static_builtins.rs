@@ -1734,14 +1734,16 @@ impl<'a> FnLowerer<'a> {
                         // so drop them (or serialize `toJSON()`'s result).
                         let (value, value_type) = match &value_type {
                             HirType::Object(fields)
-                                if fields.iter().any(|(_, ty)| {
-                                    matches!(
-                                        ty,
-                                        HirType::Function(_, _)
-                                            | HirType::CallableFunction(..)
-                                            | HirType::JsValue
-                                    )
-                                }) =>
+                                if native_accessor_fields.is_none()
+                                    && fields.iter().any(|(name, ty)| {
+                                        !is_hidden_accessor_field(name)
+                                            && matches!(
+                                                ty,
+                                                HirType::Function(_, _)
+                                                    | HirType::CallableFunction(..)
+                                                    | HirType::JsValue
+                                            )
+                                    }) =>
                             {
                                 if let Some((_, HirType::Function(params, _))) =
                                     fields.iter().find(|(name, _)| name == "toJSON")
@@ -1772,12 +1774,14 @@ impl<'a> FnLowerer<'a> {
                                     self.scope.insert(source.clone(), value_type.clone());
                                     let mut snapshot = Vec::new();
                                     for (name, ty) in fields {
-                                        if matches!(
-                                            ty,
-                                            HirType::Function(_, _)
-                                                | HirType::CallableFunction(..)
-                                                | HirType::JsValue
-                                        ) {
+                                        if is_hidden_accessor_field(name)
+                                            || matches!(
+                                                ty,
+                                                HirType::Function(_, _)
+                                                    | HirType::CallableFunction(..)
+                                                    | HirType::JsValue
+                                            )
+                                        {
                                             continue;
                                         }
                                         let read = self.lower_fixed_object_property_read(

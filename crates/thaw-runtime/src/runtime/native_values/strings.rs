@@ -964,6 +964,26 @@ fn is_javascript_whitespace(character: char) -> bool {
 }
 
 #[no_mangle]
+/// `console.log`/`%s` rendering of a native WTF-8 string: a lone surrogate
+/// becomes one U+FFFD so the printed bytes are valid UTF-8 -- matching
+/// Node's own lossy terminal output (a raw WTF-8 lone surrogate would print
+/// as its 3 component bytes, i.e. 3 replacement characters).
+///
+/// # Safety
+/// `value` must be null or point to a NUL-terminated WTF-8 string.
+pub unsafe extern "C" fn thaw_string_to_display(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let bytes = unsafe { wtf8_bytes(value) };
+    if wtf8_is_well_formed(bytes) {
+        return value;
+    }
+    let fixed = wtf8_to_well_formed(bytes);
+    arena_wtf8(&fixed).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
 /// `String.prototype.isWellFormed`: `false` when the string contains a
 /// lone UTF-16 surrogate.
 ///

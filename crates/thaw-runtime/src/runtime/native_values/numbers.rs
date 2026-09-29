@@ -66,6 +66,16 @@ fn javascript_number_string(value: f64) -> String {
 }
 
 #[no_mangle]
+/// `console.log`'s number rendering: like `Number.prototype.toString`, but
+/// shows `-0` (Node's `util.inspect` does), whereas `String(-0)` is `"0"`.
+pub extern "C" fn thaw_number_to_console_string(value: f64) -> *const c_char {
+    if value == 0.0 && value.is_sign_negative() {
+        return arena_c_string("-0").map_or(std::ptr::null(), |value| value.cast());
+    }
+    thaw_number_to_string(value)
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_number_to_string(value: f64) -> *const c_char {
     let text = javascript_number_string(value);
     let destination = thaw_arena::thaw_arena_alloc(text.len() + 1, 1);
