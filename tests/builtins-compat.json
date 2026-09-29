@@ -224,6 +224,12 @@
     },
     {
       "group": "Object",
+      "name": "array-join-dynamic",
+      "expect": "matched",
+      "source": "function main(): void { const a: any = [10, 20]; console.log(a.join(\"-\")); console.log(Array.prototype.map.call([1, 2, 3], (x: number) => x * 2).join(\",\")); }"
+    },
+    {
+      "group": "Object",
       "name": "constructor-function",
       "expect": "matched",
       "source": "function Point(x: number, y: number) { this.x = x; this.y = y; } Point.prototype.norm = function (): number { return this.x + this.y; }; Point.origin = function (): any { return new Point(0, 0); }; function main(): void { const p = new Point(1, 2); console.log(p instanceof Point, p.norm(), Point.origin().x); }"

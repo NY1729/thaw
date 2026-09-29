@@ -1879,6 +1879,43 @@ fn javascript_string_to_number(text: &str) -> f64 {
     unsafe { thaw_string_to_number(text.as_ptr()) }
 }
 
+/// `Array.prototype.join` on a dynamic (`Json`) array value -- e.g. a
+/// `Json`-typed value returned by a dynamic call
+/// (`Array.prototype.map.call(...).join(", ")`, real test262 harness). Joins
+/// each element's JavaScript `String()` form with `separator`, treating
+/// `null`/`undefined` as an empty string (unlike `thaw_json_as_string`, which
+/// renders them "null"/"undefined" for a bare `String(value)`).
+///
+/// # Safety
+/// `value` must be null or point to a valid JSON `Value`; `separator` must
+/// point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_array_join(
+    value: *const Value,
+    separator: *const c_char,
+) -> *const c_char {
+    let separator = to_str(separator);
+    let Some(Value::Array(items)) = (unsafe { value.as_ref() }) else {
+        return CString::new("").unwrap_or_default().into_raw();
+    };
+    let mut joined = String::new();
+    for (index, item) in shared_array_ref(items).iter().enumerate() {
+        if index > 0 {
+            joined.push_str(&separator);
+        }
+        match item {
+            Value::Null => {}
+            other if is_napi_undefined(other) => {}
+            other => {
+                let text = thaw_json_as_string(other as *const Value as *mut Value);
+                joined.push_str(&to_str(text));
+                thaw_cstring_destroy(text as *mut c_char);
+            }
+        }
+    }
+    CString::new(joined).unwrap_or_default().into_raw()
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };

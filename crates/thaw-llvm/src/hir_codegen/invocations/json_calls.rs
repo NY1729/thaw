@@ -326,6 +326,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("JSON.stringify returned no value".into());
             }
+            "__thaw_json_array_join" => {
+                let [value, separator] = args else {
+                    return Err("Array.join expects a value and separator".to_string());
+                };
+                let value = self.compile_expr(value)?;
+                let separator = self.compile_expr(separator)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_array_join").unwrap(),
+                        &[value.into(), separator.into()],
+                        "json_array_join",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "thaw_json_array_join returned no value".to_string());
+            }
             "__thaw_json_is_array" => {
                 let [value] = args else {
                     return Err("Array.isArray expects one operand".to_string());

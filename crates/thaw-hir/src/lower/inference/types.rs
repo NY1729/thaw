@@ -1721,6 +1721,22 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "Array.isArray JSON operand")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_array_join" => {
+                        let [value, separator] = args.as_slice() else {
+                            return Err("Array.join expects a value and separator".into());
+                        };
+                        let ty = self.infer_expr_type(value)?;
+                        if !matches!(
+                            ty,
+                            HirType::Json | HirType::Dictionary(_) | HirType::JsValue
+                        ) {
+                            return Err(format!(
+                                "__thaw_json_array_join expected a JSON value, got {ty:?}"
+                            ));
+                        }
+                        self.expect_type(&HirType::Str, separator, "Array.join separator")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_json_is_buffer" => {
                         let [value] = args.as_slice() else {
                             return Err("Buffer.isBuffer expects one operand".into());
