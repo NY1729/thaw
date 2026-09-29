@@ -50,9 +50,11 @@ fn class_decorator_token_symbol(class_name: &str) -> Symbol {
 /// create a fresh native-callback wrapper with no shared identity, so
 /// `instanceof`/metadata lookups against it could never match.
 ///
-/// Deliberately excludes a `new Class()` callee (the class is being
-/// constructed, not used as a value) and a `class X extends Base` super
-/// reference (Thaw consumes the base's *layout*, not its value identity).
+/// Also includes a class that is ever constructed (`new Class`), because
+/// its instances can reach `Object.getPrototypeOf`, which resolves the
+/// class's real prototype through the same token. Still excludes a
+/// `class X extends Base` super reference (Thaw consumes the base's
+/// *layout*, not its value identity).
 fn class_names_referenced_as_values(
     module: &swc_ecma_ast::Module,
     classes: &[&ClassDecl],
@@ -62,6 +64,13 @@ fn class_names_referenced_as_values(
     struct Collector<'a> {
         classes: &'a HashSet<Symbol>,
         found: HashSet<Symbol>,
+        /// Classes ever constructed (`new C`). Only merged into `found` when
+        /// the module actually calls `Object.getPrototypeOf`/
+        /// `Reflect.getPrototypeOf`, so a program that never asks for a
+        /// prototype doesn't pay to materialize a class token (and pull in
+        /// QuickJS) for every class it instantiates.
+        constructed: HashSet<Symbol>,
+        reads_prototype: bool,
     }
     impl Visit for Collector<'_> {
         fn visit_expr(&mut self, expr: &swc_ecma_ast::Expr) {
@@ -73,11 +82,40 @@ fn class_names_referenced_as_values(
             expr.visit_children_with(self);
         }
 
+        fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+            if let swc_ecma_ast::Callee::Expr(callee) = &call.callee {
+                if let swc_ecma_ast::Expr::Member(member) = callee.as_ref() {
+                    if let swc_ecma_ast::Expr::Ident(namespace) = member.obj.as_ref() {
+                        let is_prototype_read = matches!(
+                            namespace.sym.as_ref(),
+                            "Object" | "Reflect"
+                        ) && matches!(
+                            &member.prop,
+                            swc_ecma_ast::MemberProp::Ident(property)
+                                if property.sym == *"getPrototypeOf"
+                        );
+                        if is_prototype_read {
+                            self.reads_prototype = true;
+                        }
+                    }
+                }
+            }
+            call.visit_children_with(self);
+        }
+
         fn visit_new_expr(&mut self, expression: &swc_ecma_ast::NewExpr) {
-            // Skip a bare callee identifier (the constructed class); still
-            // visit the arguments, which may reference a class as a value
-            // (`new Thing(User)`).
-            if matches!(expression.callee.as_ref(), swc_ecma_ast::Expr::Member(_)) {
+            // A constructed class may need a stable class token: its
+            // instances can be passed to `Object.getPrototypeOf` (and, in
+            // later prototype work, have their methods/prototype read),
+            // which resolves through that token. Recorded separately and
+            // merged only if the module reads a prototype (see
+            // `reads_prototype`). Still visit the arguments, which may
+            // reference a class as a value (`new Thing(User)`).
+            if let swc_ecma_ast::Expr::Ident(ident) = expression.callee.as_ref() {
+                if self.classes.contains(ident.sym.as_ref()) {
+                    self.constructed.insert(ident.sym.to_string());
+                }
+            } else {
                 expression.callee.visit_with(self);
             }
             if let Some(arguments) = &expression.args {
@@ -102,8 +140,13 @@ fn class_names_referenced_as_values(
     let mut collector = Collector {
         classes: &names,
         found: HashSet::new(),
+        constructed: HashSet::new(),
+        reads_prototype: false,
     };
     module.visit_with(&mut collector);
+    if collector.reads_prototype {
+        collector.found.extend(collector.constructed);
+    }
     collector.found
 }
 

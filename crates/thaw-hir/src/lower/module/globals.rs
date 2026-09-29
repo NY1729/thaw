@@ -371,10 +371,13 @@ fn lower_static_class_globals(
 /// Builds `new Function()` (via the same `getDynamicValue`/
 /// `constructDynamicValue` pair `new Intl.DateTimeFormat(...)` etc. use) --
 /// a genuine, distinct, live QuickJS object with no ties to thaw's own
-/// (non-existent) prototype-chain machinery, used as a decorated class's
+/// (non-existent) prototype-chain machinery, used as a class's stable
 /// "class token" (see `lower_class_decorator_tokens`/
-/// `class_decorator_token_symbol`).
-fn class_decorator_token_init(lowerer: &mut FnLowerer) -> Result<HirExpr, String> {
+/// `class_decorator_token_symbol`). A bare class reference and
+/// `Object.getPrototypeOf(new C())` both resolve through this same token,
+/// so `Object.getPrototypeOf(new C()) === C.prototype` holds; `new C()`
+/// itself stays the native constructor call.
+fn class_decorator_token_init(lowerer: &mut FnLowerer<'_>) -> Result<HirExpr, String> {
     let constructor = HirExpr::Call(
         Box::new(HirExpr::Var("getDynamicValue".to_string())),
         vec![HirExpr::Lit(HirLit::Str("Function".to_string()))],
@@ -386,9 +389,9 @@ fn class_decorator_token_init(lowerer: &mut FnLowerer) -> Result<HirExpr, String
     ))
 }
 
-/// Gives every decorated class (`class_has_decorators`) one real, live
-/// `JsValue` "class token" -- literally `new Function()`, a genuine
-/// distinct QuickJS object -- stored as an ordinary global
+/// Gives every class that is used dynamically (decorated, referenced as a
+/// bare value, or constructed) one real, live `JsValue` "class token" --
+/// a genuine distinct QuickJS object -- stored as an ordinary global
 /// (`class_decorator_token_symbol`). A decorator's `target` argument (see
 /// `lower_class_decorator_call`/`lower_member_decorator_call` below) is
 /// built from this same token, and so is the `constructor` field
