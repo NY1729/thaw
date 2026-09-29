@@ -678,6 +678,12 @@ impl<'a> FnLowerer<'a> {
                         // bare-identifier expression lowering at all.
                         global @ ("Atomics" | "crypto" | "process" | "AbortSignal" | "String"
                         | "Number" | "Boolean" | "globalThis"
+                        // Standard namespace objects used as values (`typeof
+                        // JSON !== "undefined"`, `const ns = Math`): the realm
+                        // has the real global. A known member call
+                        // (`JSON.stringify`, `Math.floor`) is intercepted
+                        // earlier by name.
+                        | "JSON" | "Math" | "Reflect" | "Intl"
                         // Web / WHATWG globals (thaw's QuickJS platform
                         // globals provide them). Naming one bare --
                         // `typeof Headers`, `const Ctor = URL` -- yields the

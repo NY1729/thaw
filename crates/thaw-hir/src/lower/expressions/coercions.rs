@@ -586,7 +586,9 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_i64_to_string".to_string())),
                 vec![value],
             )),
-            HirType::Json | HirType::Dynamic => Ok(HirExpr::JsonAsString(Box::new(value))),
+            HirType::Json | HirType::Dynamic | HirType::Dictionary(_) => {
+                Ok(HirExpr::JsonAsString(Box::new(value)))
+            }
             // `String(value)` performs JavaScript ToPrimitive and therefore
             // honors an opaque object's own `toString`/`valueOf`. Reading it
             // back through JSON first loses that identity (real trigger:
