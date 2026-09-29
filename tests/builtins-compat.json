@@ -134,6 +134,18 @@
     },
     {
       "group": "Object",
+      "name": "class-method-this-mutation",
+      "expect": "matched",
+      "source": "class Counter { count: number = 0; bump(): number { this.count = this.count + 1; return this.count; } } function main(): void { const o: any = new (Counter as any)(); console.log(o.bump(), o.bump(), o.count); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-method-void-mutation",
+      "expect": "matched",
+      "source": "class A { label: string = \"\"; set(n: string): void { this.label = n; } } function main(): void { const o: any = new (A as any)(); o.set(\"x\"); console.log(o.label); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.defineProperty",
       "expect": "matched",
       "source": "function main(): void { const o: any = {}; Object.defineProperty(o,\"x\",{value:5,enumerable:true}); console.log(o.x); }"
