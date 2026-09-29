@@ -143,10 +143,20 @@ fn lower_top_level_initializers(
                     // leave the token's storage permanently zero (an
                     // invalid `JsValue` handle) the moment anything reads
                     // it.
-                    steps.push(HirInitStep::StoreGlobal(
-                        token_symbol.clone(),
-                        class_decorator_token_init(&mut lowerer)?,
-                    ));
+                    let token_value = match class_value_js_script(declaration) {
+                        Some((global, script)) => {
+                            steps.push(HirInitStep::Statement(HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("loadScript".to_string())),
+                                vec![HirExpr::Lit(HirLit::Str(script))],
+                            ))));
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                vec![HirExpr::Lit(HirLit::Str(global))],
+                            )
+                        }
+                        None => class_decorator_token_init(&mut lowerer)?,
+                    };
+                    steps.push(HirInitStep::StoreGlobal(token_symbol.clone(), token_value));
                     // Only a *decorated* class actually has decorators to
                     // invoke; a merely value-referenced one just needs the
                     // token above.
@@ -368,15 +378,124 @@ fn lower_static_class_globals(
     Ok(globals)
 }
 
-/// Builds `new Function()` (via the same `getDynamicValue`/
-/// `constructDynamicValue` pair `new Intl.DateTimeFormat(...)` etc. use) --
-/// a genuine, distinct, live QuickJS object with no ties to thaw's own
-/// (non-existent) prototype-chain machinery, used as a class's stable
-/// "class token" (see `lower_class_decorator_tokens`/
-/// `class_decorator_token_symbol`). A bare class reference and
-/// `Object.getPrototypeOf(new C())` both resolve through this same token,
-/// so `Object.getPrototypeOf(new C()) === C.prototype` holds; `new C()`
-/// itself stays the native constructor call.
+/// Removes every decorator (class, member, parameter) from a cloned class
+/// so its JavaScript codegen can be evaluated by QuickJS, which has no
+/// decorator syntax. thaw applies decorators natively.
+fn strip_class_decorators(class: &mut swc_ecma_ast::Class) {
+    struct Stripper;
+    impl swc_ecma_visit::VisitMut for Stripper {
+        fn visit_mut_class(&mut self, class: &mut swc_ecma_ast::Class) {
+            class.decorators.clear();
+            class.visit_mut_children_with(self);
+        }
+        fn visit_mut_class_member(&mut self, member: &mut swc_ecma_ast::ClassMember) {
+            match member {
+                swc_ecma_ast::ClassMember::Method(method) => {
+                    method.function.decorators.clear();
+                }
+                swc_ecma_ast::ClassMember::PrivateMethod(method) => {
+                    method.function.decorators.clear();
+                }
+                swc_ecma_ast::ClassMember::ClassProp(property) => property.decorators.clear(),
+                swc_ecma_ast::ClassMember::PrivateProp(property) => property.decorators.clear(),
+                _ => {}
+            }
+            member.visit_mut_children_with(self);
+        }
+        fn visit_mut_param(&mut self, param: &mut swc_ecma_ast::Param) {
+            param.decorators.clear();
+            param.visit_mut_children_with(self);
+        }
+    }
+    class.visit_mut_with(&mut Stripper);
+}
+
+/// Emits a bare ECMAScript module (`class C { ... }`) as JavaScript source.
+fn emit_module_js(module: &swc_ecma_ast::Module) -> Option<String> {
+    use swc_common::sync::Lrc;
+    use swc_ecma_codegen::{text_writer::JsWriter, Config, Emitter};
+    let source_map: Lrc<swc_common::SourceMap> = Default::default();
+    let mut buffer = Vec::new();
+    {
+        let writer = JsWriter::new(source_map.clone(), "\n", &mut buffer, None);
+        let mut emitter = Emitter {
+            cfg: Config::default(),
+            cm: source_map,
+            comments: None,
+            wr: writer,
+        };
+        emitter.emit_module(module).ok()?;
+    }
+    String::from_utf8(buffer).ok()
+}
+
+/// Renders one class as JavaScript with its TypeScript-only syntax
+/// (annotations, `readonly`/`declare`/accessibility modifiers, type params)
+/// stripped, for evaluation by QuickJS. Decorators are dropped (applied
+/// natively instead). Returns `None` if the class can't be codegen'd, in
+/// which case the caller falls back to a `new Function()` token.
+fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl) -> Option<String> {
+    let mut class = declaration.class.clone();
+    strip_class_decorators(&mut class);
+    let class_decl = swc_ecma_ast::ClassDecl {
+        ident: declaration.ident.clone(),
+        declare: false,
+        class,
+    };
+    let module = swc_ecma_ast::Module {
+        span: swc_common::DUMMY_SP,
+        body: vec![swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(
+            swc_ecma_ast::Decl::Class(class_decl),
+        ))],
+        shebang: None,
+    };
+    let mut program = swc_ecma_ast::Program::Module(module);
+    // `Mark::new()` reads swc's scoped `GLOBALS` TLS, which the parser sets
+    // during parsing but lowering has since left; open a fresh scope for
+    // the strip pass.
+    let globals = swc_common::Globals::new();
+    swc_common::GLOBALS.set(&globals, || {
+        let mut pass = swc_ecma_transforms_typescript::strip(
+            swc_common::Mark::new(),
+            swc_common::Mark::new(),
+        );
+        use swc_ecma_ast::Pass;
+        pass.process(&mut program);
+    });
+    let swc_ecma_ast::Program::Module(module) = program else {
+        return None;
+    };
+    emit_module_js(&module)
+}
+
+/// Builds the class's own real JavaScript class (TypeScript stripped) and
+/// the realm global name it is stored under, plus the `loadScript` source
+/// that defines it. The definition is wrapped so any evaluation failure
+/// (e.g. an `extends` of another native-only class, or a static initializer
+/// touching a native helper) degrades to an empty `Function()` token instead
+/// of aborting module init. Returns `None` if codegen isn't possible, in
+/// which case the caller keeps the plain `new Function()` token.
+///
+/// ponytail: method *bodies* are the class's real JavaScript, so a method
+/// that calls a native-only function (an import, another compiled function)
+/// will fail when invoked dynamically -- only `this`/built-in logic works.
+/// Static `instance.method()` still uses the native method, unaffected.
+fn class_value_js_script(declaration: &swc_ecma_ast::ClassDecl) -> Option<(String, String)> {
+    let source = class_value_js_source(declaration)?;
+    let class_name = declaration.ident.sym.as_ref();
+    let global = format!("__thaw_class_value_{class_name}");
+    let script = format!(
+        "globalThis[\"{global}\"] = (function () {{ try {{ {source}\nreturn {class_name}; }} catch (e) {{ return Function(); }} }})();"
+    );
+    Some((global, script))
+}
+
+/// Placeholder `HirGlobal.init` for a class token. AOT codegen never reads a
+/// `HirGlobal`'s own init -- the real value comes from the
+/// `HirInitStep::StoreGlobal` in `lower_top_level_initializers` (see the
+/// comment there), which stores the evaluated class (`class_value_js_script`)
+/// when available. This `constructDynamicValue` expression is only a
+/// type-correct `JsValue` fallback.
 fn class_decorator_token_init(lowerer: &mut FnLowerer<'_>) -> Result<HirExpr, String> {
     let constructor = HirExpr::Call(
         Box::new(HirExpr::Var("getDynamicValue".to_string())),

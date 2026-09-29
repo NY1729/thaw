@@ -74,6 +74,24 @@
     },
     {
       "group": "Object",
+      "name": "class-prototype-method-present",
+      "expect": "matched",
+      "source": "class A { speak(): string { return \"hi\"; } } function main(): void { console.log(typeof (A.prototype as any).speak); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-call",
+      "expect": "matched",
+      "source": "class A { speak(): string { return \"hi\"; } } function main(): void { console.log((A.prototype as any).speak()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-constructor-identity",
+      "expect": "matched",
+      "source": "class A { x: number = 1; } function main(): void { console.log(A.prototype.constructor === A); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.defineProperty",
       "expect": "matched",
       "source": "function main(): void { const o: any = {}; Object.defineProperty(o,\"x\",{value:5,enumerable:true}); console.log(o.x); }"
