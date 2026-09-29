@@ -116,6 +116,24 @@
     },
     {
       "group": "Object",
+      "name": "class-prototype-method-calls-native",
+      "expect": "matched",
+      "source": "function helper(): string { return \"native\"; } class A { m(): string { return helper(); } } function main(): void { const o: any = new (A as any)(); console.log(o.m()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-this-read",
+      "expect": "matched",
+      "source": "class A { name: string = \"a\"; greet(): string { return \"hi \" + this.name; } } function main(): void { const o: any = new (A as any)(); console.log(o.greet()); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-method-arg",
+      "expect": "matched",
+      "source": "class A { add(x: number): number { return x + 1; } } function main(): void { const o: any = new (A as any)(); console.log(o.add(10)); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.defineProperty",
       "expect": "matched",
       "source": "function main(): void { const o: any = {}; Object.defineProperty(o,\"x\",{value:5,enumerable:true}); console.log(o.x); }"
