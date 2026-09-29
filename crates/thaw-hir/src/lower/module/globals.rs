@@ -463,16 +463,42 @@ fn class_bridgeable_members(
     members
 }
 
+/// Whether a native value of `ty` supports the `===` used for write-back
+/// change detection. Scalar and pointer-shaped types do (value or pointer
+/// compare); an `Optional`/`Nullable`/`Nullish`/`Union`'s tag+payload layout
+/// has no single LLVM value `===` can compare, so those fields are written
+/// back unconditionally instead.
+fn bridge_field_comparable(ty: &HirType) -> bool {
+    matches!(
+        ty,
+        HirType::F64
+            | HirType::I64
+            | HirType::Bool
+            | HirType::Str
+            | HirType::Symbol
+            | HirType::Null
+            | HirType::Undefined
+            | HirType::Json
+            | HirType::Object(_)
+            | HirType::Array(_)
+            | HirType::Tuple(_)
+            | HirType::Dictionary(_)
+            | HirType::Function(_, _)
+            | HirType::CallableFunction(_, _, _, _)
+    )
+}
+
 /// Builds the native bridge for one method. The generated JavaScript body
 /// calls it as `bridge(this, this, ...args)`: the first `this` is decoded by
 /// the `registerNativeCallback` adapter into a native receiver copy for the
-/// call, the second is the live JS handle. After the native call, each
-/// non-identity receiver field is written back onto that handle
-/// (`setDynamicPropertyJson`), so a native method's mutations to `this` are
-/// observable from the JavaScript object -- the same as a real method call.
+/// call, the second is the live JS handle. After the call, each non-identity
+/// receiver field that actually changed (see `bridge_field_comparable`) is
+/// written back onto that handle (`setDynamicPropertyJson`), so a native
+/// method's mutations to `this` are observable from the JavaScript object --
+/// an untouched field is left exactly as it was.
 ///
-/// A field with no JSON encoding (a function-typed field) is skipped rather
-/// than failing the whole bridge.
+/// A field with no JSON encoding is skipped rather than failing the whole
+/// bridge.
 fn class_method_bridge_expr(
     lowerer: &mut FnLowerer<'_>,
     symbol: &Symbol,
@@ -511,7 +537,65 @@ fn class_method_bridge_expr(
 
     let native_call = HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), call_args);
     let result_name: Symbol = "__thaw_bridge_result".to_string();
-    let mut stmts = Vec::new();
+
+    // Snapshot every encodable receiver field *before* the call, then write
+    // it back only if it actually changed. An untouched reference field is
+    // left alone, so the JavaScript object keeps the exact value (and
+    // identity) it had -- reassigning every field unconditionally used to
+    // replace an untouched object with a fresh copy and an untouched
+    // function with a native-callback wrapper. A `===` on a native
+    // reference type compiles to a pointer compare, `Str`/`Symbol` to a
+    // content compare, and a number to a value compare (see
+    // `operators.rs`'s `EqEqEq`), so this detects a direct reassignment and
+    // a change made through a nested native call (`this.inc()`), while a
+    // field with no reliable `===` (an `Optional`/`Union` tag+payload) is
+    // still written back unconditionally.
+    let mut pre_stmts = Vec::new();
+    let mut post_stmts = Vec::new();
+    if let HirType::Object(fields) = &receiver_type {
+        for (index, (field, field_type)) in fields.iter().enumerate() {
+            if field.starts_with("__thaw_class_identity_") {
+                continue;
+            }
+            let current = HirExpr::PropAccess(
+                Box::new(HirExpr::Var(self_name.clone())),
+                receiver_type.clone(),
+                field.clone(),
+            );
+            let Ok(encoded) = lowerer.coerce_to_declared(&HirType::Json, current.clone()) else {
+                continue;
+            };
+            let write_back = HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("setDynamicPropertyJson".to_string())),
+                vec![
+                    HirExpr::Var(handle_name.clone()),
+                    HirExpr::Lit(HirLit::Str(field.clone())),
+                    encoded,
+                ],
+            ));
+            if !bridge_field_comparable(field_type) {
+                post_stmts.push(write_back);
+                continue;
+            }
+            let previous: Symbol = format!("__thaw_bridge_previous_{index}");
+            pre_stmts.push(HirStmt::Let(
+                previous.clone(),
+                field_type.clone(),
+                current.clone(),
+            ));
+            post_stmts.push(HirStmt::If(
+                HirExpr::BinOp(
+                    crate::BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(previous)),
+                    Box::new(current),
+                ),
+                Vec::new(),
+                vec![write_back],
+            ));
+        }
+    }
+
+    let mut stmts = pre_stmts;
     if signature.ret == HirType::Void {
         stmts.push(HirStmt::Expr(native_call));
     } else {
@@ -521,29 +605,7 @@ fn class_method_bridge_expr(
             native_call,
         ));
     }
-    if let HirType::Object(fields) = &receiver_type {
-        for (field, _) in fields {
-            if field.starts_with("__thaw_class_identity_") {
-                continue;
-            }
-            let read = HirExpr::PropAccess(
-                Box::new(HirExpr::Var(self_name.clone())),
-                receiver_type.clone(),
-                field.clone(),
-            );
-            let Ok(encoded) = lowerer.coerce_to_declared(&HirType::Json, read) else {
-                continue;
-            };
-            stmts.push(HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("setDynamicPropertyJson".to_string())),
-                vec![
-                    HirExpr::Var(handle_name.clone()),
-                    HirExpr::Lit(HirLit::Str(field.clone())),
-                    encoded,
-                ],
-            )));
-        }
-    }
+    stmts.extend(post_stmts);
     stmts.push(HirStmt::Return(if signature.ret == HirType::Void {
         None
     } else {
