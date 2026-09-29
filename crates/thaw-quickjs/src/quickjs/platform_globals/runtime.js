@@ -33,6 +33,7 @@
   globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
+  globalThis.__thaw_is_array_dynamic_value = value => Array.isArray(value);
   globalThis.__thaw_to_iterator = value => {
     const iterator =
       value != null && typeof value[Symbol.iterator] === 'function'

@@ -2848,6 +2848,18 @@ impl<'a> FnLowerer<'a> {
                             bindings.push((name, ty, value));
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        // A live `JsValue` (a dynamically-read field/member of
+                        // an `any`-typed class instance) has no local array
+                        // representation to inspect -- ask the realm's own
+                        // `Array.isArray` (the same live-engine query
+                        // `typeof`/`is_undefined` already use). Without this
+                        // the operand fell to the final `else` below and
+                        // answered a compile-time `false` for a genuine array.
+                        if ty == HirType::JsValue {
+                            let result = self
+                                .dynamic_value_check("__thaw_is_array_dynamic_value", value);
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         if ty == HirType::Json {
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_is_array".to_string())),
