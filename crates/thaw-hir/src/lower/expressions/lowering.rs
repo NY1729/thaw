@@ -1673,7 +1673,7 @@ impl<'a> FnLowerer<'a> {
                             self.scope.insert(right_name.clone(), right_type.clone());
                             self.wrap_call_argument_bindings(
                                 HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_json_has_own".into())),
+                                    Box::new(HirExpr::Var("__thaw_json_has".into())),
                                     vec![
                                         HirExpr::Var(right_name.clone()),
                                         HirExpr::Var(left_name.clone()),

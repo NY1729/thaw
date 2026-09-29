@@ -594,6 +594,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_json_has" => {
+                return self.compile_i8_predicate_call("thaw_json_has", args, "json_has");
+            }
             "__thaw_json_is_null" => {
                 return self.compile_i8_predicate_call(
                     "thaw_json_is_null",

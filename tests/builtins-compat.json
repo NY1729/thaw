@@ -20,6 +20,36 @@
     },
     {
       "group": "Object",
+      "name": "Object.create-inherited-get",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = Object.create(p); console.log(o.x); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.create-inherited-in",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = Object.create(p); console.log(\"x\" in o, \"y\" in o); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.create-chain",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = Object.create(p); const c: any = Object.create(o); console.log(c.x); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.create-hasOwn-own-only",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = Object.create(p); console.log(Object.hasOwn(o,\"x\"), Object.hasOwn(o,\"nope\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "Object.setPrototypeOf-inherited-get",
+      "expect": "matched",
+      "source": "function main(): void { const p: any = {x:42}; const o: any = {}; Object.setPrototypeOf(o,p); console.log(o.x); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.defineProperty",
       "expect": "matched",
       "source": "function main(): void { const o: any = {}; Object.defineProperty(o,\"x\",{value:5,enumerable:true}); console.log(o.x); }"
