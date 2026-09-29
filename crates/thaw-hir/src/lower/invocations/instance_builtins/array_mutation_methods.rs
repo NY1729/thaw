@@ -1635,6 +1635,14 @@ impl<'a> FnLowerer<'a> {
                             elements,
                             separator,
                         ),
+                        // A dynamically-obtained (`Json`) array -- e.g. a
+                        // dynamic call's result like
+                        // `Array.prototype.map.call(...)` -- joins through the
+                        // runtime's JS-semantics join.
+                        HirType::Json | HirType::Dictionary(_) => Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_array_join".to_string())),
+                            vec![HirExpr::Var(source_name.clone()), separator],
+                        )),
                         other => Err(format!(
                             "`.join()` requires an array receiver, got {other:?}"
                         )),
