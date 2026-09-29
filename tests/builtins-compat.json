@@ -194,6 +194,18 @@
     },
     {
       "group": "Object",
+      "name": "array-isarray-dynamic-field",
+      "expect": "matched",
+      "source": "class A { u: number[] = [1, 2]; } function main(): void { const a: any = new (A as any)(); console.log(Array.isArray(a.u), JSON.stringify(a.u)); }"
+    },
+    {
+      "group": "Object",
+      "name": "array-isarray-union-field",
+      "expect": "matched",
+      "source": "class A { u: number[] | string = [1, 2]; } function main(): void { const a: any = new (A as any)(); console.log(Array.isArray(a.u)); }"
+    },
+    {
+      "group": "Object",
       "name": "class-name",
       "expect": "matched",
       "source": "class Animal { name: string = \"a\"; } function main(): void { console.log(Animal.name, Animal.prototype.constructor.name); }"
