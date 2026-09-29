@@ -206,6 +206,24 @@
     },
     {
       "group": "Object",
+      "name": "builtin-prototype-typeof",
+      "expect": "matched",
+      "source": "function main(): void { console.log(typeof Object.prototype, typeof Function.prototype, typeof ArrayBuffer.prototype, typeof Date.prototype); }"
+    },
+    {
+      "group": "Object",
+      "name": "builtin-prototype-hasownproperty",
+      "expect": "matched",
+      "source": "function main(): void { console.log(Object.prototype.hasOwnProperty.call({ a: 1 }, \"a\"), Object.prototype.hasOwnProperty.call({ a: 1 }, \"b\")); }"
+    },
+    {
+      "group": "Object",
+      "name": "builtin-prototype-array-map",
+      "expect": "matched",
+      "source": "function main(): void { console.log(JSON.stringify(Array.prototype.map.call([1, 2, 3], (x: number) => x * 2))); }"
+    },
+    {
+      "group": "Object",
       "name": "class-name",
       "expect": "matched",
       "source": "class Animal { name: string = \"a\"; } function main(): void { console.log(Animal.name, Animal.prototype.constructor.name); }"
