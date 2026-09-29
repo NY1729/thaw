@@ -104,6 +104,18 @@
     },
     {
       "group": "Object",
+      "name": "class-dynamic-new",
+      "expect": "matched",
+      "source": "class A { name: string = \"a\"; } function main(): void { const x: any = new (A as any)(); console.log(typeof x, x.name); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-dynamic-new-args",
+      "expect": "matched",
+      "source": "class A { name: string; constructor(n: string) { this.name = n; } } function main(): void { const x: any = new (A as any)(\"z\"); console.log(x.name); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.defineProperty",
       "expect": "matched",
       "source": "function main(): void { const o: any = {}; Object.defineProperty(o,\"x\",{value:5,enumerable:true}); console.log(o.x); }"

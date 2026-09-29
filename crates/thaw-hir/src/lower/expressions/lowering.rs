@@ -3807,6 +3807,24 @@ impl<'a> FnLowerer<'a> {
                         });
                     }
                 }
+                // A `new` whose callee is itself a dynamic value (`new (A as
+                // any)()`, a class value or npm constructor held in an `any`
+                // binding) -- construct through the realm's own `new`.
+                if !matches!(new_expr.callee.as_ref(), Expr::Ident(_)) {
+                    let callee = self.lower_expr_with_expected_type(
+                        new_expr.callee.as_ref(),
+                        Some(&HirType::JsValue),
+                    )?;
+                    if matches!(self.infer_expr_type(&callee)?, HirType::JsValue | HirType::Dynamic)
+                    {
+                        let args = new_expr.args.as_deref().unwrap_or_default();
+                        let values = self.dynamic_call_args_json(args)?;
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("constructDynamicValue".into())),
+                            vec![callee, values],
+                        ));
+                    }
+                }
                 self.lower_promise_new(new_expr)
             }
 
