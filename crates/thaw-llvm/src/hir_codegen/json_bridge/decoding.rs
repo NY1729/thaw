@@ -138,6 +138,13 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(json, ty)
             }
+            // A `Union`-typed object field (or callback argument) decodes by
+            // runtime `typeof` discrimination -- the same
+            // `compile_json_to_union_result` `compile_json_to_native`'s own
+            // `Union` arm uses. Without this, an object-shaped JS value's
+            // union field failed with "unsupported dynamic result value
+            // Union(...)".
+            HirType::Union(elements) => self.compile_json_to_union_result(json, elements),
             // A `JsValue`-typed native-callback parameter (e.g. zod's
             // `.superRefine((val, ctx: JsValue) => { ctx.addIssue(...); })`
             // -- `ctx`, a live object with methods, has no JSON
