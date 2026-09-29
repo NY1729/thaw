@@ -158,6 +158,24 @@
     },
     {
       "group": "Object",
+      "name": "optional-strict-equality",
+      "expect": "matched",
+      "source": "function main(): void { const a: { v: number } | undefined = { v: 1 }; const b: { v: number } | undefined = a; const c: { v: number } | undefined = { v: 1 }; console.log(a === b, a === c); }"
+    },
+    {
+      "group": "Object",
+      "name": "nullish-strict-equality-kinds",
+      "expect": "matched",
+      "source": "function main(): void { const n: number | null | undefined = null; const u: number | null | undefined = undefined; console.log(n === u, n === null, u === undefined); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-optional-field-identity",
+      "expect": "matched",
+      "source": "class A { o?: { v: number } = { v: 1 }; setO(): void { this.o = { v: 2 }; } touch(): void {} } function main(): void { const a: any = new (A as any)(); const before = a.o; a.touch(); console.log(before === a.o); a.setO(); console.log(a.o.v); }"
+    },
+    {
+      "group": "Object",
       "name": "class-name",
       "expect": "matched",
       "source": "class Animal { name: string = \"a\"; } function main(): void { console.log(Animal.name, Animal.prototype.constructor.name); }"

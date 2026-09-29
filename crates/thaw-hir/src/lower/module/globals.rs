@@ -485,6 +485,13 @@ fn bridge_field_comparable(ty: &HirType) -> bool {
             | HirType::Dictionary(_)
             | HirType::Function(_, _)
             | HirType::CallableFunction(_, _, _, _)
+            // Tagged-absence wrappers and unions compare through the
+            // equality lowering's dedicated nodes (see
+            // `lower_optional_undefined_equality`), not a raw `===`.
+            | HirType::Optional(_)
+            | HirType::Nullable(_)
+            | HirType::Nullish(_)
+            | HirType::Union(_)
     )
 }
 
@@ -534,6 +541,13 @@ fn class_method_bridge_expr(
         });
         call_args.push(HirExpr::Var(name));
     }
+    // The lambda's own parameters are only added to the type scope when the
+    // `HirExpr::Lambda` node itself is inferred, but the equality helper
+    // below infers eagerly while the body is being built -- register them up
+    // front so `self`/the handle/args resolve.
+    for param in &params {
+        lowerer.scope.insert(param.name.clone(), param.ty.clone());
+    }
 
     let native_call = HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), call_args);
     let result_name: Symbol = "__thaw_bridge_result".to_string();
@@ -578,20 +592,28 @@ fn class_method_bridge_expr(
                 continue;
             }
             let previous: Symbol = format!("__thaw_bridge_previous_{index}");
+            lowerer.scope.insert(previous.clone(), field_type.clone());
             pre_stmts.push(HirStmt::Let(
                 previous.clone(),
                 field_type.clone(),
                 current.clone(),
             ));
-            post_stmts.push(HirStmt::If(
-                HirExpr::BinOp(
+            // Prefer the equality lowering's own node for tagged types
+            // (`Optional`/`Nullable`/`Nullish`/`Union`); a raw `===` can't
+            // compare their tag+payload layout. Scalars/references fall back
+            // to the direct `===` (value/pointer compare).
+            let equal = match lowerer.lower_optional_undefined_equality(
+                HirExpr::Var(previous.clone()),
+                current.clone(),
+            )? {
+                Some(equal) => equal,
+                None => HirExpr::BinOp(
                     crate::BinOp::EqEqEq,
                     Box::new(HirExpr::Var(previous)),
                     Box::new(current),
                 ),
-                Vec::new(),
-                vec![write_back],
-            ));
+            };
+            post_stmts.push(HirStmt::If(equal, Vec::new(), vec![write_back]));
         }
     }
 

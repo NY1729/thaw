@@ -1,3 +1,14 @@
+/// Which tagged-absence wrapper `lower_absence_equality` is comparing.
+#[derive(Clone, Copy)]
+enum AbsenceKind {
+    /// `T | undefined` (`Optional`).
+    Optional,
+    /// `T | null` (`Nullable`).
+    Nullable,
+    /// `T | null | undefined` (`Nullish`).
+    Nullish,
+}
+
 impl<'a> FnLowerer<'a> {
     fn truthiness_expr(&self, value: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
         let false_lit = || HirExpr::Lit(HirLit::Bool(false));
@@ -1695,6 +1706,36 @@ impl<'a> FnLowerer<'a> {
                 (other, HirType::Optional(payload)) if payload.as_ref() == other => {
                     return self.lower_optional_undefined_equality(rhs, lhs);
                 }
+                (HirType::Optional(left), HirType::Optional(right)) if left == right => {
+                    Some(self.lower_absence_equality(
+                        lhs,
+                        rhs,
+                        lhs_type.clone(),
+                        rhs_type.clone(),
+                        left.as_ref().clone(),
+                        AbsenceKind::Optional,
+                    )?)
+                }
+                (HirType::Nullable(left), HirType::Nullable(right)) if left == right => {
+                    Some(self.lower_absence_equality(
+                        lhs,
+                        rhs,
+                        lhs_type.clone(),
+                        rhs_type.clone(),
+                        left.as_ref().clone(),
+                        AbsenceKind::Nullable,
+                    )?)
+                }
+                (HirType::Nullish(left), HirType::Nullish(right)) if left == right => {
+                    Some(self.lower_absence_equality(
+                        lhs,
+                        rhs,
+                        lhs_type.clone(),
+                        rhs_type.clone(),
+                        left.as_ref().clone(),
+                        AbsenceKind::Nullish,
+                    )?)
+                }
                 (HirType::Json, HirType::Null) => Some(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_json_is_null".into())),
                     vec![lhs],
@@ -1808,6 +1849,101 @@ impl<'a> FnLowerer<'a> {
                 _ => None,
             };
         Ok(result)
+    }
+
+    /// `===` between two values of the same tagged-absence wrapper type
+    /// (`Optional`/`Nullable`/`Nullish`). Both absent compare equal, except
+    /// for a `Nullish` only when the absence *kind* also matches (`null !==
+    /// undefined`); a value present on one side is never equal to an absent
+    /// one; two present values compare by their payload's own `===`.
+    fn lower_absence_equality(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        lhs_type: HirType,
+        rhs_type: HirType,
+        payload: HirType,
+        kind: AbsenceKind,
+    ) -> Result<HirExpr, String> {
+        let left_name = format!("__thaw_absence_equality_left_{}", self.next_binding);
+        self.next_binding += 1;
+        let right_name = format!("__thaw_absence_equality_right_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(left_name.clone(), lhs_type.clone());
+        self.scope.insert(right_name.clone(), rhs_type.clone());
+        let left = HirExpr::Var(left_name.clone());
+        let right = HirExpr::Var(right_name.clone());
+
+        let none_left = self.absence_is_none(kind, left.clone(), payload.clone());
+        let none_right = self.absence_is_none(kind, right.clone(), payload.clone());
+        let some_equality = self.lower_absence_payload_equality(
+            self.absence_value(kind, left.clone(), payload.clone()),
+            self.absence_value(kind, right.clone(), payload.clone()),
+        )?;
+
+        let mut stmts = Vec::new();
+        match kind {
+            AbsenceKind::Nullish => stmts.push(HirStmt::If(
+                none_left,
+                vec![HirStmt::If(
+                    HirExpr::NullishIsNull(Box::new(left.clone()), payload.clone()),
+                    vec![HirStmt::Return(Some(HirExpr::NullishIsNull(
+                        Box::new(right.clone()),
+                        payload.clone(),
+                    )))],
+                    vec![HirStmt::Return(Some(HirExpr::NullishIsUndefined(
+                        Box::new(right.clone()),
+                        payload.clone(),
+                    )))],
+                )],
+                Vec::new(),
+            )),
+            _ => stmts.push(HirStmt::If(
+                none_left,
+                vec![HirStmt::Return(Some(none_right.clone()))],
+                Vec::new(),
+            )),
+        }
+        stmts.push(HirStmt::If(
+            none_right,
+            vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+            Vec::new(),
+        ));
+        stmts.push(HirStmt::Return(Some(some_equality)));
+
+        self.wrap_call_argument_bindings(
+            HirExpr::Block(stmts),
+            &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
+        )
+    }
+
+    fn absence_is_none(&self, kind: AbsenceKind, value: HirExpr, payload: HirType) -> HirExpr {
+        match kind {
+            AbsenceKind::Optional => HirExpr::OptionalIsNone(Box::new(value), payload),
+            AbsenceKind::Nullable => HirExpr::NullableIsNone(Box::new(value), payload),
+            AbsenceKind::Nullish => HirExpr::NullishIsNone(Box::new(value), payload),
+        }
+    }
+
+    fn absence_value(&self, kind: AbsenceKind, value: HirExpr, payload: HirType) -> HirExpr {
+        match kind {
+            AbsenceKind::Optional => HirExpr::OptionalValue(Box::new(value), payload),
+            AbsenceKind::Nullable => HirExpr::NullableValue(Box::new(value), payload),
+            AbsenceKind::Nullish => HirExpr::NullishValue(Box::new(value), payload),
+        }
+    }
+
+    fn lower_absence_payload_equality(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<HirExpr, String> {
+        Ok(
+            match self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())? {
+                Some(expr) => expr,
+                None => HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)),
+            },
+        )
     }
 
     /// Asks the live QuickJS engine a yes/no question about a `JsValue`
