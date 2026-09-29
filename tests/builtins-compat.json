@@ -230,6 +230,24 @@
     },
     {
       "group": "Object",
+      "name": "builtin-constructor-value",
+      "expect": "matched",
+      "source": "function main(): void { console.log(typeof TypeError, typeof Array, typeof Object); }"
+    },
+    {
+      "group": "Object",
+      "name": "function-namespace",
+      "expect": "matched",
+      "source": "function check(cond: boolean, msg: any): void { if (!cond) { throw \"fail: \" + msg; } } check.ok = function (v: any): boolean { return v === true; }; function main(): void { check(true, \"x\"); console.log(check.ok(true)); }"
+    },
+    {
+      "group": "Object",
+      "name": "function-namespace-alias",
+      "expect": "matched",
+      "source": "function greet(): string { return \"hi\"; } function run(): void {} run.hello = greet; function main(): void { console.log(run.hello()); }"
+    },
+    {
+      "group": "Object",
       "name": "class-name",
       "expect": "matched",
       "source": "class Animal { name: string = \"a\"; } function main(): void { console.log(Animal.name, Animal.prototype.constructor.name); }"

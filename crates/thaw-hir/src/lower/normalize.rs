@@ -749,6 +749,45 @@ fn constructor_fields(
     collect.assigned
 }
 
+/// Gives every plain parameter a `= undefined` default, matching
+/// JavaScript's "a missing argument is `undefined`" for the converted
+/// constructor-function members (e.g. `assert.throws(Ctor, fn)` omitting the
+/// optional `message`). A default -- unlike an `?` optional -- leaves the
+/// declared type unchanged, so the body still sees `any`/`number`, not
+/// `T | undefined`.
+fn make_params_default_undefined(params: &mut [swc_ecma_ast::Param]) {
+    use swc_ecma_ast::*;
+    for parameter in params {
+        let Pat::Ident(binding) = &parameter.pat else {
+            continue;
+        };
+        // Only an untyped/`any`/`unknown` parameter tolerates a `= undefined`
+        // default; a concretely typed one (e.g. `boolean`) would then reject
+        // the default at the assignment site.
+        let permissive = match &binding.type_ann {
+            None => true,
+            Some(annotation) => matches!(
+                annotation.type_ann.as_ref(),
+                TsType::TsKeywordType(TsKeywordType {
+                    kind: TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword,
+                    ..
+                })
+            ),
+        };
+        if !permissive {
+            continue;
+        }
+        parameter.pat = Pat::Assign(AssignPat {
+            span: swc_common::DUMMY_SP,
+            left: Box::new(Pat::Ident(binding.clone())),
+            right: Box::new(Expr::Ident(Ident::new_no_ctxt(
+                "undefined".into(),
+                swc_common::DUMMY_SP,
+            ))),
+        });
+    }
+}
+
 /// Converts a prototype-assigned RHS (a function expression or arrow) into a
 /// method's `Function`, or `None` if it isn't callable.
 fn rhs_function(right: &Expr) -> Option<swc_ecma_ast::Function> {
@@ -798,8 +837,19 @@ fn rhs_function(right: &Expr) -> Option<swc_ecma_ast::Function> {
 fn constructor_class(
     function: &swc_ecma_ast::FnDecl,
     assignments: &[(bool, Symbol, &Expr)],
+    is_constructor: bool,
+    functions: &HashMap<Symbol, &swc_ecma_ast::Function>,
 ) -> Result<swc_ecma_ast::ClassDecl, String> {
     use swc_ecma_ast::*;
+
+    // A member assigned an existing function's *name* (`assert._toString =
+    // formatSimpleValue`) becomes a method that reuses that function.
+    let resolve_function = |right: &Expr| -> Option<Function> {
+        match right {
+            Expr::Ident(ident) => functions.get(&ident.sym.to_string()).map(|f| (*f).clone()),
+            _ => rhs_function(right),
+        }
+    };
 
     let mut instance_methods = Vec::new();
     let mut statics = Vec::new();
@@ -849,27 +899,42 @@ fn constructor_class(
             definite: false,
         }));
     }
-    body.push(ClassMember::Constructor(Constructor {
-        span: swc_common::DUMMY_SP,
-        ctxt: Default::default(),
-        key: property(&"constructor".to_string()),
-        params: function
-            .function
-            .params
-            .iter()
-            .cloned()
-            .map(ParamOrTsParamProp::Param)
-            .collect(),
-        body: function.function.body.clone(),
-        accessibility: None,
-        is_optional: false,
-    }));
+    if is_constructor {
+        let mut params = function.function.params.clone();
+        make_params_default_undefined(&mut params);
+        body.push(ClassMember::Constructor(Constructor {
+            span: swc_common::DUMMY_SP,
+            ctxt: Default::default(),
+            key: property(&"constructor".to_string()),
+            params: params.into_iter().map(ParamOrTsParamProp::Param).collect(),
+            body: function.function.body.clone(),
+            accessibility: None,
+            is_optional: false,
+        }));
+    } else {
+        // A namespace-shaped function (`assert`): keep its body as the static
+        // `__call__`, and rewrite its plain call sites to `F.__call__(...)`.
+        let mut call_function = (*function.function).clone();
+        make_params_default_undefined(&mut call_function.params);
+        body.push(ClassMember::Method(ClassMethod {
+            span: swc_common::DUMMY_SP,
+            key: property(&"__call__".to_string()),
+            function: Box::new(call_function),
+            kind: MethodKind::Method,
+            is_static: true,
+            accessibility: None,
+            is_abstract: false,
+            is_optional: false,
+            is_override: false,
+        }));
+    }
     for (name, right) in &instance_methods {
-        let Some(method_function) = rhs_function(right) else {
+        let Some(mut method_function) = resolve_function(right) else {
             return Err(format!(
                 "constructor-function prototype member `{name}` is not a function"
             ));
         };
+        make_params_default_undefined(&mut method_function.params);
         body.push(ClassMember::Method(ClassMethod {
             span: swc_common::DUMMY_SP,
             key: property(name),
@@ -883,7 +948,8 @@ fn constructor_class(
         }));
     }
     for (name, right) in &statics {
-        if let Some(function) = rhs_function(right) {
+        if let Some(mut function) = resolve_function(right) {
+            make_params_default_undefined(&mut function.params);
             body.push(ClassMember::Method(ClassMethod {
                 span: swc_common::DUMMY_SP,
                 key: property(name),
@@ -900,12 +966,12 @@ fn constructor_class(
                 span: swc_common::DUMMY_SP,
                 key: property(name),
                 value: Some(Box::new((**right).clone())),
-                type_ann: inferred_field_type(right, &param_types).map(|ty| {
-                    Box::new(TsTypeAnn {
-                        span: swc_common::DUMMY_SP,
-                        type_ann: Box::new(ty),
-                    })
-                }),
+                type_ann: Some(Box::new(TsTypeAnn {
+                    span: swc_common::DUMMY_SP,
+                    type_ann: Box::new(
+                        inferred_field_type(right, &param_types).unwrap_or_else(ts_any_type),
+                    ),
+                })),
                 is_static: true,
                 decorators: Vec::new(),
                 accessibility: None,
@@ -968,18 +1034,37 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
         finder.0
     };
 
-    let mut candidates: HashMap<Symbol, &FnDecl> = HashMap::new();
+    // Collect every top-level `F.prototype.m = ...` / `F.s = ...` first, so a
+    // function can be recognized as a namespace (`assert`) even without
+    // `this`.
+    let mut assignments: HashMap<Symbol, Vec<(usize, bool, Symbol, &Expr)>> = HashMap::new();
+    for (index, item) in module.body.iter().enumerate() {
+        let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = item else {
+            continue;
+        };
+        if let Some((owner, on_prototype, name, right)) = constructor_assignment_target(expr) {
+            assignments
+                .entry(owner)
+                .or_default()
+                .push((index, on_prototype, name, right));
+        }
+    }
+
+    let mut candidates: HashMap<Symbol, (&FnDecl, bool)> = HashMap::new();
     for item in &module.body {
         if let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item {
             let name = function.ident.sym.to_string();
-            if !function.function.is_async
-                && !function.function.is_generator
-                && function.function.body.is_some()
-                && function.function.this_param.is_none()
-                && !rebound.contains(&name)
-                && constructor_function_uses_this(&function.function)
+            if function.function.is_async
+                || function.function.is_generator
+                || function.function.body.is_none()
+                || function.function.this_param.is_some()
+                || rebound.contains(&name)
             {
-                candidates.insert(name, function);
+                continue;
+            }
+            let uses_this = constructor_function_uses_this(&function.function);
+            if uses_this || assignments.contains_key(&name) {
+                candidates.insert(name, (function, uses_this));
             }
         }
     }
@@ -987,30 +1072,27 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
         return Ok(module.clone());
     }
 
-    let mut assignments: HashMap<Symbol, Vec<(usize, bool, Symbol, &Expr)>> = HashMap::new();
-    for (index, item) in module.body.iter().enumerate() {
-        let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = item else {
-            continue;
-        };
-        if let Some((owner, on_prototype, name, right)) = constructor_assignment_target(expr) {
-            if candidates.contains_key(&owner) {
-                assignments
-                    .entry(owner)
-                    .or_default()
-                    .push((index, on_prototype, name, right));
+    let functions: HashMap<Symbol, &Function> = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => {
+                Some((function.ident.sym.to_string(), &*function.function))
             }
-        }
-    }
+            _ => None,
+        })
+        .collect();
 
+    let mut namespaces: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
     let mut class_for: HashMap<usize, ClassDecl> = HashMap::new();
     let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (index, item) in module.body.iter().enumerate() {
         let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item else {
             continue;
         };
-        if !candidates.contains_key(function.ident.sym.as_ref()) {
+        let Some((_, is_constructor)) = candidates.get(function.ident.sym.as_ref()) else {
             continue;
-        }
+        };
         let list = assignments
             .remove(function.ident.sym.as_ref())
             .unwrap_or_default();
@@ -1021,7 +1103,13 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
             .iter()
             .map(|(_, on_prototype, name, right)| (*on_prototype, name.clone(), *right))
             .collect();
-        class_for.insert(index, constructor_class(function, &refs)?);
+        if !*is_constructor {
+            namespaces.insert(function.ident.sym.to_string());
+        }
+        class_for.insert(
+            index,
+            constructor_class(function, &refs, *is_constructor, &functions)?,
+        );
     }
 
     let mut body = Vec::new();
@@ -1037,5 +1125,35 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
     }
     let mut normalized = module.clone();
     normalized.body = body;
+
+    // A namespace function is now a class, so rewrite its plain calls
+    // (`assert(x)`) to the static `assert.__call__(x)`.
+    if !namespaces.is_empty() {
+        struct CallRewriter<'a> {
+            names: &'a std::collections::HashSet<Symbol>,
+        }
+        impl swc_ecma_visit::VisitMut for CallRewriter<'_> {
+            fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
+                if let Callee::Expr(callee) = &call.callee {
+                    if let Expr::Ident(ident) = callee.as_ref() {
+                        if self.names.contains(ident.sym.as_ref()) {
+                            call.callee = Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                span: swc_common::DUMMY_SP,
+                                obj: Box::new(Expr::Ident(ident.clone())),
+                                prop: MemberProp::Ident(IdentName::new(
+                                    "__call__".into(),
+                                    swc_common::DUMMY_SP,
+                                )),
+                            })));
+                        }
+                    }
+                }
+                call.visit_mut_children_with(self);
+            }
+        }
+        normalized
+            .body
+            .visit_mut_with(&mut CallRewriter { names: &namespaces });
+    }
     Ok(normalized)
 }
