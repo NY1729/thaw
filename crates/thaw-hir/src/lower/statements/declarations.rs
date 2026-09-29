@@ -605,6 +605,20 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty
                 };
+                // An `any`/`Json`-annotated local whose initializer is a
+                // live `JsValue` (a class token/prototype, an npm object,
+                // ...) keeps the live handle as its storage type instead of
+                // the `Json` handle-placeholder snapshot -- otherwise a
+                // dynamically-obtained method (`const p: any =
+                // A.prototype; p.greet`) reads back `undefined`, since the
+                // placeholder object only carries the handle id.
+                let ty = if matches!(ty, HirType::Dynamic | HirType::Json)
+                    && actual_type == HirType::JsValue
+                {
+                    HirType::JsValue
+                } else {
+                    ty
+                };
                 let sparse_index = self.is_primitive_array_index(init, &ty);
                 let mut value = if binding.type_ann.is_some() && sparse_index {
                     self.coerce_primitive_array_argument(value, &ty)?
