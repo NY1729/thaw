@@ -145,6 +145,27 @@ fn lower_top_level_initializers(
                     // it.
                     let token_value = match class_value_js_script(declaration) {
                         Some((global, script)) => {
+                            // Register one native bridge per instance method
+                            // before evaluating the class, so the generated
+                            // JavaScript method bodies (which delegate to
+                            // these globals) can reach the native
+                            // implementations -- including the native
+                            // functions those bodies call.
+                            for (property, _kind, symbol) in class_bridgeable_members(declaration) {
+                                let bridge = class_method_bridge_expr(&mut lowerer, &symbol)?;
+                                let name = class_method_bridge_name(class_name, &property);
+                                steps.push(HirInitStep::Statement(HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var("setDynamicProperty".to_string())),
+                                    vec![
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                            vec![HirExpr::Lit(HirLit::Str("globalThis".into()))],
+                                        ),
+                                        HirExpr::Lit(HirLit::Str(name)),
+                                        bridge,
+                                    ],
+                                ))));
+                            }
                             steps.push(HirInitStep::Statement(HirStmt::Expr(HirExpr::Call(
                                 Box::new(HirExpr::Var("loadScript".to_string())),
                                 vec![HirExpr::Lit(HirLit::Str(script))],
@@ -410,6 +431,157 @@ fn strip_class_decorators(class: &mut swc_ecma_ast::Class) {
     class.visit_mut_with(&mut Stripper);
 }
 
+/// The realm global a bridged method's generated JavaScript body calls to
+/// reach the real native implementation (see `class_method_bridge_expr`).
+fn class_method_bridge_name(class_name: &str, property: &str) -> String {
+    format!("__thaw_method_bridge_{class_name}_{property}")
+}
+
+/// The instance methods/getters/setters of a class that get a native bridge
+/// -- sync, non-static ones (an async/generator body can't be written as a
+/// synchronous delegation). Returns `(property, kind, native symbol)`.
+fn class_bridgeable_members(
+    declaration: &swc_ecma_ast::ClassDecl,
+) -> Vec<(Symbol, swc_ecma_ast::MethodKind, Symbol)> {
+    let class_name = declaration.ident.sym.as_ref();
+    let mut members = Vec::new();
+    for member in &declaration.class.body {
+        let swc_ecma_ast::ClassMember::Method(method) = member else {
+            continue;
+        };
+        if method.is_static || method.function.is_async || method.function.is_generator {
+            continue;
+        }
+        let Ok(property) = class_property_name(&method.key) else {
+            continue;
+        };
+        let Ok(symbol) = class_member_symbol(class_name, method) else {
+            continue;
+        };
+        members.push((property, method.kind, symbol));
+    }
+    members
+}
+
+/// Builds `registerNativeCallback((receiver, ...args) => native(receiver,
+/// ...args))` for one method: a JS-callable handle whose adapter marshals the
+/// (plain-object) receiver and JSON arguments into the native ABI and the
+/// result back to JSON.
+///
+/// ponytail: the receiver is decoded from the plain JS object into a fresh
+/// native copy, so a dynamic method call *reads* `this` correctly but native
+/// mutations to `this` do not propagate back to the JS object.
+fn class_method_bridge_expr(
+    lowerer: &mut FnLowerer<'_>,
+    symbol: &Symbol,
+) -> Result<HirExpr, String> {
+    let signature = lowerer
+        .signatures
+        .get(symbol)
+        .cloned()
+        .ok_or_else(|| format!("bridge target `{symbol}` is not declared"))?;
+    let mut params = Vec::with_capacity(signature.params.len());
+    let mut args = Vec::with_capacity(signature.params.len());
+    for (index, ty) in signature.params.iter().enumerate() {
+        let name = format!("__thaw_bridge_arg_{index}");
+        params.push(HirParam {
+            name: name.clone(),
+            ty: ty.clone(),
+        });
+        args.push(HirExpr::Var(name));
+    }
+    let body = HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), args);
+    let lambda = HirExpr::Lambda(Vec::new(), params, signature.ret.clone(), Box::new(body));
+    let callback_type = HirType::Function(signature.params.clone(), Box::new(signature.ret.clone()));
+    Ok(HirExpr::Call(
+        Box::new(HirExpr::Var("registerNativeCallback".to_string())),
+        vec![HirExpr::TypedClosure(callback_type, Box::new(lambda))],
+    ))
+}
+
+/// Builds a JavaScript method body that delegates to the native method's
+/// realm-registered bridge: `globalThis["<bridge>"](this, ...arguments)`
+/// (a getter passes only `this`, a setter drops the result).
+fn method_delegate_body(
+    bridge: &str,
+    kind: swc_ecma_ast::MethodKind,
+) -> swc_ecma_ast::FunctionBody {
+    use swc_common::DUMMY_SP;
+    let global_this = swc_ecma_ast::Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+        "globalThis".into(),
+        DUMMY_SP,
+    ));
+    let callee = swc_ecma_ast::Expr::Member(swc_ecma_ast::MemberExpr {
+        span: DUMMY_SP,
+        obj: Box::new(global_this),
+        prop: swc_ecma_ast::MemberProp::Computed(swc_ecma_ast::ComputedPropName {
+            span: DUMMY_SP,
+            expr: Box::new(swc_ecma_ast::Expr::Lit(swc_ecma_ast::Lit::Str(
+                swc_ecma_ast::Str {
+                    span: DUMMY_SP,
+                    value: bridge.into(),
+                    raw: None,
+                },
+            ))),
+        }),
+    });
+    let mut args = vec![swc_ecma_ast::ExprOrSpread {
+        spread: None,
+        expr: Box::new(swc_ecma_ast::Expr::This(swc_ecma_ast::ThisExpr { span: DUMMY_SP })),
+    }];
+    if !matches!(kind, swc_ecma_ast::MethodKind::Getter) {
+        args.push(swc_ecma_ast::ExprOrSpread {
+            spread: Some(DUMMY_SP),
+            expr: Box::new(swc_ecma_ast::Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                "arguments".into(),
+                DUMMY_SP,
+            ))),
+        });
+    }
+    let call = swc_ecma_ast::Expr::Call(swc_ecma_ast::CallExpr {
+        span: DUMMY_SP,
+        ctxt: Default::default(),
+        callee: swc_ecma_ast::Callee::Expr(Box::new(callee)),
+        args,
+        type_args: None,
+    });
+    let stmt = if matches!(kind, swc_ecma_ast::MethodKind::Setter) {
+        swc_ecma_ast::Stmt::Expr(swc_ecma_ast::ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(call),
+        })
+    } else {
+        swc_ecma_ast::Stmt::Return(swc_ecma_ast::ReturnStmt {
+            span: DUMMY_SP,
+            arg: Some(Box::new(call)),
+        })
+    };
+    swc_ecma_ast::FunctionBody {
+        span: DUMMY_SP,
+        stmts: vec![stmt],
+    }
+}
+
+/// Replaces each bridgeable instance method's JavaScript body with a
+/// delegation to its native bridge (see `method_delegate_body`), so a
+/// dynamically-called method reaches the real native implementation --
+/// including any native functions its body calls.
+fn rewrite_instance_methods_to_bridges(class: &mut swc_ecma_ast::Class, class_name: &str) {
+    for member in &mut class.body {
+        let swc_ecma_ast::ClassMember::Method(method) = member else {
+            continue;
+        };
+        if method.is_static || method.function.is_async || method.function.is_generator {
+            continue;
+        }
+        let Ok(property) = class_property_name(&method.key) else {
+            continue;
+        };
+        let bridge = class_method_bridge_name(class_name, &property);
+        method.function.body = Some(method_delegate_body(&bridge, method.kind));
+    }
+}
+
 /// Emits a bare ECMAScript module (`class C { ... }`) as JavaScript source.
 fn emit_module_js(module: &swc_ecma_ast::Module) -> Option<String> {
     use swc_common::sync::Lrc;
@@ -437,6 +609,7 @@ fn emit_module_js(module: &swc_ecma_ast::Module) -> Option<String> {
 fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl) -> Option<String> {
     let mut class = declaration.class.clone();
     strip_class_decorators(&mut class);
+    rewrite_instance_methods_to_bridges(&mut class, declaration.ident.sym.as_ref());
     let class_decl = swc_ecma_ast::ClassDecl {
         ident: declaration.ident.clone(),
         declare: false,
