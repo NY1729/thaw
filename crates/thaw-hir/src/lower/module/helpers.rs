@@ -29,6 +29,60 @@ fn is_error_family_name(name: &str) -> bool {
     )
 }
 
+/// Standard-library constructors whose `.prototype` the realm exposes as a
+/// real object. thaw models several of these only as call/new targets, so a
+/// bare `Object`/`Array`/`Date`/... reference is otherwise an "unknown
+/// variable"; `<name>.prototype` reads the live constructor off the realm
+/// instead (see `crates/thaw-hir/src/lower/objects.rs`'s `prototype`
+/// member-read branch) -- the shape most of test262's prototype tests use
+/// (`Object.prototype.hasOwnProperty.call`, `Array.prototype.map.call`, ...).
+fn is_builtin_prototype_owner(name: &str) -> bool {
+    matches!(
+        name,
+        "Object"
+            | "Function"
+            | "Array"
+            | "String"
+            | "Number"
+            | "Boolean"
+            | "Symbol"
+            | "BigInt"
+            | "Date"
+            | "RegExp"
+            | "Error"
+            | "TypeError"
+            | "RangeError"
+            | "SyntaxError"
+            | "ReferenceError"
+            | "EvalError"
+            | "URIError"
+            | "AggregateError"
+            | "SuppressedError"
+            | "Map"
+            | "Set"
+            | "WeakMap"
+            | "WeakSet"
+            | "ArrayBuffer"
+            | "SharedArrayBuffer"
+            | "DataView"
+            | "Int8Array"
+            | "Uint8Array"
+            | "Uint8ClampedArray"
+            | "Int16Array"
+            | "Uint16Array"
+            | "Int32Array"
+            | "Uint32Array"
+            | "Float16Array"
+            | "Float32Array"
+            | "Float64Array"
+            | "BigInt64Array"
+            | "BigUint64Array"
+            | "Promise"
+            | "Iterator"
+            | "AsyncIterator"
+    )
+}
+
 /// Standard library / Web API type names thaw does not model natively. An
 /// annotation naming one is treated as an opaque `JsValue` -- at runtime the
 /// value is a real QuickJS object (thaw's platform globals provide these) --

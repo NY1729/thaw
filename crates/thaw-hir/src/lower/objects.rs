@@ -1994,6 +1994,32 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             MemberProp::Ident(prop) => {
+                // `<Builtin>.prototype` for a standard-library constructor
+                // thaw only models as a call/new target (`Object`, `Array`,
+                // `Date`, `RegExp`, `Map`, `Set`, `ArrayBuffer`, typed
+                // arrays, ...). The realm has the real constructor, so read
+                // `.prototype` off it as a live value -- the shape most of
+                // test262's prototype tests use
+                // (`Object.prototype.hasOwnProperty.call`,
+                // `Array.prototype.map.call`, ...).
+                if prop.sym == *"prototype" {
+                    if let Expr::Ident(owner) = member.obj.as_ref() {
+                        let name = self.resolve_binding(owner.sym.as_ref());
+                        if !self.scope.contains_key(&name)
+                            && !self.interfaces.contains_key(&name)
+                            && is_builtin_prototype_owner(owner.sym.as_ref())
+                        {
+                            let object = HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                vec![HirExpr::Lit(HirLit::Str(owner.sym.to_string()))],
+                            );
+                            return self.lower_dynamic_value_property_read(
+                                object,
+                                HirExpr::Lit(HirLit::Str("prototype".to_string())),
+                            );
+                        }
+                    }
+                }
                 if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Math") {
                     let value = match prop.sym.as_ref() {
                         "E" => std::f64::consts::E,
