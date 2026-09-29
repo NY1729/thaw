@@ -463,14 +463,16 @@ fn class_bridgeable_members(
     members
 }
 
-/// Builds `registerNativeCallback((receiver, ...args) => native(receiver,
-/// ...args))` for one method: a JS-callable handle whose adapter marshals the
-/// (plain-object) receiver and JSON arguments into the native ABI and the
-/// result back to JSON.
+/// Builds the native bridge for one method. The generated JavaScript body
+/// calls it as `bridge(this, this, ...args)`: the first `this` is decoded by
+/// the `registerNativeCallback` adapter into a native receiver copy for the
+/// call, the second is the live JS handle. After the native call, each
+/// non-identity receiver field is written back onto that handle
+/// (`setDynamicPropertyJson`), so a native method's mutations to `this` are
+/// observable from the JavaScript object -- the same as a real method call.
 ///
-/// ponytail: the receiver is decoded from the plain JS object into a fresh
-/// native copy, so a dynamic method call *reads* `this` correctly but native
-/// mutations to `this` do not propagate back to the JS object.
+/// A field with no JSON encoding (a function-typed field) is skipped rather
+/// than failing the whole bridge.
 fn class_method_bridge_expr(
     lowerer: &mut FnLowerer<'_>,
     symbol: &Symbol,
@@ -480,19 +482,80 @@ fn class_method_bridge_expr(
         .get(symbol)
         .cloned()
         .ok_or_else(|| format!("bridge target `{symbol}` is not declared"))?;
-    let mut params = Vec::with_capacity(signature.params.len());
-    let mut args = Vec::with_capacity(signature.params.len());
-    for (index, ty) in signature.params.iter().enumerate() {
+    let Some((receiver_type, method_params)) = signature.params.split_first() else {
+        return Err(format!("bridge target `{symbol}` has no receiver"));
+    };
+    let receiver_type = receiver_type.clone();
+
+    let self_name: Symbol = "__thaw_bridge_self".to_string();
+    let handle_name: Symbol = "__thaw_bridge_handle".to_string();
+    let mut params = vec![
+        HirParam {
+            name: self_name.clone(),
+            ty: receiver_type.clone(),
+        },
+        HirParam {
+            name: handle_name.clone(),
+            ty: HirType::JsValue,
+        },
+    ];
+    let mut call_args = vec![HirExpr::Var(self_name.clone())];
+    for (index, ty) in method_params.iter().enumerate() {
         let name = format!("__thaw_bridge_arg_{index}");
         params.push(HirParam {
             name: name.clone(),
             ty: ty.clone(),
         });
-        args.push(HirExpr::Var(name));
+        call_args.push(HirExpr::Var(name));
     }
-    let body = HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), args);
-    let lambda = HirExpr::Lambda(Vec::new(), params, signature.ret.clone(), Box::new(body));
-    let callback_type = HirType::Function(signature.params.clone(), Box::new(signature.ret.clone()));
+
+    let native_call = HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), call_args);
+    let result_name: Symbol = "__thaw_bridge_result".to_string();
+    let mut stmts = Vec::new();
+    if signature.ret == HirType::Void {
+        stmts.push(HirStmt::Expr(native_call));
+    } else {
+        stmts.push(HirStmt::Let(
+            result_name.clone(),
+            signature.ret.clone(),
+            native_call,
+        ));
+    }
+    if let HirType::Object(fields) = &receiver_type {
+        for (field, _) in fields {
+            if field.starts_with("__thaw_class_identity_") {
+                continue;
+            }
+            let read = HirExpr::PropAccess(
+                Box::new(HirExpr::Var(self_name.clone())),
+                receiver_type.clone(),
+                field.clone(),
+            );
+            let Ok(encoded) = lowerer.coerce_to_declared(&HirType::Json, read) else {
+                continue;
+            };
+            stmts.push(HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("setDynamicPropertyJson".to_string())),
+                vec![
+                    HirExpr::Var(handle_name.clone()),
+                    HirExpr::Lit(HirLit::Str(field.clone())),
+                    encoded,
+                ],
+            )));
+        }
+    }
+    stmts.push(HirStmt::Return(if signature.ret == HirType::Void {
+        None
+    } else {
+        Some(HirExpr::Var(result_name))
+    }));
+
+    let body = HirExpr::Block(stmts);
+    let lambda = HirExpr::Lambda(Vec::new(), params.clone(), signature.ret.clone(), Box::new(body));
+    let callback_type = HirType::Function(
+        params.iter().map(|param| param.ty.clone()).collect(),
+        Box::new(signature.ret.clone()),
+    );
     Ok(HirExpr::Call(
         Box::new(HirExpr::Var("registerNativeCallback".to_string())),
         vec![HirExpr::TypedClosure(callback_type, Box::new(lambda))],
@@ -525,10 +588,13 @@ fn method_delegate_body(
             ))),
         }),
     });
-    let mut args = vec![swc_ecma_ast::ExprOrSpread {
+    let this_arg = || swc_ecma_ast::ExprOrSpread {
         spread: None,
         expr: Box::new(swc_ecma_ast::Expr::This(swc_ecma_ast::ThisExpr { span: DUMMY_SP })),
-    }];
+    };
+    // `this` twice: the first is decoded into a native receiver copy for the
+    // call, the second is the live handle the bridge writes mutations back to.
+    let mut args = vec![this_arg(), this_arg()];
     if !matches!(kind, swc_ecma_ast::MethodKind::Getter) {
         args.push(swc_ecma_ast::ExprOrSpread {
             spread: Some(DUMMY_SP),
