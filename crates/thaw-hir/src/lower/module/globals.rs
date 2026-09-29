@@ -667,6 +667,24 @@ fn emit_module_js(module: &swc_ecma_ast::Module) -> Option<String> {
     String::from_utf8(buffer).ok()
 }
 
+/// The user-facing name of a class for JavaScript codegen: strips the
+/// module-flattening prefix (`__thawmod<N>_`, added to every top-level
+/// declaration for cross-file uniqueness) so the evaluated class reports its
+/// real `name` (`A`, not `__thawmod0_A`).
+fn display_class_name(class_name: &str) -> &str {
+    if let Some(rest) = class_name.strip_prefix("__thawmod") {
+        if let Some((digits, original)) = rest.split_once('_') {
+            if !digits.is_empty()
+                && digits.chars().all(|character| character.is_ascii_digit())
+                && !original.is_empty()
+            {
+                return original;
+            }
+        }
+    }
+    class_name
+}
+
 /// Renders one class as JavaScript with its TypeScript-only syntax
 /// (annotations, `readonly`/`declare`/accessibility modifiers, type params)
 /// stripped, for evaluation by QuickJS. Decorators are dropped (applied
@@ -676,8 +694,10 @@ fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl) -> Option<String
     let mut class = declaration.class.clone();
     strip_class_decorators(&mut class);
     rewrite_instance_methods_to_bridges(&mut class, declaration.ident.sym.as_ref());
+    let mut class_ident = declaration.ident.clone();
+    class_ident.sym = display_class_name(declaration.ident.sym.as_ref()).into();
     let class_decl = swc_ecma_ast::ClassDecl {
-        ident: declaration.ident.clone(),
+        ident: class_ident,
         declare: false,
         class,
     };
@@ -722,9 +742,10 @@ fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl) -> Option<String
 fn class_value_js_script(declaration: &swc_ecma_ast::ClassDecl) -> Option<(String, String)> {
     let source = class_value_js_source(declaration)?;
     let class_name = declaration.ident.sym.as_ref();
+    let display = display_class_name(class_name);
     let global = format!("__thaw_class_value_{class_name}");
     let script = format!(
-        "globalThis[\"{global}\"] = (function () {{ try {{ {source}\nreturn {class_name}; }} catch (e) {{ return Function(); }} }})();"
+        "globalThis[\"{global}\"] = (function () {{ try {{ {source}\nreturn {display}; }} catch (e) {{ return Function(); }} }})();"
     );
     Some((global, script))
 }
