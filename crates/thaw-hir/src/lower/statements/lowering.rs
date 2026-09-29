@@ -1466,6 +1466,33 @@ impl<'a> FnLowerer<'a> {
                             vec![values],
                         );
                     }
+                    // A native `Map`/`Set` iterates its `[key, value]` entries
+                    // / values -- materialize the snapshot array (the same
+                    // conversion `[...map]`/`Array.from(set)` use) and fall
+                    // into the array case below.
+                    if let HirType::Map(key_type, value_type) = &values_type {
+                        let pair_type = HirType::Tuple(vec![
+                            key_type.as_ref().clone(),
+                            value_type.as_ref().clone(),
+                        ]);
+                        values = HirExpr::TypedClosure(
+                            HirType::Array(Box::new(pair_type)),
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_map_snapshot_entries".to_string())),
+                                vec![values],
+                            )),
+                        );
+                        values_type = self.infer_expr_type(&values)?;
+                    } else if let HirType::Set(set_element) = &values_type {
+                        values = HirExpr::TypedClosure(
+                            HirType::Array(set_element.clone()),
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_map_snapshot_keys".to_string())),
+                                vec![values],
+                            )),
+                        );
+                        values_type = self.infer_expr_type(&values)?;
+                    }
                     let (element, json_array) = match &values_type {
                         HirType::Array(element) => (element.as_ref().clone(), false),
                         HirType::Union(members)

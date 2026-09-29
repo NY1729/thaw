@@ -3828,13 +3828,28 @@ impl<'a> FnLowerer<'a> {
                 // A `new` whose callee is itself a dynamic value (`new (A as
                 // any)()`, a class value or npm constructor held in an `any`
                 // binding) -- construct through the realm's own `new`.
-                if !matches!(new_expr.callee.as_ref(), Expr::Ident(_)) {
+                let dynamic_callee = match new_expr.callee.as_ref() {
+                    // A constructor held in an `any`/dynamic binding
+                    // (`const C: any = SomeCtor; new C()`): construct through
+                    // the realm. An ordinary typed callee (a function/class
+                    // signature) was already handled above.
+                    Expr::Ident(ident) => {
+                        let name = self.resolve_binding(ident.sym.as_ref());
+                        self.scope.get(&name).is_some_and(|ty| {
+                            matches!(ty, HirType::JsValue | HirType::Dynamic | HirType::Json)
+                        })
+                    }
+                    _ => true,
+                };
+                if dynamic_callee {
                     let callee = self.lower_expr_with_expected_type(
                         new_expr.callee.as_ref(),
                         Some(&HirType::JsValue),
                     )?;
-                    if matches!(self.infer_expr_type(&callee)?, HirType::JsValue | HirType::Dynamic)
-                    {
+                    if matches!(
+                        self.infer_expr_type(&callee)?,
+                        HirType::JsValue | HirType::Dynamic | HirType::Json
+                    ) {
                         let args = new_expr.args.as_deref().unwrap_or_default();
                         let values = self.dynamic_call_args_json(args)?;
                         return Ok(HirExpr::Call(
