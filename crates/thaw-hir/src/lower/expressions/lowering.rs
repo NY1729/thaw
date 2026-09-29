@@ -711,6 +711,18 @@ impl<'a> FnLowerer<'a> {
                                 vec![HirExpr::Lit(HirLit::Str(global.to_string()))],
                             ))
                         }
+                        // A bare standard-library *constructor* used as a
+                        // value (`assert.throws(TypeError, ...)`,
+                        // `Object.getPrototypeOf(x) === Array.prototype`):
+                        // the realm has the real global. A `.prototype`/member
+                        // read is intercepted earlier; this covers a value
+                        // position.
+                        global if is_builtin_prototype_owner(global) => {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                vec![HirExpr::Lit(HirLit::Str(global.to_string()))],
+                            ))
+                        }
                         _ => {}
                     }
                 }
