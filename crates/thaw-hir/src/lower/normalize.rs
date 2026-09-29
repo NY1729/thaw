@@ -587,3 +587,455 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
     normalized.body = body;
     Ok(normalized)
 }
+
+/// True if a function's own body uses `this` -- the classic constructor
+/// shape (`function F(...) { this.x = ...; }`).
+fn constructor_function_uses_this(function: &swc_ecma_ast::Function) -> bool {
+    struct Finder(bool);
+    impl swc_ecma_visit::Visit for Finder {
+        fn visit_expr(&mut self, expr: &Expr) {
+            if matches!(expr, Expr::This(_)) {
+                self.0 = true;
+            }
+            expr.visit_children_with(self);
+        }
+        // A nested (non-arrow) function has its own `this`; a `this` inside
+        // it doesn't make the *enclosing* function a constructor. An arrow
+        // keeps the enclosing `this`, so it is still descended into.
+        fn visit_function(&mut self, _function: &swc_ecma_ast::Function) {}
+    }
+    let mut finder = Finder(false);
+    if let Some(body) = &function.body {
+        body.visit_with(&mut finder);
+    }
+    finder.0
+}
+
+/// The `(owner, on_prototype, name, right)` of an assignment expression whose
+/// target is `F.name` (static) or `F.prototype.name` (instance).
+fn constructor_assignment_target(expr: &Expr) -> Option<(Symbol, bool, Symbol, &Expr)> {
+    let Expr::Assign(assign) = expr else {
+        return None;
+    };
+    if assign.op != swc_ecma_ast::AssignOp::Assign {
+        return None;
+    }
+    let swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Member(member)) =
+        &assign.left
+    else {
+        return None;
+    };
+    let name: Symbol = match &member.prop {
+        swc_ecma_ast::MemberProp::Ident(ident) => ident.sym.to_string(),
+        _ => return None,
+    };
+    match member.obj.as_ref() {
+        Expr::Ident(owner) => (name != "prototype").then_some((
+            owner.sym.to_string(),
+            false,
+            name,
+            assign.right.as_ref(),
+        )),
+        Expr::Member(inner) => {
+            let Expr::Ident(owner) = inner.obj.as_ref() else {
+                return None;
+            };
+            if !matches!(&inner.prop, swc_ecma_ast::MemberProp::Ident(prop) if prop.sym == *"prototype")
+            {
+                return None;
+            }
+            Some((owner.sym.to_string(), true, name, assign.right.as_ref()))
+        }
+        _ => None,
+    }
+}
+
+fn ts_any_type() -> swc_ecma_ast::TsType {
+    use swc_ecma_ast::*;
+    TsType::TsKeywordType(TsKeywordType {
+        span: swc_common::DUMMY_SP,
+        kind: TsKeywordTypeKind::TsAnyKeyword,
+    })
+}
+
+/// A best-effort TS type for a field from its assigned RHS (a string/number/
+/// boolean literal, or `a || b`/`a + b`/a ternary of those). `None` means the
+/// caller uses `any`.
+fn inferred_field_type(
+    right: &Expr,
+    param_types: &HashMap<Symbol, swc_ecma_ast::TsType>,
+) -> Option<swc_ecma_ast::TsType> {
+    use swc_ecma_ast::*;
+    let keyword = |kind| {
+        Some(TsType::TsKeywordType(TsKeywordType {
+            span: swc_common::DUMMY_SP,
+            kind,
+        }))
+    };
+    match right {
+        Expr::Lit(Lit::Str(_)) => keyword(TsKeywordTypeKind::TsStringKeyword),
+        Expr::Lit(Lit::Num(_)) => keyword(TsKeywordTypeKind::TsNumberKeyword),
+        Expr::Lit(Lit::Bool(_)) => keyword(TsKeywordTypeKind::TsBooleanKeyword),
+        // `this.x = x` where `x` is a typed constructor parameter: reuse the
+        // parameter's own annotation as the field type.
+        Expr::Ident(ident) => param_types.get(&ident.sym.to_string()).cloned(),
+        Expr::Paren(paren) => inferred_field_type(&paren.expr, param_types),
+        Expr::Bin(bin) => inferred_field_type(&bin.left, param_types)
+            .or_else(|| inferred_field_type(&bin.right, param_types)),
+        Expr::Cond(cond) => inferred_field_type(&cond.cons, param_types)
+            .or_else(|| inferred_field_type(&cond.alt, param_types)),
+        Expr::TsAs(assertion) => inferred_field_type(&assertion.expr, param_types),
+        _ => None,
+    }
+}
+
+/// Collects the `this.<field>` names (and a best-effort type) a constructor
+/// body uses, excluding prototype-assigned method names. Any `this.p` read
+/// but never assigned becomes an `any` field, so a method that reads it still
+/// compiles.
+fn constructor_fields(
+    function: &swc_ecma_ast::Function,
+    methods: &std::collections::HashSet<Symbol>,
+    param_types: &HashMap<Symbol, swc_ecma_ast::TsType>,
+) -> Vec<(Symbol, swc_ecma_ast::TsType)> {
+    struct Collect<'a> {
+        methods: std::collections::HashSet<Symbol>,
+        param_types: &'a HashMap<Symbol, swc_ecma_ast::TsType>,
+        assigned: Vec<(Symbol, swc_ecma_ast::TsType)>,
+        read: Vec<Symbol>,
+    }
+    impl swc_ecma_visit::Visit for Collect<'_> {
+        fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
+            if let swc_ecma_ast::AssignTarget::Simple(
+                swc_ecma_ast::SimpleAssignTarget::Member(member),
+            ) = &assign.left
+            {
+                if let Expr::This(_) = member.obj.as_ref() {
+                    if let swc_ecma_ast::MemberProp::Ident(ident) = &member.prop {
+                        let name: Symbol = ident.sym.to_string();
+                        if !self.methods.contains(&name)
+                            && !self.assigned.iter().any(|(existing, _)| *existing == name)
+                        {
+                            let ty = inferred_field_type(&assign.right, self.param_types)
+                                .unwrap_or_else(ts_any_type);
+                            self.assigned.push((name, ty));
+                        }
+                    }
+                }
+            }
+            assign.visit_children_with(self);
+        }
+        fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
+            if let Expr::This(_) = member.obj.as_ref() {
+                if let swc_ecma_ast::MemberProp::Ident(ident) = &member.prop {
+                    self.read.push(ident.sym.to_string());
+                }
+            }
+            member.visit_children_with(self);
+        }
+    }
+    let mut collect = Collect {
+        methods: methods.clone(),
+        param_types,
+        assigned: Vec::new(),
+        read: Vec::new(),
+    };
+    function.visit_with(&mut collect);
+    for name in collect.read {
+        if !methods.contains(&name) && !collect.assigned.iter().any(|(existing, _)| *existing == name) {
+            collect.assigned.push((name, ts_any_type()));
+        }
+    }
+    collect.assigned
+}
+
+/// Converts a prototype-assigned RHS (a function expression or arrow) into a
+/// method's `Function`, or `None` if it isn't callable.
+fn rhs_function(right: &Expr) -> Option<swc_ecma_ast::Function> {
+    use swc_ecma_ast::*;
+    match right {
+        Expr::Fn(function) => Some((*function.function).clone()),
+        Expr::Arrow(arrow) => {
+            let params = arrow
+                .params
+                .iter()
+                .cloned()
+                .map(|pat| Param {
+                    span: swc_common::DUMMY_SP,
+                    decorators: Vec::new(),
+                    pat,
+                })
+                .collect();
+            let body = match arrow.body.as_ref() {
+                ArrowFunctionBody::FunctionBody(block) => Some(block.clone()),
+                ArrowFunctionBody::Expr(expr) => Some(FunctionBody {
+                    span: swc_common::DUMMY_SP,
+                    stmts: vec![Stmt::Return(ReturnStmt {
+                        span: swc_common::DUMMY_SP,
+                        arg: Some(expr.clone()),
+                    })],
+                }),
+            };
+            Some(Function {
+                params,
+                decorators: Vec::new(),
+                span: swc_common::DUMMY_SP,
+                ctxt: Default::default(),
+                body,
+                is_generator: arrow.is_generator,
+                is_async: arrow.is_async,
+                type_params: arrow.type_params.clone(),
+                return_type: arrow.return_type.clone(),
+                this_param: None,
+            })
+        }
+        Expr::Paren(paren) => rhs_function(&paren.expr),
+        _ => None,
+    }
+}
+
+/// Builds the class that replaces a constructor-function declaration.
+fn constructor_class(
+    function: &swc_ecma_ast::FnDecl,
+    assignments: &[(bool, Symbol, &Expr)],
+) -> Result<swc_ecma_ast::ClassDecl, String> {
+    use swc_ecma_ast::*;
+
+    let mut instance_methods = Vec::new();
+    let mut statics = Vec::new();
+    for (on_prototype, name, right) in assignments {
+        if *on_prototype {
+            instance_methods.push((name.clone(), *right));
+        } else {
+            statics.push((name.clone(), *right));
+        }
+    }
+    let method_names: std::collections::HashSet<Symbol> =
+        instance_methods.iter().map(|(name, _)| name.clone()).collect();
+    let mut param_types: HashMap<Symbol, TsType> = HashMap::new();
+    for parameter in &function.function.params {
+        if let Pat::Ident(binding) = &parameter.pat {
+            if let Some(annotation) = &binding.type_ann {
+                param_types.insert(
+                    binding.id.sym.to_string(),
+                    annotation.type_ann.as_ref().clone(),
+                );
+            }
+        }
+    }
+    let fields = constructor_fields(&function.function, &method_names, &param_types);
+
+    let property = |name: &Symbol| {
+        PropName::Ident(IdentName::new(name.as_str().into(), swc_common::DUMMY_SP))
+    };
+    let mut body: Vec<ClassMember> = Vec::new();
+    for (name, ty) in fields {
+        body.push(ClassMember::ClassProp(ClassProp {
+            span: swc_common::DUMMY_SP,
+            key: property(&name),
+            value: None,
+            type_ann: Some(Box::new(TsTypeAnn {
+                span: swc_common::DUMMY_SP,
+                type_ann: Box::new(ty),
+            })),
+            is_static: false,
+            decorators: Vec::new(),
+            accessibility: None,
+            is_abstract: false,
+            is_optional: false,
+            is_override: false,
+            readonly: false,
+            declare: false,
+            definite: false,
+        }));
+    }
+    body.push(ClassMember::Constructor(Constructor {
+        span: swc_common::DUMMY_SP,
+        ctxt: Default::default(),
+        key: property(&"constructor".to_string()),
+        params: function
+            .function
+            .params
+            .iter()
+            .cloned()
+            .map(ParamOrTsParamProp::Param)
+            .collect(),
+        body: function.function.body.clone(),
+        accessibility: None,
+        is_optional: false,
+    }));
+    for (name, right) in &instance_methods {
+        let Some(method_function) = rhs_function(right) else {
+            return Err(format!(
+                "constructor-function prototype member `{name}` is not a function"
+            ));
+        };
+        body.push(ClassMember::Method(ClassMethod {
+            span: swc_common::DUMMY_SP,
+            key: property(name),
+            function: Box::new(method_function),
+            kind: MethodKind::Method,
+            is_static: false,
+            accessibility: None,
+            is_abstract: false,
+            is_optional: false,
+            is_override: false,
+        }));
+    }
+    for (name, right) in &statics {
+        if let Some(function) = rhs_function(right) {
+            body.push(ClassMember::Method(ClassMethod {
+                span: swc_common::DUMMY_SP,
+                key: property(name),
+                function: Box::new(function),
+                kind: MethodKind::Method,
+                is_static: true,
+                accessibility: None,
+                is_abstract: false,
+                is_optional: false,
+                is_override: false,
+            }));
+        } else {
+            body.push(ClassMember::ClassProp(ClassProp {
+                span: swc_common::DUMMY_SP,
+                key: property(name),
+                value: Some(Box::new((**right).clone())),
+                type_ann: inferred_field_type(right, &param_types).map(|ty| {
+                    Box::new(TsTypeAnn {
+                        span: swc_common::DUMMY_SP,
+                        type_ann: Box::new(ty),
+                    })
+                }),
+                is_static: true,
+                decorators: Vec::new(),
+                accessibility: None,
+                is_abstract: false,
+                is_optional: false,
+                is_override: false,
+                readonly: false,
+                declare: false,
+                definite: false,
+            }));
+        }
+    }
+    Ok(ClassDecl {
+        ident: function.ident.clone(),
+        declare: false,
+        class: Box::new(Class {
+            span: swc_common::DUMMY_SP,
+            ctxt: Default::default(),
+            decorators: Vec::new(),
+            body,
+            super_class: None,
+            is_abstract: false,
+            type_params: None,
+            super_type_params: None,
+            implements: Vec::new(),
+        }),
+    })
+}
+
+/// Rewrites the classic constructor-function pattern into a class, so it
+/// reuses thaw's native class machinery (`this`, `new F()`,
+/// `instanceof F`, static dispatch) instead of failing on `this` in a plain
+/// function. Real trigger: test262's own harness (`Test262Error`).
+///
+/// Only *module-level* function declarations whose body uses `this` are
+/// converted; their `F.prototype.m = ...` / `F.s = ...` assignments (wherever
+/// they appear in the module) become instance methods / static members.
+pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String> {
+    use swc_ecma_ast::*;
+
+    // A function explicitly declared with a `this` parameter, or used via
+    // `.call`/`.apply`/`.bind`, is a call-with-receiver function, not a
+    // constructor -- leave it alone.
+    let rebound: std::collections::HashSet<Symbol> = {
+        struct Finder(std::collections::HashSet<Symbol>);
+        impl swc_ecma_visit::Visit for Finder {
+            fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
+                if let (Expr::Ident(object), swc_ecma_ast::MemberProp::Ident(property)) =
+                    (member.obj.as_ref(), &member.prop)
+                {
+                    if matches!(property.sym.as_ref(), "call" | "apply" | "bind") {
+                        self.0.insert(object.sym.to_string());
+                    }
+                }
+                member.visit_children_with(self);
+            }
+        }
+        let mut finder = Finder(std::collections::HashSet::new());
+        module.visit_with(&mut finder);
+        finder.0
+    };
+
+    let mut candidates: HashMap<Symbol, &FnDecl> = HashMap::new();
+    for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item {
+            let name = function.ident.sym.to_string();
+            if !function.function.is_async
+                && !function.function.is_generator
+                && function.function.body.is_some()
+                && function.function.this_param.is_none()
+                && !rebound.contains(&name)
+                && constructor_function_uses_this(&function.function)
+            {
+                candidates.insert(name, function);
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(module.clone());
+    }
+
+    let mut assignments: HashMap<Symbol, Vec<(usize, bool, Symbol, &Expr)>> = HashMap::new();
+    for (index, item) in module.body.iter().enumerate() {
+        let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = item else {
+            continue;
+        };
+        if let Some((owner, on_prototype, name, right)) = constructor_assignment_target(expr) {
+            if candidates.contains_key(&owner) {
+                assignments
+                    .entry(owner)
+                    .or_default()
+                    .push((index, on_prototype, name, right));
+            }
+        }
+    }
+
+    let mut class_for: HashMap<usize, ClassDecl> = HashMap::new();
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (index, item) in module.body.iter().enumerate() {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item else {
+            continue;
+        };
+        if !candidates.contains_key(function.ident.sym.as_ref()) {
+            continue;
+        }
+        let list = assignments
+            .remove(function.ident.sym.as_ref())
+            .unwrap_or_default();
+        for (item_index, ..) in &list {
+            consumed.insert(*item_index);
+        }
+        let refs: Vec<(bool, Symbol, &Expr)> = list
+            .iter()
+            .map(|(_, on_prototype, name, right)| (*on_prototype, name.clone(), *right))
+            .collect();
+        class_for.insert(index, constructor_class(function, &refs)?);
+    }
+
+    let mut body = Vec::new();
+    for (index, item) in module.body.iter().enumerate() {
+        if let Some(class) = class_for.remove(&index) {
+            body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))));
+            continue;
+        }
+        if consumed.contains(&index) {
+            continue;
+        }
+        body.push(item.clone());
+    }
+    let mut normalized = module.clone();
+    normalized.body = body;
+    Ok(normalized)
+}

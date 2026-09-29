@@ -157,6 +157,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_top_level_class_expressions(&normalized)?;
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
+    let normalized = normalize_constructor_functions(&normalized)?;
     let normalized = specialize_named_promise_rejection_callbacks(&normalized)?;
     let mut program = lower_normalized_module(&normalized)?;
     // `HirType::Bytes` is a lowering-time distinction only; nothing past
