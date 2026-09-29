@@ -176,6 +176,12 @@
     },
     {
       "group": "Object",
+      "name": "class-union-field-bridge",
+      "expect": "matched",
+      "source": "class A { u: number | string = \"x\"; setU(): void { this.u = 7; } touch(): void {} } function main(): void { const a: any = new (A as any)(); const before = a.u; a.touch(); console.log(before === a.u, typeof a.u); a.setU(); console.log(a.u); }"
+    },
+    {
+      "group": "Object",
       "name": "class-name",
       "expect": "matched",
       "source": "class Animal { name: string = \"a\"; } function main(): void { console.log(Animal.name, Animal.prototype.constructor.name); }"
