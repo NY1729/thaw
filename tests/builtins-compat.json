@@ -92,6 +92,18 @@
     },
     {
       "group": "Object",
+      "name": "class-prototype-method-via-any",
+      "expect": "matched",
+      "source": "class A { greet(): string { return \"hello\"; } } function main(): void { const p: any = A.prototype; console.log(typeof p.greet); }"
+    },
+    {
+      "group": "Object",
+      "name": "class-prototype-inherited-method-call",
+      "expect": "matched",
+      "source": "class A { greet(): string { return \"hello\"; } } function main(): void { const p: any = A.prototype; const o: any = Object.create(p); console.log(o.greet()); }"
+    },
+    {
+      "group": "Object",
       "name": "Object.defineProperty",
       "expect": "matched",
       "source": "function main(): void { const o: any = {}; Object.defineProperty(o,\"x\",{value:5,enumerable:true}); console.log(o.x); }"
