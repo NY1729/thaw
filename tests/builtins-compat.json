@@ -465,7 +465,7 @@
     {
       "group": "Number",
       "name": "Number.toFixed-round",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "function main(): void { console.log((2.5).toFixed(0), (2.05).toFixed(1), (1.005).toFixed(2)); }"
     },
     {
@@ -615,7 +615,7 @@
     {
       "group": "Date",
       "name": "Date.compare",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "function main(): void { console.log(new Date(0) < new Date(1), new Date(0).getTime() === 0); }"
     },
     {

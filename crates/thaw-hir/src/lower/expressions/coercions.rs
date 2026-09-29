@@ -1146,6 +1146,16 @@ impl<'a> FnLowerer<'a> {
                 vec![value],
             )))),
             HirType::Object(fields) => {
+                // A `Date` is `{ timestamp }`; `ToNumber(date)` is its
+                // `valueOf()` (the timestamp), so `date1 < date2` and
+                // `date1 - date2` order by time.
+                if fields.len() == 1 && fields[0].0 == "timestamp" && fields[0].1 == HirType::F64 {
+                    return Ok(HirExpr::PropAccess(
+                        Box::new(value),
+                        HirType::Object(fields),
+                        "timestamp".to_string(),
+                    ));
+                }
                 if let Some(result) =
                     self.invoke_object_to_primitive(value.clone(), &fields, "number")?
                 {
