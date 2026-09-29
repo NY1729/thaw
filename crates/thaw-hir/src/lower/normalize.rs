@@ -1001,6 +1001,111 @@ fn constructor_class(
     })
 }
 
+/// True if `statement` always transfers control away (a `return`/`throw` on
+/// every path) -- a conservative AST-level approximation, enough to decide
+/// whether a function body can fall off its end.
+fn ast_statement_terminates(statement: &swc_ecma_ast::Stmt) -> bool {
+    use swc_ecma_ast::*;
+    match statement {
+        Stmt::Return(_) | Stmt::Throw(_) => true,
+        Stmt::Block(block) => ast_block_terminates(&block.stmts),
+        Stmt::If(if_statement) => {
+            if_statement.alt.is_some()
+                && ast_statement_terminates(&if_statement.cons)
+                && ast_statement_terminates(if_statement.alt.as_ref().unwrap())
+        }
+        Stmt::Switch(switch) => {
+            switch.cases.iter().any(|case| case.test.is_none())
+                && switch
+                    .cases
+                    .iter()
+                    .all(|case| ast_block_terminates(&case.cons))
+        }
+        Stmt::Try(try_statement) => {
+            ast_block_terminates(&try_statement.block.stmts)
+                && try_statement.handler.as_ref().is_none_or(|handler| {
+                    ast_block_terminates(&handler.body.stmts)
+                })
+        }
+        Stmt::While(while_statement) => {
+            matches!(while_statement.test.as_ref(), Expr::Lit(Lit::Bool(b)) if b.value)
+        }
+        _ => false,
+    }
+}
+
+fn ast_block_terminates(statements: &[swc_ecma_ast::Stmt]) -> bool {
+    statements.iter().any(ast_statement_terminates)
+}
+
+/// True if the block contains a `return <value>` somewhere (so the function
+/// is value-returning, not `void`).
+fn ast_block_has_value_return(statements: &[swc_ecma_ast::Stmt]) -> bool {
+    use swc_ecma_ast::*;
+    statements.iter().any(|statement| match statement {
+        Stmt::Return(ret) => ret.arg.is_some(),
+        Stmt::Block(block) => ast_block_has_value_return(&block.stmts),
+        Stmt::If(if_statement) => {
+            ast_block_has_value_return(std::slice::from_ref(&if_statement.cons))
+                || if_statement
+                    .alt
+                    .as_ref()
+                    .is_some_and(|alt| ast_block_has_value_return(std::slice::from_ref(alt)))
+        }
+        Stmt::Switch(switch) => switch
+            .cases
+            .iter()
+            .any(|case| ast_block_has_value_return(&case.cons)),
+        Stmt::Try(try_statement) => {
+            ast_block_has_value_return(&try_statement.block.stmts)
+                || try_statement
+                    .handler
+                    .as_ref()
+                    .is_some_and(|handler| ast_block_has_value_return(&handler.body.stmts))
+        }
+        Stmt::While(while_statement) => ast_block_has_value_return(std::slice::from_ref(&*while_statement.body)),
+        Stmt::For(for_statement) => ast_block_has_value_return(std::slice::from_ref(&*for_statement.body)),
+        Stmt::ForIn(for_in) => ast_block_has_value_return(std::slice::from_ref(&*for_in.body)),
+        Stmt::ForOf(for_of) => ast_block_has_value_return(std::slice::from_ref(&*for_of.body)),
+        Stmt::Labeled(labeled) => ast_block_has_value_return(std::slice::from_ref(&labeled.body)),
+        _ => false,
+    })
+}
+
+/// Gives a function without a declared return type that can fall through an
+/// explicit trailing `return undefined;`, so a *value-returning* function's
+/// inferred return type becomes `T | undefined` (matching JavaScript's
+/// implicit `undefined`) instead of failing codegen's "does not return a value
+/// on all paths". A `void` function, one that already returns on all paths, a
+/// generator, or an async function is left alone.
+pub fn normalize_implicit_returns(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    struct Rewriter;
+    impl swc_ecma_visit::VisitMut for Rewriter {
+        fn visit_mut_function(&mut self, function: &mut Function) {
+            function.visit_mut_children_with(self);
+            if function.return_type.is_some() || function.is_generator || function.is_async {
+                return;
+            }
+            let Some(body) = &mut function.body else {
+                return;
+            };
+            if ast_block_has_value_return(&body.stmts) && !ast_block_terminates(&body.stmts) {
+                body.stmts.push(Stmt::Return(ReturnStmt {
+                    span: swc_common::DUMMY_SP,
+                    arg: Some(Box::new(Expr::Ident(Ident::new_no_ctxt(
+                        "undefined".into(),
+                        swc_common::DUMMY_SP,
+                    )))),
+                }));
+            }
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Rewriter);
+    module
+}
+
 /// Rewrites the classic constructor-function pattern into a class, so it
 /// reuses thaw's native class machinery (`this`, `new F()`,
 /// `instanceof F`, static dispatch) instead of failing on `this` in a plain
