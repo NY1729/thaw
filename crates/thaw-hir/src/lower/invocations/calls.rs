@@ -2039,6 +2039,34 @@ impl<'a> FnLowerer<'a> {
         }
 
         if let Some(params) = &param_types {
+            // JavaScript accepts fewer arguments than parameters (a missing
+            // one is `undefined`). Pad the missing trailing parameters that
+            // can hold `undefined` (`any`/optional) so a shorter call matches
+            // -- e.g. test262's `verifyProperty(obj, name, desc, strict)`
+            // called with three. A concretely typed parameter still requires
+            // its argument.
+            if signature.as_ref().is_some_and(|sig| {
+                sig.generic_type_params.is_empty()
+                    && sig.variadic.is_none()
+                    && sig.native_rest.is_none()
+            }) {
+                for ty in params[lowered_arguments.len().min(params.len())..].iter() {
+                    if matches!(
+                        ty,
+                        HirType::Json
+                            | HirType::Dynamic
+                            | HirType::JsValue
+                            | HirType::Optional(_)
+                            | HirType::Nullable(_)
+                            | HirType::Nullish(_)
+                            | HirType::Undefined
+                    ) {
+                        lowered_arguments.push(HirExpr::Lit(HirLit::Undefined));
+                    } else {
+                        break;
+                    }
+                }
+            }
             let variadic = signature.as_ref().and_then(|sig| sig.variadic.as_ref());
             let generic_optional = signature.as_ref().filter(|signature| {
                 !signature.generic_type_params.is_empty()

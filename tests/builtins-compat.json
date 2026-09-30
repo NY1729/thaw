@@ -236,6 +236,12 @@
     },
     {
       "group": "Object",
+      "name": "function-arity-omitted",
+      "expect": "matched",
+      "source": "function f(a: any, b: any, c: any, d: any): string { return String(a) + String(d); } function main(): void { console.log(f(1, 2, 3)); }"
+    },
+    {
+      "group": "Object",
       "name": "constructor-function-expression",
       "expect": "matched",
       "source": "var Point = function (x: number, y: number) { this.x = x; this.y = y; }; Point.prototype.norm = function (): number { return this.x + this.y; }; function main(): void { const p = new Point(1, 2); console.log(p instanceof Point, p.norm()); }"
