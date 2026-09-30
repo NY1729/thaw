@@ -1072,6 +1072,77 @@ fn ast_block_has_value_return(statements: &[swc_ecma_ast::Stmt]) -> bool {
     })
 }
 
+/// True if `function`'s body (including nested arrows, which inherit it, but
+/// not nested non-arrow functions, which have their own) references
+/// `arguments`.
+fn function_references_arguments(function: &swc_ecma_ast::Function) -> bool {
+    struct Finder(bool);
+    impl swc_ecma_visit::Visit for Finder {
+        fn visit_expr(&mut self, expr: &Expr) {
+            if matches!(expr, Expr::Ident(ident) if ident.sym == *"arguments") {
+                self.0 = true;
+            }
+            expr.visit_children_with(self);
+        }
+        fn visit_function(&mut self, _function: &swc_ecma_ast::Function) {}
+    }
+    let mut finder = Finder(false);
+    if let Some(body) = &function.body {
+        body.visit_with(&mut finder);
+    }
+    finder.0
+}
+
+/// `const arguments: any[] = [p1, p2, ...];` for a function whose body uses
+/// `arguments` -- an approximation binding it to the declared parameters (JS
+/// `arguments` also holds extra args, which thaw's fixed-arity functions
+/// cannot receive). `None` when a parameter is itself named `arguments` or
+/// isn't a simple identifier.
+fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Stmt> {
+    use swc_ecma_ast::*;
+    let mut elements = Vec::new();
+    for parameter in &function.params {
+        let Pat::Ident(binding) = &parameter.pat else {
+            return None;
+        };
+        if binding.id.sym == *"arguments" {
+            return None;
+        }
+        elements.push(Some(ExprOrSpread {
+            spread: None,
+            expr: Box::new(Expr::Ident(binding.id.clone())),
+        }));
+    }
+    let any = || TsType::TsKeywordType(TsKeywordType {
+        span: swc_common::DUMMY_SP,
+        kind: TsKeywordTypeKind::TsAnyKeyword,
+    });
+    Some(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+        span: swc_common::DUMMY_SP,
+        ctxt: Default::default(),
+        kind: VarDeclKind::Const,
+        declare: false,
+        decls: vec![VarDeclarator {
+            span: swc_common::DUMMY_SP,
+            name: Pat::Ident(BindingIdent {
+                id: Ident::new_no_ctxt("arguments".into(), swc_common::DUMMY_SP),
+                type_ann: Some(Box::new(TsTypeAnn {
+                    span: swc_common::DUMMY_SP,
+                    type_ann: Box::new(TsType::TsArrayType(TsArrayType {
+                        span: swc_common::DUMMY_SP,
+                        elem_type: Box::new(any()),
+                    })),
+                })),
+            }),
+            init: Some(Box::new(Expr::Array(ArrayLit {
+                span: swc_common::DUMMY_SP,
+                elems: elements,
+            }))),
+            definite: false,
+        }],
+    }))))
+}
+
 /// Gives a function without a declared return type that can fall through an
 /// explicit trailing `return undefined;`, so a *value-returning* function's
 /// inferred return type becomes `T | undefined` (matching JavaScript's
@@ -1084,6 +1155,13 @@ pub fn normalize_implicit_returns(module: &Module) -> Module {
     impl swc_ecma_visit::VisitMut for Rewriter {
         fn visit_mut_function(&mut self, function: &mut Function) {
             function.visit_mut_children_with(self);
+            if function_references_arguments(function) {
+                if let Some(binding) = arguments_binding(function) {
+                    if let Some(body) = &mut function.body {
+                        body.stmts.insert(0, binding);
+                    }
+                }
+            }
             if function.return_type.is_some() || function.is_generator || function.is_async {
                 return;
             }
