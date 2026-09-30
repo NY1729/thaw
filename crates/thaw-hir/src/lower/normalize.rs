@@ -838,6 +838,7 @@ fn constructor_class(
     function: &swc_ecma_ast::FnDecl,
     assignments: &[(bool, Symbol, &Expr)],
     is_constructor: bool,
+    prototype_replacement: Option<&Expr>,
     functions: &HashMap<Symbol, &swc_ecma_ast::Function>,
 ) -> Result<swc_ecma_ast::ClassDecl, String> {
     use swc_ecma_ast::*;
@@ -982,6 +983,78 @@ fn constructor_class(
                 declare: false,
                 definite: false,
             }));
+        }
+    }
+    // `F.prototype = { m() {...}, x: 1 }` -- fold the object literal's
+    // identifier-keyed members into the class as instance methods/fields
+    // (numeric/string keys and a non-literal RHS are left unsupported).
+    if let Some(Expr::Object(object)) = prototype_replacement {
+        for prop in &object.props {
+            let PropOrSpread::Prop(prop) = prop else {
+                continue;
+            };
+            match prop.as_ref() {
+                Prop::Method(method) => {
+                    let PropName::Ident(key) = &method.key else {
+                        continue;
+                    };
+                    let mut method_function = (*method.function).clone();
+                    make_params_default_undefined(&mut method_function.params);
+                    body.push(ClassMember::Method(ClassMethod {
+                        span: swc_common::DUMMY_SP,
+                        key: PropName::Ident(key.clone()),
+                        function: Box::new(method_function),
+                        kind: MethodKind::Method,
+                        is_static: false,
+                        accessibility: None,
+                        is_abstract: false,
+                        is_optional: false,
+                        is_override: false,
+                    }));
+                }
+                Prop::KeyValue(pair) => {
+                    let PropName::Ident(key) = &pair.key else {
+                        continue;
+                    };
+                    // `{ greet: function () {...} }` is a method, not a field.
+                    if let Some(mut method_function) = resolve_function(&pair.value) {
+                        make_params_default_undefined(&mut method_function.params);
+                        body.push(ClassMember::Method(ClassMethod {
+                            span: swc_common::DUMMY_SP,
+                            key: PropName::Ident(key.clone()),
+                            function: Box::new(method_function),
+                            kind: MethodKind::Method,
+                            is_static: false,
+                            accessibility: None,
+                            is_abstract: false,
+                            is_optional: false,
+                            is_override: false,
+                        }));
+                        continue;
+                    }
+                    let ty = inferred_field_type(&pair.value, &param_types)
+                        .unwrap_or_else(ts_any_type);
+                    body.push(ClassMember::ClassProp(ClassProp {
+                        span: swc_common::DUMMY_SP,
+                        key: PropName::Ident(key.clone()),
+                        value: Some(pair.value.clone()),
+                        type_ann: Some(Box::new(TsTypeAnn {
+                            span: swc_common::DUMMY_SP,
+                            type_ann: Box::new(ty),
+                        })),
+                        is_static: false,
+                        decorators: Vec::new(),
+                        accessibility: None,
+                        is_abstract: false,
+                        is_optional: false,
+                        is_override: false,
+                        readonly: false,
+                        declare: false,
+                        definite: false,
+                    }));
+                }
+                _ => {}
+            }
         }
     }
     Ok(ClassDecl {
@@ -1184,6 +1257,28 @@ pub fn normalize_implicit_returns(module: &Module) -> Module {
     module
 }
 
+/// `(owner, object)` for a whole-prototype assignment `F.prototype = <expr>`.
+fn constructor_prototype_replacement(expr: &Expr) -> Option<(Symbol, &Expr)> {
+    let Expr::Assign(assign) = expr else {
+        return None;
+    };
+    if assign.op != swc_ecma_ast::AssignOp::Assign {
+        return None;
+    }
+    let swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Member(member)) =
+        &assign.left
+    else {
+        return None;
+    };
+    let Expr::Ident(owner) = member.obj.as_ref() else {
+        return None;
+    };
+    if !matches!(&member.prop, swc_ecma_ast::MemberProp::Ident(prop) if prop.sym == *"prototype") {
+        return None;
+    }
+    Some((owner.sym.to_string(), assign.right.as_ref()))
+}
+
 /// `(name, function)` for a single-declarator `var F = function () {...}`
 /// binding, else `None`.
 fn var_decl_function(var: &swc_ecma_ast::VarDecl) -> Option<(Symbol, &swc_ecma_ast::Function)> {
@@ -1236,6 +1331,7 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
     // function can be recognized as a namespace (`assert`) even without
     // `this`.
     let mut assignments: HashMap<Symbol, Vec<(usize, bool, Symbol, &Expr)>> = HashMap::new();
+    let mut prototype_replacements: HashMap<Symbol, (usize, &Expr)> = HashMap::new();
     for (index, item) in module.body.iter().enumerate() {
         let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = item else {
             continue;
@@ -1245,6 +1341,8 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
                 .entry(owner)
                 .or_default()
                 .push((index, on_prototype, name, right));
+        } else if let Some((owner, object)) = constructor_prototype_replacement(expr) {
+            prototype_replacements.insert(owner, (index, object));
         }
     }
 
@@ -1271,8 +1369,11 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
             continue;
         }
         let uses_this = constructor_function_uses_this(function);
-        if uses_this || assignments.contains_key(&name) {
-            candidates.insert(name, uses_this);
+        // A whole-prototype assignment (`Con.prototype = {...}`) also marks a
+        // constructor, even without `this`.
+        let is_constructor = uses_this || prototype_replacements.contains_key(&name);
+        if is_constructor || assignments.contains_key(&name) {
+            candidates.insert(name, is_constructor);
         }
     }
     if candidates.is_empty() {
@@ -1319,6 +1420,13 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
         for (item_index, ..) in &list {
             consumed.insert(*item_index);
         }
+        let replacement_object = match prototype_replacements.remove(&name) {
+            Some((replacement_index, object)) => {
+                consumed.insert(replacement_index);
+                Some(object)
+            }
+            None => None,
+        };
         let refs: Vec<(bool, Symbol, &Expr)> = list
             .iter()
             .map(|(_, on_prototype, member, right)| (*on_prototype, member.clone(), *right))
@@ -1333,7 +1441,13 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
         };
         class_for.insert(
             index,
-            constructor_class(&declaration, &refs, *is_constructor, &functions)?,
+            constructor_class(
+                &declaration,
+                &refs,
+                *is_constructor,
+                replacement_object,
+                &functions,
+            )?,
         );
     }
 
