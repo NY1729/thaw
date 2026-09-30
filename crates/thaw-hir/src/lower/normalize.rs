@@ -1145,6 +1145,45 @@ fn ast_block_has_value_return(statements: &[swc_ecma_ast::Stmt]) -> bool {
     })
 }
 
+/// Gives a module-level `var x;`/`let x;` (no initializer) an
+/// `: any = undefined` type and value, so it can be declared and assigned
+/// later (real trigger: test262's `testTypedArray.js` `var makeIterable;`).
+/// A `const` without an initializer stays an error.
+pub fn normalize_uninitialized_globals(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    let mut normalized = module.clone();
+    for item in &mut normalized.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) = item else {
+            continue;
+        };
+        if var.kind == VarDeclKind::Const {
+            continue;
+        }
+        for declarator in &mut var.decls {
+            if declarator.init.is_some() {
+                continue;
+            }
+            let Pat::Ident(binding) = &mut declarator.name else {
+                continue;
+            };
+            if binding.type_ann.is_none() {
+                binding.type_ann = Some(Box::new(TsTypeAnn {
+                    span: swc_common::DUMMY_SP,
+                    type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                        span: swc_common::DUMMY_SP,
+                        kind: TsKeywordTypeKind::TsAnyKeyword,
+                    })),
+                }));
+            }
+            declarator.init = Some(Box::new(Expr::Ident(Ident::new_no_ctxt(
+                "undefined".into(),
+                swc_common::DUMMY_SP,
+            ))));
+        }
+    }
+    normalized
+}
+
 /// True if `function`'s body (including nested arrows, which inherit it, but
 /// not nested non-arrow functions, which have their own) references
 /// `arguments`.
