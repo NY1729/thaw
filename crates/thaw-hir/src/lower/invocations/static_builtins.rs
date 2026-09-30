@@ -716,6 +716,81 @@ impl<'a> FnLowerer<'a> {
                             };
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        // A `Json`/`any` target with a *dynamic* key
+                        // (`Object.defineProperty(o, k, { value: ... })`):
+                        // write the descriptor's `value` through the dynamic
+                        // object path (only `value` is modelled; accessor
+                        // descriptors are ignored).
+                        let dynamic_target = self.lower_expr(target.expr.as_ref())?;
+                        let dynamic_target_type = self.infer_expr_type(&dynamic_target)?;
+                        if matches!(
+                            dynamic_target_type,
+                            HirType::Json | HirType::Dictionary(_)
+                        ) {
+                            if let Expr::Object(descriptor_object) = descriptor.expr.as_ref() {
+                                let descriptor_value = descriptor_object.props.iter().find_map(
+                                    |prop| match prop {
+                                        PropOrSpread::Prop(prop) => match prop.as_ref() {
+                                            Prop::KeyValue(pair)
+                                                if matches!(&pair.key, PropName::Ident(key) if key.sym == *"value") =>
+                                            {
+                                                Some(pair.value.clone())
+                                            }
+                                            _ => None,
+                                        },
+                                        _ => None,
+                                    },
+                                );
+                                let key_value = self.lower_expr(key.expr.as_ref())?;
+                                let key_value = self.coerce_primitive_to_string(key_value)?;
+                                let value = match descriptor_value {
+                                    Some(value) => {
+                                        let value = self.lower_expr(&value)?;
+                                        self.coerce_to_declared(&HirType::Json, value)?
+                                    }
+                                    None => self.coerce_to_declared(
+                                        &HirType::Json,
+                                        HirExpr::Lit(HirLit::Undefined),
+                                    )?,
+                                };
+                                let set = HirExpr::JsonSet(
+                                    Box::new(dynamic_target.clone()),
+                                    Box::new(key_value),
+                                    Box::new(value),
+                                    HirType::Json,
+                                    false,
+                                );
+                                let (result, return_type) = if object.sym == *"Reflect" {
+                                    (HirExpr::Lit(HirLit::Bool(true)), HirType::Bool)
+                                } else {
+                                    (dynamic_target, dynamic_target_type.clone())
+                                };
+                                let body = HirExpr::Block(vec![
+                                    HirStmt::Expr(set),
+                                    HirStmt::Return(Some(result)),
+                                ]);
+                                let mut referenced = BTreeSet::new();
+                                collect_referenced_bindings(&body, &mut referenced);
+                                let captures = referenced
+                                    .into_iter()
+                                    .filter_map(|captured| {
+                                        self.scope
+                                            .get(&captured)
+                                            .cloned()
+                                            .map(|ty| HirParam { name: captured, ty })
+                                    })
+                                    .collect();
+                                return Ok(HirExpr::Call(
+                                    Box::new(HirExpr::Lambda(
+                                        captures,
+                                        Vec::new(),
+                                        return_type,
+                                        Box::new(body),
+                                    )),
+                                    Vec::new(),
+                                ));
+                            }
+                        }
                         let Expr::Lit(Lit::Str(key)) = key.expr.as_ref() else {
                             return Err(
                                 "`Object.defineProperty` currently requires a string-literal key"
