@@ -236,6 +236,12 @@
     },
     {
       "group": "Object",
+      "name": "object-defineproperty-dynamic-key",
+      "expect": "matched",
+      "source": "function main(): void { const o: any = {}; const k = \"x\"; Object.defineProperty(o, k, { value: 7, enumerable: true }); console.log(o.x); }"
+    },
+    {
+      "group": "Object",
       "name": "constructor-prototype-replacement",
       "expect": "matched",
       "source": "var Con = function () {}; Con.prototype = { greet: function (): string { return \"hi\"; }, tag: \"T\" }; function main(): void { const c = new Con(); console.log(c.greet(), c.tag, c instanceof Con); }"
