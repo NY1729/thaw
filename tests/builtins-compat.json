@@ -236,6 +236,12 @@
     },
     {
       "group": "Object",
+      "name": "function-arguments-object",
+      "expect": "matched",
+      "source": "function f(a: any, b: any): string { return String(arguments[0]) + String(arguments[1]) + String(arguments.length); } function main(): void { console.log(f(7, 8)); }"
+    },
+    {
+      "group": "Object",
       "name": "function-arity-omitted",
       "expect": "matched",
       "source": "function f(a: any, b: any, c: any, d: any): string { return String(a) + String(d); } function main(): void { console.log(f(1, 2, 3)); }"
