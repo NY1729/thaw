@@ -236,6 +236,12 @@
     },
     {
       "group": "Object",
+      "name": "uninitialized-global",
+      "expect": "matched",
+      "source": "var makeIterable; makeIterable = function (x: any): any { return x + 1; }; function main(): void { if (makeIterable) { console.log(makeIterable(5)); } }"
+    },
+    {
+      "group": "Object",
       "name": "object-defineproperty-dynamic-key",
       "expect": "matched",
       "source": "function main(): void { const o: any = {}; const k = \"x\"; Object.defineProperty(o, k, { value: 7, enumerable: true }); console.log(o.x); }"
