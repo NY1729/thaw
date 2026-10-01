@@ -24,13 +24,29 @@ fn inline_triple_slash_references(
     source: &str,
     visited: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<String, String> {
+    let namespace = export_as_namespace_name(source)?;
+    let canonical_entry = entry_path
+        .canonicalize()
+        .unwrap_or_else(|_| entry_path.to_path_buf());
+    visited.insert(canonical_entry.clone());
+    inline_triple_slash_references_inner(
+        entry_path, source, &canonical_entry, namespace.as_deref(), visited,
+    )
+}
+
+fn inline_triple_slash_references_inner(
+    current_path: &Path,
+    source: &str,
+    canonical_entry: &Path,
+    namespace: Option<&str>,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<String, String> {
     use thaw_parser::ast::{Decl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let namespace = export_as_namespace_name(source)?;
     let mut output = String::new();
     for reference in triple_slash_reference_paths(source) {
-        let Some(target_path) = entry_path
+        let Some(target_path) = current_path
             .parent()
             .map(|dir| dir.join(&reference))
             .filter(|path| path.is_file())
@@ -51,14 +67,25 @@ fn inline_triple_slash_references(
         })?;
         let (referenced_module, source_map) =
             thaw_parser::parse_declarations_with_source_map(&referenced_source)?;
-        let canonical_entry = entry_path
-            .canonicalize()
-            .unwrap_or_else(|_| entry_path.to_path_buf());
         for item in &referenced_module.body {
             let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
+                // Referenced files also carry ordinary declarations. Their
+                // source files disappear after flattening, so preserve the
+                // original declarations alongside module augmentations.
+                if matches!(item, ModuleItem::Stmt(Stmt::Decl(_))
+                    | ModuleItem::ModuleDecl(thaw_parser::ast::ModuleDecl::ExportDecl(_))) {
+                    output.push('\n');
+                    output.push_str(&source_map.span_to_snippet(item.span()).map_err(|error| {
+                        format!("failed to read referenced declaration: {error:?}")
+                    })?);
+                }
                 continue;
             };
             let TsModuleName::Str(target) = &module_decl.id else {
+                output.push('\n');
+                output.push_str(&source_map.span_to_snippet(item.span()).map_err(|error| {
+                    format!("failed to read referenced namespace: {error:?}")
+                })?);
                 continue;
             };
             let Some(target_specifier) = target.value.as_str() else {
@@ -84,7 +111,7 @@ fn inline_triple_slash_references(
                 // to merge it into has nothing sensible to attach to;
                 // drop it rather than leaving a dangling, unresolvable
                 // reference to a namespace that was never declared.
-                if let Some(namespace) = &namespace {
+                if let Some(namespace) = namespace {
                     output.push_str(&format!("\ndeclare namespace {namespace} {{\n"));
                     for snippet in &snippets {
                         output.push_str(snippet);
@@ -104,9 +131,11 @@ fn inline_triple_slash_references(
         // A referenced file can itself carry further references (not
         // exercised by any package tested so far, but the DefinitelyTyped
         // convention allows it).
-        output.push_str(&inline_triple_slash_references(
+        output.push_str(&inline_triple_slash_references_inner(
             &target_path,
             &referenced_source,
+            canonical_entry,
+            namespace,
             visited,
         )?);
     }
@@ -118,18 +147,34 @@ fn inline_triple_slash_references(
 /// per the TS convention this follows, only recognized at the very top of
 /// the file), so this scans the raw text rather than the AST.
 fn triple_slash_reference_paths(source: &str) -> Vec<String> {
-    source
-        .lines()
-        .take_while(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("///") || trimmed.is_empty()
-        })
-        .filter_map(|line| {
-            let start = line.find("path=\"")? + "path=\"".len();
-            let end = start + line[start..].find('"')?;
-            Some(line[start..end].to_string())
-        })
-        .collect()
+    let mut paths = Vec::new();
+    let mut in_block_comment = false;
+    for line in source.lines() {
+        let mut rest = line.trim_start();
+        loop {
+            if in_block_comment {
+                let Some(end) = rest.find("*/") else { break };
+                rest = rest[end + 2..].trim_start();
+                in_block_comment = false;
+            }
+            if rest.is_empty() { break; }
+            if rest.starts_with("///") {
+                if let Some(start) = rest.find("path=\"").map(|index| index + "path=\"".len())
+                    && let Some(end) = rest[start..].find('"') {
+                    paths.push(rest[start..start + end].to_string());
+                }
+                break;
+            }
+            if rest.starts_with("//") { break; }
+            if let Some(after_open) = rest.strip_prefix("/*") {
+                in_block_comment = true;
+                rest = after_open;
+                continue;
+            }
+            return paths;
+        }
+    }
+    paths
 }
 
 /// `export as namespace <name>;` -- the name a `.d.ts` file's own exported
@@ -1995,26 +2040,43 @@ fn callable_const_declarations(
 /// an inline `export default function <ident>(...) {}`) and keeps that
 /// real `<ident>`, which need not equal the literal string `"default"`.
 fn declared_function_name_range(snippet: &str) -> Option<(usize, usize)> {
-    // Variable keywords cover callable bindings (`callable_const_
-    // declaration_snippet`, e.g. zod v3's `declare const objectType:
-    // (...) => ...;`) -- for the interface-backed shape, whose snippet
-    // concatenates the const's own declaration with its referenced
-    // interface's, the variable keyword appears before that interface's own
-    // `"interface "`, so this still renames the callable binding name
-    // (the one actually being re-exported), not the interface's.
-    let Some((keyword_index, keyword)) = ["function ", "class ", "interface ", "const ", "let ", "var "]
-        .into_iter()
-        .filter_map(|keyword| snippet.find(keyword).map(|index| (index, keyword)))
-        .min_by_key(|(index, _)| *index)
-    else {
-        return None;
-    };
-    let name_start = keyword_index + keyword.len();
-    let name_end = snippet[name_start..]
-        .find(|character: char| !(character.is_alphanumeric() || character == '_' || character == '$'))
-        .map(|offset| name_start + offset)
-        .unwrap_or(snippet.len());
-    (name_start != name_end).then_some((name_start, name_end))
+    use thaw_parser::ast::{Decl, DefaultDecl, ModuleDecl, ModuleItem, Pat, Stmt};
+    use thaw_parser::common::Spanned;
+
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(snippet).ok()?;
+    // The first declaration is the callable binding, possibly followed by
+    // an interface supplying its signature. Use its AST identifier span so
+    // whitespace/comments and keyword text in comments cannot move it.
+    let ident_span = module.body.iter().find_map(|item| {
+        let declaration = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+            ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default)) => {
+                return match &default.decl {
+                    DefaultDecl::Fn(function) => function.ident.as_ref().map(|ident| ident.span()),
+                    DefaultDecl::Class(class) => class.ident.as_ref().map(|ident| ident.span()),
+                    _ => None,
+                };
+            }
+            _ => None,
+        }?;
+        match declaration {
+            Decl::Fn(function) => Some(function.ident.span()),
+            Decl::Class(class) => Some(class.ident.span()),
+            Decl::TsInterface(interface) => Some(interface.id.span()),
+            Decl::Var(variable) => variable.decls.first().and_then(|declarator| {
+                if let Pat::Ident(binding) = &declarator.name {
+                    Some(binding.id.span())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        }
+    })?;
+    let start = source_map.lookup_byte_offset(ident_span.lo).pos.0 as usize;
+    let end = source_map.lookup_byte_offset(ident_span.hi).pos.0 as usize;
+    (start < end && snippet.get(start..end).is_some()).then_some((start, end))
 }
 
 fn rename_declared_function(snippet: String, exported: &str) -> String {
