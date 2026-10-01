@@ -4298,3 +4298,77 @@ fn intl_datetime_hebrew_ordinal_month_matches_real_node() {
         .unwrap()
     );
 }
+
+/// Historical Intl remediation cases. Authored for the focused follow-up;
+/// execution is left to the user-requested test phase.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_followup_locale_duration_and_exact_digits() {
+    assert_eq!(
+        load(
+            "function intlFollowup() {\n\
+               const locale = new Intl.Locale('de-CH-1901-u-hc-h23');\n\
+               const merged = new Intl.Locale('en-u-ca-buddhist-hc-h23', { numberingSystem: 'arab' });\n\
+               const privateUse = new Intl.Locale('en-x-foo', { numberingSystem: 'arab' });\n\
+               let malformedLater = false;\n\
+               try { new Intl.NumberFormat(['en-US', 'bad_tag']); }\n\
+               catch (error) { malformedLater = error instanceof RangeError; }\n\
+               const ameteAlem = new Intl.DateTimeFormat('en-u-ca-ethioaa').resolvedOptions().calendar;\n\
+               const digits = new Intl.NumberFormat('en-US').format(9007199254740993n);\n\
+               const decimal = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format('9007199254740993.255');\n\
+               const parts = new Intl.NumberFormat('en-US').formatToParts(9007199254740993n);\n\
+               const digital = new Intl.DurationFormat('en', { style: 'digital' }).format({ hours: 1, minutes: 2, seconds: 3 });\n\
+               let mixed = false;\n\
+               try { new Intl.DurationFormat('en').format({ hours: 1, minutes: -2 }); }\n\
+               catch (error) { mixed = error instanceof RangeError; }\n\
+               return [locale.baseName, locale.toString(), merged.toString(), privateUse.toString(), malformedLater, ameteAlem, digits, decimal, parts.map(part => part.value).join(''), digital, mixed];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("intlFollowup", "[]"),
+        r#"["de-CH-1901","de-CH-1901-u-hc-h23","en-u-ca-buddhist-hc-h23-nu-arab","en-u-nu-arab-x-foo",true,"ethioaa","9,007,199,254,740,993","9,007,199,254,740,993.26","9,007,199,254,740,993","1:02:03",true]"#
+    );
+}
+
+/// CanonicalizeLocaleList reads array-like indices, validates every present
+/// element, and does not consult an iterator. Kept unrun for the user test phase.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_followup_locale_list_boundary() {
+    assert_eq!(
+        load(
+            r#"function intlLocaleListBoundary() {
+              const locale = value => new Intl.NumberFormat(value).resolvedOptions().locale;
+              const rejectsType = value => {
+                try { locale(value); return false; }
+                catch (error) { return error instanceof TypeError; }
+              };
+              const inherited = Object.create({ 0: 'ja-JP' });
+              inherited.length = 1;
+              const noIterator = ['ja-JP'];
+              noIterator[Symbol.iterator] = () => { throw new Error('iterator was read'); };
+              const instance = new Intl.Locale('ja-JP');
+              instance.toString = () => 'bad_tag';
+              return [
+                locale([, 'ja-JP']) === 'ja-JP',
+                locale({ 0: 'ja-JP', length: 1 }) === 'ja-JP',
+                locale({ length: 0 }) === 'en-US',
+                locale(inherited) === 'ja-JP',
+                locale(noIterator) === 'ja-JP',
+                locale(instance) === 'ja-JP',
+                locale(['ja-JP', 'ja-jp']) === 'ja-JP',
+                rejectsType([123]), rejectsType([null]),
+                rejectsType([undefined]), rejectsType([Symbol()]),
+                rejectsType({ length: 1n }),
+              ];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("intlLocaleListBoundary", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true,true]"
+    );
+}

@@ -166,7 +166,9 @@ fn intl_locale_parse_json(tag: &str) -> String {
             .map(|value| value.to_string())
     };
     format!(
-        r#"{{"valid":true,"language":"{}","script":{},"region":{},"calendar":{},"numberingSystem":{},"collation":{}}}"#,
+        r#"{{"valid":true,"tag":{},"baseName":{},"language":"{}","script":{},"region":{},"calendar":{},"numberingSystem":{},"collation":{}}}"#,
+        serde_json::to_string(&locale.to_string()).unwrap(),
+        serde_json::to_string(&locale.id.to_string()).unwrap(),
         locale.id.language,
         json_string_or_null(locale.id.script.as_ref().map(|s| s.as_str())),
         json_string_or_null(locale.id.region.as_ref().map(|r| r.as_str())),
@@ -236,14 +238,15 @@ fn intl_locale_transform_json(
     transform: impl FnOnce(&icu_locale::LocaleExpander, &mut icu_locale::LanguageIdentifier),
 ) -> String {
     use std::str::FromStr;
-    let Ok(mut id) = icu_locale::LanguageIdentifier::from_str(tag) else {
+    let Ok(mut locale) = icu_locale::Locale::from_str(tag) else {
         return r#"{"valid":false}"#.to_string();
     };
-    transform(&locale_expander(), &mut id);
+    transform(&locale_expander(), &mut locale.id);
     format!(
-        r#"{{"valid":true,"language":"{}","script":{},"region":{}}}"#,
-        id.language,
-        json_string_or_null(id.script.as_ref().map(|s| s.as_str())),
-        json_string_or_null(id.region.as_ref().map(|r| r.as_str())),
+        r#"{{"valid":true,"tag":{},"language":"{}","script":{},"region":{}}}"#,
+        serde_json::to_string(&locale.to_string()).unwrap(),
+        locale.id.language,
+        json_string_or_null(locale.id.script.as_ref().map(|s| s.as_str())),
+        json_string_or_null(locale.id.region.as_ref().map(|r| r.as_str())),
     )
 }
