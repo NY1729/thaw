@@ -2101,6 +2101,7 @@
   // deliberately-unstable icu4x dependency in this whole effort
   // (`icu_experimental`, see `intl_relative_time.rs`'s own doc comment).
   const INTL_RELATIVE_TIME_UNITS = {
+    __proto__: null,
     year: 'year', years: 'year',
     quarter: 'quarter', quarters: 'quarter',
     month: 'month', months: 'month',

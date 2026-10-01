@@ -3239,6 +3239,23 @@ fn intl_segmenter_matches_real_node() {
     assert_eq!(call("containing", "[-1]"), "null");
 }
 
+#[cfg(feature = "intl")]
+#[test]
+fn intl_relative_time_rejects_inherited_unit_names() {
+    // Unrun regression: invalid unit names must not resolve Object.prototype.
+    assert_eq!(load(r#"
+        function inheritedRelativeUnits() {
+            const formatter = new Intl.RelativeTimeFormat('en');
+            return ['toString', 'constructor', '__proto__', 'hasOwnProperty'].map(unit => {
+                try { formatter.format(1, unit); return 'no-throw'; }
+                catch (error) { return error.name; }
+            });
+        }
+    "#), 1);
+    assert_eq!(call("inheritedRelativeUnits", "[]"),
+        r#"["RangeError","RangeError","RangeError","RangeError"]"#);
+}
+
 /// `Intl.RelativeTimeFormat` (M11, entirely new capability, backed by
 /// the one deliberately-unstable icu4x dependency in this whole effort)
 /// -- cross-checked against real Node, including `numeric: 'auto'`
