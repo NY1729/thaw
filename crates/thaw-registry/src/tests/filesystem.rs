@@ -898,6 +898,35 @@ fn fs_open_and_file_options_preserve_independent_flags() {
 }
 
 #[test]
+fn fs_stream_positions_reject_invalid_original_values_before_open() {
+    // Unrun regression: constructor argument validation must happen before
+    // default 'w' can truncate an existing file or create a new one.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_stream_positions");
+    fs::write(
+        dir.join("index.js"),
+        r#"var fs = require('node:fs'); module.exports = async function(root) { var path = root + '/original.txt', absent = root + '/absent.txt'; fs.writeFileSync(path, 'abcdef'); var writeErrors = ['0', null, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(function(start) { try { fs.createWriteStream(path, { start: start }); return 'none'; } catch(error) { return error.name; } }); var missingError; try { fs.createWriteStream(absent, { start: '0' }); } catch(error) { missingError = error.name; } var readErrors = []; [{start:'1'}, {end:-1}, {end:'3'}, {start:4,end:2}].forEach(function(options) { try { fs.createReadStream(path, options); readErrors.push('none'); } catch(error) { readErrors.push(error.name); } }); var preserved = fs.readFileSync(path, 'utf8'), missing = fs.existsSync(absent), handle = await fs.promises.open(path, 'r+'), handleError; try { handle.createWriteStream({start:null}); } catch(error) { handleError = error.name; } var handleOpen = !handle.closed; await handle.close(); await new Promise(function(resolve, reject) { var writer = fs.createWriteStream(path, {flags:'r+', start:2}); writer.on('error',reject); writer.on('finish',resolve); writer.end('XY'); }); var range = await new Promise(function(resolve,reject) { var reader = fs.createReadStream(path, {start:1,end:3}), chunks=[]; reader.on('data',function(chunk) { chunks.push(chunk.toString()); }); reader.on('error',reject); reader.on('end',function() { resolve(chunks.join('')); }); }); return [writeErrors,missingError,readErrors,preserved,missing,handleError,handleOpen,fs.readFileSync(path,'utf8'),range]; };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_stream_positions_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreamPositions = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsStreamPositions").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["TypeError","TypeError","RangeError","RangeError","RangeError","RangeError","RangeError"],"TypeError",["TypeError","RangeError","TypeError","RangeError"],"abcdef",false,"TypeError",true,"abXYef","bXY"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn fs_creation_apis_honor_requested_modes() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_creation_modes");
