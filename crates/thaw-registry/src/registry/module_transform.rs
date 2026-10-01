@@ -730,7 +730,7 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
 
 fn rewrite_import_meta_urls(source: &str) -> String {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{Expr, MetaPropKind};
+    use thaw_parser::ast::{Expr, Ident, MetaPropKind};
     use thaw_parser::common::Spanned;
 
     // `import.meta` itself (bare, or as the object of `.url`/`.resolve`/
@@ -742,19 +742,24 @@ fn rewrite_import_meta_urls(source: &str) -> String {
     // "extends" feature uses `import.meta.resolve(...)`) -- since
     // QuickJS parses the whole file eagerly, an unreached reference
     // still blocks every other statement in the bundle from loading at
-    // all. Replace every `import.meta` expression with a plain object
-    // literal exposing the one property this codebase already
-    // synthesizes a value for (`url`) plus a `resolve` that throws if
-    // actually called, rather than special-casing only `.url` and
-    // leaving every other member access to hard-fail the whole parse.
+    // all. All references in a module must share one object, including
+    // properties added by its own code. Keep its declaration inside the
+    // module factory and initialize it on first access.
     #[derive(Default)]
-    struct ImportMetaExprs(Vec<(u32, u32)>);
+    struct ImportMetaExprs {
+        spans: Vec<(u32, u32)>,
+        identifiers: std::collections::BTreeSet<String>,
+    }
     impl Visit for ImportMetaExprs {
+        fn visit_ident(&mut self, ident: &Ident) {
+            self.identifiers.insert(ident.sym.to_string());
+        }
+
         fn visit_expr(&mut self, expr: &Expr) {
             if let Expr::MetaProp(meta) = expr {
                 if meta.kind == MetaPropKind::ImportMeta {
                     let span = meta.span();
-                    self.0.push((span.lo.0, span.hi.0));
+                    self.spans.push((span.lo.0, span.hi.0));
                     return;
                 }
             }
@@ -767,8 +772,20 @@ fn rewrite_import_meta_urls(source: &str) -> String {
     };
     let mut metas = ImportMetaExprs::default();
     module.visit_with(&mut metas);
+    if metas.spans.is_empty() {
+        return source.to_string();
+    }
+    // Check parsed names as well as source text: a Unicode-escaped
+    // identifier can bind the same name without containing its spelling.
+    let binding = (0..)
+        .map(|index| format!("__thaw_import_meta_{index}"))
+        .find(|name| !metas.identifiers.contains(name) && !source.contains(name.as_str()))
+        .expect("an unused import.meta binding name exists");
+    let meta = format!(
+        "({binding} || ({binding} = {{url: ('file://' + __filename), resolve: function() {{ throw new Error('import.meta.resolve is not supported'); }}}}))"
+    );
     let mut output = source.to_string();
-    for (lo, hi) in metas.0.into_iter().rev() {
+    for (lo, hi) in metas.spans.into_iter().rev() {
         let lo = source_map
             .lookup_byte_offset(thaw_parser::common::BytePos(lo))
             .pos
@@ -777,11 +794,11 @@ fn rewrite_import_meta_urls(source: &str) -> String {
             .lookup_byte_offset(thaw_parser::common::BytePos(hi))
             .pos
             .0 as usize;
-        output.replace_range(
-            lo..hi,
-            "({url: ('file://' + __filename), resolve: function() { throw new Error('import.meta.resolve is not supported'); }})",
-        );
+        output.replace_range(lo..hi, &meta);
     }
+    // `var` is hoisted, so this placement preserves leading directives
+    // while every replacement still sees the same factory-local slot.
+    output.push_str(&format!("\nvar {binding};"));
     output
 }
 
