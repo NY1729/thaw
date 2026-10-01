@@ -54,7 +54,18 @@
   }
   if (typeof globalThis.ReadableStream !== 'function') {
     const webInvalidState = message => { const error = new TypeError(message); error.code = 'ERR_INVALID_STATE'; return error; };
-    const webSizeAlgorithm = size => { if (size === undefined) return () => 1; if (typeof size !== 'function') throw new TypeError('size must be a function'); return size; };
+    const webSizeAlgorithm = size => { if (size === undefined) return () => 1; if (typeof size !== 'function') throw new TypeError('size must be a function'); return chunk => webApply(size, undefined, [chunk]); };
+    const webApply = Reflect.apply;
+    const webCallback = (dictionary, name) => {
+      const callback = dictionary[name];
+      if (callback !== undefined && typeof callback !== 'function') throw new TypeError(`${name} must be a function`);
+      return callback;
+    };
+    const webStrategy = strategy => {
+      const value = strategy.highWaterMark;
+      const highWaterMark = value === undefined ? undefined : Number(value);
+      return { highWaterMark, size: webCallback(strategy, 'size') };
+    };
     class ReadableStreamDefaultController {
       constructor(stream) { this._stream = stream; }
       enqueue(chunk) {
@@ -188,16 +199,23 @@
         }, { highWaterMark: 0 });
       }
       constructor(source = {}, strategy = {}) {
-        if (source.type !== undefined && source.type !== 'bytes') { const error = new TypeError('invalid source.type'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        if (source.autoAllocateChunkSize !== undefined && (source.type !== 'bytes' || !Number.isInteger(Number(source.autoAllocateChunkSize)) || Number(source.autoAllocateChunkSize) <= 0)) throw new RangeError('invalid autoAllocateChunkSize');
-        const size = strategy.size;
-        if (source.type === 'bytes' && size !== undefined) { const error = new RangeError('byte streams cannot use a size strategy'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        const defaultHighWaterMark = source.type === 'bytes' ? 0 : 1, highWaterMark = strategy.highWaterMark === undefined ? defaultHighWaterMark : Number(strategy.highWaterMark);
+        const { highWaterMark: strategyHighWaterMark, size } = webStrategy(strategy);
+        // Convert the source dictionary once, in Web IDL member order, before start can mutate it.
+        const autoAllocateValue = source.autoAllocateChunkSize;
+        const autoAllocateChunkSize = autoAllocateValue === undefined ? undefined : Number(autoAllocateValue);
+        const cancel = webCallback(source, 'cancel');
+        const pull = webCallback(source, 'pull');
+        const start = webCallback(source, 'start');
+        const type = source.type;
+        if (type !== undefined && type !== 'bytes') { const error = new TypeError('invalid source.type'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+        if (autoAllocateChunkSize !== undefined && (type !== 'bytes' || !Number.isInteger(autoAllocateChunkSize) || autoAllocateChunkSize <= 0)) throw new RangeError('invalid autoAllocateChunkSize');
+        if (type === 'bytes' && size !== undefined) { const error = new RangeError('byte streams cannot use a size strategy'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+        const defaultHighWaterMark = type === 'bytes' ? 0 : 1, highWaterMark = strategyHighWaterMark === undefined ? defaultHighWaterMark : strategyHighWaterMark;
         if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        this._source = source; this._byteStream = source.type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._autoAllocateChunkSize = this._byteStream && source.autoAllocateChunkSize !== undefined ? Number(source.autoAllocateChunkSize) : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._capacityWaiters = []; this._state = 'readable'; this._closeRequested = false; this._disturbed = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
+        this._source = source; this._sourcePull = pull; this._sourceCancel = cancel; this._byteStream = type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._autoAllocateChunkSize = this._byteStream && autoAllocateChunkSize !== undefined ? autoAllocateChunkSize : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._capacityWaiters = []; this._state = 'readable'; this._closeRequested = false; this._disturbed = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
         this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; });
         this._closed.catch(() => {}); this._controller = this._byteStream ? new ReadableByteStreamController(this) : new ReadableStreamDefaultController(this);
-        try { Promise.resolve(typeof source.start === 'function' ? source.start(this._controller) : undefined).then(() => { this._started = true; this._callPullIfNeeded(); }, error => this._controller.error(error)); } catch (error) { this._controller.error(error); }
+        Promise.resolve(start === undefined ? undefined : webApply(start, source, [this._controller])).then(() => { this._started = true; this._callPullIfNeeded(); }, error => this._controller.error(error));
       }
       get locked() { return this._reader !== null; }
       getReader(options = {}) { if (options.mode === undefined) return new ReadableStreamDefaultReader(this); if (options.mode === 'byob') return new ReadableStreamBYOBReader(this); const error = new TypeError('invalid reader mode'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
@@ -209,11 +227,11 @@
       _rejectCapacity(error) { const waiters = this._capacityWaiters.splice(0); for (const waiter of waiters) waiter.reject(error); }
       _finishCloseIfReady() { if (!this._closeRequested || this._queue.length || this._state !== 'readable') return; this._state = 'closed'; this._byobRequest = null; this._rejectCapacity(webInvalidState('ReadableStream is closed')); while (this._reads.length) this._reads.shift().resolve({ value: undefined, done: true }); while (this._byobReads.length) { const read = this._byobReads.shift(); read.resolve({ value: byobResultView(read.view, read.filled), done: read.filled === 0 }); } this._resolveClosed(); }
       _callPullIfNeeded() {
-        if (!this._started || this._state !== 'readable' || this._closeRequested || typeof this._source.pull !== 'function') return;
+        if (!this._started || this._state !== 'readable' || this._closeRequested || this._sourcePull === undefined) return;
         if (!this._reads.length && !this._byobReads.length && this._highWaterMark - this._queueTotalSize <= 0) return;
         if (this._pulling) { this._pullAgain = true; return; }
         this._pulling = true;
-        Promise.resolve().then(() => this._source.pull(this._controller)).then(() => { this._pulling = false; if (this._pullAgain) { this._pullAgain = false; this._callPullIfNeeded(); } }, error => { this._pulling = false; this._controller.error(error); });
+        Promise.resolve().then(() => webApply(this._sourcePull, this._source, [this._controller])).then(() => { this._pulling = false; if (this._pullAgain) { this._pullAgain = false; this._callPullIfNeeded(); } }, error => { this._pulling = false; this._controller.error(error); });
       }
       _drainByob() {
         while (this._byobReads.length && this._queue.length) {
@@ -244,7 +262,7 @@
         const elementSize = view instanceof DataView ? 1 : view.BYTES_PER_ELEMENT, result = new Promise((resolve, reject) => this._byobReads.push({ reader, view, elementSize, minBytes: min * elementSize, filled: 0, resolve, reject })); this._notifyCapacity(); this._drainByob(); this._prepareByobRequest();
         return result;
       }
-      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); this._finishCloseIfReady(); try { return Promise.resolve(typeof this._source.cancel === 'function' ? this._source.cancel(reason) : undefined).then(() => undefined); } catch (error) { return Promise.reject(error); } }
+      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); this._finishCloseIfReady(); try { return Promise.resolve(this._sourceCancel === undefined ? undefined : webApply(this._sourceCancel, this._source, [reason])).then(() => undefined); } catch (error) { return Promise.reject(error); } }
       cancel(reason) { if (this.locked) return Promise.reject(webInvalidState('ReadableStream is locked')); this._disturbed = true; return this._cancel(reason); }
       tee() {
         if (this.locked) throw webInvalidState('ReadableStream is locked');
@@ -370,17 +388,30 @@
       get desiredSize() { return this._stream ? this._stream._desiredSize() : null; }
     }
     globalThis.WritableStream = class WritableStream {
-      constructor(sink = {}, strategy = {}) { const highWaterMark = strategy.highWaterMark === undefined ? 1 : Number(strategy.highWaterMark); if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } this._sink = sink; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(strategy.size); this._queueTotalSize = 0; this._backpressured = false; this._ready = Promise.resolve(); this._resolveReady = null; this._rejectReady = null; this._state = 'writable'; this._error = undefined; this._writer = null; this._chain = Promise.resolve(); this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {}); this._controller = new WritableStreamDefaultController(this); this._setBackpressure(this._desiredSize() <= 0); if (typeof sink.start === 'function') { try { this._chain = Promise.resolve(sink.start(this._controller)).catch(error => { this._errorStream(error); throw error; }); } catch (error) { this._errorStream(error); this._chain = Promise.reject(error); } } }
+      constructor(sink = {}, strategy = {}) {
+        const { highWaterMark: strategyHighWaterMark, size } = webStrategy(strategy);
+        const abort = webCallback(sink, 'abort');
+        const close = webCallback(sink, 'close');
+        const start = webCallback(sink, 'start');
+        if (sink.type !== undefined) throw new RangeError('invalid sink.type');
+        const write = webCallback(sink, 'write');
+        const highWaterMark = strategyHighWaterMark === undefined ? 1 : strategyHighWaterMark;
+        if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+        this._sink = sink; this._sinkWrite = write; this._sinkClose = close; this._sinkAbort = abort; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._queueTotalSize = 0; this._backpressured = false; this._ready = Promise.resolve(); this._resolveReady = null; this._rejectReady = null; this._state = 'writable'; this._error = undefined; this._writer = null; this._chain = Promise.resolve();
+        this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {});
+        this._controller = new WritableStreamDefaultController(this); this._setBackpressure(this._desiredSize() <= 0);
+        if (start !== undefined) this._chain = Promise.resolve(webApply(start, sink, [this._controller])).catch(error => { this._errorStream(error); throw error; });
+      }
       get locked() { return this._writer !== null; }
       getWriter() { return new WritableStreamDefaultWriter(this); }
       _desiredSize() { if (this._state === 'errored') return null; if (this._state === 'closed') return 0; return this._highWaterMark - this._queueTotalSize; }
       _setBackpressure(value) { if (this._backpressured === value) return; this._backpressured = value; if (value) { this._ready = new Promise((resolve, reject) => { this._resolveReady = resolve; this._rejectReady = reject; }); this._ready.catch(() => {}); } else { if (this._resolveReady) this._resolveReady(); this._resolveReady = null; this._rejectReady = null; this._ready = Promise.resolve(); } }
       _errorReady(error) { if (this._rejectReady) this._rejectReady(error); this._resolveReady = null; this._rejectReady = null; this._backpressured = false; this._ready = Promise.reject(error); this._ready.catch(() => {}); }
       _errorStream(error) { if (this._state !== 'writable') return; this._state = 'errored'; this._error = error; this._errorReady(error); this._rejectClosed(error); }
-      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(webInvalidState('WritableStream is closed')); let size; try { size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } } catch (error) { this._errorStream(error); return Promise.reject(error); } this._queueTotalSize += size; this._setBackpressure(this._desiredSize() <= 0); const operation = this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this._controller) : undefined); return operation.then(() => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); if (this._state === 'writable') this._setBackpressure(this._desiredSize() <= 0); return Promise.resolve().then(() => undefined); }, error => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); this._errorStream(error); return Promise.resolve().then(() => { throw error; }); }); }
-      _close() { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(webInvalidState('WritableStream is closed')); this._state = 'closed'; this._setBackpressure(false); this._chain = this._chain.then(() => typeof this._sink.close === 'function' ? this._sink.close() : undefined).then(() => this._resolveClosed(), error => { this._error = error; this._state = 'errored'; this._errorReady(error); this._rejectClosed(error); throw error; }); return this._chain; }
+      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(webInvalidState('WritableStream is closed')); let size; try { size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } } catch (error) { this._errorStream(error); return Promise.reject(error); } this._queueTotalSize += size; this._setBackpressure(this._desiredSize() <= 0); const operation = this._chain = this._chain.then(() => this._sinkWrite === undefined ? undefined : webApply(this._sinkWrite, this._sink, [chunk, this._controller])); return operation.then(() => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); if (this._state === 'writable') this._setBackpressure(this._desiredSize() <= 0); return Promise.resolve().then(() => undefined); }, error => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); this._errorStream(error); return Promise.resolve().then(() => { throw error; }); }); }
+      _close() { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(webInvalidState('WritableStream is closed')); this._state = 'closed'; this._setBackpressure(false); this._chain = this._chain.then(() => this._sinkClose === undefined ? undefined : webApply(this._sinkClose, this._sink, [])).then(() => this._resolveClosed(), error => { this._error = error; this._state = 'errored'; this._errorReady(error); this._rejectClosed(error); throw error; }); return this._chain; }
       close() { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._close(); }
-      _abort(reason) { if (this._state !== 'writable') return Promise.resolve(); this._state = 'errored'; this._error = reason; this._errorReady(reason); this._controller._abortController.abort(reason); const operation = this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return operation.then(() => Promise.resolve()); }
+      _abort(reason) { if (this._state !== 'writable') return Promise.resolve(); this._state = 'errored'; this._error = reason; this._errorReady(reason); this._controller._abortController.abort(reason); const operation = this._chain = this._chain.then(() => this._sinkAbort === undefined ? undefined : webApply(this._sinkAbort, this._sink, [reason])).then(() => this._rejectClosed(reason)); return operation.then(() => Promise.resolve()); }
       abort(reason) { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._abort(reason); }
     };
     globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
@@ -393,7 +424,29 @@
       terminate() { const error = webInvalidState('TransformStream has been terminated'); this._readableController._stream._rejectCapacity(error); this._readableController.close(); if (this._writable) this._writable._errorStream(error); }
     }
     globalThis.TransformStream = class TransformStream {
-      constructor(transformer = {}, writableStrategy = {}, readableStrategy = {}) { let readableController, writable; const readableHighWaterMark = readableStrategy.highWaterMark, readableQueueStrategy = { highWaterMark: readableHighWaterMark === undefined ? 0 : readableHighWaterMark, size: readableStrategy.size }, cancel = reason => typeof transformer.cancel === 'function' ? transformer.cancel(reason) : undefined; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); return cancel(error); } }, readableQueueStrategy); const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; }; writable = this.writable = new WritableStream({ start(writableController) { controller._writable = writable = writableController._stream; return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return readableController._stream._waitForCapacity().then(() => typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk)).catch(fail); }, close() { return Promise.resolve().then(() => typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()).catch(fail); }, abort(error) { return Promise.resolve(cancel(error)).then(() => readableController.error(error)); } }, writableStrategy); controller._writable = writable; }
+      constructor(transformer = {}, writableStrategy = {}, readableStrategy = {}) {
+        const writableQueueStrategy = webStrategy(writableStrategy);
+        const readableQueueStrategy = webStrategy(readableStrategy);
+        const cancel = webCallback(transformer, 'cancel');
+        const flush = webCallback(transformer, 'flush');
+        const readableType = transformer.readableType;
+        const start = webCallback(transformer, 'start');
+        const transform = webCallback(transformer, 'transform');
+        const writableType = transformer.writableType;
+        if (readableType !== undefined || writableType !== undefined) throw new RangeError('transformer types are not supported');
+        let readableController, writable;
+        if (readableQueueStrategy.highWaterMark === undefined) readableQueueStrategy.highWaterMark = 0;
+        const callCancel = reason => cancel === undefined ? undefined : webApply(cancel, transformer, [reason]);
+        this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); return callCancel(error); } }, readableQueueStrategy);
+        const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; };
+        writable = this.writable = new WritableStream({
+          start(writableController) { controller._writable = writable = writableController._stream; return start === undefined ? undefined : webApply(start, transformer, [controller]); },
+          write(chunk) { return readableController._stream._waitForCapacity().then(() => transform === undefined ? controller.enqueue(chunk) : webApply(transform, transformer, [chunk, controller])).catch(fail); },
+          close() { return Promise.resolve().then(() => flush === undefined ? undefined : webApply(flush, transformer, [controller])).then(() => readableController.close()).catch(fail); },
+          abort(error) { return Promise.resolve(callCancel(error)).then(() => readableController.error(error)); }
+        }, writableQueueStrategy);
+        controller._writable = writable;
+      }
     };
     globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
     const streamBytes = (value, allowShared = false) => {

@@ -4456,6 +4456,157 @@ fn buffer_boundary_and_encoding_regressions() {
 }
 
 #[test]
+fn stream_source_callbacks_are_captured_once_before_start() {
+    assert_eq!(load(r#"
+      async function streamSourceCallbackCapture() {
+        const reads = [], calls = [];
+        const source = {
+          get autoAllocateChunkSize() { reads.push('autoAllocateChunkSize'); return undefined; },
+          get cancel() { reads.push('cancel'); return function (reason) { calls.push(['cancel', this === source, reason]); }; },
+          get pull() { reads.push('pull'); return function (controller) { calls.push(['pull', this === source]); controller.enqueue('chunk'); }; },
+          get start() { reads.push('start'); return function () { calls.push(['start', this === source]); Object.defineProperty(this, 'pull', { value: null }); Object.defineProperty(this, 'cancel', { value: 12 }); }; },
+          get type() { reads.push('type'); return undefined; }
+        };
+        const reader = new ReadableStream(source, { highWaterMark: 0 }).getReader();
+        const value = (await reader.read()).value;
+        await reader.cancel('stop');
+        return [reads, calls, value];
+      }
+    "#), 1);
+    assert_eq!(call("streamSourceCallbackCapture", "[]"),
+        r#"[["autoAllocateChunkSize","cancel","pull","start","type"],[["start",true],["pull",true],["cancel",true,"stop"]],"chunk"]"#);
+}
+
+#[test]
+fn stream_sink_callbacks_are_captured_once_before_start() {
+    assert_eq!(load(r#"
+      async function streamSinkCallbackCapture() {
+        const reads = [], calls = [];
+        const sink = {
+          get abort() { reads.push('abort'); return function (reason) { calls.push(['abort', this === sink, reason]); }; },
+          get close() { reads.push('close'); return function () { calls.push(['close', this === sink]); }; },
+          get start() { reads.push('start'); return function () { calls.push(['start', this === sink]); Object.defineProperty(this, 'write', { value: null }); Object.defineProperty(this, 'close', { value: 1 }); Object.defineProperty(this, 'abort', { value: null }); }; },
+          get type() { reads.push('type'); return undefined; },
+          get write() { reads.push('write'); return function (chunk) { calls.push(['write', this === sink, chunk]); }; }
+        };
+        const writer = new WritableStream(sink).getWriter();
+        await writer.write('chunk');
+        await writer.close();
+        const abortSink = {
+          start() { this.abort = 1; },
+          abort(reason) { calls.push(['abort-after-start', this === abortSink, reason]); }
+        };
+        await new WritableStream(abortSink).abort('stop');
+        return [reads, calls];
+      }
+    "#), 1);
+    assert_eq!(call("streamSinkCallbackCapture", "[]"),
+        r#"[["abort","close","start","type","write"],[["start",true],["write",true,"chunk"],["close",true],["abort-after-start",true,"stop"]]]"#);
+}
+
+#[test]
+fn stream_transformer_callbacks_are_captured_once_before_start() {
+    assert_eq!(load(r#"
+      async function streamTransformerCallbackCapture() {
+        const reads = [], calls = [];
+        const transformer = {
+          get cancel() { reads.push('cancel'); return function (reason) { calls.push(['cancel', this === transformer, reason]); }; },
+          get flush() { reads.push('flush'); return function () { calls.push(['flush', this === transformer]); }; },
+          get readableType() { reads.push('readableType'); return undefined; },
+          get start() { reads.push('start'); return function () { calls.push(['start', this === transformer]); Object.defineProperty(this, 'transform', { value: null }); Object.defineProperty(this, 'flush', { value: 1 }); Object.defineProperty(this, 'cancel', { value: null }); }; },
+          get transform() { reads.push('transform'); return function (chunk, controller) { calls.push(['transform', this === transformer, chunk]); controller.enqueue(chunk); }; },
+          get writableType() { reads.push('writableType'); return undefined; }
+        };
+        const stream = new TransformStream(transformer, {}, { highWaterMark: 1 });
+        const writer = stream.writable.getWriter(), reader = stream.readable.getReader();
+        await writer.write('chunk');
+        const value = (await reader.read()).value;
+        await writer.close();
+        const cancelTransformer = { start() { this.cancel = 1; }, cancel(reason) { calls.push(['cancel-after-start', this === cancelTransformer, reason]); } };
+        await new TransformStream(cancelTransformer).readable.cancel('stop');
+        return [reads, calls, value];
+      }
+    "#), 1);
+    assert_eq!(call("streamTransformerCallbackCapture", "[]"),
+        r#"[["cancel","flush","readableType","start","transform","writableType"],[["start",true],["transform",true,"chunk"],["flush",true],["cancel-after-start",true,"stop"]],"chunk"]"#);
+}
+
+#[test]
+fn stream_dictionary_rejects_noncallable_callbacks_before_start() {
+    assert_eq!(load(r#"
+      function streamRejectsNoncallableCallbacks() {
+        let starts = 0;
+        const check = construct => { try { construct(); return false; } catch (error) { return error instanceof TypeError; } };
+        return [
+          check(() => new ReadableStream({ pull: null, start() { starts++; } })),
+          check(() => new WritableStream({ abort: 1, start() { starts++; } })),
+          check(() => new TransformStream({ transform: false, start() { starts++; } })),
+          starts
+        ];
+      }
+    "#), 1);
+    assert_eq!(call("streamRejectsNoncallableCallbacks", "[]"),
+        "[true,true,true,0]");
+}
+
+#[test]
+fn stream_strategy_getters_precede_callback_conversion_once() {
+    assert_eq!(load(r#"
+      function streamStrategyGetterOrder() {
+        const reads = [];
+        const strategy = name => ({
+          get highWaterMark() { reads.push(name + '.highWaterMark'); return 1; },
+          get size() { reads.push(name + '.size'); return () => 1; }
+        });
+        const source = {
+          get autoAllocateChunkSize() { reads.push('source.autoAllocateChunkSize'); return undefined; },
+          get cancel() { reads.push('source.cancel'); return undefined; },
+          get pull() { reads.push('source.pull'); return undefined; },
+          get start() { reads.push('source.start'); return function () { reads.push('source.start()'); }; },
+          get type() { reads.push('source.type'); return undefined; }
+        };
+        new ReadableStream(source, strategy('readable'));
+        const sink = {
+          get abort() { reads.push('sink.abort'); return undefined; },
+          get close() { reads.push('sink.close'); return undefined; },
+          get start() { reads.push('sink.start'); return function () { reads.push('sink.start()'); }; },
+          get type() { reads.push('sink.type'); return undefined; },
+          get write() { reads.push('sink.write'); return undefined; }
+        };
+        new WritableStream(sink, strategy('writable'));
+        const transformer = {
+          get cancel() { reads.push('transformer.cancel'); return undefined; },
+          get flush() { reads.push('transformer.flush'); return undefined; },
+          get readableType() { reads.push('transformer.readableType'); return undefined; },
+          get start() { reads.push('transformer.start'); return function () { reads.push('transformer.start()'); }; },
+          get transform() { reads.push('transformer.transform'); return undefined; },
+          get writableType() { reads.push('transformer.writableType'); return undefined; }
+        };
+        new TransformStream(transformer, strategy('transformWritable'), strategy('transformReadable'));
+        return reads;
+      }
+    "#), 1);
+    assert_eq!(call("streamStrategyGetterOrder", "[]"),
+        r#"["readable.highWaterMark","readable.size","source.autoAllocateChunkSize","source.cancel","source.pull","source.start","source.type","source.start()","writable.highWaterMark","writable.size","sink.abort","sink.close","sink.start","sink.type","sink.write","sink.start()","transformWritable.highWaterMark","transformWritable.size","transformReadable.highWaterMark","transformReadable.size","transformer.cancel","transformer.flush","transformer.readableType","transformer.start","transformer.transform","transformer.writableType","transformer.start()"]"#);
+}
+
+#[test]
+fn stream_start_exceptions_escape_constructors_synchronously() {
+    assert_eq!(load(r#"
+      function streamStartThrowsSynchronously() {
+        const sentinel = new Error('start failure');
+        const throwsSame = construct => { try { construct(); return false; } catch (error) { return error === sentinel; } };
+        return [
+          throwsSame(() => new ReadableStream({ start() { throw sentinel; } })),
+          throwsSame(() => new WritableStream({ start() { throw sentinel; } })),
+          throwsSame(() => new TransformStream({ start() { throw sentinel; } }))
+        ];
+      }
+    "#), 1);
+    assert_eq!(call("streamStartThrowsSynchronously", "[]"), "[true,true,true]");
+}
+
+#[test]
 fn crypto_buffer_regressions() {
     assert_eq!(
         load(r#"async function cryptoBufferRegressions() {
