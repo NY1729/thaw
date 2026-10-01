@@ -397,7 +397,7 @@
         const write = webCallback(sink, 'write');
         const highWaterMark = strategyHighWaterMark === undefined ? 1 : strategyHighWaterMark;
         if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        this._sink = sink; this._sinkWrite = write; this._sinkClose = close; this._sinkAbort = abort; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._queueTotalSize = 0; this._backpressured = false; this._ready = Promise.resolve(); this._resolveReady = null; this._rejectReady = null; this._state = 'writable'; this._error = undefined; this._writer = null; this._chain = Promise.resolve();
+        this._sink = sink; this._sinkWrite = write; this._sinkClose = close; this._sinkAbort = abort; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._queueTotalSize = 0; this._backpressured = false; this._ready = Promise.resolve(); this._resolveReady = null; this._rejectReady = null; this._state = 'writable'; this._closeQueued = false; this._closeInFlight = false; this._closeResult = null; this._abortPromise = null; this._error = undefined; this._writer = null; this._chain = Promise.resolve();
         this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {});
         this._controller = new WritableStreamDefaultController(this); this._setBackpressure(this._desiredSize() <= 0);
         if (start !== undefined) this._chain = Promise.resolve(webApply(start, sink, [this._controller])).catch(error => { this._errorStream(error); throw error; });
@@ -407,11 +407,74 @@
       _desiredSize() { if (this._state === 'errored') return null; if (this._state === 'closed') return 0; return this._highWaterMark - this._queueTotalSize; }
       _setBackpressure(value) { if (this._backpressured === value) return; this._backpressured = value; if (value) { this._ready = new Promise((resolve, reject) => { this._resolveReady = resolve; this._rejectReady = reject; }); this._ready.catch(() => {}); } else { if (this._resolveReady) this._resolveReady(); this._resolveReady = null; this._rejectReady = null; this._ready = Promise.resolve(); } }
       _errorReady(error) { if (this._rejectReady) this._rejectReady(error); this._resolveReady = null; this._rejectReady = null; this._backpressured = false; this._ready = Promise.reject(error); this._ready.catch(() => {}); }
-      _errorStream(error) { if (this._state !== 'writable') return; this._state = 'errored'; this._error = error; this._errorReady(error); this._rejectClosed(error); }
-      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(webInvalidState('WritableStream is closed')); let size; try { size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } } catch (error) { this._errorStream(error); return Promise.reject(error); } this._queueTotalSize += size; this._setBackpressure(this._desiredSize() <= 0); const operation = this._chain = this._chain.then(() => this._sinkWrite === undefined ? undefined : webApply(this._sinkWrite, this._sink, [chunk, this._controller])); return operation.then(() => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); if (this._state === 'writable') this._setBackpressure(this._desiredSize() <= 0); return Promise.resolve().then(() => undefined); }, error => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); this._errorStream(error); return Promise.resolve().then(() => { throw error; }); }); }
-      _close() { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(webInvalidState('WritableStream is closed')); this._state = 'closed'; this._setBackpressure(false); this._chain = this._chain.then(() => this._sinkClose === undefined ? undefined : webApply(this._sinkClose, this._sink, [])).then(() => this._resolveClosed(), error => { this._error = error; this._state = 'errored'; this._errorReady(error); this._rejectClosed(error); throw error; }); return this._chain; }
+      _errorStream(error) { if (this._state !== 'writable') return; this._state = 'errored'; this._error = error; this._errorReady(error); if (!this._closeInFlight) this._rejectClosed(error); }
+      _write(chunk) {
+        if (this._state === 'errored') return Promise.reject(this._error);
+        if (this._state !== 'writable' || this._closeQueued) return Promise.reject(webInvalidState('WritableStream is closed'));
+        let size;
+        try { size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } }
+        catch (error) { this._errorStream(error); return Promise.reject(error); }
+        this._queueTotalSize += size;
+        this._setBackpressure(this._desiredSize() <= 0);
+        const operation = this._chain.then(() => {
+          if (this._state === 'errored') throw this._error;
+          return this._sinkWrite === undefined ? undefined : webApply(this._sinkWrite, this._sink, [chunk, this._controller]);
+        });
+        const result = operation.then(() => {
+          this._queueTotalSize = Math.max(0, this._queueTotalSize - size);
+          if (this._state === 'writable' && !this._closeQueued) this._setBackpressure(this._desiredSize() <= 0);
+        }, error => {
+          this._queueTotalSize = Math.max(0, this._queueTotalSize - size);
+          this._errorStream(error);
+          throw error;
+        });
+        this._chain = result.catch(() => {});
+        return result;
+      }
+      _close() {
+        if (this._state === 'errored') return Promise.reject(this._error);
+        if (this._state !== 'writable' || this._closeQueued) return Promise.reject(webInvalidState('WritableStream is closed'));
+        this._closeQueued = true;
+        this._setBackpressure(false);
+        const operation = this._chain.then(() => {
+          if (this._state === 'errored') throw this._error;
+          this._closeInFlight = true;
+          return this._sinkClose === undefined ? undefined : webApply(this._sinkClose, this._sink, []);
+        });
+        const result = operation.then(() => {
+          this._closeInFlight = false;
+          this._error = undefined;
+          this._state = 'closed';
+          this._resolveClosed();
+        }, error => {
+          this._closeInFlight = false;
+          if (this._state === 'errored') this._rejectClosed(this._error);
+          else this._errorStream(error);
+          throw error;
+        });
+        this._closeResult = result;
+        this._chain = result.catch(() => {});
+        return result;
+      }
       close() { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._close(); }
-      _abort(reason) { if (this._state !== 'writable') return Promise.resolve(); this._state = 'errored'; this._error = reason; this._errorReady(reason); this._controller._abortController.abort(reason); const operation = this._chain = this._chain.then(() => this._sinkAbort === undefined ? undefined : webApply(this._sinkAbort, this._sink, [reason])).then(() => this._rejectClosed(reason)); return operation.then(() => Promise.resolve()); }
+      _abort(reason) {
+        if (this._abortPromise) return this._abortPromise;
+        if (this._state !== 'writable') return Promise.resolve();
+        let resolveAbort, rejectAbort;
+        const result = new Promise((resolve, reject) => { resolveAbort = resolve; rejectAbort = reject; });
+        this._abortPromise = result;
+        this._state = 'errored'; this._error = reason; this._errorReady(reason);
+        this._controller._abortController.abort(reason);
+        if (this._closeInFlight) {
+          this._closeResult.then(() => resolveAbort(), error => rejectAbort(error));
+        } else {
+          const operation = this._chain.then(() => this._sinkAbort === undefined ? undefined : webApply(this._sinkAbort, this._sink, [reason]));
+          operation.then(() => { this._rejectClosed(reason); resolveAbort(); }, error => { this._rejectClosed(reason); rejectAbort(error); });
+          this._chain = result.catch(() => {});
+        }
+        result.then(() => { this._abortPromise = null; }, () => { this._abortPromise = null; });
+        return result;
+      }
       abort(reason) { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._abort(reason); }
     };
     globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
