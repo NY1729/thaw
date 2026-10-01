@@ -604,6 +604,184 @@ mod linux_cpu_info_tests {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_cpu_times(ticks: [u32; 4], hz: u64) -> [u64; 5] {
+    let milliseconds = |state: usize| ((ticks[state] as u128 * 1000) / hz as u128) as u64;
+    [milliseconds(libc::CPU_STATE_USER as usize), milliseconds(libc::CPU_STATE_NICE as usize),
+        milliseconds(libc::CPU_STATE_SYSTEM as usize), milliseconds(libc::CPU_STATE_IDLE as usize), 0]
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn macos_processor_ticks_map_to_node_milliseconds() {
+    assert_eq!(macos_cpu_times([25, 50, 75, 100], 250), [100, 400, 200, 300, 0]);
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cpus() -> Vec<serde_json::Value> {
+    use std::ffi::CStr as FfiCStr;
+
+    extern "C" {
+        fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
+    }
+
+    unsafe fn sysctl_bytes(name: &FfiCStr) -> Option<Vec<u8>> {
+        let mut size = 0usize;
+        if unsafe { libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+            return None;
+        }
+        if size == 0 || size > 4096 { return None; }
+        let mut value = vec![0u8; size];
+        if unsafe { libc::sysctlbyname(name.as_ptr(), value.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+            return None;
+        }
+        if size > value.len() { return None; }
+        value.truncate(size);
+        Some(value)
+    }
+
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let Ok(hz) = u64::try_from(hz) else { return Vec::new(); };
+    if hz == 0 { return Vec::new(); }
+    let model = unsafe {
+        sysctl_bytes(c"machdep.cpu.brand_string")
+            .or_else(|| sysctl_bytes(c"hw.model"))
+    }.map(|bytes| String::from_utf8_lossy(bytes.split(|byte| *byte == 0).next().unwrap_or(&[])).into_owned())
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string());
+    let speed = unsafe { sysctl_bytes(c"hw.cpufrequency") }
+        .and_then(|bytes| bytes.try_into().ok().map(u64::from_ne_bytes))
+        .unwrap_or(0) / 1_000_000;
+    let mut count: libc::natural_t = 0;
+    let mut raw: libc::processor_info_array_t = std::ptr::null_mut();
+    let mut raw_count: libc::mach_msg_type_number_t = 0;
+    let host = unsafe { libc::mach_host_self() };
+    let result = unsafe { libc::host_processor_info(host, libc::PROCESSOR_CPU_LOAD_INFO,
+        &mut count, &mut raw, &mut raw_count) };
+    unsafe { mach_port_deallocate(libc::mach_task_self(), host) };
+    if result != 0 || raw.is_null() { return Vec::new(); }
+    let expected = (count as usize).checked_mul(std::mem::size_of::<libc::processor_cpu_load_info>());
+    let actual = (raw_count as usize).checked_mul(std::mem::size_of::<libc::integer_t>());
+    let mut cpus = Vec::new();
+    if matches!((actual, expected), (Some(actual), Some(expected)) if actual >= expected) {
+        let records = unsafe { std::slice::from_raw_parts(raw.cast::<libc::processor_cpu_load_info>(), count as usize) };
+        for record in records {
+            let [user, nice, sys, idle, irq] = macos_cpu_times(record.cpu_ticks, hz);
+            cpus.push(serde_json::json!({ "model": model, "speed": speed,
+                "times": { "user": user, "nice": nice, "sys": sys, "idle": idle, "irq": irq } }));
+        }
+    }
+    if let Some(actual) = actual {
+        unsafe { libc::vm_deallocate(libc::mach_task_self(), raw as libc::vm_address_t, actual as libc::vm_size_t) };
+    }
+    cpus
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cpu_times(user: i64, kernel: i64, idle: i64, interrupt: i64) -> [u64; 5] {
+    let ms = |ticks: i64| ticks.max(0) as u64 / 10_000;
+    [ms(user), 0, ms(kernel.saturating_sub(idle)), ms(idle), ms(interrupt)]
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_processor_ticks_exclude_idle_from_system_time() {
+    assert_eq!(windows_cpu_times(50_000, 90_000, 40_000, 20_000), [5, 0, 5, 4, 2]);
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cpus() -> Vec<serde_json::Value> {
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct ProcessorTimes {
+        idle: i64,
+        kernel: i64,
+        user: i64,
+        dpc: i64,
+        interrupt: i64,
+        interrupt_count: u32,
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQuerySystemInformation(class: u32, data: *mut std::ffi::c_void, length: u32,
+            returned: *mut u32) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetActiveProcessorCount(group: u16) -> u32;
+    }
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegOpenKeyExW(parent: *mut std::ffi::c_void, path: *const u16, options: u32,
+            access: u32, key: *mut *mut std::ffi::c_void) -> i32;
+        fn RegQueryValueExW(key: *mut std::ffi::c_void, name: *const u16, reserved: *mut u32,
+            kind: *mut u32, data: *mut u8, bytes: *mut u32) -> i32;
+        fn RegCloseKey(key: *mut std::ffi::c_void) -> i32;
+    }
+    let identity = |index: usize| {
+        let path = format!("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\{index}")
+            .encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+        let name = "ProcessorNameString\0".encode_utf16().collect::<Vec<_>>();
+        let frequency = "~MHz\0".encode_utf16().collect::<Vec<_>>();
+        let mut key = std::ptr::null_mut();
+        let root = (0x8000_0002u32 as i32 as isize) as *mut std::ffi::c_void;
+        if unsafe { RegOpenKeyExW(root, path.as_ptr(), 0, 1, &mut key) } != 0 {
+            return (std::env::consts::ARCH.to_string(), 0u64);
+        }
+        let mut brand = [0u16; 256];
+        let mut brand_bytes = std::mem::size_of_val(&brand) as u32;
+        let mut brand_kind = 0u32;
+        let brand_ok = unsafe { RegQueryValueExW(key, name.as_ptr(), std::ptr::null_mut(),
+            &mut brand_kind, brand.as_mut_ptr().cast(), &mut brand_bytes) } == 0
+            && brand_kind == 1 && brand_bytes as usize <= std::mem::size_of_val(&brand)
+            && brand_bytes % 2 == 0;
+        let mut mhz = 0u32;
+        let mut mhz_bytes = std::mem::size_of_val(&mhz) as u32;
+        let mut mhz_kind = 0u32;
+        let mhz_ok = unsafe { RegQueryValueExW(key, frequency.as_ptr(), std::ptr::null_mut(),
+            &mut mhz_kind, (&mut mhz as *mut u32).cast(), &mut mhz_bytes) } == 0
+            && mhz_kind == 4 && mhz_bytes as usize == std::mem::size_of_val(&mhz);
+        unsafe {
+            RegCloseKey(key);
+        }
+        let model = if brand_ok {
+            let length = (brand_bytes as usize / 2).min(brand.len());
+            let end = brand[..length].iter().position(|unit| *unit == 0).unwrap_or(length);
+            String::from_utf16_lossy(&brand[..end])
+        } else { std::env::consts::ARCH.to_string() };
+        (model, if mhz_ok { mhz as u64 } else { 0 })
+    };
+    let mut capacity = unsafe { GetActiveProcessorCount(0xffff) }.max(1) as usize;
+    let records = loop {
+        let mut values = vec![ProcessorTimes::default(); capacity];
+        let Some(bytes) = capacity.checked_mul(std::mem::size_of::<ProcessorTimes>())
+            .and_then(|value| u32::try_from(value).ok()) else { return Vec::new(); };
+        let mut returned = 0u32;
+        let status = unsafe { NtQuerySystemInformation(8, values.as_mut_ptr().cast(), bytes, &mut returned) };
+        if status >= 0 {
+            if returned == 0 || returned > bytes || returned as usize % std::mem::size_of::<ProcessorTimes>() != 0 {
+                return Vec::new();
+            }
+            values.truncate(returned as usize / std::mem::size_of::<ProcessorTimes>());
+            break values;
+        }
+        if status != 0xc000_0004u32 as i32 && status != 0xc000_0023u32 as i32 {
+            return Vec::new();
+        }
+        // Some Windows versions do not populate ReturnLength on a short buffer.
+        let required = (returned as usize).div_ceil(std::mem::size_of::<ProcessorTimes>());
+        let next = required.max(capacity.saturating_mul(2));
+        if next <= capacity || next > 65_536 { return Vec::new(); }
+        capacity = next;
+    };
+    records.into_iter().enumerate().map(|(index, record)| {
+        let [user, nice, sys, idle, irq] = windows_cpu_times(
+            record.user, record.kernel, record.idle, record.interrupt);
+        let (model, speed) = identity(index);
+        serde_json::json!({ "model": model, "speed": speed,
+            "times": { "user": user, "nice": nice, "sys": sys, "idle": idle, "irq": irq } })
+    }).collect()
+}
+
 fn os_info_json() -> String {
     let platform = match std::env::consts::OS {
         "macos" => "darwin",
@@ -655,7 +833,11 @@ fn os_info_json() -> String {
                     "times": { "user": user, "nice": nice, "sys": sys, "idle": idle, "irq": irq } })
             }).collect::<Vec<_>>()
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    let cpus = macos_cpus();
+    #[cfg(target_os = "windows")]
+    let cpus = windows_cpus();
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     let cpus = (0..std::thread::available_parallelism().map(usize::from).unwrap_or(1))
         .map(|_| serde_json::json!({ "model": model, "speed": speed,
             "times": { "user": 0, "nice": 0, "sys": 0, "idle": 0, "irq": 0 } }))
@@ -694,7 +876,7 @@ fn os_info_json() -> String {
 
 /// Backs `process.report.getReport().header.glibcVersionRuntime` -- real
 /// Node's own way of telling a glibc build apart from a musl one at
-/// runtime (`null`/absent on musl), which some native-addon loaders check
+/// runtime (`null`/absent on musl and non-Linux targets), which some native-addon loaders check
 /// directly instead of trusting `process.platform`/`arch` alone (real
 /// trigger: `better-sqlite3`'s own prebuild-selection fallback,
 /// `!process.report.getReport().header.glibcVersionRuntime`). Thaw's own
@@ -704,11 +886,11 @@ fn os_info_json() -> String {
 /// is the real glibc runtime version string on a glibc build; musl has no
 /// such symbol at all.
 fn glibc_version_runtime() -> Option<String> {
-    #[cfg(target_env = "musl")]
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     {
         None
     }
-    #[cfg(not(target_env = "musl"))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         let version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) };
         Some(version.to_string_lossy().into_owned())
