@@ -1286,9 +1286,9 @@ fn readable_cancellation_closes_before_source_failure() {
       for (var asynchronous of [false, true]) {
         var failure = new Error('cancel'), reason = { reason: true }, received;
         var stream = new ReadableStream({ cancel(value) { received = value; if (asynchronous) return Promise.reject(failure); throw failure; } }), reader = stream.getReader(), pending = reader.read(), closed = reader.closed;
-        var cancellation = reader.cancel(reason), outcomes = await Promise.allSettled([pending, closed, cancellation]);
+        var cancellation = reader.cancel(reason), calledSynchronously = received === reason, outcomes = await Promise.allSettled([pending, closed, cancellation]);
         var later = await reader.read();
-        results.push([outcomes[0].status, outcomes[0].value.done, outcomes[1].status, outcomes[2].status, outcomes[2].reason === failure, received === reason, later.done]);
+        results.push([outcomes[0].status, outcomes[0].value.done, outcomes[1].status, outcomes[2].status, outcomes[2].reason === failure, received === reason, later.done, calledSynchronously]);
         reader.releaseLock();
       }
       return results;
@@ -1299,7 +1299,7 @@ fn readable_cancellation_closes_before_source_failure() {
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseCancelFailure").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[["fulfilled",true,"fulfilled","rejected",true,true,true],["fulfilled",true,"fulfilled","rejected",true,true,true]]"#);
+    assert_eq!(result, r#"[["fulfilled",true,"fulfilled","rejected",true,true,true,true],["fulfilled",true,"fulfilled","rejected",true,true,true,true]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
