@@ -139,13 +139,14 @@ impl<'a> FnLowerer<'a> {
                         HirType::Function(_, _) | HirType::CallableFunction(..)
                     ) {
                         let search_is_regex = self.infer_expr_type(search)? == regex_type;
-                        return self.lower_replace_with_function(
+                        let result = self.lower_replace_with_function(
                             property.sym.as_ref(),
                             receiver,
                             search.clone(),
                             search_is_regex,
                             replacement.clone(),
-                        );
+                        )?;
+                        return self.wrap_call_argument_bindings(result, &spread_bindings);
                     }
                     if self.infer_expr_type(search)? == regex_type {
                         let pattern = search.clone();

@@ -4155,6 +4155,11 @@ impl<'a> FnLowerer<'a> {
                                 "`String.raw` currently requires a `raw` array literal".into()
                             );
                         };
+                        if substitutions.iter().any(|argument| argument.spread.is_some()) {
+                            return Err("`String.raw` does not support a spread substitution".into());
+                        }
+                        let (substitutions, bindings) =
+                            self.lower_native_spread_values(substitutions, "String.raw")?;
                         let mut parts = Vec::with_capacity(array.elems.len() * 2);
                         for (index, element) in array.elems.iter().enumerate() {
                             let Some(element) = element else {
@@ -4177,20 +4182,16 @@ impl<'a> FnLowerer<'a> {
                             // segments, so the last segment has none.
                             if index + 1 < array.elems.len() {
                                 if let Some(substitution) = substitutions.get(index) {
-                                    if substitution.spread.is_some() {
-                                        return Err(
-                                            "`String.raw` does not support a spread substitution"
-                                                .into(),
-                                        );
-                                    }
-                                    let value = self.lower_expr(&substitution.expr)?;
-                                    parts.push(self.coerce_primitive_to_string(value)?);
+                                    parts.push(self.coerce_primitive_to_string(substitution.clone())?);
                                 }
                             }
                         }
                         let mut parts = parts.into_iter();
                         let Some(mut result) = parts.next() else {
-                            return Ok(HirExpr::Lit(HirLit::Str(String::new())));
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Lit(HirLit::Str(String::new())),
+                                &bindings,
+                            );
                         };
                         for part in parts {
                             result = HirExpr::Call(
@@ -4198,7 +4199,7 @@ impl<'a> FnLowerer<'a> {
                                 vec![result, part],
                             );
                         }
-                        return Ok(result);
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"String" && property.sym == *"fromCharCode" {
                         let (arguments, bindings) =

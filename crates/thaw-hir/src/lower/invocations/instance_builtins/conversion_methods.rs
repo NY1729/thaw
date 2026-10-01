@@ -184,13 +184,17 @@ impl<'a> FnLowerer<'a> {
                         if !call.args.is_empty() {
                             return Err("native `.toString()` expects no arguments".into());
                         }
+                        let receiver_name = format!("__thaw_regex_to_string_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                        let bound = HirExpr::Var(receiver_name.clone());
                         let source = HirExpr::PropAccess(
-                            Box::new(receiver.clone()),
+                            Box::new(bound.clone()),
                             receiver_type.clone(),
                             "source".to_string(),
                         );
                         let flags = HirExpr::PropAccess(
-                            Box::new(receiver.clone()),
+                            Box::new(bound.clone()),
                             receiver_type.clone(),
                             "flags".to_string(),
                         );
@@ -202,10 +206,14 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_string_concat".into())),
                             vec![open, HirExpr::Lit(HirLit::Str("/".to_string()))],
                         );
-                        return Ok(HirExpr::Call(
+                        let result = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".into())),
                             vec![close, flags],
-                        ));
+                        );
+                        return self.wrap_call_argument_bindings(
+                            result,
+                            &[(receiver_name, receiver_type, receiver)],
+                        );
                     }
                     // `Symbol.prototype.toString()` is `Symbol(description)`.
                     // `coerce_primitive_to_string`'s `Symbol` arm is
@@ -236,7 +244,11 @@ impl<'a> FnLowerer<'a> {
                         let [radix] = arguments.as_slice() else {
                             return Err("native `.toString()` expects zero or one argument".into());
                         };
-                        let radix = self.coerce_primitive_to_number(radix.clone())?;
+                        let radix = if self.infer_expr_type(radix)? == HirType::Undefined {
+                            HirExpr::Lit(HirLit::F64(10.0))
+                        } else {
+                            self.coerce_primitive_to_number(radix.clone())?
+                        };
                         let receiver_name =
                             format!("__thaw_to_string_radix_receiver_{}", self.next_binding);
                         self.next_binding += 1;
