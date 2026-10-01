@@ -12,6 +12,144 @@ fn function_type_substitution(function: &swc_ecma_ast::Function) -> HashMap<Symb
         .unwrap_or_default()
 }
 
+// Only a function expression's hidden receiver needs the exact spelling of
+// string literals. Other type annotations continue to widen them to string.
+fn lower_non_arrow_receiver_type(
+    ty: &TsType,
+    substitution: &HashMap<Symbol, HirType>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<HirType, String> {
+    match ty {
+        TsType::TsTypeRef(reference) => {
+            if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
+                let name: &str = name.sym.as_ref();
+                if reference.type_params.is_none() {
+                    if let Some(concrete) = substitution.get(name) {
+                        return Ok(concrete.clone());
+                    }
+                    if let Some(alias) = generic_interfaces.plain_aliases.get(name) {
+                        if in_progress.iter().any(|active| active == name) {
+                            return Err(format!("receiver type alias `{name}` is (indirectly) self-referential"));
+                        }
+                        in_progress.push(name.to_string());
+                        let result = lower_non_arrow_receiver_type(&alias.type_ann, substitution,
+                            interfaces, generic_interfaces, in_progress);
+                        in_progress.pop();
+                        return result;
+                    }
+                }
+                if let Some(alias) = generic_interfaces.aliases.get(name) {
+                    if in_progress.iter().any(|active| active == name) {
+                        return Err(format!("receiver type alias `{name}` is (indirectly) self-referential"));
+                    }
+                    let parameters = &alias.type_params.as_ref()
+                        .expect("generic alias has type parameters").params;
+                    let arguments = reference.type_params.as_ref()
+                        .map(|arguments| arguments.params.as_slice()).unwrap_or_default();
+                    let required = parameters.iter().take_while(|parameter|
+                        parameter.default.is_none()).count();
+                    if arguments.len() < required || arguments.len() > parameters.len() {
+                        return Err(format!("receiver type alias `{name}` expects {required}..={} type arguments, got {}",
+                            parameters.len(), arguments.len()));
+                    }
+                    // Supplied arguments belong to the caller's type scope:
+                    // Choice<Choice<"closed">> is finite. Only defaults and
+                    // the alias body can recurse into this alias definition.
+                    let supplied = arguments.iter().map(|argument|
+                        lower_non_arrow_receiver_type(argument, substitution, interfaces,
+                            generic_interfaces, in_progress)).collect::<Result<Vec<_>, _>>()?;
+                    in_progress.push(name.to_string());
+                    let result = (|| {
+                        let mut concrete = HashMap::new();
+                        for (index, parameter) in parameters.iter().enumerate() {
+                            let argument = if let Some(argument) = supplied.get(index) {
+                                argument.clone()
+                            } else {
+                                lower_non_arrow_receiver_type(parameter.default.as_ref()
+                                    .expect("arity validation requires default"), &concrete,
+                                    interfaces, generic_interfaces, in_progress)?
+                            };
+                            if let Some(constraint) = &parameter.constraint {
+                                let constraint = resolve_ts_type_with_substitution(constraint,
+                                    &concrete, interfaces, generic_interfaces, in_progress)?;
+                                if !type_satisfies_constraint(&argument, &constraint) {
+                                    return Err(format!("type argument {argument:?} does not satisfy constraint {constraint:?} for `{}` in receiver alias `{name}`",
+                                        parameter.name.sym));
+                                }
+                            }
+                            concrete.insert(parameter.name.sym.to_string(), argument);
+                        }
+                        lower_non_arrow_receiver_type(&alias.type_ann, &concrete, interfaces,
+                            generic_interfaces, in_progress)
+                    })();
+                    in_progress.pop();
+                    return result;
+                }
+            }
+            resolve_ts_type_with_substitution(ty, substitution, interfaces,
+                generic_interfaces, in_progress)
+        }
+        TsType::TsParenthesizedType(parenthesized) => lower_non_arrow_receiver_type(
+            &parenthesized.type_ann, substitution, interfaces, generic_interfaces, in_progress),
+        TsType::TsLitType(literal) => {
+            if let swc_ecma_ast::TsLit::Str(value) = &literal.lit {
+                if let Ok(value) = std::str::from_utf8(value.value.as_wtf8().as_bytes()) {
+                    return Ok(HirType::StrLiteral(value.to_string()));
+                }
+            }
+            lower_ts_type(ty, interfaces, generic_interfaces)
+        }
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            let mut elements = Vec::new();
+            for member in &union.types {
+                let member = lower_non_arrow_receiver_type(member, substitution, interfaces,
+                    generic_interfaces, in_progress)?;
+                // A referenced alias can itself be a union. Keep this
+                // receiver union flat so its member tag still names a leaf.
+                let leaves = match member {
+                    HirType::Union(leaves) => leaves,
+                    leaf => vec![leaf],
+                };
+                for leaf in leaves {
+                    if !elements.contains(&leaf) {
+                        elements.push(leaf);
+                    }
+                }
+            }
+            if let [single] = elements.as_slice() {
+                return Ok(single.clone());
+            }
+            if elements.len() == 3 && elements.contains(&HirType::Null)
+                && elements.contains(&HirType::Undefined)
+            {
+                if let Some(payload) = elements.iter()
+                    .find(|element| !matches!(element, HirType::Null | HirType::Undefined))
+                {
+                    return Ok(HirType::Nullish(Box::new(payload.clone())));
+                }
+            }
+            if elements.len() == 2 {
+                if let Some(payload) = elements.iter().find(|element| **element != HirType::Undefined)
+                    .filter(|_| elements.contains(&HirType::Undefined))
+                {
+                    return Ok(HirType::Optional(Box::new(payload.clone())));
+                }
+                if let Some(payload) = elements.iter().find(|element| **element != HirType::Null)
+                    .filter(|_| elements.contains(&HirType::Null))
+                {
+                    return Ok(HirType::Nullable(Box::new(payload.clone())));
+                }
+            }
+            Ok(HirType::Union(elements))
+        }
+        _ if substitution.is_empty() => lower_ts_type(ty, interfaces, generic_interfaces),
+        _ => resolve_ts_type_with_substitution(ty, substitution, interfaces,
+            generic_interfaces, in_progress),
+    }
+}
+
 fn lower_ts_type(
     ty: &TsType,
     interfaces: &HashMap<Symbol, HirType>,
@@ -135,6 +273,7 @@ fn lower_ts_type(
                             | HirType::I64
                             | HirType::Bool
                             | HirType::Str
+                            | HirType::StrLiteral(_)
                             | HirType::Json
                             | HirType::JsValue
                             | HirType::Array(_)
