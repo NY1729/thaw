@@ -403,8 +403,8 @@
     return ranAny;
   };
   if (typeof globalThis.process === 'undefined') globalThis.process = {};
-  const hostInfo = typeof globalThis.__thaw_os_info === 'function'
-    ? JSON.parse(globalThis.__thaw_os_info()) : {};
+  const hostInfo = typeof globalThis.__thaw_os_identity === 'function'
+    ? JSON.parse(globalThis.__thaw_os_identity()) : {};
   const processStart = Date.now();
   const processListeners = new Map();
   const processOn = (event, listener, once = false) => {
