@@ -1100,3 +1100,55 @@ fn fs_watchers_track_missing_bigint_and_timer_lifetime() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn fs_glob_parses_patterns_and_prunes_excluded_directories() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_glob_patterns");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(root) { var work = root + '/glob'; fs.mkdirSync(work + '/sub', { recursive: true }); fs.mkdirSync(work + '/private/sub', { recursive: true }); fs.mkdirSync(work + '/.hidden'); ['file1.js','file2.js','file3.js','file2.ts','.hidden.js','sub/main.js','private/secret.js','private/sub/deep.js','.hidden/inside.js','a.txt','é.txt','1.txt','file01.txt','file02.txt','file03.txt'].forEach(function(name) { fs.writeFileSync(work + '/' + name, name); }); var namedAlpha = fs.globSync('[[:alpha:]].txt', { cwd: work }).sort(), mixedClass = fs.globSync('[[:alpha:]0-9].txt', { cwd: work }).sort(), padded = fs.globSync('file{1..03}.txt', { cwd: work }).sort(), cls = fs.globSync('file[12].js', { cwd: work }).sort(), brace = fs.globSync('file{1..2}.js', { cwd: work }).sort(), ext = fs.globSync('file@(1|2).js', { cwd: work }).sort(), neg = fs.globSync('file!(3).js', { cwd: work }).sort(), dot = fs.globSync('**/*.js', { cwd: work }).sort(), explicitDot = fs.globSync('.*.js', { cwd: work }).sort(), absolute = fs.globSync(work + '/file[12].js').sort(), parent = fs.globSync('../file[12].js', { cwd: work + '/sub' }).sort(), relativeParent = fs.globSync('../file[12].js', { cwd: require('node:path').relative(process.cwd(), work + '/sub') }).sort(), dotted = fs.globSync('./file[12].js', { cwd: work }).sort(), backslash = fs.globSync('sub' + String.fromCharCode(92) + 'main.js', { cwd: work }), typed = fs.globSync('**/*.js', { cwd: work, withFileTypes: true, exclude: function(entry) { if (typeof entry.isDirectory !== 'function') throw new Error('exclude did not receive Dirent'); return entry.isDirectory() && entry.name === 'private'; } }).map(function(entry) { return entry.name; }).sort(); var original = fs.readdirSync, pruned, rootedPruned, typedRootPruned, ancestorPruned, typedAncestorPruned, absolutePruned; fs.readdirSync = function(path, options) { if (String(path) === work + '/private') throw new Error('excluded directory was traversed'); return original(path, options); }; try { pruned = fs.globSync('**/*.js', { cwd: work, exclude: ['private/**'] }).sort(); rootedPruned = fs.globSync('private/**/*.js', { cwd: work, exclude: ['private/**'] }); typedRootPruned = fs.globSync('private/**/*.js', { cwd: work, withFileTypes: true, exclude: function(entry) { if (typeof entry.isDirectory !== 'function') throw new Error('root exclude did not receive Dirent'); return entry.name === 'private'; } }); ancestorPruned = fs.globSync('private/sub/**/*.js', { cwd: work, exclude: ['private'] }); typedAncestorPruned = fs.globSync('private/sub/**/*.js', { cwd: work, withFileTypes: true, exclude: function(entry) { if (typeof entry.isDirectory !== 'function') throw new Error('ancestor exclude did not receive Dirent'); return entry.name === 'private'; } }); absolutePruned = fs.globSync(work + '/private/**/*.js', { cwd: work, exclude: ['private/**'] }); } finally { fs.readdirSync = original; } var callback = await new Promise(function(resolve, reject) { fs.glob('file{1,2}.js', { cwd: work }, function(error, values) { error ? reject(error) : resolve(values.sort()); }); }); var asyncValues = []; for await (var value of fs.promises.glob('file[12].js', { cwd: work })) asyncValues.push(value); return [cls, brace, ext, neg, dot, explicitDot, absolute, parent, typed, pruned, callback, asyncValues.sort(), backslash, dotted, relativeParent, rootedPruned, typedRootPruned, ancestorPruned, typedAncestorPruned, absolutePruned, namedAlpha, mixedClass, padded]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_glob_patterns_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsGlobPatterns = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(
+        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
+    )
+    .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsGlobPatterns").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let two = serde_json::json!(["file1.js", "file2.js"]);
+    for index in [0, 1, 2, 3, 10, 11] {
+        assert_eq!(parsed[index], two);
+    }
+    assert_eq!(parsed[4], serde_json::json!(["file1.js", "file2.js", "file3.js", "private/secret.js", "private/sub/deep.js", "sub/main.js"]));
+    assert_eq!(parsed[5], serde_json::json!([".hidden.js"]));
+    let work = dir.join("glob").to_string_lossy().into_owned();
+    assert_eq!(parsed[6], serde_json::json!([format!("{work}/file1.js"), format!("{work}/file2.js")]));
+    assert_eq!(parsed[7], serde_json::json!(["../file1.js", "../file2.js"]));
+    assert_eq!(parsed[8], serde_json::json!(["file1.js", "file2.js", "file3.js", "main.js"]));
+    assert_eq!(parsed[9], serde_json::json!(["file1.js", "file2.js", "file3.js", "sub/main.js"]));
+    assert_eq!(parsed[12], serde_json::json!(["sub/main.js"]));
+    assert_eq!(parsed[13], two);
+    assert_eq!(parsed[14], serde_json::json!(["../file1.js", "../file2.js"]));
+    assert_eq!(parsed[15], serde_json::json!([]));
+    assert_eq!(parsed[16], serde_json::json!([]));
+    assert_eq!(parsed[17], serde_json::json!([]));
+    assert_eq!(parsed[18], serde_json::json!([]));
+    assert_eq!(parsed[19], serde_json::json!([]));
+    assert_eq!(parsed[20], serde_json::json!(["a.txt", "é.txt"]));
+    assert_eq!(parsed[21], serde_json::json!(["1.txt", "a.txt", "é.txt"]));
+    assert_eq!(parsed[22], serde_json::json!(["file01.txt", "file02.txt", "file03.txt"]));
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
