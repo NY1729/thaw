@@ -1785,3 +1785,56 @@ fn generic_non_arrow_this_scope_and_empty_operations_lower() {
         console.log(order.join(","));
     }"#);
 }
+
+#[test]
+fn generic_non_arrow_optional_this_operations_lower() {
+    lower(r#"function main(): void {
+        const choose = function<T>(this: T, value?: T): T { return this; };
+        console.log(choose.call(7));
+        console.log(choose.apply(8, null));
+        console.log(choose.apply(9, undefined));
+        const bound = choose.bind(10);
+        console.log(bound());
+        console.log(bound(10));
+    }"#);
+}
+
+#[test]
+fn generic_non_arrow_rest_this_operations_lower() {
+    lower(r#"function main(): void {
+        const count = function<T>(this: T, ...values: T[]): number {
+            return values.length;
+        };
+        console.log(count.call(7, 7, 7));
+        console.log(count.apply(8, [8, 8] as [number, number]));
+        const bound = count.bind(9);
+        console.log(bound(9, 9));
+        const partial = count.bind(10, 10);
+        console.log(partial(10));
+    }"#);
+}
+
+#[test]
+fn generic_non_arrow_apply_runtime_nullish_tuple_preserves_order() {
+    lower(r#"function main(): void {
+        const order: string[] = [];
+        const choose = function<T>(this: T, value?: T): T {
+            order.push("body");
+            return this;
+        };
+        function receiver(): number { order.push("receiver"); return 7; }
+        function maybe(mode: number): [number] | null | undefined {
+            order.push("tuple");
+            if (mode === 0) return null;
+            if (mode === 1) return undefined;
+            return [7] as [number];
+        }
+        function extra(): number { order.push("extra"); return 0; }
+        function spreadExtra(): [number, number] { order.push("spread"); return [1, 2]; }
+        console.log(choose.apply(receiver(), maybe(0), extra()));
+        console.log(choose.apply(receiver(), maybe(1), extra()));
+        console.log(choose.apply(receiver(), maybe(2), extra()));
+        console.log(choose.apply(receiver(), maybe(0), ...spreadExtra()));
+        console.log(order.join(","));
+    }"#);
+}
