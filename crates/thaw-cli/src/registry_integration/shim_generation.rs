@@ -111,6 +111,7 @@ fn push_error_family_ambient_declarations(classes: &[thaw_bridge::DtsClass], shi
 fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
+    runtime_packages: &std::collections::HashSet<String>,
     user_source: &str,
     embed_native_addons: bool,
     output: &Path,
@@ -1282,7 +1283,8 @@ fn generate_registry_shims(
         if let Some(native_lib) = &pkg.native_lib {
             native_libs.push(native_lib.clone());
         }
-        if let Some(executable) = &pkg.platform_executable {
+        if let Some(executable) = pkg.platform_executable.as_ref()
+            .filter(|_| runtime_packages.contains(&pkg.name)) {
             let bytes = std::fs::read(executable).map_err(|error| {
                 format!(
                     "failed to embed platform executable `{}`: {error}",
@@ -1292,7 +1294,8 @@ fn generate_registry_shims(
             let encoded = thaw_bridge::encode_embedded_native(&bytes);
             platform_executables.push(encoded);
         }
-        if let Some(native_addon) = &pkg.native_addon {
+        if let Some(native_addon) = pkg.native_addon.as_ref()
+            .filter(|_| runtime_packages.contains(&pkg.name)) {
             let root_export = if pkg.bundle_js.is_some() {
                 None
             } else {
@@ -1361,6 +1364,7 @@ fn generate_registry_shims(
             }
         }
         if let Some(bundle_js) = &pkg.bundle_js {
+            let runtime_package = runtime_packages.contains(&pkg.name);
             // `class_targets` (populated by `generate_napi_class_
             // constructors`, above) exists to drive `class_rewrites` --
             // rewriting a `new ClassName(...)` call site's callee
@@ -1467,6 +1471,11 @@ fn generate_registry_shims(
                     })
                 })
                 .collect::<Vec<_>>();
+            if !runtime_package {
+                // Keep typed value bindings for retained function bodies,
+                // but do not call their package getter during startup.
+                shim.push_str("\"__thaw_internal_execution:0\";\n");
+            }
             let value_exports = pkg
                 .values
                 .iter()
@@ -1519,6 +1528,9 @@ fn generate_registry_shims(
                     ))
                 })
                 .collect::<Vec<_>>();
+            if !runtime_package {
+                shim.push_str("\"__thaw_internal_execution:1\";\n");
+            }
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
@@ -1608,10 +1620,10 @@ fn generate_registry_shims(
             let class_names: Vec<String> = pkg.classes.iter()
                 .filter(|class| !class.name.contains('.'))
                 .map(|class| class.name.clone()).collect();
-            if !fallback_names.is_empty()
+            if runtime_package && (!fallback_names.is_empty()
                 || pkg.native_addon.is_some()
                 || !pkg.classes.is_empty()
-                || !value_exports.is_empty()
+                || !value_exports.is_empty())
             {
                 bundles.push((
                     pkg.name.clone(),
