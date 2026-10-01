@@ -2890,3 +2890,23 @@ fn non_arrow_same_tag_string_union_selects_literal_and_fallback() {
     assert_eq!(compile_and_run(source, "non_arrow_string_union"),
         "string string\nTypeError\nstring string\nstring string\nstring string\nstring string\nstring string\n");
 }
+
+#[test]
+fn non_arrow_nested_receiver_wrappers_use_leaf_envelope() {
+    let source = r#"
+        type Maybe<T> = T | undefined;
+        class Carrier { value: number; constructor(value: number) { this.value = value; } }
+        function main(): void {
+            const branch = function(this: Maybe<number> | string): string { return typeof this; };
+            console.log(branch(), branch.call(3), branch.call("x"));
+            const overlap = function(this: (number | undefined) | number): string { return typeof this; };
+            console.log(overlap(), overlap.call(5));
+            const nullish = function(this: (number | null) | undefined): string { return typeof this; };
+            console.log(nullish(), nullish.call(null), nullish.call(6));
+            const native = function(this: (Carrier | undefined) | string): string { return typeof this; };
+            console.log(native(), native.call(new Carrier(1)), native.call("x"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_nested_receivers"),
+        "undefined number string\nundefined number\nundefined object number\nundefined object string\n");
+}

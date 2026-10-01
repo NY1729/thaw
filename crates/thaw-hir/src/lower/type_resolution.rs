@@ -12,6 +12,53 @@ fn function_type_substitution(function: &swc_ecma_ast::Function) -> HashMap<Symb
         .unwrap_or_default()
 }
 
+// A receiver envelope carries a value kind and one native word, not the
+// source type's wrapper nesting. Canonicalize the hidden receiver to its
+// distinct runtime leaves before HIR assigns the lambda parameter's ABI.
+fn canonical_non_arrow_receiver_type(receiver: HirType) -> HirType {
+    fn collect(receiver: HirType, leaves: &mut Vec<HirType>) {
+        match receiver {
+            HirType::Union(members) => {
+                for member in members { collect(member, leaves); }
+            }
+            HirType::Optional(inner) => {
+                collect(*inner, leaves);
+                collect(HirType::Undefined, leaves);
+            }
+            HirType::Nullable(inner) => {
+                collect(*inner, leaves);
+                collect(HirType::Null, leaves);
+            }
+            HirType::Nullish(inner) => {
+                collect(*inner, leaves);
+                collect(HirType::Null, leaves);
+                collect(HirType::Undefined, leaves);
+            }
+            leaf if !leaves.contains(&leaf) => leaves.push(leaf),
+            _ => {}
+        }
+    }
+    let mut leaves = Vec::new();
+    collect(receiver, &mut leaves);
+    if leaves.len() == 2 {
+        if let Some(index) = leaves.iter().position(|leaf| *leaf == HirType::Undefined) {
+            leaves.remove(index);
+            return HirType::Optional(Box::new(leaves.remove(0)));
+        }
+        if let Some(index) = leaves.iter().position(|leaf| *leaf == HirType::Null) {
+            leaves.remove(index);
+            return HirType::Nullable(Box::new(leaves.remove(0)));
+        }
+    }
+    if leaves.len() == 3 && leaves.contains(&HirType::Null)
+        && leaves.contains(&HirType::Undefined)
+    {
+        leaves.retain(|leaf| !matches!(leaf, HirType::Null | HirType::Undefined));
+        return HirType::Nullish(Box::new(leaves.remove(0)));
+    }
+    if leaves.len() == 1 { leaves.remove(0) } else { HirType::Union(leaves) }
+}
+
 // Only a function expression's hidden receiver needs the exact spelling of
 // string literals. Other type annotations continue to widen them to string.
 fn lower_non_arrow_receiver_type(
