@@ -21,6 +21,7 @@ fn erase_bytes(program: &mut HirProgram) {
         match step {
             HirInitStep::StoreGlobal(_, value) => erase_expr(value),
             HirInitStep::Statement(stmt) => erase_stmt(stmt),
+            HirInitStep::ExecutionBoundary(_) | HirInitStep::ModuleBoundary { .. } => {}
         }
     }
     for function in &mut program.functions {

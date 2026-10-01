@@ -415,8 +415,16 @@ impl<'ctx> HirCompiler<'ctx> {
         self.arena_variables.clear();
         self.catch_stack.clear();
         self.seed_global_variables();
+        let mut execute = true;
         for step in &program.initializers {
             match step {
+                HirInitStep::ExecutionBoundary(enabled) => {
+                    execute = *enabled;
+                }
+                HirInitStep::ModuleBoundary { eager, .. } => {
+                    execute = *eager;
+                }
+                _ if !execute => {}
                 HirInitStep::StoreGlobal(name, expression) => {
                     let value = self.compile_expr(expression)?;
                     let (pointer, _, _) = self.global_variables[name];
