@@ -1,4 +1,166 @@
 #[test]
+fn quickjs_reference_graph_preserves_cycles_arrays_and_buffer_bytes() {
+    unsafe {
+        let mut env = Env::new();
+        let root = value_from_json_with_undefined(&mut env, &serde_json::json!({
+            "__thaw_napi_object__": 1,
+            "value": {
+                "self": { "__thaw_napi_ref__": 1 },
+                "items": { "__thaw_napi_array__": 2, "value": [{ "__thaw_napi_ref__": 2 }] },
+                "bytes": { "__thaw_napi_buffer__": 3, "value": [1, 2] }
+            }
+        }), true).unwrap();
+        let Value::Object(properties) = value_ref(root).unwrap() else { panic!("object expected") };
+        assert_eq!(properties[&PropertyKey::String("self".into())], root);
+        let array = properties[&PropertyKey::String("items".into())];
+        let buffer = properties[&PropertyKey::String("bytes".into())];
+        let Value::Array(items) = value_ref(array).unwrap() else { panic!("array expected") };
+        assert_eq!(items[0], Some(array));
+        let four = env.alloc(Value::Number(4.0));
+        if let Some(Value::Array(items)) = array.as_mut() { items.push(Some(four)); }
+        if let Some(Value::Buffer(bytes)) = buffer.as_mut() { bytes[0] = 9; }
+        let snapshot = quickjs_reference_json(&env, root, true, &mut HashSet::new()).unwrap();
+        assert_eq!(snapshot["self"], serde_json::json!({ "__thaw_napi_ref__": 1 }));
+        assert_eq!(quickjs_reference_json(&env, array, true, &mut HashSet::new()).unwrap(),
+            serde_json::json!([{ "__thaw_napi_ref__": 2 }, 4]));
+        assert_eq!(quickjs_reference_json(&env, buffer, true, &mut HashSet::new()).unwrap(),
+            serde_json::json!([9, 2]));
+    }
+}
+
+#[test]
+fn quickjs_typed_array_uses_the_original_arraybuffer_backing() {
+    unsafe {
+        let mut env = Env::new();
+        let view = value_from_json_with_undefined(&mut env, &serde_json::json!({
+            "__thaw_napi_view__": 12,
+            "kind": 1,
+            "length": 3,
+            "byte_offset": 0,
+            "buffer": { "__thaw_napi_arraybuffer__": 11, "value": [1, 2, 3] }
+        }), true).unwrap();
+        let backing = env.quickjs_references[&11];
+        let Value::TypedArray { array_buffer, .. } = value_ref(view).unwrap() else {
+            panic!("typed array expected")
+        };
+        assert_eq!(*array_buffer, backing);
+        if let Some(Value::ArrayBuffer { bytes, .. }) = backing.as_mut() { bytes[1] = 9; }
+        assert_eq!(quickjs_reference_json(&env, backing, true, &mut HashSet::new()).unwrap(),
+            serde_json::json!([1, 9, 3]));
+        assert_eq!(value_from_json_with_undefined(&mut env,
+            &serde_json::json!({ "__thaw_napi_ref__": 11 }), true).unwrap(), backing);
+    }
+}
+
+#[test]
+fn json_view_decoder_rejects_invalid_bounds_before_exposing_a_native_view() {
+    let mut env = Env::new();
+    let cases = [
+        serde_json::json!({
+            "__thaw_napi_view__": 21, "kind": 1, "length": 1,
+            "byte_offset": 18446744073709551615u64,
+            "buffer": { "__thaw_napi_arraybuffer__": 20, "value": [1] }
+        }),
+        serde_json::json!({
+            "__thaw_napi_view__": 22, "kind": 4, "length": 1,
+            "byte_offset": 1,
+            "buffer": { "__thaw_napi_arraybuffer__": 20, "value": [1, 2, 3, 4] }
+        }),
+        serde_json::json!({
+            "__thaw_napi_view__": 23, "kind": -1, "length": 2,
+            "byte_offset": 0, "buffer": { "__thaw_napi_buffer__": 24, "value": [1, 2] }
+        }),
+    ];
+    for input in &cases {
+        assert!(value_from_json(&mut env, input).is_err());
+    }
+    assert!(!env.quickjs_references.contains_key(&21));
+    assert!(!env.quickjs_references.contains_key(&22));
+    assert!(!env.quickjs_references.contains_key(&23));
+}
+
+#[test]
+fn repeated_binary_references_keep_native_data_pointers_stable() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let buffer = value_from_json(&mut env, &serde_json::json!({
+            "__thaw_napi_buffer__": 31, "value": [1, 2]
+        })).unwrap();
+        let mut original_buffer_data = ptr::null_mut();
+        assert_eq!(napi_get_buffer_info(env_ptr, buffer, &mut original_buffer_data, ptr::null_mut()), NAPI_OK);
+        assert_eq!(value_from_json(&mut env, &serde_json::json!({
+            "__thaw_napi_buffer__": 31, "value": [3, 4]
+        })).unwrap(), buffer);
+        let mut current_buffer_data = ptr::null_mut();
+        assert_eq!(napi_get_buffer_info(env_ptr, buffer, &mut current_buffer_data, ptr::null_mut()), NAPI_OK);
+        assert_eq!(original_buffer_data, current_buffer_data);
+        assert!(matches!(value_ref(buffer), Ok(Value::Buffer(bytes)) if bytes.as_slice() == [3, 4]));
+
+        for shared in [false, true] {
+            let backing_id = if shared { 33 } else { 32 };
+            let view_id = if shared { 35 } else { 34 };
+            let view = value_from_json(&mut env, &serde_json::json!({
+                "__thaw_napi_view__": view_id, "kind": 1, "length": 2,
+                "byte_offset": 1, "buffer": {
+                    "__thaw_napi_arraybuffer__": backing_id, "shared": shared,
+                    "value": [1, 2, 3]
+                }
+            })).unwrap();
+            let backing = env.quickjs_references[&backing_id];
+            let mut original_backing_data = ptr::null_mut();
+            let mut original_view_data = ptr::null_mut();
+            assert_eq!(napi_get_arraybuffer_info(env_ptr, backing, &mut original_backing_data, ptr::null_mut()), NAPI_OK);
+            assert_eq!(napi_get_typedarray_info(env_ptr, view, ptr::null_mut(), ptr::null_mut(),
+                &mut original_view_data, ptr::null_mut(), ptr::null_mut()), NAPI_OK);
+            assert_eq!(value_from_json(&mut env, &serde_json::json!({
+                "__thaw_napi_view__": view_id, "kind": 1, "length": 2,
+                "byte_offset": 1, "buffer": {
+                    "__thaw_napi_arraybuffer__": backing_id, "shared": shared,
+                    "value": [4, 5, 6]
+                }
+            })).unwrap(), view);
+            let mut current_backing_data = ptr::null_mut();
+            let mut current_view_data = ptr::null_mut();
+            assert_eq!(napi_get_arraybuffer_info(env_ptr, backing, &mut current_backing_data, ptr::null_mut()), NAPI_OK);
+            assert_eq!(napi_get_typedarray_info(env_ptr, view, ptr::null_mut(), ptr::null_mut(),
+                &mut current_view_data, ptr::null_mut(), ptr::null_mut()), NAPI_OK);
+            assert_eq!(original_backing_data, current_backing_data);
+            assert_eq!(original_view_data, current_view_data);
+        }
+        assert!(value_from_json(&mut env, &serde_json::json!({
+            "__thaw_napi_buffer__": 31, "value": [7, 8, 9]
+        })).is_err());
+        assert!(value_from_json(&mut env, &serde_json::json!({
+            "__thaw_napi_arraybuffer__": 32, "shared": false,
+            "value": [7, 8, 9, 10]
+        })).is_err());
+    }
+}
+
+#[test]
+fn native_symbol_key_keeps_its_identity_in_own_keys() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let object = env.alloc(Value::Object(HashMap::new()));
+        let description = env.alloc(Value::String("key".into()));
+        let mut symbol = ptr::null_mut();
+        assert_eq!(napi_create_symbol(env_ptr, description, &mut symbol), NAPI_OK);
+        let value = env.alloc(Value::Number(7.0));
+        assert_eq!(napi_set_property(env_ptr, object, symbol, value), NAPI_OK);
+        let mut keys = ptr::null_mut();
+        assert_eq!(napi_get_all_property_names(env_ptr, object, NAPI_KEY_OWN_ONLY,
+            NAPI_KEY_ALL_PROPERTIES, NAPI_KEY_NUMBERS_TO_STRINGS, &mut keys), NAPI_OK);
+        let Value::Array(keys) = value_ref(keys).unwrap() else { panic!("keys expected") };
+        assert_eq!(keys.as_slice(), &[Some(symbol)]);
+        let marker = quickjs_bridge_value(symbol).unwrap();
+        let Value::Symbol { id, .. } = value_ref(symbol).unwrap() else { panic!("symbol expected") };
+        assert_eq!(marker["__thaw_napi_symbol__"], serde_json::json!(id.to_string()));
+    }
+}
+
+#[test]
 fn async_contexts_validate_names_and_environment_ownership() {
     unsafe extern "C" fn return_undefined(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
         let mut result = ptr::null_mut();

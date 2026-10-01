@@ -638,7 +638,13 @@ pub unsafe extern "C" fn napi_run_script(
     };
     let status = match evaluated {
         Ok(Some(json)) => match serde_json::from_str::<JsonValue>(&json) {
-            Ok(json) => write_value(result, value_from_json(env, &json)),
+            Ok(json) => match value_from_json(env, &json) {
+                Ok(value) => write_value(result, value),
+                Err(error) => {
+                    env.exception = Some(env.alloc(Value::Error(error)));
+                    NAPI_PENDING_EXCEPTION
+                }
+            },
             Err(error) => {
                 env.exception = Some(env.alloc(Value::Error(format!(
                     "failed to decode script result: {error}"
