@@ -868,3 +868,31 @@ fn file_urls_resolve_relative_paths_from_current_working_directory() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
+
+
+#[test]
+fn form_data_preserves_file_metadata_and_utf8_multipart_parameters() {
+    // Unrun regression for the shared append/set storage and body decoder.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("form_data_file_metadata");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var form = new FormData(), blob = new Blob([new Uint8Array([0, 255, 13])], { type: 'application/custom' });
+      form.append('名前', blob, '日本語.bin'); form.append('default', blob);
+      form.append('replace', 'old'); form.append('replace', 'duplicate'); form.set('replace', blob, '変更.bin');
+      var original = new File(['file'], 'original.txt', { lastModified: 42 }); form.append('original', original);
+      var before = [form.get('名前') instanceof File, form.get('名前').name, form.get('default').name, form.get('replace').name, form.getAll('replace').length, form.get('original') === original, form.get('original').lastModified, [...form][0][1].name];
+      var parsed = await new Response(form).formData(), received = parsed.get('名前');
+      var raw = '--boundary\r\nContent-Disposition: form-data; name="file"; filename="plain.txt"\r\n\r\nhello\r\n--boundary--\r\n';
+      var noType = await new Response(raw, { headers: { 'content-type': 'multipart/form-data; boundary=boundary' } }).formData();
+      return [before, received.name, received.type, Array.from(new Uint8Array(await received.arrayBuffer())), noType.get('file').type, await noType.get('file').text()];
+    };"#).unwrap();
+    let modules = temp_registry("form_data_file_metadata_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFormData = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseFormData").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,"日本語.bin","blob","変更.bin",1,true,42,"日本語.bin"],"日本語.bin","application/custom",[0,255,13],"text/plain","hello"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}

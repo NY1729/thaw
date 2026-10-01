@@ -422,14 +422,24 @@
   }
   if (typeof globalThis.FormData !== 'function') {
     const formDataEntries = new WeakMap();
+    const formDataEntry = (name, value, filename) => {
+      const key = String(name);
+      if (!(value instanceof Blob)) {
+        if (filename !== undefined) throw new TypeError('filename requires a Blob value');
+        return [key, String(value)];
+      }
+      const file = filename === undefined && value instanceof File ? value
+        : new File([value], filename === undefined ? 'blob' : String(filename), { type: value.type, lastModified: value instanceof File ? value.lastModified : undefined });
+      return [key, file];
+    };
     class FormData {
       constructor() { formDataEntries.set(this, []); }
-      append(name, value, filename = undefined) { const entry = [String(name), value instanceof Blob ? value : String(value)]; if (filename !== undefined) entry.push(String(filename)); formDataEntries.get(this).push(entry); }
+      append(name, value, filename = undefined) { formDataEntries.get(this).push(formDataEntry(name, value, filename)); }
       delete(name) { const key = String(name); formDataEntries.set(this, formDataEntries.get(this).filter(entry => entry[0] !== key)); }
       get(name) { const key = String(name), entry = formDataEntries.get(this).find(item => item[0] === key); return entry ? entry[1] : null; }
       getAll(name) { const key = String(name); return formDataEntries.get(this).filter(entry => entry[0] === key).map(entry => entry[1]); }
       has(name) { const key = String(name); return formDataEntries.get(this).some(entry => entry[0] === key); }
-      set(name, value, filename = undefined) { const key = String(name), entries = formDataEntries.get(this), index = entries.findIndex(entry => entry[0] === key), replacement = [key, value instanceof Blob ? value : String(value)]; if (filename !== undefined) replacement.push(String(filename)); if (index < 0) entries.push(replacement); else { entries[index] = replacement; formDataEntries.set(this, entries.filter((entry, current) => entry[0] !== key || current === index)); } }
+      set(name, value, filename = undefined) { const replacement = formDataEntry(name, value, filename), key = replacement[0], entries = formDataEntries.get(this), index = entries.findIndex(entry => entry[0] === key); if (index < 0) entries.push(replacement); else { entries[index] = replacement; formDataEntries.set(this, entries.filter((entry, current) => entry[0] !== key || current === index)); } }
       *entries() { for (const entry of formDataEntries.get(this)) yield [entry[0], entry[1]]; }
       *keys() { for (const entry of formDataEntries.get(this)) yield entry[0]; }
       *values() { for (const entry of formDataEntries.get(this)) yield entry[1]; }
@@ -503,9 +513,9 @@
         const rawHeaders = section.slice(0, marker), content = section.slice(marker + 4), headers = Object.create(null);
         for (const line of rawHeaders.split('\r\n')) { const colon = line.indexOf(':'); if (colon >= 0) headers[line.slice(0, colon).toLowerCase()] = line.slice(colon + 1).trim(); }
         const disposition = headers['content-disposition'] || '', nameMatch = /(?:^|;)\s*name="([^"]*)"/i.exec(disposition); if (!nameMatch) continue;
-        const decodeParameter = value => value.replace(/%22/gi, '"').replace(/%0D/gi, '\r').replace(/%0A/gi, '\n');
+        const decodeParameter = value => new TextDecoder().decode(Uint8Array.from(value, character => character.charCodeAt(0))).replace(/%22/gi, '"').replace(/%0D/gi, '\r').replace(/%0A/gi, '\n');
         const name = decodeParameter(nameMatch[1]), filenameMatch = /(?:^|;)\s*filename="([^"]*)"/i.exec(disposition), partBytes = Uint8Array.from(content, character => character.charCodeAt(0));
-        if (filenameMatch) data.append(name, new File([partBytes], decodeParameter(filenameMatch[1]), { type: headers['content-type'] || 'application/octet-stream' }));
+        if (filenameMatch) data.append(name, new File([partBytes], decodeParameter(filenameMatch[1]), { type: headers['content-type'] || 'text/plain' }));
         else data.append(name, new TextDecoder().decode(partBytes));
       }
       return data;
