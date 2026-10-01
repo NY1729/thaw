@@ -1,13 +1,92 @@
-fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
-    let code = if error.raw_os_error() == Some(libc::EBADF) { "EBADF" } else { match error.kind() {
+#[cfg(unix)]
+fn fs_raw_error_code(raw: i32) -> Option<&'static str> {
+    if raw == libc::ENOTSUP || raw == libc::EOPNOTSUPP { return Some("ENOTSUP"); }
+    Some(match raw {
+        libc::EPERM => "EPERM",
+        libc::ENOENT => "ENOENT",
+        libc::ESRCH => "ESRCH",
+        libc::EINTR => "EINTR",
+        libc::EIO => "EIO",
+        libc::ENXIO => "ENXIO",
+        libc::E2BIG => "E2BIG",
+        libc::ENOEXEC => "ENOEXEC",
+        libc::EBADF => "EBADF",
+        libc::ECHILD => "ECHILD",
+        libc::EAGAIN => "EAGAIN",
+        libc::ENOMEM => "ENOMEM",
+        libc::EACCES => "EACCES",
+        libc::EFAULT => "EFAULT",
+        libc::EBUSY => "EBUSY",
+        libc::EEXIST => "EEXIST",
+        libc::EXDEV => "EXDEV",
+        libc::ENODEV => "ENODEV",
+        libc::ENOTDIR => "ENOTDIR",
+        libc::EISDIR => "EISDIR",
+        libc::EINVAL => "EINVAL",
+        libc::ENFILE => "ENFILE",
+        libc::EMFILE => "EMFILE",
+        libc::ENOTTY => "ENOTTY",
+        libc::ETXTBSY => "ETXTBSY",
+        libc::EFBIG => "EFBIG",
+        libc::ENOSPC => "ENOSPC",
+        libc::ESPIPE => "ESPIPE",
+        libc::EROFS => "EROFS",
+        libc::EMLINK => "EMLINK",
+        libc::EPIPE => "EPIPE",
+        libc::EDOM => "EDOM",
+        libc::ERANGE => "ERANGE",
+        libc::EDEADLK => "EDEADLK",
+        libc::ENAMETOOLONG => "ENAMETOOLONG",
+        libc::ENOLCK => "ENOLCK",
+        libc::ENOSYS => "ENOSYS",
+        libc::ENOTEMPTY => "ENOTEMPTY",
+        libc::ELOOP => "ELOOP",
+        libc::EOVERFLOW => "EOVERFLOW",
+        libc::EILSEQ => "EILSEQ",
+        libc::EADDRINUSE => "EADDRINUSE",
+        libc::EADDRNOTAVAIL => "EADDRNOTAVAIL",
+        libc::ENETDOWN => "ENETDOWN",
+        libc::ENETUNREACH => "ENETUNREACH",
+        libc::ECONNABORTED => "ECONNABORTED",
+        libc::ECONNRESET => "ECONNRESET",
+        libc::ENOBUFS => "ENOBUFS",
+        libc::ENOTCONN => "ENOTCONN",
+        libc::ETIMEDOUT => "ETIMEDOUT",
+        libc::ECONNREFUSED => "ECONNREFUSED",
+        libc::EHOSTUNREACH => "EHOSTUNREACH",
+        libc::ESTALE => "ESTALE",
+        libc::EDQUOT => "EDQUOT",
+        libc::ECANCELED => "ECANCELED",
+        _ => return None,
+    })
+}
+
+#[cfg(not(unix))]
+fn fs_raw_error_code(_raw: i32) -> Option<&'static str> {
+    None
+}
+
+fn fs_kind_error_code(kind: io::ErrorKind) -> Option<&'static str> {
+    Some(match kind {
         io::ErrorKind::NotFound => "ENOENT",
         io::ErrorKind::PermissionDenied => "EACCES",
         io::ErrorKind::AlreadyExists => "EEXIST",
         io::ErrorKind::InvalidInput => "EINVAL",
         io::ErrorKind::IsADirectory => "EISDIR",
         io::ErrorKind::NotADirectory => "ENOTDIR",
-        _ => "EIO",
-    } };
+        _ => return None,
+    })
+}
+
+fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
+    let code = if let Some(raw) = error.raw_os_error() {
+        fs_raw_error_code(raw)
+            .or_else(|| if cfg!(unix) { None } else { fs_kind_error_code(error.kind()) })
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("ERRNO_{raw}"))
+    } else {
+        fs_kind_error_code(error.kind()).unwrap_or("EIO").to_string()
+    };
     serde_json::json!({ "ok": false, "code": code, "operation": operation, "path": path, "message": error.to_string() }).to_string()
 }
 
@@ -590,4 +669,56 @@ thread_local! {
     static WASM_JS_IMPORTS: RefCell<(u32, HashMap<u32, WasmJsImport>)> = RefCell::new((1, HashMap::new()));
     #[cfg(feature = "wasm")]
     static WASM_JS_VALUES: RefCell<(u32, HashMap<u32, WasmJsValue>)> = RefCell::new((1, HashMap::new()));
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn fs_error_preserves_native_errno_and_path_operation() {
+    let code = |raw| {
+        serde_json::from_str::<serde_json::Value>(&fs_error("rmdir", "/example", io::Error::from_raw_os_error(raw)))
+            .unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(code(libc::EPERM), "EPERM");
+    assert_eq!(code(libc::EACCES), "EACCES");
+    assert_eq!(code(libc::ELOOP), "ELOOP");
+    assert_eq!(code(libc::ENOSPC), "ENOSPC");
+    assert_eq!(code(libc::EXDEV), "EXDEV");
+    assert_eq!(code(libc::ENOTSUP), "ENOTSUP");
+    assert_eq!(code(libc::EOPNOTSUPP), "ENOTSUP");
+    assert_eq!(code(123456), "ERRNO_123456");
+    let fallback: serde_json::Value = serde_json::from_str(&fs_error(
+        "rmdir", "/example", io::Error::new(io::ErrorKind::InvalidInput, "invalid path"),
+    )).unwrap();
+    assert_eq!(fallback["code"], "EINVAL");
+
+    let directory = std::env::temp_dir().join(format!(
+        "thaw_fs_errno_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("child"), b"x").unwrap();
+    let result: serde_json::Value = serde_json::from_str(&host_fs(
+        "rmdir".into(), directory.to_string_lossy().into_owned(), String::new(), false,
+        &mut FsHandleTable::new(),
+    )).unwrap();
+    assert_eq!(result["code"], "ENOTEMPTY");
+    assert_eq!(result["operation"], "rmdir");
+    assert_eq!(result["path"], directory.to_string_lossy().as_ref());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn fs_error_preserves_platform_error_kinds() {
+    let code = |raw| -> String {
+        serde_json::from_str::<serde_json::Value>(&fs_error("open", "C:\\example", io::Error::from_raw_os_error(raw)))
+            .unwrap()["code"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(code(2), "ENOENT");
+    assert_eq!(code(5), "EACCES");
+    assert_eq!(code(123456), "ERRNO_123456");
 }
