@@ -226,6 +226,29 @@ fn rewrites_named_import_to_a_require_call() {
 }
 
 #[test]
+fn esm_synthetic_names_avoid_source_bindings_in_sync_and_async_rewrites() {
+    // Unrun regression: the reference and declaration passes must choose the
+    // same unused range, including identifiers spelled with Unicode escapes.
+    let source = "import { value } from './dep'; \
+        const __thaw_esm_import_0 = 7, __thaw_esm_import_\\u0031 = 9; \
+        export { value as again } from './dep'; \
+        const __thaw_esm_reexport_0 = 3; \
+        export * from './other'; \
+        const __thaw_esm_reexport_all_0 = 4, __thaw_esm_key_0 = 5; \
+        export const answer = value + __thaw_esm_import_0 + __thaw_esm_import_\\u0031;";
+    for await_imports in [false, true] {
+        let rewritten = rewrite_esm_to_commonjs_mode(source, await_imports).unwrap();
+        assert!(rewritten.contains("var __thaw_esm_import_2 = "), "{rewritten}");
+        assert!(rewritten.contains("__thaw_esm_import_2[\"value\"]"), "{rewritten}");
+        assert!(rewritten.contains("var __thaw_esm_reexport_3 = "), "{rewritten}");
+        assert!(rewritten.contains("var __thaw_esm_reexport_all_4 = "), "{rewritten}");
+        assert!(rewritten.contains("for (let __thaw_esm_key_2 in"), "{rewritten}");
+        assert!(rewritten.contains("const __thaw_esm_import_0 = 7"), "{rewritten}");
+        assert_eq!(rewritten.contains("await requireAsync"), await_imports, "{rewritten}");
+    }
+}
+
+#[test]
 fn rewrites_import_meta_url_without_touching_text() {
     let rewritten = rewrite_esm_to_commonjs(
         "export const url = import.meta.url; const text = 'import.meta.url';",
