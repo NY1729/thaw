@@ -374,6 +374,12 @@ fn parse_fs_time(value: Option<&str>) -> io::Result<f64> {
     Ok(seconds)
 }
 
+#[cfg(unix)]
+fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
+    fs_path_utimes(path, value, 0)
+}
+
+#[cfg(not(unix))]
 fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
     let mut values = value.split(',');
     let timestamp = |seconds: f64| -> io::Result<std::time::SystemTime> {
@@ -393,23 +399,39 @@ fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
 
 #[cfg(unix)]
 fn fs_lutimes(path: &str, value: &str) -> io::Result<()> {
+    fs_path_utimes(path, value, libc::AT_SYMLINK_NOFOLLOW)
+}
+
+#[cfg(unix)]
+fn fs_timespec(value: Option<&str>) -> io::Result<libc::timespec> {
+    let seconds = parse_fs_time(value)?;
+    let mut sec = seconds.trunc() as i128;
+    if sec < libc::time_t::MIN as i128 || sec > libc::time_t::MAX as i128 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "timestamp out of range"));
+    }
+    let mut nsec = ((seconds - sec as f64) * 1_000_000_000.0).trunc() as i128;
+    if nsec < 0 {
+        sec -= 1;
+        nsec += 1_000_000_000;
+    } else if nsec >= 1_000_000_000 {
+        sec += 1;
+        nsec -= 1_000_000_000;
+    }
+    if sec < libc::time_t::MIN as i128 || sec > libc::time_t::MAX as i128
+        || !(0..1_000_000_000).contains(&nsec) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "timestamp out of range"));
+    }
+    Ok(libc::timespec { tv_sec: sec as libc::time_t, tv_nsec: nsec as libc::c_long })
+}
+
+#[cfg(unix)]
+fn fs_path_utimes(path: &str, value: &str, flags: libc::c_int) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let mut values = value.split(',');
-    let to_timespec = |value| -> io::Result<libc::timespec> {
-        let seconds = parse_fs_time(value)?;
-        let whole = seconds.floor();
-        if whole < libc::time_t::MIN as f64 || whole >= libc::time_t::MAX as f64 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "timestamp out of range"));
-        }
-        Ok(libc::timespec {
-            tv_sec: whole as libc::time_t,
-            tv_nsec: ((seconds - whole) * 1_000_000_000.0).floor() as libc::c_long,
-        })
-    };
-    let times = [to_timespec(values.next())?, to_timespec(values.next())?];
+    let times = [fs_timespec(values.next())?, fs_timespec(values.next())?];
     let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
-    if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+    if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), flags) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -759,4 +781,49 @@ fn fs_statfs_reports_linux_type_for_path_and_descriptor() {
     assert_ne!(path_result["type"], 0);
     assert_eq!(fd_result["type"], path_result["type"]);
     assert_eq!(fd_result["blocks"], path_result["blocks"]);
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn fs_timespec_normalizes_negative_fraction_and_bounds() {
+    let tiny = fs_timespec(Some("-0.00000000000000001")).unwrap();
+    assert_eq!((tiny.tv_sec, tiny.tv_nsec), (0, 0));
+    let negative = fs_timespec(Some("-0.000000001")).unwrap();
+    assert_eq!((negative.tv_sec, negative.tv_nsec), (-1, 999_999_999));
+    let subnanosecond = fs_timespec(Some("0.0000000006")).unwrap();
+    assert_eq!((subnanosecond.tv_sec, subnanosecond.tv_nsec), (0, 0));
+    let milliseconds = fs_timespec(Some("1.234")).unwrap();
+    assert_eq!((milliseconds.tv_sec, milliseconds.tv_nsec), (1, 233_999_999));
+    assert!(fs_timespec(Some("NaN")).is_err());
+    assert!(fs_timespec(Some("9223372036854775808")).is_err());
+    assert!(fs_timespec(Some("-1e300")).is_err());
+    assert!(fs_timespec(Some("1e300")).is_err());
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn fs_utimes_updates_permissionless_target_and_preserves_link_behavior() {
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    let directory = std::env::temp_dir().join(format!(
+        "thaw_fs_utimes_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let target = directory.join("target");
+    let link = directory.join("link");
+    std::fs::write(&target, b"x").unwrap();
+    symlink(&target, &link).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    fs_utimes(target.to_str().unwrap(), "-0.000000001,1.234").unwrap();
+    let target_stat = std::fs::metadata(&target).unwrap();
+    assert_eq!((target_stat.atime(), target_stat.atime_nsec()), (-1, 999_999_999));
+    assert_eq!((target_stat.mtime(), target_stat.mtime_nsec()), (1, 233_999_999));
+    fs_lutimes(link.to_str().unwrap(), "2.5,3.5").unwrap();
+    assert_eq!(std::fs::symlink_metadata(&link).unwrap().mtime(), 3);
+    assert_eq!(std::fs::metadata(&target).unwrap().mtime(), 1);
+    fs_utimes(link.to_str().unwrap(), "4,5").unwrap();
+    assert_eq!(std::fs::metadata(&target).unwrap().mtime(), 5);
+    assert_eq!(std::fs::symlink_metadata(&link).unwrap().mtime(), 3);
+    std::fs::remove_dir_all(directory).unwrap();
 }
