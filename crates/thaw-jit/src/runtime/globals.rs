@@ -82,9 +82,9 @@ pub type ArraySplice = unsafe extern "C" fn(*mut *mut u8, f64, f64, *const u8) -
 pub type ArraySet = unsafe extern "C" fn(u8, *mut *mut u8, f64, f64) -> i8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 pub type NumberSource = unsafe extern "C" fn() -> f64;
-pub type DictionaryGet = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char) -> f64;
-pub type DictionaryMutate = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char, f64) -> f64;
-pub type DictionaryQuery = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char) -> f64;
+pub type DictionaryGet = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char, *mut u8, *mut *const c_char) -> f64;
+pub type DictionaryMutate = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char, f64, *mut *const c_char) -> f64;
+pub type DictionaryQuery = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char, *mut *const c_char) -> f64;
 pub type DynamicObjectQuery =
     unsafe extern "C" fn(u8, u64, *mut *const c_char) -> f64;
 
@@ -240,15 +240,27 @@ extern "C" fn callable_entry_set(key: f64, table: f64, selection: f64) -> f64 {
 
 extern "C" fn dictionary_get(value: f64, key: f64, kind: u8) -> f64 {
     let Some(get) = DICTIONARY_GET.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     };
-    unsafe {
+    let mut present = 1;
+    let mut error = ptr::null();
+    let result = unsafe {
         get(
             kind,
             value.to_bits() as usize as *mut libc::c_void,
             key.to_bits() as usize as *const c_char,
+            &mut present,
+            &mut error,
         )
+    };
+    if !error.is_null() {
+        CALL_ERROR.with(|slot| slot.set(error));
+    } else if kind >= 3 && present != 1 {
+        CALL_ABSENCE.with(|absence| absence.set(if present == 2 { 2 } else { 1 }));
+        CALL_PRESENT.with(|slot| slot.set(false));
     }
+    result
 }
 
 extern "C" fn number_dictionary_get(value: f64, key: f64) -> f64 {
@@ -263,18 +275,37 @@ extern "C" fn string_dictionary_get(value: f64, key: f64) -> f64 {
     dictionary_get(value, key, 2)
 }
 
+extern "C" fn optional_number_dictionary_get(value: f64, key: f64) -> f64 {
+    dictionary_get(value, key, 3)
+}
+
+extern "C" fn optional_bool_dictionary_get(value: f64, key: f64) -> f64 {
+    dictionary_get(value, key, 4)
+}
+
+extern "C" fn optional_string_dictionary_get(value: f64, key: f64) -> f64 {
+    dictionary_get(value, key, 5)
+}
+
 extern "C" fn dictionary_mutate(object: f64, key: f64, value: f64, kind: u8) -> f64 {
     let Some(mutate) = DICTIONARY_MUTATE.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     };
-    unsafe {
+    let mut error = ptr::null();
+    let result = unsafe {
         mutate(
             kind,
             object.to_bits() as usize as *mut libc::c_void,
             key.to_bits() as usize as *const c_char,
             value,
+            &mut error,
         )
+    };
+    if !error.is_null() {
+        CALL_ERROR.with(|slot| slot.set(error));
     }
+    result
 }
 
 extern "C" fn number_dictionary_set(object: f64, key: f64, value: f64) -> f64 {
@@ -297,17 +328,28 @@ extern "C" fn dictionary_delete(object: f64, key: f64) -> f64 {
     dictionary_mutate(object, key, 0.0, 3)
 }
 
+extern "C" fn dictionary_strict_delete(object: f64, key: f64) -> f64 {
+    dictionary_mutate(object, key, 0.0, 4)
+}
+
 extern "C" fn dictionary_query(object: f64, key: f64, operation: u8) -> f64 {
     let Some(query) = DICTIONARY_QUERY.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     };
-    unsafe {
+    let mut error = ptr::null();
+    let result = unsafe {
         query(
             operation,
             object.to_bits() as usize as *mut libc::c_void,
             key.to_bits() as usize as *const c_char,
+            &mut error,
         )
+    };
+    if !error.is_null() {
+        CALL_ERROR.with(|slot| slot.set(error));
     }
+    result
 }
 
 extern "C" fn dictionary_has_own(object: f64, key: f64) -> f64 {
@@ -315,7 +357,7 @@ extern "C" fn dictionary_has_own(object: f64, key: f64) -> f64 {
 }
 
 extern "C" fn dictionary_in(key: f64, object: f64) -> f64 {
-    dictionary_query(object, key, 0)
+    dictionary_query(object, key, 23)
 }
 
 extern "C" fn dictionary_keys(object: f64) -> f64 {

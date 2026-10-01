@@ -1461,7 +1461,7 @@ macro_rules! jit_expressions {
                     MemberProp::Ident(key) => encode_string(key.sym.as_ref(), output)?,
                     _ => return None,
                 }
-                output.push("ddelete".into());
+                output.push("dstrictdelete".into());
             }
             Expr::Unary(unary)
                 if matches!(
@@ -1682,10 +1682,28 @@ macro_rules! jit_expressions {
                         if let Some(presence) = optional.receiver_presence {
                             selected = presence;
                             selected.extend(["asbool".into(), "if".into()]);
-                            selected.extend(optional.receiver.clone());
-                            selected.extend(optional.continuation);
-                            if jit_operation_may_be_absent(&optional.receiver) {
+                            let mut receiver = optional.receiver.clone();
+                            let receiver_may_be_absent = jit_operation_may_be_absent(&receiver);
+                            if receiver_may_be_absent {
+                                mark_dictionary_get_presence(&mut receiver);
+                            }
+                            selected.extend(receiver);
+                            let mut continuation = optional.continuation;
+                            let continuation_may_be_absent = jit_operation_may_be_absent(&continuation);
+                            if receiver_may_be_absent {
                                 selected.push("ifpresent".into());
+                            }
+                            if continuation_may_be_absent {
+                                mark_dictionary_get_presence(&mut continuation);
+                            }
+                            selected.extend(continuation);
+                            if continuation_may_be_absent {
+                                selected.push("ifpresent".into());
+                                selected.push("else".into());
+                                selected.extend(fallback.clone());
+                                selected.push("end".into());
+                            }
+                            if receiver_may_be_absent {
                                 selected.push("else".into());
                                 selected.extend(fallback.clone());
                                 selected.push("end".into());
@@ -1695,8 +1713,11 @@ macro_rules! jit_expressions {
                             selected.push("end".into());
                         } else {
                             selected = optional.receiver;
+                            mark_dictionary_get_presence(&mut selected);
                             selected.push("ifpresent".into());
-                            selected.extend(optional.continuation.clone());
+                            let mut continuation = optional.continuation.clone();
+                            mark_dictionary_get_presence(&mut continuation);
+                            selected.extend(continuation);
                             if jit_operation_may_be_absent(&optional.continuation) {
                                 selected.push("ifpresent".into());
                                 selected.push("else".into());
@@ -1718,6 +1739,7 @@ macro_rules! jit_expressions {
                         )?;
                         if jit_operation_may_be_absent(&operation) {
                             selected = operation;
+                            mark_dictionary_get_presence(&mut selected);
                             selected.push("ifpresent".into());
                             selected.push("else".into());
                             selected.extend(fallback);
@@ -1740,7 +1762,9 @@ macro_rules! jit_expressions {
                     output.push("if".into());
                     output.extend(operation);
                 } else {
-                    output.extend(optional.receiver);
+                    let mut receiver = optional.receiver;
+                    mark_dictionary_get_presence(&mut receiver);
+                    output.extend(receiver);
                     output.push("ifpresent".into());
                     output.extend(optional.continuation);
                 }
