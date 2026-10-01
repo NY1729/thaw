@@ -2543,21 +2543,21 @@ fn reexported_function_declarations(
             return Ok(declarations);
         }
     }
-    for item in module.body {
+    for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
         };
         if export.type_only {
             continue;
         }
-        let Some(source) = export.src.and_then(|source| source.value.as_str().map(str::to_owned))
+        let Some(source) = export.src.as_ref().and_then(|source| source.value.as_str())
         else {
             continue;
         };
-        let Some(target_path) = declaration_reexport_path(path, &source) else {
+        let Some(target_path) = declaration_reexport_path(path, source) else {
             continue;
         };
-        for specifier in export.specifiers {
+        for specifier in &export.specifiers {
             let ExportSpecifier::Named(named) = specifier else {
                 continue;
             };
@@ -2571,13 +2571,25 @@ fn reexported_function_declarations(
             let original = export_name(&named.orig);
             let exported = named.exported.as_ref().and_then(export_name).or_else(|| original.clone());
             if exported.as_deref() == Some(name) {
-                return reexported_function_declarations(
+                let snippets = reexported_function_declarations(
                     &target_path,
                     original.as_deref().unwrap_or(name),
                     visited,
-                )
-                .map(|snippets| snippets.into_iter().map(|snippet| export_function_as(snippet, name, path)).collect());
+                )?;
+                if !snippets.is_empty() {
+                    return Ok(snippets.into_iter().map(|snippet| export_function_as(snippet, name, path)).collect());
+                }
             }
+        }
+    }
+    if name != "default" {
+        for item in &module.body {
+            let ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) = item else { continue; };
+            if export.type_only { continue; }
+            let Some(target) = export.src.value.as_str()
+                .and_then(|source| declaration_reexport_path(path, source)) else { continue; };
+            let snippets = reexported_function_declarations(&target, name, visited)?;
+            if !snippets.is_empty() { return Ok(snippets); }
         }
     }
     Ok(Vec::new())
@@ -2966,14 +2978,8 @@ fn merge_type_only_status(current: Option<bool>, next: Option<bool>) -> Option<b
     }
 }
 
-/// Same shape as `reexported_function_declarations`, but for a class or
-/// interface declared directly in `path` under `name` (the counterpart
-/// to that function's `Decl::Fn` handling for `Decl::Class`/
-/// `Decl::TsInterface`) -- doesn't follow further `export ... from`
-/// re-export chains itself, since `named_import_targets` only ever
-/// points at the file a name was *imported* from, which for every
-/// package seen so far declares the class/interface directly rather
-/// than re-exporting it yet again.
+/// Follow a class or interface binding through named and wildcard declaration
+/// re-exports, retaining imported superclass declarations as type support.
 fn reexported_class_or_interface_declarations(
     path: &Path,
     name: &str,
@@ -3212,11 +3218,34 @@ fn reexported_class_or_interface_declarations_inner(
                     .and_then(export_name)
                     .or_else(|| original.clone());
                 if exported.as_deref() == Some(local_name.as_str()) {
-                    return reexported_class_or_interface_declarations_inner(
+                    let snippets = reexported_class_or_interface_declarations_inner(
                         &target_path,
                         original.as_deref().unwrap_or(name),
                         visited,
-                    );
+                    )?;
+                    if !snippets.is_empty() {
+                        return Ok(snippets);
+                    }
+                }
+            }
+        }
+        // A named export can point at a barrel whose only declaration edge
+        // is `export *`. Keep the selected declaration and its supporting
+        // superclass snippets under their original names on this hop.
+        if name != "default" {
+            for item in &module.body {
+                let ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) = item else {
+                    continue;
+                };
+                let Some(target) = export.src.value.as_str()
+                    .and_then(|source| declaration_reexport_path(path, source)) else {
+                    continue;
+                };
+                let snippets = reexported_class_or_interface_declarations_inner(
+                    &target, &local_name, visited,
+                )?;
+                if !snippets.is_empty() {
+                    return Ok(snippets);
                 }
             }
         }
@@ -3275,10 +3304,16 @@ fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf>
         let direct_declaration = path.file_name().and_then(|name| name.to_str())
             .is_some_and(|name| name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts"))
             .then(|| path.clone());
-        return [direct_declaration, with_explicit_d_ts_suffix(&path), with_d_ts_suffix(&path), Some(path.join("index.d.ts"))]
+        let file = [direct_declaration, with_explicit_d_ts_suffix(&path), with_d_ts_suffix(&path)]
             .into_iter()
             .flatten()
-            .find(|candidate| candidate.is_file())
+            .find(|candidate| candidate.is_file());
+        let manifest_entry = || read_manifest(&path).ok()
+            .and_then(|manifest| find_own_dts(&manifest, &path))
+            .map(|(_, absolute)| absolute)
+            .filter(|candidate| candidate.is_file());
+        return file.or_else(manifest_entry)
+            .or_else(|| { let index = path.join("index.d.ts"); index.is_file().then_some(index) })
             // Canonicalize so a re-export cycle is seen as the *same*
             // `PathBuf` on every hop. Without this, each `./x.js` hop
             // appends another `./` segment (`a/./b.d.ts` ->
