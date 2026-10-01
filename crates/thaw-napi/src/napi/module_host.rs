@@ -2171,7 +2171,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
     discard_result: u8,
 ) -> ThawResult {
     let result = (|| -> Result<String, String> {
-        thaw_napi_run_async_work();
+        thaw_napi_poll_async_work();
         let env = module_env_for_handle(receiver)?;
         let method_name = text(method)?;
         let args: Vec<JsonValue> = serde_json::from_str(&text(args)?)
