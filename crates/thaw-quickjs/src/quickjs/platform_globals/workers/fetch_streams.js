@@ -331,7 +331,23 @@
         }
       }
       pipeThrough(transform, options) { if (this.locked) throw webInvalidState('ReadableStream is locked'); if (!transform || !transform.readable || !transform.writable) throw new TypeError('transform must contain readable and writable streams'); if (transform.writable.locked) throw webInvalidState('WritableStream is locked'); this.pipeTo(transform.writable, options).catch(error => transform.readable._controller.error(error)); return transform.readable; }
-      values(options = {}) { const reader = this.getReader(); return { next: () => reader.read(), return: async () => { if (!options.preventCancel) await reader.cancel(); reader.releaseLock(); return { value: undefined, done: true }; }, [Symbol.asyncIterator]() { return this; } }; }
+      values(options = {}) {
+        const preventCancel = Boolean(options.preventCancel), reader = this.getReader();
+        let done = false, chain = Promise.resolve();
+        const run = operation => { const result = chain.then(operation); chain = result.catch(() => {}); return result; };
+        return {
+          next: () => run(async () => {
+            if (done) return { value: undefined, done: true };
+            try { const result = await reader.read(); if (result.done) { done = true; reader.releaseLock(); } return result; }
+            catch (error) { done = true; reader.releaseLock(); throw error; }
+          }),
+          return: value => run(async () => {
+            if (!done) { done = true; try { if (!preventCancel) await reader.cancel(value); } finally { reader.releaseLock(); } }
+            return { value, done: true };
+          }),
+          [Symbol.asyncIterator]() { return this; }
+        };
+      } }
       [Symbol.asyncIterator]() { return this.values(); }
     };
     globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
