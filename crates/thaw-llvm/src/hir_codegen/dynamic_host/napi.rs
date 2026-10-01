@@ -100,6 +100,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_extract_value(result, 1, "napi_setter_error")
             .map_err(|error| error.to_string())?;
+        self.destroy_typed_host_arguments(array, args_json)?;
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
@@ -115,6 +116,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_parse returned no setter value".to_string())?;
+        self.destroy_typed_host_result_string(value)?;
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
@@ -196,6 +198,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_parse returned no getter value".to_string())?;
+        self.destroy_typed_host_result_string(value)?;
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
@@ -278,17 +281,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .zip(signature.params.iter().skip(usize::from(!is_static)))
             .enumerate()
         {
-            let (value, marshalled_type) = if signature.backend == DynamicBackend::QuickJs
-                && quickjs_callback_type(ty)
-            {
-                (
-                    self.compile_register_native_callback(std::slice::from_ref(argument))?,
-                    &HirType::JsValue,
-                )
-            } else {
-                (self.compile_expr(argument)?, ty)
-            };
-            self.compile_typed_dynamic_argument(array, value, marshalled_type)
+            if signature.backend == DynamicBackend::QuickJs && quickjs_callback_type(ty) {
+                self.compile_quickjs_callback_argument(array, argument)?;
+                continue;
+            }
+            let value = self.compile_expr(argument)?;
+            self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("N-API method argument {}: {error}", index + 1))?;
         }
         self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;

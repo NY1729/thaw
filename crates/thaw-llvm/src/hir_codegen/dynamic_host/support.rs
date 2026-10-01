@@ -136,3 +136,35 @@ fn jit_union_member_tag(ty: &HirType) -> Option<u64> {
         _ => None,
     }
 }
+
+impl<'ctx> HirCompiler<'ctx> {
+    fn destroy_typed_host_arguments(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        args_json: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[args_json.into()],
+            "destroy_typed_host_args_string",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[array.into()],
+            "destroy_typed_host_args",
+        ).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn destroy_typed_host_result_string(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[value.into()],
+            "destroy_typed_host_result_string",
+        ).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
