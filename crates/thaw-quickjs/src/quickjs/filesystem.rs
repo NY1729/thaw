@@ -165,6 +165,15 @@ fn fs_access(path: &str, mode: i32) -> io::Result<()> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "aix"))]
+fn fs_statfs_type(call: impl FnOnce(*mut libc::statfs) -> libc::c_int) -> io::Result<u64> {
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if call(stats.as_mut_ptr()) != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { stats.assume_init().f_type as u64 })
+}
+
 #[cfg(unix)]
 fn fs_statfs(path: &str) -> io::Result<serde_json::Value> {
     use std::os::unix::ffi::OsStrExt;
@@ -175,8 +184,12 @@ fn fs_statfs(path: &str) -> io::Result<serde_json::Value> {
         return Err(io::Error::last_os_error());
     }
     let stats = unsafe { stats.assume_init() };
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "aix"))]
+    let fs_type = fs_statfs_type(|record| unsafe { libc::statfs(path.as_ptr(), record) })?;
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "aix")))]
+    let fs_type = 0;
     Ok(
-        serde_json::json!({ "ok": true, "type": 0, "bsize": stats.f_bsize, "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail, "files": stats.f_files, "ffree": stats.f_ffree }),
+        serde_json::json!({ "ok": true, "type": fs_type, "bsize": stats.f_bsize, "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail, "files": stats.f_files, "ffree": stats.f_ffree }),
     )
 }
 
@@ -530,7 +543,11 @@ fn fs_fd_operation(operation: &str, fd: u32, value: &str, table: &mut FsHandleTa
                 let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
                 if unsafe { libc::fstatvfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 { return Err(io::Error::last_os_error()); }
                 let stats = unsafe { stats.assume_init() };
-                Ok(serde_json::json!({ "ok": true, "type": 0, "bsize": stats.f_bsize, "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail, "files": stats.f_files, "ffree": stats.f_ffree }))
+                #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "aix"))]
+                let fs_type = fs_statfs_type(|record| unsafe { libc::fstatfs(file.as_raw_fd(), record) })?;
+                #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "aix")))]
+                let fs_type = 0;
+                Ok(serde_json::json!({ "ok": true, "type": fs_type, "bsize": stats.f_bsize, "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail, "files": stats.f_files, "ffree": stats.f_ffree }))
             }
             #[cfg(not(unix))] { Err(io::Error::new(io::ErrorKind::Unsupported, "filesystem statistics are unsupported")) }
         }
@@ -721,4 +738,25 @@ fn fs_error_preserves_platform_error_kinds() {
     assert_eq!(code(2), "ENOENT");
     assert_eq!(code(5), "EACCES");
     assert_eq!(code(123456), "ERRNO_123456");
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn fs_statfs_reports_linux_type_for_path_and_descriptor() {
+    let directory = std::env::temp_dir();
+    let mut table = FsHandleTable::new();
+    let fd = table.next;
+    table.next += 1;
+    table.files.insert(fd, std::fs::File::open(&directory).unwrap());
+    let path_result: serde_json::Value = serde_json::from_str(&host_fs(
+        "statfs".into(), directory.to_string_lossy().into_owned(), String::new(), false, &mut table,
+    )).unwrap();
+    let fd_result: serde_json::Value = serde_json::from_str(&host_fs(
+        "fd_statfs".into(), fd.to_string(), String::new(), false, &mut table,
+    )).unwrap();
+    assert_eq!(path_result["ok"], true);
+    assert_eq!(fd_result["ok"], true);
+    assert_ne!(path_result["type"], 0);
+    assert_eq!(fd_result["type"], path_result["type"]);
+    assert_eq!(fd_result["blocks"], path_result["blocks"]);
 }
