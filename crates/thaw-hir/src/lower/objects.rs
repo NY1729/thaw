@@ -337,8 +337,8 @@ impl<'a> FnLowerer<'a> {
         let object_name = format!("__thaw_dynamic_object_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(object_name.clone(), HirType::Json);
-        let mut bindings = Vec::new();
         let mut body = Vec::new();
+        let mut locals = BTreeSet::new();
         for property in &obj_lit.props {
             match property {
                 PropOrSpread::Spread(spread) => {
@@ -353,7 +353,8 @@ impl<'a> FnLowerer<'a> {
                         format!("__thaw_dynamic_object_spread_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(source_name.clone(), HirType::Json);
-                    bindings.push((source_name.clone(), HirType::Json, source));
+                    locals.insert(source_name.clone());
+                    body.push(HirStmt::Let(source_name.clone(), HirType::Json, source));
                     body.push(HirStmt::Expr(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
                         vec![
@@ -391,13 +392,15 @@ impl<'a> FnLowerer<'a> {
                     let key_name = format!("__thaw_dynamic_object_key_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(key_name.clone(), HirType::Str);
-                    bindings.push((key_name.clone(), HirType::Str, key));
+                    locals.insert(key_name.clone());
+                    body.push(HirStmt::Let(key_name.clone(), HirType::Str, key));
                     let value = self.coerce_to_declared(&HirType::Json, value)?;
                     let value_name =
                         format!("__thaw_dynamic_object_value_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(value_name.clone(), HirType::Json);
-                    bindings.push((value_name.clone(), HirType::Json, value));
+                    locals.insert(value_name.clone());
+                    body.push(HirStmt::Let(value_name.clone(), HirType::Json, value));
                     body.push(HirStmt::Expr(HirExpr::JsonSet(
                         Box::new(HirExpr::Var(object_name.clone())),
                         Box::new(HirExpr::Var(key_name)),
@@ -409,12 +412,13 @@ impl<'a> FnLowerer<'a> {
             }
         }
         body.push(HirStmt::Return(Some(HirExpr::Var(object_name.clone()))));
-        let captures = bindings
-            .iter()
-            .map(|(name, ty, _)| HirParam {
-                name: name.clone(),
-                ty: ty.clone(),
-            })
+        locals.insert(object_name.clone());
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&HirExpr::Block(body.clone()), &mut referenced);
+        let captures = referenced
+            .into_iter()
+            .filter(|name| !locals.contains(name))
+            .filter_map(|name| self.scope.get(&name).cloned().map(|ty| HirParam { name, ty }))
             .collect();
         let result = HirExpr::Call(
             Box::new(HirExpr::Lambda(
@@ -428,7 +432,7 @@ impl<'a> FnLowerer<'a> {
             )),
             vec![HirExpr::JsonObjectLit(Vec::new(), HirType::Json)],
         );
-        self.wrap_call_argument_bindings(result, &bindings)
+        Ok(result)
     }
 
     fn lower_dynamic_accessor_object_lit(
@@ -739,7 +743,7 @@ impl<'a> FnLowerer<'a> {
             return self.lower_ordered_await_object_lit(obj_lit, expected_fields);
         }
         let mut fields: Vec<(Symbol, HirExpr)> = Vec::new();
-        let mut evaluated_spreads: Vec<(Symbol, HirType, HirExpr)> = Vec::new();
+        let mut property_bindings: Vec<LoweredBinding> = Vec::new();
         for property in &obj_lit.props {
             let additions = match property {
                 PropOrSpread::Spread(spread) => {
@@ -793,7 +797,8 @@ impl<'a> FnLowerer<'a> {
                                 )
                             })
                             .collect();
-                        evaluated_spreads.push((temporary, source_type, source));
+                        self.scope.insert(temporary.clone(), source_type.clone());
+                        property_bindings.push((temporary, source_type, source));
                         additions
                     }
                 }
@@ -844,6 +849,12 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             for (name, value) in additions {
+                let ty = self.infer_expr_type(&value)?;
+                let temporary = format!("__thaw_object_field_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(temporary.clone(), ty.clone());
+                property_bindings.push((temporary.clone(), ty, value));
+                let value = HirExpr::Var(temporary);
                 if !is_hidden_accessor_field(&name)
                     && (matches!(property, PropOrSpread::Spread(_))
                         || matches!(property, PropOrSpread::Prop(prop) if matches!(prop.as_ref(), Prop::KeyValue(_) | Prop::Shorthand(_) | Prop::Method(_))))
@@ -862,42 +873,7 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
-        let mut property_bindings = Vec::new();
-        if evaluated_spreads.is_empty() && fields.iter().any(|(_, value)| contains_await(value)) {
-            for (position, (_, value)) in fields.iter_mut().enumerate() {
-                let source = value.clone();
-                let ty = self.infer_expr_type(&source)?;
-                let name = format!("__thaw_object_field_{}_{}", position, self.next_binding);
-                self.next_binding += 1;
-                self.scope.insert(name.clone(), ty.clone());
-                *value = HirExpr::Var(name.clone());
-                property_bindings.push((name, ty, source));
-            }
-        }
-        let mut result = HirExpr::ObjectLit(fields);
-        let result_type = self.infer_expr_type(&result)?;
-        for index in (0..evaluated_spreads.len()).rev() {
-            let (name, ty, source) = &evaluated_spreads[index];
-            let captures = evaluated_spreads[..index]
-                .iter()
-                .map(|(name, ty, _)| HirParam {
-                    name: name.clone(),
-                    ty: ty.clone(),
-                })
-                .collect();
-            result = HirExpr::Call(
-                Box::new(HirExpr::Lambda(
-                    captures,
-                    vec![HirParam {
-                        name: name.clone(),
-                        ty: ty.clone(),
-                    }],
-                    result_type.clone(),
-                    Box::new(result),
-                )),
-                vec![source.clone()],
-            );
-        }
+        let result = HirExpr::ObjectLit(fields);
         self.wrap_call_argument_bindings(result, &property_bindings)
     }
 

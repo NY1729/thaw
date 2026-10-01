@@ -3401,16 +3401,15 @@ impl<'a> FnLowerer<'a> {
                                     .into(),
                             );
                         }
-                        let error = self.lower_expr(&args[0].expr)?;
-                        let suppressed = self.lower_expr(&args[1].expr)?;
-                        let message = match args.get(2) {
-                            Some(argument) => {
-                                let message = self.lower_expr(&argument.expr)?;
-                                self.coerce_primitive_to_string(message)?
-                            }
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&args, "SuppressedError")?;
+                        let error = arguments[0].clone();
+                        let suppressed = arguments[1].clone();
+                        let message = match arguments.get(2) {
+                            Some(message) => self.coerce_primitive_to_string(message.clone())?,
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
-                        return Ok(HirExpr::ObjectLit(vec![
+                        let result = HirExpr::ObjectLit(vec![
                             (
                                 "__thaw_class_identity_SuppressedError$Error".to_string(),
                                 HirExpr::Lit(HirLit::Bool(true)),
@@ -3422,7 +3421,8 @@ impl<'a> FnLowerer<'a> {
                             ),
                             ("error".to_string(), error),
                             ("suppressed".to_string(), suppressed),
-                        ]));
+                        ]);
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if class.sym == *"AggregateError" {
                         // `new AggregateError(errors, message?, options?)`.

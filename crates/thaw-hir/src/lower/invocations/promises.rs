@@ -530,6 +530,18 @@ impl<'a> FnLowerer<'a> {
                 promises.push(value);
                 resolved_types.push(resolved);
             }
+            let mut bindings = Vec::new();
+            let promises = promises
+                .into_iter()
+                .map(|value| {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = format!("__thaw_promise_operand_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, value));
+                    Ok(HirExpr::Var(name))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             let mut field_types = Vec::new();
             let mut settled_slots: Option<Vec<HirType>> = None;
             let (joined, joined_type) = if all_keyed {
@@ -622,14 +634,17 @@ impl<'a> FnLowerer<'a> {
                 output_type.clone(),
                 Box::new(body),
             );
-            return Ok(HirExpr::PromiseThen(
-                Box::new(joined),
-                Box::new(callback),
-                joined_type,
-                output_type,
-                false,
-                false,
-            ));
+            return self.wrap_call_argument_bindings(
+                HirExpr::PromiseThen(
+                    Box::new(joined),
+                    Box::new(callback),
+                    joined_type,
+                    output_type,
+                    false,
+                    false,
+                ),
+                &bindings,
+            );
         }
 
         if callee_name == "Promise.all" {
@@ -693,11 +708,25 @@ impl<'a> FnLowerer<'a> {
                     Ok(value)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
+            let mut bindings = Vec::new();
+            let promises = promises
+                .into_iter()
+                .map(|value| {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = format!("__thaw_promise_operand_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, value));
+                    Ok(HirExpr::Var(name))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             let first = element_types.first().cloned().unwrap_or(HirType::F64);
-            if element_types.iter().all(|element| element == &first) {
-                return Ok(HirExpr::PromiseAll(promises, first));
-            }
-            return Ok(HirExpr::PromiseAllTuple(promises, element_types));
+            let result = if element_types.iter().all(|element| element == &first) {
+                HirExpr::PromiseAll(promises, first)
+            } else {
+                HirExpr::PromiseAllTuple(promises, element_types)
+            };
+            return self.wrap_call_argument_bindings(result, &bindings);
         }
 
         if callee_name == "Promise.allSettled" {
@@ -779,10 +808,22 @@ impl<'a> FnLowerer<'a> {
                     Ok(value)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            return Ok(HirExpr::PromiseAllSettled(
-                promises,
-                element_type.unwrap_or(HirType::F64),
-            ));
+            let mut bindings = Vec::new();
+            let promises = promises
+                .into_iter()
+                .map(|value| {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = format!("__thaw_promise_operand_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, value));
+                    Ok(HirExpr::Var(name))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            return self.wrap_call_argument_bindings(
+                HirExpr::PromiseAllSettled(promises, element_type.unwrap_or(HirType::F64)),
+                &bindings,
+            );
         }
 
         if callee_name == "Promise.race" {
