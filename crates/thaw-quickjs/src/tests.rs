@@ -5076,6 +5076,62 @@ fn writer_relock_during_abort_waits_for_closed_settlement() {
 }
 
 #[test]
+fn tee_preserves_falsy_error_reasons_in_default_and_byte_branches() {
+    assert_eq!(load(r#"
+      async function teePreservesFalsyErrors() {
+        const reasons = [0, false, '', null, undefined, NaN];
+        const results = [];
+        for (const bytes of [false, true]) {
+          for (const reason of reasons) {
+            const source = new ReadableStream({ type: bytes ? 'bytes' : undefined,
+              start(controller) { controller.error(reason); } });
+            const branches = source.tee();
+            results.push(await Promise.all(branches.map(branch => branch.getReader().read()
+              .then(() => false, error => Object.is(error, reason)))));
+          }
+        }
+        return results;
+      }
+    "#), 1);
+    assert_eq!(call("teePreservesFalsyErrors", "[]"),
+        "[[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true]]");
+}
+
+#[test]
+fn tee_closes_normally_and_keeps_cancellation_separate_from_errors() {
+    assert_eq!(load(r#"
+      async function teeCloseAndCancelPaths() {
+        const results = [];
+        for (const bytes of [false, true]) {
+          const closed = new ReadableStream({ type: bytes ? 'bytes' : undefined,
+            start(controller) { controller.close(); } }).tee();
+          results.push(await Promise.all(closed.map(branch => branch.getReader().read()
+            .then(result => result.done, () => false))));
+
+          let controller;
+          const source = new ReadableStream({ type: bytes ? 'bytes' : undefined,
+            start(value) { controller = value; } });
+          const [left, right] = source.tee();
+          const canceled = left.cancel('left');
+          const reading = right.getReader().read();
+          controller.error(0);
+          results.push([await canceled.then(() => true, () => false),
+            await reading.then(() => false, error => Object.is(error, 0))]);
+
+          let reasons;
+          const both = new ReadableStream({ type: bytes ? 'bytes' : undefined,
+            cancel(value) { reasons = value; } }).tee();
+          await Promise.all([both[0].cancel(false), both[1].cancel(0)]);
+          results.push([Object.is(reasons[0], false), Object.is(reasons[1], 0)]);
+        }
+        return results;
+      }
+    "#), 1);
+    assert_eq!(call("teeCloseAndCancelPaths", "[]"),
+        "[[true,true],[true,true],[true,true],[true,true],[true,true],[true,true]]");
+}
+
+#[test]
 fn crypto_buffer_regressions() {
     assert_eq!(
         load(r#"async function cryptoBufferRegressions() {
