@@ -850,14 +850,11 @@ impl<'ctx> HirCompiler<'ctx> {
             {
                 continue;
             }
-            let (value, marshalled_type) = if signature.backend == DynamicBackend::QuickJs
-                && quickjs_callback_type(ty)
-            {
-                (
-                    self.compile_register_native_callback(std::slice::from_ref(arg))?,
-                    &HirType::JsValue,
-                )
-            } else {
+            if signature.backend == DynamicBackend::QuickJs && quickjs_callback_type(ty) {
+                self.compile_quickjs_callback_argument(array, arg)?;
+                continue;
+            }
+            let (value, marshalled_type) = {
                 // A live `JsValue` handle (e.g. an Observable passed as an
                 // `any`/`Json`-declared package parameter) must cross as
                 // the `{"__thaw_js_handle_id__": N}` placeholder, not a
@@ -951,6 +948,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_extract_value(result, 1, "napi_export_handle_error")
                     .map_err(|error| error.to_string())?;
+                self.destroy_typed_host_arguments(array, args_json)?;
                 self.builder
                     .build_store(self.pending_exception().as_pointer_value(), error)
                     .map_err(|error| error.to_string())?;
@@ -1005,6 +1003,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_extract_value(result, 1, "napi_construct_error")
                 .map_err(|error| error.to_string())?;
+            self.destroy_typed_host_arguments(array, args_json)?;
             self.builder
                 .build_store(self.pending_exception().as_pointer_value(), error)
                 .map_err(|error| error.to_string())?;
@@ -1068,6 +1067,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_extract_value(result, 1, "typed_dynamic_construct_error")
                     .map_err(|error| error.to_string())?;
+                self.destroy_typed_host_arguments(array, args_json)?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_release_handle").unwrap(),
+                    &[constructor.into()],
+                    "release_typed_dynamic_constructor",
+                ).map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(self.pending_exception().as_pointer_value(), error)
                     .map_err(|error| error.to_string())?;
@@ -1122,20 +1127,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_extract_value(result, 1, "typed_dynamic_callable_error")
                 .map_err(|error| error.to_string())?;
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_cstring_destroy").unwrap(),
-                    &[args_json.into()],
-                    "destroy_typed_dynamic_callable_args_string",
-                )
-                .map_err(|error| error.to_string())?;
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_json_destroy").unwrap(),
-                    &[array.into()],
-                    "destroy_typed_dynamic_callable_args",
-                )
-                .map_err(|error| error.to_string())?;
+            self.destroy_typed_host_arguments(array, args_json)?;
+            self.builder.build_call(
+                self.module.get_function("thaw_js_release_handle").unwrap(),
+                &[callable.into()],
+                "release_typed_dynamic_callable",
+            ).map_err(|error| error.to_string())?;
             self.builder
                 .build_store(self.pending_exception().as_pointer_value(), error)
                 .map_err(|error| error.to_string())?;

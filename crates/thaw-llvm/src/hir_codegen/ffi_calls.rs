@@ -744,7 +744,8 @@ impl<'ctx> HirCompiler<'ctx> {
                                 &format!("ffi_{name}"),
                             )?
                             .into(),
-                        HirType::Object(_) | HirType::Array(_) if field.is_struct_value() => self
+                        HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_)
+                            if field.is_struct_value() => self
                             .marshal_ffi_return(
                             field,
                             field_ty,
