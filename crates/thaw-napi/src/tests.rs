@@ -1296,3 +1296,51 @@ fn parcel_watcher_callback_bridge_reuses_identity_when_supplied() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
+    let mut env = Env::new();
+    let date = env.alloc(Value::Date(f64::NAN));
+    let nan = env.alloc(Value::Number(f64::NAN));
+    let infinity = env.alloc(Value::Number(f64::INFINITY));
+    let minus_infinity = env.alloc(Value::Number(f64::NEG_INFINITY));
+    let zero = env.alloc(Value::Number(0.0));
+    let literal_date = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("timestamp".into()), zero),
+    ])));
+    let error_text = env.alloc(Value::String("ordinary".into()));
+    let literal_error = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("__thaw_napi_error__".into()), error_text),
+    ])));
+    let nested = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("__proto__".into()), date),
+        (PropertyKey::String("error".into()), literal_error),
+    ])));
+    let numeric_key_object = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("0".into()), nan),
+    ])));
+    let root = env.alloc(Value::Array(vec![
+        Some(literal_date), Some(nested), Some(nan), Some(infinity), Some(minus_infinity),
+        Some(numeric_key_object),
+    ]));
+    let wire = unsafe { quickjs_reference_wire(&env, root, true) }.unwrap();
+    assert_eq!(wire.value[0]["timestamp"], 0);
+    assert_eq!(wire.value[2], JsonValue::Null);
+    assert!(wire.origins.contains(&serde_json::json!([[0], "plain"])));
+    assert!(wire.origins.contains(&serde_json::json!([[1], "plain"])));
+    assert!(wire.origins.contains(&serde_json::json!([[1, "__proto__"], "date", null])));
+    assert!(wire.origins.contains(&serde_json::json!([[1, "error"], "plain"])));
+    assert!(wire.origins.contains(&serde_json::json!([[2], "nonfinite", "NaN"])));
+    assert!(wire.origins.contains(&serde_json::json!([[3], "nonfinite", "Infinity"])));
+    assert!(wire.origins.contains(&serde_json::json!([[4], "nonfinite", "-Infinity"])));
+    assert!(wire.origins.contains(&serde_json::json!([[5, "0"], "nonfinite", "NaN"])));
+    assert!(!wire.origins.contains(&serde_json::json!([[5, 0], "nonfinite", "NaN"])));
+    env.quickjs_references.insert(77, date);
+    let referenced = unsafe { quickjs_reference_wire(&env, root, true) }.unwrap();
+    assert_eq!(referenced.value[1]["__proto__"]["__thaw_napi_ref__"], serde_json::json!(77));
+    assert!(!referenced.origins.iter().any(|entry| entry[0] == serde_json::json!([1, "__proto__"])));
+    // Public plain JSON keeps its existing lossy value contract.
+    assert_eq!(unsafe { json_from_value_with_undefined(date, true) }.unwrap(), JsonValue::Null);
+    assert_eq!(unsafe { json_from_value_with_undefined(nan, true) }.unwrap(), JsonValue::Null);
+    assert_eq!(unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"], 0);
+}

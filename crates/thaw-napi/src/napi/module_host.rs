@@ -185,7 +185,7 @@ unsafe extern "C" fn thaw_napi_call_typed_bridge(
 ) -> *const c_char {
     let result = text(name).and_then(|name| text(args).and_then(|args| {
         let value = call_value_impl(&name, &args, true)?;
-        quickjs_bridge_value(value).and_then(|value| serde_json::to_string(&value).map_err(|error| error.to_string()))
+        quickjs_bridge_value(value).and_then(|wire| serde_json::to_string(&quickjs_wire_result("value", wire)).map_err(|error| error.to_string()))
     }));
     let result = result.unwrap_or_else(|error| serde_json::json!({ "__thaw_error__": error }).to_string());
     CString::new(result).unwrap_or_default().into_raw()
@@ -236,17 +236,14 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     .find(|env| env.quickjs_references.contains_key(&reference))
                     .ok_or_else(|| "unknown QuickJS reference".to_string())?;
                 let value = env.quickjs_references[&reference];
-                Ok(serde_json::json!({
-                    "kind": "value",
-                    "value": quickjs_reference_json(env, value, true, &mut HashSet::new())?
-                }))
+                Ok(quickjs_wire_result("value", quickjs_reference_wire(env, value, true)?))
             });
         }
         if operation == "sync_handle" {
             let handle = target.parse::<u64>().map_err(|_| "invalid native binary handle")?;
             let env = module_env_for_handle(handle)?;
-            let value = quickjs_reference_json(&*env, handle as NapiValue, true, &mut HashSet::new())?;
-            return Ok(serde_json::json!({ "kind": "value", "value": value }));
+            let wire = quickjs_reference_wire(&*env, handle as NapiValue, true)?;
+            return Ok(quickjs_wire_result("value", wire));
         }
         if operation == "promise_state" {
             let handle = target.parse::<u64>().map_err(|_| "invalid native Promise handle")?;
@@ -258,8 +255,8 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             };
             let settled = match *state.borrow() {
                 PromiseState::Pending => Ok(serde_json::json!({ "kind": "pending" })),
-                PromiseState::Resolved(value) => Ok(serde_json::json!({ "kind": "resolved", "value": quickjs_bridge_value(value)? })),
-                PromiseState::Rejected(value) => Ok(serde_json::json!({ "kind": "rejected", "value": quickjs_bridge_value(value)? })),
+                PromiseState::Resolved(value) => Ok(quickjs_wire_result("resolved", quickjs_bridge_value(value)?)),
+                PromiseState::Rejected(value) => Ok(quickjs_wire_result("rejected", quickjs_bridge_value(value)?)),
             };
             return settled;
         }
@@ -331,10 +328,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 if matches!(value_ref(value), Ok(Value::Function(_))) {
                     Ok(serde_json::json!({ "kind": "method", "value": (value as u64).to_string() }))
                 } else {
-                    Ok(serde_json::json!({
-                        "kind": "value",
-                        "value": quickjs_bridge_value(value)?
-                    }))
+                    Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
                 }
             }
             "has" | "has_symbol" => {
@@ -364,7 +358,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     return Err("native property names were not an array".into());
                 };
                 let keys = keys.iter().filter_map(|key| *key)
-                    .map(|value| quickjs_bridge_value(value)).collect::<Result<Vec<_>, _>>()?;
+                    .map(|value| quickjs_bridge_value(value).map(|wire| wire.value)).collect::<Result<Vec<_>, _>>()?;
                 Ok(serde_json::json!({ "kind": "value", "value": keys }))
             }
             "descriptor" | "descriptor_symbol" => {
@@ -402,21 +396,12 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     new_target: ptr::null_mut(), data: function.data };
                 let value = callback_result(env, (function.callback)(env, &mut info));
                 take_env_exception(env)?;
-                Ok(serde_json::json!({ "kind": "value", "value": quickjs_bridge_value(value)? }))
+                Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
             }
             "call" => {
                 let name = CString::new(name).map_err(|_| "method contains NUL")?;
-                let result = call_method_impl(handle, name.as_ptr(), args, true);
-                if result.error.is_null() {
-                    let value = CStr::from_ptr(result.value).to_string_lossy();
-                    Ok(serde_json::json!({
-                        "kind": "value",
-                        "value": serde_json::from_str::<serde_json::Value>(&value)
-                            .map_err(|error| error.to_string())?
-                    }))
-                } else {
-                    Err(CStr::from_ptr(result.error).to_string_lossy().into_owned())
-                }
+                let value = call_method_value_impl(handle, name.as_ptr(), args, true)?;
+                Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
             }
             "set_symbol" => {
                 let env = module_env_for_handle(handle)?;
@@ -1100,12 +1085,36 @@ fn value_from_json(env: &mut Env, json: &JsonValue) -> Result<NapiValue, String>
     value_from_json_with_undefined(env, json, false)
 }
 
+struct QuickJsWireValue {
+    value: JsonValue,
+    // [path, kind, payload]. Paths contain only own string keys and array indices.
+    origins: Vec<JsonValue>,
+}
+
+fn quickjs_wire_result(kind: &str, wire: QuickJsWireValue) -> JsonValue {
+    serde_json::json!({ "kind": kind, "value": wire.value, "origins": wire.origins })
+}
+
+fn quickjs_child_path(path: &[JsonValue], segment: JsonValue) -> Vec<JsonValue> {
+    let mut child = path.to_vec();
+    child.push(segment);
+    child
+}
+
+unsafe fn quickjs_reference_wire(env: &Env, value: NapiValue, root: bool) -> Result<QuickJsWireValue, String> {
+    let mut origins = Vec::new();
+    let value = quickjs_reference_json(env, value, root, &mut HashSet::new(), &[], &mut origins)?;
+    Ok(QuickJsWireValue { value, origins })
+}
+
 /// Snapshot one reference while keeping child identities on the existing wire ID.
 unsafe fn quickjs_reference_json(
     env: &Env,
     value: NapiValue,
     root: bool,
     seen: &mut HashSet<usize>,
+    path: &[JsonValue],
+    origins: &mut Vec<JsonValue>,
 ) -> Result<JsonValue, String> {
     if !root {
         if let Some((reference, _)) = env.quickjs_references.iter().find(|(_, item)| **item == value) {
@@ -1117,6 +1126,8 @@ unsafe fn quickjs_reference_json(
     }
     let result = match value_ref(value).map_err(|_| "invalid napi_value")? {
         Value::Object(properties) if !env.instances.contains_key(&(value as usize)) => {
+            // The normal object is data, even if its own keys resemble native markers.
+            origins.push(serde_json::json!([path, "plain"]));
             let mut out = serde_json::Map::new();
             for (key, child) in properties {
                 if let PropertyKey::String(key) = key {
@@ -1124,14 +1135,18 @@ unsafe fn quickjs_reference_json(
                         && (!matches!(value_ref(*child), Ok(Value::Function(_)))
                             || env.quickjs_references.values().any(|reference| *reference == *child))
                     {
-                        out.insert(key.clone(), quickjs_reference_json(env, *child, false, seen)?);
+                        let child_path = quickjs_child_path(path, JsonValue::String(key.clone()));
+                        out.insert(key.clone(), quickjs_reference_json(env, *child, false, seen, &child_path, origins)?);
                     }
                 }
             }
             JsonValue::Object(out)
         }
-        Value::Array(values) => JsonValue::Array(values.iter().map(|child| match child {
-            Some(child) => quickjs_reference_json(env, *child, false, seen),
+        Value::Array(values) => JsonValue::Array(values.iter().enumerate().map(|(index, child)| match child {
+            Some(child) => {
+                let child_path = quickjs_child_path(path, serde_json::json!(index));
+                quickjs_reference_json(env, *child, false, seen, &child_path, origins)
+            }
             None => Ok(JsonValue::Null),
         }).collect::<Result<_, _>>()?),
         Value::Buffer(bytes) if root => JsonValue::Array(bytes.iter().map(|byte| serde_json::json!(byte)).collect()),
@@ -1155,42 +1170,52 @@ unsafe fn quickjs_reference_json(
             serde_json::json!({ "__thaw_napi_binary__": (value as u64).to_string(),
                 "kind": "TypedArray", "array_type": array_type, "length": length,
                 "byte_offset": byte_offset,
-                "buffer": quickjs_reference_json(env, *array_buffer, false, seen)? })
+                "buffer": quickjs_reference_json(env, *array_buffer, false, seen, &quickjs_child_path(path, serde_json::json!("buffer")), origins)? })
         }
         Value::DataView { length, array_buffer, byte_offset } => {
             serde_json::json!({ "__thaw_napi_binary__": (value as u64).to_string(),
                 "kind": "DataView", "length": length, "byte_offset": byte_offset,
-                "buffer": quickjs_reference_json(env, *array_buffer, false, seen)? })
+                "buffer": quickjs_reference_json(env, *array_buffer, false, seen, &quickjs_child_path(path, serde_json::json!("buffer")), origins)? })
         }
         Value::Object(_) => serde_json::json!({ "__thaw_napi_handle__": (value as u64).to_string() }),
         Value::Promise(_) => serde_json::json!({ "__thaw_napi_promise__": (value as u64).to_string() }),
+        Value::Date(time) => {
+            origins.push(serde_json::json!([path, "date", time.is_finite().then_some(*time)]));
+            json_from_value_with_undefined(value, true)?
+        }
+        Value::Number(number) if !number.is_finite() => {
+            let token = if number.is_nan() { "NaN" } else if number.is_sign_positive() { "Infinity" } else { "-Infinity" };
+            origins.push(serde_json::json!([path, "nonfinite", token]));
+            JsonValue::Null
+        }
         _ => json_from_value_with_undefined(value, true)?,
     };
     seen.remove(&(value as usize));
     Ok(result)
 }
 
-unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<JsonValue, String> {
+unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, String> {
+    let marker = |value| Ok(QuickJsWireValue { value, origins: Vec::new() });
     match value_ref(value) {
-        Ok(Value::Promise(_)) => return Ok(serde_json::json!({ "__thaw_napi_promise__": (value as u64).to_string() })),
+        Ok(Value::Promise(_)) => return marker(serde_json::json!({ "__thaw_napi_promise__": (value as u64).to_string() })),
         Ok(Value::Symbol { id, description }) => {
             let global = GLOBAL_SYMBOLS.get().is_some_and(|symbols| {
                 symbols.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
                     .get(description) == Some(id)
             });
-            return Ok(serde_json::json!({ "__thaw_napi_symbol__": id.to_string(), "description": description, "global": global }));
+            return marker(serde_json::json!({ "__thaw_napi_symbol__": id.to_string(), "description": description, "global": global }));
         }
         Ok(Value::Error(message)) => {
             let name = error_name_for_owner(ptr::null_mut(), value as usize)
                 .unwrap_or_else(|| "Error".into());
-            return Ok(serde_json::json!({ "__thaw_napi_error__": message, "name": name }));
+            return marker(serde_json::json!({ "__thaw_napi_error__": message, "name": name }));
         }
         _ => {}
     }
     HOST.with(|host| {
         let host = host.borrow();
         if let Some(env) = host.module_envs.iter().find(|env| env.values.contains(&value)) {
-            quickjs_reference_json(env, value, false, &mut HashSet::new())
+            quickjs_reference_wire(env, value, false)
         } else {
             Err("native addon result belongs to an unknown environment".into())
         }
@@ -1811,13 +1836,13 @@ pub unsafe extern "C" fn thaw_napi_construct_handle_typed_result(
     construct_handle_impl(constructor, args, true)
 }
 
-unsafe fn call_method_impl(
+unsafe fn call_method_value_impl(
     receiver: u64,
     method: *const c_char,
     args: *const c_char,
     preserve_undefined: bool,
-) -> ThawResult {
-    let result = (|| -> Result<String, String> {
+) -> Result<NapiValue, String> {
+    (|| -> Result<NapiValue, String> {
         let env = module_env_for_handle(receiver)?;
         let method_name = text(method)?;
         let values = module_arguments(env, args, preserve_undefined)?;
@@ -1847,11 +1872,19 @@ unsafe fn call_method_impl(
         };
         let value = callback_result(env, (function.callback)(env, &mut info));
         take_env_exception(env)?;
-        let value = wait_for_promise(value)?;
-        serde_json::to_string(&json_from_value_with_undefined(value, preserve_undefined)?)
-            .map_err(|error| error.to_string())
-    })();
-    text_result(result)
+        wait_for_promise(value)
+    })()
+}
+
+unsafe fn call_method_impl(
+    receiver: u64,
+    method: *const c_char,
+    args: *const c_char,
+    preserve_undefined: bool,
+) -> ThawResult {
+    text_result(call_method_value_impl(receiver, method, args, preserve_undefined)
+        .and_then(|value| json_from_value_with_undefined(value, preserve_undefined))
+        .and_then(|value| serde_json::to_string(&value).map_err(|error| error.to_string())))
 }
 
 #[no_mangle]
