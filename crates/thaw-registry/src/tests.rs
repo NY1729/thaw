@@ -232,7 +232,7 @@ fn rewrites_import_meta_url_without_touching_text() {
     )
     .unwrap();
     assert!(
-        rewritten.contains("const url = ({url: ('file://' + __filename)"),
+        rewritten.contains("const url = (__thaw_import_meta_0 ||"),
         "{rewritten}"
     );
     assert!(
@@ -299,9 +299,9 @@ fn rewrites_import_meta_as_an_expression_in_every_position() {
          export const resolved = import.meta.resolve('x'); import.meta.url;",
     )
     .unwrap();
-    assert!(rewritten.contains("const meta = () => ({url:"), "{rewritten}");
-    assert!(rewritten.contains("}).url"), "{rewritten}");
-    assert!(rewritten.contains("}).resolve('x')"), "{rewritten}");
+    assert!(rewritten.contains("const meta = () => (__thaw_import_meta_0 ||"), "{rewritten}");
+    assert!(rewritten.contains("})).url"), "{rewritten}");
+    assert!(rewritten.contains("})).resolve('x')"), "{rewritten}");
     assert!(thaw_parser::parse_javascript(&rewritten).is_ok(), "{rewritten}");
 }
 
@@ -310,9 +310,36 @@ fn rewrites_bare_import_meta_expression_statement_without_export_syntax() {
     // Unrun regression: ESM can use import.meta without an import/export
     // declaration, and the CJS wrapper still evaluates it as script code.
     let rewritten = rewrite_esm_to_commonjs("import.meta.url;").unwrap();
-    assert!(rewritten.starts_with("({url:"), "{rewritten}");
-    assert!(rewritten.ends_with("}).url;"), "{rewritten}");
+    assert!(rewritten.starts_with("(__thaw_import_meta_0 ||"), "{rewritten}");
+    assert!(rewritten.contains("})).url;"), "{rewritten}");
+    assert!(rewritten.ends_with("var __thaw_import_meta_0;"), "{rewritten}");
     assert!(thaw_parser::parse_javascript(&rewritten).is_ok(), "{rewritten}");
+}
+
+#[test]
+fn import_meta_is_one_mutable_object_without_a_generated_name_collision() {
+    use std::ffi::{CStr, CString};
+
+    // Unrun regression: the source owns one plain and one escaped
+    // candidate name. Both must be distinct from the generated slot.
+    let rewritten = rewrite_esm_to_commonjs(
+        "const __thaw_import_meta_0 = 17, __thaw_import_meta_\\u0031 = 19; \
+         export function check() { const first = import.meta; first.extra = 1; \
+         return [first === import.meta, import.meta.extra, __thaw_import_meta_0, __thaw_import_meta_\\u0031]; }",
+    )
+    .unwrap();
+    assert!(rewritten.contains("var __thaw_import_meta_2;"), "{rewritten}");
+    let script = format!(
+        "globalThis.__thaw_import_meta_identity_case = (function() {{ \
+         var module = {{ exports: {{}} }}, __filename = '/module.js'; \
+         {rewritten} return module.exports.check; }})();"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("__thaw_import_meta_identity_case").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,1,17,19]");
 }
 
 #[test]
