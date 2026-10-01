@@ -203,7 +203,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_int_compare(IntPredicate::EQ, left, right, "union_int_equal")
                 .map_err(|error| error.to_string()),
             (BasicValueEnum::PointerValue(left), BasicValueEnum::PointerValue(right)) => {
-                if ty == &HirType::Str {
+                if ty == &HirType::Json {
+                    let compared = self.builder.build_call(
+                        self.module.get_function("thaw_json_strict_equal").unwrap(),
+                        &[left.into(), right.into()],
+                        "union_json_strict_equal",
+                    ).map_err(|error| error.to_string())?
+                    .try_as_basic_value().basic().ok_or("JSON union equality returned no value")?
+                    .into_int_value();
+                    self.builder.build_int_compare(
+                        IntPredicate::NE, compared, self.context.i8_type().const_zero(), "union_json_equal",
+                    ).map_err(|error| error.to_string())
+                } else if matches!(ty, HirType::Str | HirType::Symbol) {
                     let compared = self
                         .builder
                         .build_call(
