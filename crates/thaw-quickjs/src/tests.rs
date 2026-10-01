@@ -4372,3 +4372,103 @@ fn intl_followup_locale_list_boundary() {
         "[true,true,true,true,true,true,true,true,true,true,true,true]"
     );
 }
+
+#[test]
+fn buffer_boundary_and_encoding_regressions() {
+    assert_eq!(
+        load(r#"function bufferBoundaryRegressions() {
+          const written = Buffer.alloc(2);
+          const n = written.write('61', 'hex');
+          const short = Buffer.alloc(2);
+          const limited = short.write('abcd', 0, 4);
+          let fractionalLengthFailed = false, infiniteLengthFailed = false;
+          try { short.write('ab', 0, 2.5); } catch (e) { fractionalLengthFailed = e instanceof RangeError; }
+          try { short.write('ab', 0, Infinity); } catch (e) { infiniteLengthFailed = e instanceof RangeError; }
+          const utf8 = Buffer.alloc(2);
+          const utf8Count = utf8.write('あ');
+          const filled = Buffer.alloc(5, new Uint8Array([1, 2]));
+          const fromElements = Buffer.from(new Uint16Array([0x1234]));
+          let readFailed = false, writeFailed = false;
+          try { Buffer.alloc(1).readUInt16LE(0); } catch (e) { readFailed = e instanceof RangeError; }
+          try { Buffer.alloc(1).writeUInt16LE(7, 0); } catch (e) { writeFailed = e instanceof RangeError; }
+          return [n, written.toString('hex'), limited, short.toString(), utf8Count,
+            utf8.toString('hex'), filled.toString('hex'), fromElements.toString('hex'), readFailed, writeFailed,
+            fractionalLengthFailed, infiniteLengthFailed];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("bufferBoundaryRegressions", "[]"),
+        r#"[1,"6100",2,"ab",0,"0000","0102010201","34",true,true,true,true]"#
+    );
+}
+
+#[test]
+fn crypto_buffer_regressions() {
+    assert_eq!(
+        load(r#"async function cryptoBufferRegressions() {
+          const cryptoModule = __thaw_crypto_module;
+          const raw = new Uint8Array([1, 2, 3]);
+          const key = await crypto.subtle.importKey('raw', raw, {name: 'HMAC', hash: 'SHA-256'}, false, ['sign']);
+          raw[0] = 9;
+          const keyCopied = key.__thawRaw.toString('hex') === '010203';
+          const hash = cryptoModule.createHash('sha256').update('a'); hash.digest();
+          const hmac = cryptoModule.createHmac('sha256', 'key').update('a');
+          const copiedHmac = hmac.copy().update('b').digest('hex') ===
+            cryptoModule.createHmac('sha256', 'key').update('ab').digest('hex');
+          const sha384Key = Buffer.alloc(20, 0x0b);
+          const sha384Hmac = cryptoModule.createHmac('sha384', sha384Key).update('Hi There').digest('hex') ===
+            'afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6';
+          let copyFailed = false;
+          try { hash.copy(); } catch (e) { copyFailed = true; }
+          let typeFailed = false;
+          try { crypto.getRandomValues(new Float32Array(1)); } catch (e) { typeFailed = e.name === 'TypeMismatchError'; }
+          const original = __thaw_crypto_random_hex;
+          let calls = 0, sampled;
+          try {
+            __thaw_crypto_random_hex = () => (++calls === 1 ? 'ffffffffffff' : '000000000001');
+            sampled = cryptoModule.randomInt(0, 3);
+          } finally { __thaw_crypto_random_hex = original; }
+          const ecdh = cryptoModule.createECDH('P-256');
+          const compressed = ecdh.generateKeys(undefined, 'compressed');
+          const uncompressed = ecdh.getPublicKey();
+          const keylen = cryptoModule.pbkdf2Sync('password', 'salt', 1, 80, 'sha256').length;
+          const sha384Length = cryptoModule.pbkdf2Sync('password', 'salt', 1, 80, 'sha384').length;
+          const passwordKey = await crypto.subtle.importKey('raw', new Uint8Array([1]), 'PBKDF2', false, ['deriveBits']);
+          const derivedLength = (await crypto.subtle.deriveBits({name: 'PBKDF2', salt: new Uint8Array([2]), iterations: 1, hash: 'SHA-256'}, passwordKey, 640)).byteLength;
+          const sha384DerivedLength = (await crypto.subtle.deriveBits({name: 'PBKDF2', salt: new Uint8Array([2]), iterations: 1, hash: 'SHA-384'}, passwordKey, 640)).byteLength;
+          let invalidIteration = false, fractionalMinFailed = false, exactRangeFailed = false;
+          try { cryptoModule.pbkdf2Sync('password', 'salt', 0, 1, 'sha256'); }
+          catch (e) { invalidIteration = e instanceof RangeError; }
+          try { cryptoModule.randomInt(0.5, 4); } catch (e) { fractionalMinFailed = e instanceof RangeError; }
+          try { cryptoModule.randomInt(0, 0x1000000000000); } catch (e) { exactRangeFailed = e instanceof RangeError; }
+          const originalQueue = queueMicrotask;
+          const originalScrypt = __thaw_crypto_scrypt_hex;
+          const originalGenerate = __thaw_crypto_generate_key_pair_json;
+          let callbackCount = 0, thrown = false, job;
+          try {
+            queueMicrotask = next => { job = next; };
+            __thaw_crypto_scrypt_hex = () => '00';
+            cryptoModule.scrypt('a', 'b', 1, () => { callbackCount++; throw new Error('callback'); });
+            try { job(); } catch (e) { thrown = e.message === 'callback'; }
+            __thaw_crypto_generate_key_pair_json = () => JSON.stringify({publicPem: 'p', privatePem: 'q'});
+            cryptoModule.generateKeyPair('rsa', {publicKeyEncoding: {format: 'pem'}, privateKeyEncoding: {format: 'pem'}},
+              () => { callbackCount++; throw new Error('callback'); });
+            try { job(); } catch (e) { thrown = thrown && e.message === 'callback'; }
+          } finally {
+            queueMicrotask = originalQueue;
+            __thaw_crypto_scrypt_hex = originalScrypt;
+            __thaw_crypto_generate_key_pair_json = originalGenerate;
+          }
+          return [keyCopied, copyFailed, copiedHmac, sha384Hmac, typeFailed, calls, sampled, compressed.length,
+            compressed[0] === (uncompressed[uncompressed.length - 1] & 1) + 2,
+            keylen, sha384Length, derivedLength, sha384DerivedLength, invalidIteration, fractionalMinFailed, exactRangeFailed,
+            callbackCount, thrown];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("cryptoBufferRegressions", "[]"),
+        "[true,true,true,true,true,2,1,33,true,80,80,80,80,true,true,true,2,true]"
+    );
+}

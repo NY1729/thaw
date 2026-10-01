@@ -35,7 +35,7 @@
         const offset = Number(encodingOrOffset || 0);
         return new Buffer(value, offset, length === undefined ? value.byteLength - offset : Number(length));
       }
-      if (ArrayBuffer.isView(value)) return new Buffer(Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)));
+      if (ArrayBuffer.isView(value)) return new Buffer(value instanceof DataView ? Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) : Array.from(value));
       if (value && value.type === 'Buffer' && Array.isArray(value.data)) return new Buffer(value.data);
       return new Buffer(Array.from(value || []));
     }
@@ -116,7 +116,9 @@
       target.set(bytes.subarray(0, count), Number(targetStart)); return Math.max(0, count);
     }
     fill(value, start = 0, end = this.length, encoding) {
-      const pattern = typeof value === 'string' ? bufferBytes(value, encoding) : [Number(value) & 255];
+      const pattern = typeof value === 'string' ? bufferBytes(value, encoding)
+        : ArrayBuffer.isView(value) ? Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+        : [Number(value) & 255];
       if (pattern.length === 0) return this;
       for (let index = Number(start); index < Number(end); index++) this[index] = pattern[(index - Number(start)) % pattern.length];
       return this;
@@ -140,27 +142,42 @@
     includes(value, byteOffset, encoding) { return this.indexOf(value, byteOffset, encoding) !== -1; }
     slice(start, end) { return this.subarray(start, end); }
     write(value, offset = 0, length, encoding = 'utf8') {
-      if (typeof length === 'string') { encoding = length; length = undefined; }
-      const bytes = bufferBytes(value, encoding); const count = Math.min(bytes.length, length === undefined ? this.length - Number(offset) : Number(length));
-      this.set(bytes.slice(0, count), Number(offset)); return count;
+      if (typeof offset === 'string') { encoding = offset; offset = 0; length = undefined; }
+      else if (typeof length === 'string') { encoding = length; length = undefined; }
+      offset = Number(offset);
+      if (!Number.isInteger(offset) || offset < 0 || offset > this.length) throw new RangeError('offset out of range');
+      const requested = length === undefined ? this.length - offset : Number(length);
+      if (!Number.isInteger(requested) || requested < 0) throw new RangeError('length out of range');
+      const bytes = bufferBytes(value, encoding);
+      const available = Math.min(this.length - offset, requested);
+      let count = Math.min(bytes.length, available);
+      if (normalizeBufferEncoding(encoding) === 'utf8' || normalizeBufferEncoding(encoding) === 'utf') {
+        while (count > 0 && count < bytes.length && (bytes[count] & 0xc0) === 0x80) count--;
+      }
+      this.set(bytes.slice(0, count), offset); return count;
     }
-    readUInt8(offset = 0) { return this[Number(offset)]; }
+    checkedOffset(offset, width) {
+      const index = Number(offset);
+      if (!Number.isInteger(index) || index < 0 || index + width > this.length) throw new RangeError('offset out of range');
+      return index;
+    }
+    readUInt8(offset = 0) { return this[this.checkedOffset(offset, 1)]; }
     readInt8(offset = 0) { const value = this.readUInt8(offset); return value > 0x7f ? value - 0x100 : value; }
-    writeUInt8(value, offset = 0) { this[Number(offset)] = Number(value) & 255; return Number(offset) + 1; }
-    readUInt16LE(offset = 0) { const index = Number(offset); return this[index] | this[index + 1] << 8; }
-    readUInt16BE(offset = 0) { const index = Number(offset); return this[index] << 8 | this[index + 1]; }
+    writeUInt8(value, offset = 0) { const index = this.checkedOffset(offset, 1); this[index] = Number(value) & 255; return index + 1; }
+    readUInt16LE(offset = 0) { const index = this.checkedOffset(offset, 2); return this[index] | this[index + 1] << 8; }
+    readUInt16BE(offset = 0) { const index = this.checkedOffset(offset, 2); return this[index] << 8 | this[index + 1]; }
     readInt16LE(offset = 0) { const value = this.readUInt16LE(offset); return value > 0x7fff ? value - 0x10000 : value; }
     readInt16BE(offset = 0) { const value = this.readUInt16BE(offset); return value > 0x7fff ? value - 0x10000 : value; }
-    writeUInt16LE(value, offset = 0) { const index = Number(offset); this[index] = Number(value) & 255; this[index + 1] = Number(value) >> 8 & 255; return index + 2; }
-    writeUInt16BE(value, offset = 0) { const index = Number(offset); this[index] = Number(value) >> 8 & 255; this[index + 1] = Number(value) & 255; return index + 2; }
+    writeUInt16LE(value, offset = 0) { const index = this.checkedOffset(offset, 2); this[index] = Number(value) & 255; this[index + 1] = Number(value) >> 8 & 255; return index + 2; }
+    writeUInt16BE(value, offset = 0) { const index = this.checkedOffset(offset, 2); this[index] = Number(value) >> 8 & 255; this[index + 1] = Number(value) & 255; return index + 2; }
     writeInt16LE(value, offset = 0) { return this.writeUInt16LE(value, offset); }
     writeInt16BE(value, offset = 0) { return this.writeUInt16BE(value, offset); }
-    readUInt32LE(offset = 0) { const index = Number(offset); return (this[index] | this[index + 1] << 8 | this[index + 2] << 16 | this[index + 3] << 24) >>> 0; }
-    readUInt32BE(offset = 0) { const index = Number(offset); return (this[index] * 0x1000000 + (this[index + 1] << 16 | this[index + 2] << 8 | this[index + 3])) >>> 0; }
+    readUInt32LE(offset = 0) { const index = this.checkedOffset(offset, 4); return (this[index] | this[index + 1] << 8 | this[index + 2] << 16 | this[index + 3] << 24) >>> 0; }
+    readUInt32BE(offset = 0) { const index = this.checkedOffset(offset, 4); return (this[index] * 0x1000000 + (this[index + 1] << 16 | this[index + 2] << 8 | this[index + 3])) >>> 0; }
     readInt32LE(offset = 0) { const value = this.readUInt32LE(offset); return value > 0x7fffffff ? value - 0x100000000 : value; }
     readInt32BE(offset = 0) { const value = this.readUInt32BE(offset); return value > 0x7fffffff ? value - 0x100000000 : value; }
-    writeUInt32LE(value, offset = 0) { const index = Number(offset), number = Number(value) >>> 0; this[index] = number; this[index + 1] = number >>> 8; this[index + 2] = number >>> 16; this[index + 3] = number >>> 24; return index + 4; }
-    writeUInt32BE(value, offset = 0) { const index = Number(offset), number = Number(value) >>> 0; this[index] = number >>> 24; this[index + 1] = number >>> 16; this[index + 2] = number >>> 8; this[index + 3] = number; return index + 4; }
+    writeUInt32LE(value, offset = 0) { const index = this.checkedOffset(offset, 4), number = Number(value) >>> 0; this[index] = number; this[index + 1] = number >>> 8; this[index + 2] = number >>> 16; this[index + 3] = number >>> 24; return index + 4; }
+    writeUInt32BE(value, offset = 0) { const index = this.checkedOffset(offset, 4), number = Number(value) >>> 0; this[index] = number >>> 24; this[index + 1] = number >>> 16; this[index + 2] = number >>> 8; this[index + 3] = number; return index + 4; }
     writeInt32LE(value, offset = 0) { return this.writeUInt32LE(value, offset); }
     writeInt32BE(value, offset = 0) { return this.writeUInt32BE(value, offset); }
     readFloatLE(offset = 0) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat32(Number(offset), true); }
@@ -295,7 +312,7 @@
       const value = Buffer.from(__thaw_crypto_hash_hex(this.algorithm, Buffer.concat(this._chunks).toString('hex')), 'hex');
       return encoding === undefined ? value : value.toString(encoding);
     }
-    copy() { const copied = new Hash(this.algorithm); copied._chunks = this._chunks.map(chunk => Buffer.from(chunk)); return copied; }
+    copy() { if (this._digested) throw new Error('Digest already called'); const copied = new Hash(this.algorithm); copied._chunks = this._chunks.map(chunk => Buffer.from(chunk)); return copied; }
   }
   class Hmac extends Hash {
     constructor(algorithm, key) {
@@ -307,6 +324,12 @@
       this._digested = true;
       const value = Buffer.from(__thaw_crypto_hmac_hex(this.algorithm, this._key.toString('hex'), Buffer.concat(this._chunks).toString('hex')), 'hex');
       return encoding === undefined ? value : value.toString(encoding);
+    }
+    copy() {
+      if (this._digested) throw new Error('Digest already called');
+      const copied = new Hmac(this.algorithm, this._key);
+      copied._chunks = this._chunks.map(chunk => Buffer.from(chunk));
+      return copied;
     }
   }
   const randomFillSync = (buffer, offset = 0, size = buffer.byteLength - Number(offset)) => {
@@ -329,10 +352,17 @@
   };
   const randomInt = (min, max, callback) => {
     if (max === undefined || typeof max === 'function') { callback = typeof max === 'function' ? max : callback; max = min; min = 0; }
-    min = Math.ceil(Number(min)); max = Math.floor(Number(max));
-    if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || max <= min) throw new RangeError('invalid random integer range');
-    const range = max - min; const bytes = randomBytesSync(4);
-    const value = min + ((bytes[0] * 0x1000000 + bytes[1] * 0x10000 + bytes[2] * 0x100 + bytes[3]) % range);
+    if (typeof min !== 'number' || typeof max !== 'number' || !Number.isSafeInteger(min) || !Number.isSafeInteger(max) || max <= min) throw new RangeError('invalid random integer range');
+    const range = max - min;
+    if (range >= 0x1000000000000) throw new RangeError('random integer range must be less than 2^48');
+    const limit = 0x1000000000000 - (0x1000000000000 % range);
+    let sample;
+    do {
+      const bytes = randomBytesSync(6);
+      sample = bytes[0] * 0x10000000000 + bytes[1] * 0x100000000
+        + bytes[2] * 0x1000000 + bytes[3] * 0x10000 + bytes[4] * 0x100 + bytes[5];
+    } while (sample >= limit);
+    const value = min + sample % range;
     if (callback === undefined) return value;
     queueMicrotask(() => callback(null, value));
   };
@@ -346,13 +376,18 @@
     if (a.length !== b.length) throw new RangeError('input buffers must have the same length');
     let difference = 0; for (let index = 0; index < a.length; index++) difference |= a[index] ^ b[index]; return difference === 0;
   };
+  const checkedPbkdf2Number = (value, minimum, name) => {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < minimum || number > 0xffffffff) throw new RangeError(`${name} out of range`);
+    return number;
+  };
   const pbkdf2Sync = (password, salt, iterations, keylen, digest) => Buffer.from(
     __thaw_crypto_pbkdf2_hex(
       normalizeHashAlgorithm(digest),
       Buffer.from(password).toString('hex'),
       Buffer.from(salt).toString('hex'),
-      Number(iterations),
-      Number(keylen)
+      checkedPbkdf2Number(iterations, 1, 'iterations'),
+      checkedPbkdf2Number(keylen, 0, 'keylen')
     ),
     'hex'
   );
@@ -371,8 +406,10 @@
     if (typeof options === 'function') { callback = options; options = {}; }
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
     queueMicrotask(() => {
-      try { callback(null, scryptSync(password, salt, keylen, options)); }
-      catch (error) { callback(error); }
+      let value;
+      try { value = scryptSync(password, salt, keylen, options); }
+      catch (error) { callback(error); return; }
+      callback(null, value);
     });
   };
   class Cipheriv {
@@ -559,10 +596,10 @@
   const generateKeyPair = (type, options, callback) => {
     if (typeof options === 'function') { callback = options; options = {}; }
     queueMicrotask(() => {
-      try {
-        const result = generateKeyPairSync(type, options);
-        callback(null, result.publicKey, result.privateKey);
-      } catch (error) { callback(error); }
+      let result;
+      try { result = generateKeyPairSync(type, options); }
+      catch (error) { callback(error); return; }
+      callback(null, result.publicKey, result.privateKey);
     });
   };
   // `crypto.diffieHellman({privateKey, publicKey})` -- the modern,
@@ -601,8 +638,15 @@
       const value = Buffer.from(this._privateKeyHex, 'hex');
       return encoding === undefined ? value : value.toString(encoding);
     }
-    getPublicKey(encoding) {
+    getPublicKey(encoding, format = 'uncompressed') {
       const value = Buffer.from(this._publicKeyHex, 'hex');
+      if (format !== 'uncompressed') {
+        if (format !== 'compressed' && format !== 'hybrid') throw new TypeError('invalid public key format');
+        const coordinateLength = (value.length - 1) / 2;
+        const odd = value[value.length - 1] & 1;
+        value[0] = (format === 'compressed' ? 2 : 6) + odd;
+        if (format === 'compressed') return encoding === undefined ? value.subarray(0, coordinateLength + 1) : value.subarray(0, coordinateLength + 1).toString(encoding);
+      }
       return encoding === undefined ? value : value.toString(encoding);
     }
     computeSecret(otherPublicKey, inputEncoding, outputEncoding) {
@@ -637,7 +681,7 @@
     importKey(format, keyData, algorithm, extractable, usages) {
       if (format !== 'raw') return Promise.reject(new TypeError(`Unsupported key format: ${format}`));
       return Promise.resolve({
-        __thawRaw: Buffer.from(keyData.buffer || keyData, keyData.byteOffset || 0, keyData.byteLength),
+        __thawRaw: Buffer.from(new Uint8Array(keyData.buffer || keyData, keyData.byteOffset || 0, keyData.byteLength)),
         algorithm: typeof algorithm === 'string' ? { name: algorithm } : algorithm,
         extractable: Boolean(extractable),
         usages: Array.from(usages || [])
@@ -655,15 +699,22 @@
       const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
       const hash = algorithm && algorithm.hash;
       const digest = typeof hash === 'string' ? hash : hash && hash.name;
-      if (String(name).toUpperCase() !== 'PBKDF2' || !key.__thawRaw || Number(length) % 8 !== 0) return Promise.reject(new TypeError('Unsupported key derivation'));
-      const salt = Buffer.from(algorithm.salt.buffer || algorithm.salt, algorithm.salt.byteOffset || 0, algorithm.salt.byteLength);
-      const value = Buffer.from(__thaw_crypto_pbkdf2_hex(normalizeHashAlgorithm(digest), key.__thawRaw.toString('hex'), salt.toString('hex'), Number(algorithm.iterations), Number(length) / 8), 'hex');
-      return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+      if (String(name).toUpperCase() !== 'PBKDF2' || !key.__thawRaw) return Promise.reject(new TypeError('Unsupported key derivation'));
+      try {
+        const bits = Number(length);
+        if (!Number.isInteger(bits) || bits < 0 || bits % 8 !== 0) throw new RangeError('length out of range');
+        const iterations = checkedPbkdf2Number(algorithm.iterations, 1, 'iterations');
+        const bytes = checkedPbkdf2Number(bits / 8, 0, 'length');
+        const salt = Buffer.from(algorithm.salt.buffer || algorithm.salt, algorithm.salt.byteOffset || 0, algorithm.salt.byteLength);
+        const value = Buffer.from(__thaw_crypto_pbkdf2_hex(normalizeHashAlgorithm(digest), key.__thawRaw.toString('hex'), salt.toString('hex'), iterations, bytes), 'hex');
+        return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+      } catch (error) { return Promise.reject(error); }
     }
   };
   const webCrypto = globalThis.crypto || {};
   webCrypto.getRandomValues = value => {
-    if (!ArrayBuffer.isView(value) || value.byteLength > 65536) throw new DOMException('invalid random value target', 'QuotaExceededError');
+    if (!(value instanceof Int8Array || value instanceof Uint8Array || value instanceof Int16Array || value instanceof Uint16Array || value instanceof Int32Array || value instanceof Uint32Array || (typeof BigInt64Array !== 'undefined' && value instanceof BigInt64Array) || (typeof BigUint64Array !== 'undefined' && value instanceof BigUint64Array))) throw new DOMException('integer TypedArray required', 'TypeMismatchError');
+    if (value.byteLength > 65536) throw new DOMException('random value target exceeds 65536 bytes', 'QuotaExceededError');
     return randomFillSync(value);
   };
   webCrypto.randomUUID = randomUUID;
