@@ -541,7 +541,7 @@ fn ensure_context() {
                             &hex_decode(&password),
                             &hex_decode(&salt),
                             iterations,
-                            (length as usize).clamp(10, 64),
+                            length as usize,
                         ))
                     },
                 )

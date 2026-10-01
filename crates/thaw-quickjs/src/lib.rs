@@ -73,7 +73,7 @@ use rustls::{
     ServerConfig, ServerConnection, SignatureScheme, StreamOwned,
 };
 use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 #[cfg(feature = "wasm")]
 use wasmi::Linker as WasmLinker;
 #[cfg(feature = "wasm")]
@@ -477,13 +477,14 @@ fn digest_bytes(algorithm: &str, value: &[u8]) -> Vec<u8> {
     match algorithm {
         "sha1" => Sha1::digest(value).to_vec(),
         "sha256" => Sha256::digest(value).to_vec(),
+        "sha384" => Sha384::digest(value).to_vec(),
         "sha512" => Sha512::digest(value).to_vec(),
         _ => Vec::new(),
     }
 }
 
 fn hmac_bytes(algorithm: &str, key: &[u8], value: &[u8]) -> Vec<u8> {
-    let block_size = if algorithm == "sha512" { 128 } else { 64 };
+    let block_size = if algorithm == "sha384" || algorithm == "sha512" { 128 } else { 64 };
     let mut normalized = if key.len() > block_size {
         digest_bytes(algorithm, key)
     } else {
