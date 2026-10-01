@@ -1,69 +1,301 @@
+fn constructor_pat_names(pat: &thaw_parser::ast::Pat, names: &mut std::collections::HashSet<String>) {
+    use thaw_parser::ast::{ObjectPatProp, Pat};
+    match pat {
+        Pat::Ident(binding) => { names.insert(binding.id.sym.to_string()); }
+        Pat::Array(array) => {
+            for element in array.elems.iter().flatten() { constructor_pat_names(element, names); }
+        }
+        Pat::Object(object) => {
+            for property in &object.props {
+                match property {
+                    ObjectPatProp::Assign(assign) => { names.insert(assign.key.sym.to_string()); }
+                    ObjectPatProp::KeyValue(value) => constructor_pat_names(&value.value, names),
+                    ObjectPatProp::Rest(rest) => constructor_pat_names(&rest.arg, names),
+                }
+            }
+        }
+        Pat::Assign(assign) => constructor_pat_names(&assign.left, names),
+        Pat::Rest(rest) => constructor_pat_names(&rest.arg, names),
+        _ => {}
+    }
+}
+
+fn constructor_decl_names(
+    decl: &thaw_parser::ast::Decl,
+    names: &mut std::collections::HashSet<String>,
+) {
+    use thaw_parser::ast::Decl;
+    match decl {
+        Decl::Var(vars) => {
+            for var in &vars.decls { constructor_pat_names(&var.name, names); }
+        }
+        Decl::Fn(function) => { names.insert(function.ident.sym.to_string()); }
+        Decl::Class(class) => { names.insert(class.ident.sym.to_string()); }
+        _ => {}
+    }
+}
+
+#[derive(Default)]
+struct ConstructorHoistedVars(std::collections::HashSet<String>);
+
+impl swc_ecma_visit::Visit for ConstructorHoistedVars {
+    fn visit_var_decl(&mut self, declaration: &thaw_parser::ast::VarDecl) {
+        if declaration.kind == thaw_parser::ast::VarDeclKind::Var {
+            for binding in &declaration.decls {
+                constructor_pat_names(&binding.name, &mut self.0);
+            }
+        }
+    }
+
+    fn visit_function(&mut self, _function: &thaw_parser::ast::Function) {}
+    fn visit_arrow_expr(&mut self, _arrow: &thaw_parser::ast::ArrowExpr) {}
+    fn visit_class(&mut self, _class: &thaw_parser::ast::Class) {}
+}
+
 fn rewrite_external_class_constructors(
     source: &str,
     classes: &[ClassConstructorRewrite],
+    package_qualifiers: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{Expr, MemberProp, NewExpr};
+    use thaw_parser::ast::{
+        ArrowExpr, BlockStmt, CatchClause, ClassExpr, Constructor, Decl, DefaultDecl, Expr,
+        FnExpr, ForHead, ForInStmt, ForOfStmt, ForStmt, Function, MemberProp, ModuleDecl,
+        ModuleItem, NewExpr, ParamOrTsParamProp, Stmt, SwitchStmt, TsParamPropParam,
+        VarDeclKind, VarDeclOrExpr,
+    };
     use thaw_parser::common::Spanned;
 
-    if classes.is_empty() {
-        return Ok(source.to_string());
+    if classes.is_empty() { return Ok(source.to_string()); }
+    let module = thaw_parser::parse_typescript(source)?;
+    let (named_imports, namespace_imports, imported_names) =
+        constructor_imports(&module, package_qualifiers);
+    let mut top_level = std::collections::HashSet::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(decl)) => constructor_decl_names(decl, &mut top_level),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) =>
+                constructor_decl_names(&export.decl, &mut top_level),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
+                DefaultDecl::Class(class) => {
+                    if let Some(name) = &class.ident { top_level.insert(name.sym.to_string()); }
+                }
+                DefaultDecl::Fn(function) => {
+                    if let Some(name) = &function.ident { top_level.insert(name.sym.to_string()); }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
     }
+    let mut hoisted = ConstructorHoistedVars::default();
+    module.visit_with(&mut hoisted);
+    top_level.extend(hoisted.0);
     struct Finder<'a> {
         classes: &'a [ClassConstructorRewrite],
+        named_imports: std::collections::HashMap<String, (String, String)>,
+        namespace_imports: std::collections::HashMap<String, String>,
+        imported_names: std::collections::HashSet<String>,
+        shadowed: Vec<std::collections::HashSet<String>>,
         replacements: Vec<(u32, u32, String)>,
     }
-    impl Visit for Finder<'_> {
-        fn visit_new_expr(&mut self, expression: &NewExpr) {
-            let class = match expression.callee.as_ref() {
-                Expr::Ident(class) => self
-                    .classes
-                    .iter()
-                    .find(|(_, name, _)| name == class.sym.as_str()),
-                Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
-                    (Expr::Ident(package), MemberProp::Ident(class)) => {
-                        self.classes.iter().find(|(qualifier, name, _)| {
-                            qualifier == package.sym.as_str() && name == class.sym.as_str()
-                        })
+    impl Finder<'_> {
+        fn is_shadowed(&self, name: &str) -> bool {
+            self.shadowed.iter().any(|scope| scope.contains(name))
+        }
+        fn find_class(&self, qualifier: &str, name: &str) -> Option<&ClassConstructorRewrite> {
+            self.classes.iter().find(|(package, class, _)| package == qualifier && class == name)
+        }
+        fn class_for_callee(&self, callee: &Expr) -> Option<&ClassConstructorRewrite> {
+            match callee {
+                Expr::Ident(name) => {
+                    let local = name.sym.as_str();
+                    if self.is_shadowed(local) { return None; }
+                    if let Some((package, exported)) = self.named_imports.get(local) {
+                        return self.find_class(package, exported);
                     }
-                    (Expr::Member(namespace), MemberProp::Ident(class)) => {
-                        let (Expr::Ident(package), MemberProp::Ident(namespace_name)) =
-                            (namespace.obj.as_ref(), &namespace.prop) else {
-                                return expression.visit_children_with(self);
-                            };
-                        let member_name = format!("{}.{}", namespace_name.sym, class.sym);
-                        self.classes.iter().find(|(qualifier, name, _)| {
-                            qualifier == package.sym.as_str() && name == &member_name
-                        })
+                    if let Some(package) = self.namespace_imports.get(local) {
+                        return self.find_class(package, "__namespace_root__");
                     }
-                    _ => None,
-                },
+                    if self.imported_names.contains(local) { return None; }
+                    let mut candidates = self.classes.iter().filter(|(_, class, _)| class == local);
+                    let only = candidates.next()?;
+                    candidates.next().is_none().then_some(only)
+                }
+                Expr::Member(member) => {
+                    let MemberProp::Ident(property) = &member.prop else { return None; };
+                    let (root, name) = match member.obj.as_ref() {
+                        Expr::Ident(root) => (root.sym.as_str(), property.sym.to_string()),
+                        Expr::Member(namespace) => {
+                            let (Expr::Ident(root), MemberProp::Ident(namespace_name)) =
+                                (namespace.obj.as_ref(), &namespace.prop) else { return None; };
+                            (root.sym.as_str(), format!("{}.{}", namespace_name.sym, property.sym))
+                        }
+                        _ => return None,
+                    };
+                    if self.is_shadowed(root) { return None; }
+                    let (package, name) = if let Some(package) = self.namespace_imports.get(root) {
+                        (package.as_str(), name)
+                    } else if let Some((package, exported)) = self.named_imports.get(root) {
+                        (package.as_str(), format!("{exported}.{name}"))
+                    } else if self.imported_names.contains(root) {
+                        return None;
+                    } else {
+                        (root, name)
+                    };
+                    self.find_class(package, &name)
+                }
                 _ => None,
-            };
-            if let Some((_, _, helpers)) = class {
-                let argument_count = expression.args.as_ref().map_or(0, Vec::len);
-                let mut candidates = helpers
-                    .iter()
-                    .filter(|(arity, _, _)| *arity == argument_count);
-                if let Some((_, helper, _)) = candidates.next() {
-                    if candidates.next().is_none() {
-                        self.replacements.push((
-                            expression.span().lo.0,
-                            expression
-                                .type_args
-                                .as_ref()
-                                .map_or_else(|| expression.callee.span().hi.0, |args| args.span().hi.0),
-                            helper.clone(),
-                        ));
+            }
+        }
+    }
+    impl Visit for Finder<'_> {
+        fn visit_switch_stmt(&mut self, statement: &SwitchStmt) {
+            statement.discriminant.visit_with(self);
+            let mut names = std::collections::HashSet::new();
+            for case in &statement.cases {
+                for statement in &case.cons {
+                    match statement {
+                        Stmt::Decl(Decl::Var(vars)) if vars.kind != VarDeclKind::Var => {
+                            for var in &vars.decls {
+                                constructor_pat_names(&var.name, &mut names);
+                            }
+                        }
+                        Stmt::Decl(decl @ (Decl::Class(_) | Decl::Fn(_))) =>
+                            constructor_decl_names(decl, &mut names),
+                        _ => {}
                     }
                 }
+            }
+            self.shadowed.push(names);
+            statement.cases.visit_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_block_stmt(&mut self, block: &BlockStmt) {
+            let mut names = std::collections::HashSet::new();
+            for statement in &block.stmts {
+                if let Stmt::Decl(decl) = statement { constructor_decl_names(decl, &mut names); }
+            }
+            self.shadowed.push(names);
+            block.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_function(&mut self, function: &Function) {
+            let mut names = std::collections::HashSet::new();
+            for parameter in &function.params { constructor_pat_names(&parameter.pat, &mut names); }
+            if let Some(body) = &function.body {
+                let mut hoisted = ConstructorHoistedVars::default();
+                body.visit_with(&mut hoisted);
+                names.extend(hoisted.0);
+            }
+            self.shadowed.push(names);
+            function.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_fn_expr(&mut self, expression: &FnExpr) {
+            let mut names = std::collections::HashSet::new();
+            if let Some(name) = &expression.ident { names.insert(name.sym.to_string()); }
+            self.shadowed.push(names);
+            expression.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_arrow_expr(&mut self, arrow: &ArrowExpr) {
+            let mut names = std::collections::HashSet::new();
+            for parameter in &arrow.params { constructor_pat_names(parameter, &mut names); }
+            let mut hoisted = ConstructorHoistedVars::default();
+            arrow.body.visit_with(&mut hoisted);
+            names.extend(hoisted.0);
+            self.shadowed.push(names);
+            arrow.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_catch_clause(&mut self, clause: &CatchClause) {
+            let mut names = std::collections::HashSet::new();
+            if let Some(parameter) = &clause.param { constructor_pat_names(parameter, &mut names); }
+            self.shadowed.push(names);
+            clause.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_class_expr(&mut self, expression: &ClassExpr) {
+            let mut names = std::collections::HashSet::new();
+            if let Some(name) = &expression.ident { names.insert(name.sym.to_string()); }
+            self.shadowed.push(names);
+            expression.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_constructor(&mut self, constructor: &Constructor) {
+            let mut names = std::collections::HashSet::new();
+            for parameter in &constructor.params {
+                match parameter {
+                    ParamOrTsParamProp::Param(param) => constructor_pat_names(&param.pat, &mut names),
+                    ParamOrTsParamProp::TsParamProp(property) => match &property.param {
+                        TsParamPropParam::Ident(binding) => { names.insert(binding.id.sym.to_string()); }
+                        TsParamPropParam::Assign(assign) => constructor_pat_names(&assign.left, &mut names),
+                    },
+                }
+            }
+            if let Some(body) = &constructor.body {
+                let mut hoisted = ConstructorHoistedVars::default();
+                body.visit_with(&mut hoisted);
+                names.extend(hoisted.0);
+            }
+            self.shadowed.push(names);
+            constructor.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_for_stmt(&mut self, statement: &ForStmt) {
+            let mut names = std::collections::HashSet::new();
+            if let Some(VarDeclOrExpr::VarDecl(vars)) = &statement.init {
+                for var in &vars.decls { constructor_pat_names(&var.name, &mut names); }
+            }
+            self.shadowed.push(names);
+            statement.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
+            let mut names = std::collections::HashSet::new();
+            if let ForHead::VarDecl(vars) = &statement.left {
+                for var in &vars.decls { constructor_pat_names(&var.name, &mut names); }
+            }
+            self.shadowed.push(names);
+            statement.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_for_of_stmt(&mut self, statement: &ForOfStmt) {
+            let mut names = std::collections::HashSet::new();
+            if let ForHead::VarDecl(vars) = &statement.left {
+                for var in &vars.decls { constructor_pat_names(&var.name, &mut names); }
+            }
+            self.shadowed.push(names);
+            statement.visit_children_with(self);
+            self.shadowed.pop();
+        }
+        fn visit_new_expr(&mut self, expression: &NewExpr) {
+            let argument_count = expression.args.as_ref().map_or(0, Vec::len);
+            let helper = self.class_for_callee(&expression.callee).and_then(|(_, _, helpers)| {
+                let mut candidates = helpers.iter().filter(|(arity, _, _)| *arity == argument_count);
+                let (_, helper, _) = candidates.next()?;
+                candidates.next().is_none().then(|| helper.clone())
+            });
+            if let Some(helper) = helper {
+                self.replacements.push((
+                    expression.span().lo.0,
+                    expression.type_args.as_ref().map_or_else(
+                        || expression.callee.span().hi.0,
+                        |args| args.span().hi.0,
+                    ),
+                    helper,
+                ));
             }
             expression.visit_children_with(self);
         }
     }
-    let module = thaw_parser::parse_typescript(source)?;
     let mut finder = Finder {
         classes,
+        named_imports,
+        namespace_imports,
+        imported_names,
+        shadowed: vec![top_level],
         replacements: Vec::new(),
     };
     module.visit_with(&mut finder);

@@ -460,6 +460,8 @@ fn build_with_native_mode(
     shim_source.push_str(&format!(
         "function __thaw_artifact_metadata(): string {{ return {marker_literal}; }}\n"
     ));
+    let constructor_package_qualifiers =
+        package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
     let transform = |source: &str| {
         let imported_overload_aliases = fallback_function_overload_rewrites
             .iter()
@@ -483,7 +485,11 @@ fn build_with_native_mode(
             &factory_class_rewrites,
             &fallback_function_overload_rewrites,
         )?;
-        rewrite_external_class_constructors(&source, &class_constructor_rewrites)
+        rewrite_external_class_constructors(
+            &source,
+            &class_constructor_rewrites,
+            &constructor_package_qualifiers,
+        )
     };
     let mut module = module_graph::bundle_with_source_transform(
         input,
