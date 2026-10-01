@@ -63,6 +63,9 @@ impl<'ctx> HirCompiler<'ctx> {
             ]);
             handler
         });
+        if let Some(handler) = &loop_rejection_handler {
+            guarded_rethrow_handlers.insert(enabled_guard.clone(), handler.clone());
+        }
         let current = segments.last_mut().unwrap();
         current.stmts.push(HirStmt::Let(
             enabled_guard.clone(),
