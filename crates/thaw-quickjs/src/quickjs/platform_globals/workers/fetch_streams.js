@@ -330,7 +330,7 @@
           reader.releaseLock(); writer.releaseLock();
         }
       }
-      pipeThrough(transform, options) { if (this.locked) throw webInvalidState('ReadableStream is locked'); if (!transform || !transform.readable || !transform.writable) throw new TypeError('transform must contain readable and writable streams'); if (transform.writable.locked) throw webInvalidState('WritableStream is locked'); this.pipeTo(transform.writable, options).catch(error => transform.readable._controller.error(error)); return transform.readable; }
+      pipeThrough(transform, options) { if (this.locked) throw webInvalidState('ReadableStream is locked'); if (!transform || !transform.readable || !transform.writable) throw new TypeError('transform must contain readable and writable streams'); if (transform.writable.locked) throw webInvalidState('WritableStream is locked'); this.pipeTo(transform.writable, options).catch(() => {}); return transform.readable; }
       values(options = {}) {
         const preventCancel = Boolean(options.preventCancel), reader = this.getReader();
         let done = false, chain = Promise.resolve();
