@@ -1459,8 +1459,10 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_temporal_zoned_zone_from_string" => return Ok(HirType::Str),
                     "__thaw_temporal_now"
                     | "__thaw_temporal_now_nanos"
-                    |                     "__thaw_temporal_instant_from_string"
+                    | "__thaw_temporal_instant_from_string"
                     | "__thaw_temporal_instant_nanos_from_string"
+                    | "__thaw_temporal_plain_date_time_from_string"
+                    | "__thaw_temporal_plain_date_time_nanos_from_string"
                     | "__thaw_temporal_plain_month_day_from_string"
                     | "__thaw_temporal_plain_time_from_string"
                     | "__thaw_temporal_plain_time_nanos_from_string"

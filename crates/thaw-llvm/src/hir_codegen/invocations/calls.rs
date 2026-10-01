@@ -667,6 +667,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             "__thaw_temporal_instant_from_string"
             | "__thaw_temporal_instant_nanos_from_string"
+            | "__thaw_temporal_plain_date_time_from_string"
+            | "__thaw_temporal_plain_date_time_nanos_from_string"
             | "__thaw_temporal_plain_time_from_string"
             | "__thaw_temporal_plain_time_nanos_from_string"
             | "__thaw_temporal_plain_month_day_from_string"
@@ -879,14 +881,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("Temporal time zone transition returned no value".into());
             }
             "__thaw_temporal_with_fields" => {
-                if args.len() != 12 {
-                    return Err(format!("{name} expects twelve operands"));
+                if args.len() != 14 {
+                    return Err(format!("{name} expects fourteen operands"));
                 }
                 let values = args
                     .iter()
                     .map(|value| self.compile_expr(value).map(Into::into))
                     .collect::<Result<Vec<_>, _>>()?;
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_temporal_with_fields").unwrap(),
@@ -896,7 +898,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("Temporal field replacement returned no value".into());
+                    .ok_or("Temporal field replacement returned no value")?;
+                let value = result.into_float_value();
+                let invalid = self.builder
+                    .build_float_compare(inkwell::FloatPredicate::UNO, value, value, "temporal_invalid_fields")
+                    .map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let error_bb = self.context.append_basic_block(function, "temporal_fields_error");
+                let continue_bb = self.context.append_basic_block(function, "temporal_fields_ok");
+                self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error_bb);
+                let error = self.builder
+                    .build_global_string_ptr("\u{1}RangeError\u{1}Invalid Temporal field", "temporal_fields_range_error")
+                    .map_err(|error| error.to_string())?
+                    .as_pointer_value();
+                self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_unconditional_branch(continue_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(continue_bb);
+                self.branch_on_pending_exception()?;
+                return Ok(value.into());
             }
             "__thaw_temporal_zoned_to_string" | "__thaw_temporal_zoned_offset" => {
                 let [milliseconds, nanoseconds, zone] = args else {

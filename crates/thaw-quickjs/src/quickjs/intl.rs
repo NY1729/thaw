@@ -24,7 +24,7 @@
 /// (`digest_bytes`/`hmac_bytes` and friends all cross the boundary as
 /// plain strings too).
 fn intl_zoned_parts_json(tz_name: &str, timestamp_ms: f64) -> String {
-    if !timestamp_ms.is_finite() {
+    if !timestamp_ms.is_finite() || timestamp_ms.abs() > 8_640_000_000_000_000.0 {
         return r#"{"valid":false}"#.to_string();
     }
     let Ok(time_zone) = jiff::tz::TimeZone::get(tz_name) else {
@@ -34,7 +34,7 @@ fn intl_zoned_parts_json(tz_name: &str, timestamp_ms: f64) -> String {
     // within its own supported range; clamp rather than panic on an
     // extreme (but finite) `Date` value -- matches every other native
     // builtin in this crate degrading gracefully instead of aborting.
-    let millis = timestamp_ms.round().clamp(-8_640_000_000_000_000.0, 8_640_000_000_000_000.0) as i64;
+    let millis = timestamp_ms.trunc() as i64;
     let Ok(timestamp) = jiff::Timestamp::from_millisecond(millis) else {
         return r#"{"valid":false}"#.to_string();
     };

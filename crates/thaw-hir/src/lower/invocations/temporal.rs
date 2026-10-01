@@ -300,10 +300,10 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `(milliseconds, sub-millisecond nanoseconds)` that represent a total
-    /// nanosecond count (floor division, so the remainder is non-negative).
+    /// nanosecond count (truncated division preserves the duration sign).
     fn duration_from_total_nanoseconds(total: HirExpr) -> (HirExpr, HirExpr) {
         let milliseconds = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_math_floor".into())),
+            Box::new(HirExpr::Var("__thaw_math_trunc".into())),
             vec![HirExpr::BinOp(
                 BinOp::Div,
                 Box::new(total.clone()),
@@ -730,9 +730,9 @@ impl<'a> FnLowerer<'a> {
                     };
                     let value = self.lower_expr(&entry.value)?;
                     match name.as_str() {
-                        "year" => year = Some(value),
-                        "month" => month = Some(value),
-                        "day" if kind == "plainDate" => day = Some(value),
+                        "year" => year = Some(self.coerce_primitive_to_number(value)?),
+                        "month" => month = Some(self.coerce_primitive_to_number(value)?),
+                        "day" if kind == "plainDate" => day = Some(self.coerce_primitive_to_number(value)?),
                         "calendar" => {}
                         other => {
                             return Err(format!(
@@ -746,14 +746,11 @@ impl<'a> FnLowerer<'a> {
                 };
                 let day = day.unwrap_or(HirExpr::Lit(HirLit::F64(1.0)));
                 let zero = || HirExpr::Lit(HirLit::F64(0.0));
-                let month = HirExpr::BinOp(
-                    BinOp::Sub,
-                    Box::new(month),
-                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                );
+                let missing = || HirExpr::Lit(HirLit::F64(f64::NAN));
                 let milliseconds = HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_date_utc".into())),
-                    vec![year, month, day, zero(), zero(), zero(), zero()],
+                    Box::new(HirExpr::Var("__thaw_temporal_with_fields".into())),
+                    vec![zero(), zero(), year, month, day, missing(), missing(), missing(),
+                        missing(), missing(), missing(), zero(), zero(), HirExpr::Lit(HirLit::F64(7.0))],
                 );
                 Self::temporal_object_calendar(
                     kind,
@@ -799,8 +796,8 @@ impl<'a> FnLowerer<'a> {
                     )
                 } else {
                     (
-                        "__thaw_temporal_instant_from_string",
-                        "__thaw_temporal_instant_nanos_from_string",
+                        "__thaw_temporal_plain_date_time_from_string",
+                        "__thaw_temporal_plain_date_time_nanos_from_string",
                     )
                 };
                 let milliseconds = HirExpr::Call(
@@ -870,7 +867,7 @@ impl<'a> FnLowerer<'a> {
                         vec![Self::temporal_components(receiver, &receiver_type)],
                     )));
                 }
-                match &time_zone {
+                let formatted = match &time_zone {
                     Some(zone) => HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_temporal_zoned_to_string".into())),
                         vec![timestamp, nanoseconds, zone.clone()],
@@ -879,21 +876,57 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var(Self::temporal_formatter(kind).into())),
                         vec![timestamp, nanoseconds],
                     ),
+                };
+                if kind == "instant" || kind == "plainTime" {
+                    formatted
+                } else {
+                    let calendar = Self::temporal_calendar(receiver.clone(), &receiver_type);
+                    let annotation = HirExpr::BinOp(BinOp::Add,
+                        Box::new(HirExpr::BinOp(BinOp::Add,
+                            Box::new(HirExpr::Lit(HirLit::Str("[u-ca=".into()))),
+                            Box::new(calendar.clone()))),
+                        Box::new(HirExpr::Lit(HirLit::Str("]".into()))));
+                    HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                            Box::new(calendar),
+                            Box::new(HirExpr::Lit(HirLit::Str("iso8601".into()))))),
+                        Box::new(formatted.clone()),
+                        Box::new(HirExpr::BinOp(BinOp::Add, Box::new(formatted), Box::new(annotation))),
+                        HirType::Str,
+                    )
                 }
             }
             "equals" => {
                 let [other] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
                 };
+                let other_type = self.infer_expr_type(other)?;
                 let (other_ms, other_ns) = self.temporal_operand(other.clone())?;
-                HirExpr::BinOp(
+                let mut equal = HirExpr::BinOp(
                     BinOp::EqEqEq,
                     Box::new(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_temporal_compare".into())),
                         vec![timestamp, nanoseconds, other_ms, other_ns],
                     )),
                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                )
+                );
+                if Self::temporal_kind(&other_type).is_some() {
+                    if kind == "zonedDateTime" {
+                        equal = HirExpr::Conditional(
+                            Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                Box::new(time_zone.clone().expect("zoned value has a time zone")),
+                                Box::new(Self::temporal_zone(other.clone(), &other_type)))),
+                            Box::new(equal), Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool);
+                    }
+                    if kind != "instant" && kind != "plainTime" && kind != "duration" {
+                        equal = HirExpr::Conditional(
+                            Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                Box::new(Self::temporal_calendar(receiver.clone(), &receiver_type)),
+                                Box::new(Self::temporal_calendar(other.clone(), &other_type)))),
+                            Box::new(equal), Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool);
+                    }
+                }
+                equal
             }
             "add" | "subtract" => {
                 let [duration] = arguments.as_slice() else {
@@ -1068,18 +1101,18 @@ impl<'a> FnLowerer<'a> {
                 let [other] = arguments.as_slice() else {
                     return Err(format!("`{label}` expects exactly one argument"));
                 };
-                let (other_ms, _) = self.temporal_operand(other.clone())?;
+                let (other_ms, other_ns) = self.temporal_operand(other.clone())?;
                 // `until` is `other - this`, `since` is `this - other`.
-                let (left, right) = if property.sym == *"until" {
-                    (other_ms, timestamp)
+                let (left_ms, left_ns, right_ms, right_ns) = if property.sym == *"until" {
+                    (other_ms, other_ns, timestamp, nanoseconds)
                 } else {
-                    (timestamp, other_ms)
+                    (timestamp, nanoseconds, other_ms, other_ns)
                 };
-                let milliseconds =
-                    HirExpr::BinOp(BinOp::Sub, Box::new(left), Box::new(right));
-                let nanoseconds = HirExpr::Lit(HirLit::F64(0.0));
-                let components =
-                    self.duration_components_from_ms(&milliseconds, &nanoseconds)?;
+                let millisecond_delta = HirExpr::BinOp(BinOp::Sub, Box::new(left_ms), Box::new(right_ms));
+                let nanosecond_delta = HirExpr::BinOp(BinOp::Sub, Box::new(left_ns), Box::new(right_ns));
+                let total = Self::duration_total_nanoseconds(&millisecond_delta, &nanosecond_delta);
+                let (milliseconds, nanoseconds) = Self::duration_from_total_nanoseconds(total);
+                let components = self.duration_components_from_ms(&milliseconds, &nanoseconds)?;
                 Self::temporal_duration_object(milliseconds, nanoseconds, components)
             }
             "toPlainDate" | "toPlainDateTime" | "toPlainTime" => {
@@ -1114,16 +1147,23 @@ impl<'a> FnLowerer<'a> {
                         Self::temporal_object_calendar(
                             plain_kind,
                             local,
-                            nanoseconds,
+                            if plain_kind == "plainDate" { HirExpr::Lit(HirLit::F64(0.0)) } else { nanoseconds },
                             calendar,
                         )
                     }
                     None => {
                         let calendar = Self::temporal_calendar(receiver, &receiver_type);
+                        let converted = if plain_kind == "plainDate" || plain_kind == "plainTime" {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_temporal_zoned_plain_timestamp".into())),
+                                vec![timestamp, nanoseconds.clone(), HirExpr::Lit(HirLit::Str("UTC".into())),
+                                    HirExpr::Lit(HirLit::F64(if plain_kind == "plainDate" { 0.0 } else { 1.0 }))],
+                            )
+                        } else { timestamp };
                         Self::temporal_object_calendar(
                             plain_kind,
-                            timestamp,
-                            nanoseconds,
+                            converted,
+                            if plain_kind == "plainDate" { HirExpr::Lit(HirLit::F64(0.0)) } else { nanoseconds },
                             calendar,
                         )
                     }
@@ -1298,6 +1338,7 @@ impl<'a> FnLowerer<'a> {
                     "nanosecond",
                 ];
                 let mut replacements = vec![HirExpr::Lit(HirLit::F64(f64::NAN)); names.len()];
+                let mut present = [false; 9];
                 for (name, value) in fields {
                     let Some(index) = names.iter().position(|candidate| *candidate == name) else {
                         return Err(format!("`{label}` does not support the `{name}` field"));
@@ -1306,13 +1347,14 @@ impl<'a> FnLowerer<'a> {
                         return Err(format!("`{label}` does not support the `{name}` field"));
                     }
                     replacements[index] = self.coerce_primitive_to_number(value.clone())?;
+                    present[index] = true;
                 }
-                if replacements.iter().all(|value| matches!(value, HirExpr::Lit(HirLit::F64(value)) if value.is_nan())) {
+                if !present.iter().any(|value| *value) {
                     return Err(format!("`{label}` requires at least one recognized field"));
                 }
                 let mut replacement_bindings = Vec::new();
-                for value in &mut replacements {
-                    if matches!(value, HirExpr::Lit(HirLit::F64(value)) if value.is_nan()) {
+                for (index, value) in replacements.iter_mut().enumerate() {
+                    if !present[index] {
                         continue;
                     }
                     let name = format!("__thaw_temporal_with_{}", self.next_binding);
@@ -1321,16 +1363,21 @@ impl<'a> FnLowerer<'a> {
                     replacement_bindings.push((name.clone(), HirType::F64, value.clone()));
                     *value = HirExpr::Var(name);
                 }
+                let overflow = Self::object_string_field(call.args.get(1), "overflow", "constrain")?;
+                let reject_overflow = match overflow.as_str() {
+                    "constrain" => 0.0,
+                    "reject" => 1.0,
+                    _ => return Err(format!("`{label}` invalid overflow option `{overflow}`")),
+                };
                 let converted = |part| {
                     let mut values = vec![timestamp.clone(), nanoseconds.clone()];
-                    values.extend(replacements.iter().enumerate().map(|(index, value)| {
-                        if (part == 0.0 && index <= 6) || (part == 1.0 && index >= 7) {
-                            value.clone()
-                        } else {
-                            HirExpr::Lit(HirLit::F64(f64::NAN))
-                        }
-                    }));
+                    values.extend(replacements.iter().cloned());
                     values.push(HirExpr::Lit(HirLit::F64(part)));
+                    values.push(HirExpr::Lit(HirLit::F64(reject_overflow)));
+                    let mask = present.iter().enumerate().fold(0u16, |mask, (index, supplied)| {
+                        if *supplied { mask | (1 << index) } else { mask }
+                    });
+                    values.push(HirExpr::Lit(HirLit::F64(mask as f64)));
                     HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_temporal_with_fields".into())),
                         values,
@@ -1395,8 +1442,8 @@ impl<'a> FnLowerer<'a> {
                 let factor = Self::duration_unit_factor(&Self::duration_unit(unit)?)?;
                 HirExpr::BinOp(
                     BinOp::Div,
-                    Box::new(timestamp),
-                    Box::new(HirExpr::Lit(HirLit::F64(factor))),
+                    Box::new(Self::duration_total_nanoseconds(&timestamp, &nanoseconds)),
+                    Box::new(HirExpr::Lit(HirLit::F64(factor * 1_000_000.0))),
                 )
             }
             "round" if matches!(kind, "duration" | "instant" | "plainDateTime" | "plainTime") => {
