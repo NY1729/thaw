@@ -360,11 +360,24 @@ fn function_modules_do_not_replace_globals_with_their_named_methods() {
 }
 
 #[test]
-fn native_class_proxies_retain_js_properties_and_release_native_handles() {
+fn native_class_proxies_use_native_properties_and_release_native_handles() {
     let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
     assert!(wrapped.contains("__thaw_napi_proxy_finalizers.register(proxy"));
     assert!(wrapped.contains("'release_handle'"));
-    assert!(wrapped.contains("Reflect.set(_, name, value, receiver)"));
+    assert!(wrapped.contains("'call_captured'"));
+    assert!(wrapped.contains("String(__thaw_napi_handles.get(proxy))"));
+    assert!(wrapped.contains("'own_keys'"));
+    assert!(wrapped.contains("'descriptor'"));
+    assert!(wrapped.contains("'has'"));
+    assert!(wrapped.contains("__thaw_napi_array__"));
+    assert!(wrapped.contains("__thaw_napi_buffer__"));
+    assert!(wrapped.contains("__thaw_napi_ref__"));
+    assert!(wrapped.contains("__thaw_napi_promise__"));
+    assert!(wrapped.contains("__thaw_napi_symbol__"));
+    assert!(wrapped.contains("operation + '_symbol'"));
+    assert!(wrapped.contains("__thaw_napi_arraybuffer__"));
+    assert!(wrapped.contains("__thaw_napi_view__"));
+    assert!(wrapped.contains("new ctor(value.__thaw_napi_error__)"));
     assert!(wrapped.contains("result.value['$__thaw_napi_undefined$'] === true"));
     assert!(wrapped.contains("globalThis.process.dlopen = function(target)"));
     assert!(wrapped.contains("__thaw_addon.QueryEngine"));
