@@ -1,41 +1,4 @@
 impl NumericProgram {
-    fn returns_tagged_array(&self) -> bool {
-        matches!(
-            self.0.last(),
-            Some(
-                NumericValue::StringSplit
-                    | NumericValue::StringToArray
-                    | NumericValue::ArraySlice
-                    | NumericValue::ArrayConcat
-                    | NumericValue::NumberArrayAppend
-                    | NumericValue::StringArrayAppend
-                    | NumericValue::BoolArrayAppend
-                    | NumericValue::ArrayToReversed
-                    | NumericValue::ArrayReverse
-                    | NumericValue::NumberArrayToSorted
-                    | NumericValue::StringArrayToSorted
-                    | NumericValue::BoolArrayToSorted
-                    | NumericValue::NumberArraySort
-                    | NumericValue::StringArraySort
-                    | NumericValue::BoolArraySort
-                    | NumericValue::PrimitiveArrayJitMap(_, _, _)
-                    | NumericValue::PrimitiveArrayJitScan(_, 6, _)
-                    | NumericValue::StringArrayToSortedDescending
-                    | NumericValue::StringArraySortDescending
-                    | NumericValue::NumberArrayFill
-                    | NumericValue::StringArrayFill
-                    | NumericValue::BoolArrayFill
-                    | NumericValue::ArrayCopyWithin
-                    | NumericValue::ArraySplice
-                    | NumericValue::ArrayToSpliced
-                    | NumericValue::ArrayValue
-                    | NumericValue::NumberArrayWith
-                    | NumericValue::StringArrayWith
-                    | NumericValue::BoolArrayWith
-            )
-        )
-    }
-
     fn parse(symbol: &str) -> Option<Self> {
         if let Some(encoded) = symbol.strip_prefix("expr:") {
             let encoded = encoded.split_once(':')?.0;

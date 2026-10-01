@@ -715,21 +715,17 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?
                     .into_int_value();
-                let pointer = self.builder
-                    .build_int_to_ptr(
-                        bits,
-                        self.context.ptr_type(inkwell::AddressSpace::default()),
-                        "jit_string_value",
-                    )
-                    .map_err(|error| error.to_string())?;
                 if matches!(return_type, HirType::Array(_)) {
-                    // A direct array return has already had its
-                    // `ARRAY_RESULT_TAG` stripped by the JIT machine
-                    // (`thaw_jit`'s `returns_tagged_array`), so `pointer`
-                    // is the raw buffer to wrap.
-                    self.compile_array_wrap(pointer)?.into()
+                    self.compile_jit_array_result(bits)?.into()
                 } else {
-                    pointer.into()
+                    self.builder
+                        .build_int_to_ptr(
+                            bits,
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            "jit_string_value",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .into()
                 }
             } else {
                 value
@@ -842,12 +838,14 @@ impl<'ctx> HirCompiler<'ctx> {
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = signature.backend == DynamicBackend::QuickJs;
         let mut returned_bytes_argument = None;
+        let mut callback_values = Vec::with_capacity(function_argument.len());
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
             if signature.backend == DynamicBackend::Napi
                 && function_argument
                     .iter()
                     .any(|(function_index, ..)| *function_index == index)
             {
+                callback_values.push(self.compile_expr(arg)?);
                 continue;
             }
             if signature.backend == DynamicBackend::QuickJs && quickjs_callback_type(ty) {
@@ -908,7 +906,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .unwrap();
                 let result = if !function_argument.is_empty() {
                     let functions =
-                        self.compile_napi_function_arguments(args, &function_argument)?;
+                        self.compile_napi_function_arguments(&callback_values, &function_argument)?;
                     self.builder.build_call(
                         self.module
                             .get_function(
@@ -1140,7 +1138,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(value);
         }
         if signature.backend == DynamicBackend::Napi && !function_argument.is_empty() {
-            let functions = self.compile_napi_function_arguments(args, &function_argument)?;
+            let functions = self.compile_napi_function_arguments(&callback_values, &function_argument)?;
             let count = self
                 .context
                 .i64_type()

@@ -41,6 +41,9 @@ impl<'ctx> HirCompiler<'ctx> {
             self.function_type(params, ret)?,
             Some(Linkage::Internal),
         );
+        // This adapter is a separate LLVM function. Its exception branch
+        // must not target a catch block in the function that creates it.
+        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
         let entry = self.context.append_basic_block(adapter, "entry");
         self.builder.position_at_end(entry);
         let environment = adapter
@@ -125,6 +128,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
         if *ret == HirType::Void {
             self.builder
                 .build_call(
@@ -160,6 +164,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_return(Some(&decoded))
                 .map_err(|error| error.to_string())?;
         }
+        self.catch_stack = outer_catch_stack;
         self.builder.position_at_end(parent);
 
         let closure = self
@@ -380,7 +385,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn compile_napi_function_arguments(
         &mut self,
-        args: &[HirExpr],
+        callbacks: &[BasicValueEnum<'ctx>],
         functions: &[NapiFunctionArgument],
     ) -> Result<PointerValue<'ctx>, String> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -403,7 +408,7 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         for (slot, (index, params, ret, optional, rest_start)) in functions.iter().enumerate() {
-            let callback = self.compile_expr(&args[*index])?;
+            let callback = callbacks[slot];
             let (adapter, context) = if *optional {
                 let callback = callback.into_struct_value();
                 let present = self
@@ -602,6 +607,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.context.ptr_type(AddressSpace::default()).const_null(),
             )
             .map_err(|error| error.to_string())?;
+        for (index, param) in params.iter().enumerate() {
+            if *param == HirType::JsValue {
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_release_handle").unwrap(),
+                    &[callback_args[index + 1]],
+                    "release_failed_callback_argument",
+                ).map_err(|error| error.to_string())?;
+            }
+        }
+        for value in argument_json.iter().copied().chain(std::iter::once(args_json)) {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[value.into()],
+                "destroy_failed_callback_argument",
+            ).map_err(|error| error.to_string())?;
+        }
         self.builder
             .build_return(Some(&framed))
             .map_err(|error| error.to_string())?;
@@ -612,6 +633,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .ok_or("async value callback must return a Promise")?
                 .into_pointer_value();
+            for (index, param) in params.iter().enumerate() {
+                if *param == HirType::JsValue {
+                    self.builder.build_call(
+                        self.module.get_function("thaw_js_release_handle").unwrap(),
+                        &[callback_args[index + 1]],
+                        "release_deferred_callback_argument",
+                    ).map_err(|error| error.to_string())?;
+                }
+            }
+            for value in argument_json.iter().copied().chain(std::iter::once(args_json)) {
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[value.into()],
+                    "destroy_deferred_callback_argument",
+                ).map_err(|error| error.to_string())?;
+            }
             self.builder
                 .build_return(Some(&promise))
                 .map_err(|error| error.to_string())?;
@@ -635,6 +672,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // index dance below, which requires a real value to push.
         // `undefined` is a real callback result; only `void` means there is
         // no value for the JavaScript wrapper to reconstruct.
+        let mut result_array = None;
         let result_json = if matches!(ret, HirType::Undefined) {
             self.compile_napi_undefined_json()?
         } else if matches!(ret, HirType::Void) {
@@ -680,6 +718,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
+                result_array = Some(result_json);
                 // `preserve_undefined: true` -- this is a standalone
                 // return value being wrapped, not an object field that
                 // can legitimately omit itself (see `wrap_native_value_
@@ -747,7 +786,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // regardless of aliasing (including a *nested* alias, e.g.
         // `(x) => ({ wrapped: x })` -- `serde_json::Value::clone` is a
         // real recursive clone, so the nested copy is independent too).
-        if defer_promise {
+        {
             for (index, param) in params.iter().enumerate() {
                 if *param == HirType::JsValue {
                     self.builder
@@ -787,6 +826,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 "destroy_native_callback_result_json",
             )
             .map_err(|error| error.to_string())?;
+        if let Some(array) = result_array {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[array.into()],
+                "destroy_native_callback_result_array",
+            ).map_err(|error| error.to_string())?;
+        }
         self.builder
             .build_return(Some(&result))
             .map_err(|error| error.to_string())?;
@@ -889,6 +935,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_return(Some(&error))
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(fulfilled_block);
+        let mut result_array = None;
         let result_json = if *resolved == HirType::Void {
             self.drive_promise_to_completion(promise)?;
             self.compile_json_null()?
@@ -905,6 +952,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
+            result_array = Some(array);
             // See the identical `preserve_undefined: true` reasoning at
             // this same function's synchronous counterpart above -- a
             // resolved `Promise<Optional<Json>>`/`Promise<Nullish<Json>>`
@@ -936,6 +984,18 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[result_json.into()],
+            "destroy_native_promise_result_json",
+        ).map_err(|error| error.to_string())?;
+        if let Some(array) = result_array {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[array.into()],
+                "destroy_native_promise_result_array",
+            ).map_err(|error| error.to_string())?;
+        }
         self.builder
             .build_return(Some(&result))
             .map_err(|error| error.to_string())?;

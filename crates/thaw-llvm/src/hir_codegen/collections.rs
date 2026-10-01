@@ -98,6 +98,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_int_to_ptr(tagged_buffer, ptr_type, "jit_array_tagged_buffer")
             .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let tagged_bb = self.context.append_basic_block(function, "jit_array_tagged");
+        let handle_bb = self.context.append_basic_block(function, "jit_array_handle");
+        let merge_bb = self.context.append_basic_block(function, "jit_array_merge");
+        self.builder.build_conditional_branch(tagged, tagged_bb, handle_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(tagged_bb);
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(handle_bb);
         let guard = self
             .builder
             .build_alloca(i64_type, "jit_array_null_guard")
@@ -127,16 +135,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?
             .into_pointer_value();
         let handle_buffer = self.compile_array_data(handle_pointer)?;
-        let buffer = self
-            .builder
-            .build_select(
-                tagged,
-                tagged_buffer,
-                handle_buffer,
-                "jit_array_buffer",
-            )
-            .map_err(|error| error.to_string())?
-            .into_pointer_value();
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_bb);
+        let buffer = self.builder.build_phi(ptr_type, "jit_array_buffer").map_err(|error| error.to_string())?;
+        buffer.add_incoming(&[(&tagged_buffer, tagged_bb), (&handle_buffer, handle_bb)]);
+        let buffer = buffer.as_basic_value().into_pointer_value();
         self.compile_array_wrap(buffer)
     }
 
