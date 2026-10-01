@@ -377,17 +377,47 @@ fn system_time_millis(time: io::Result<std::time::SystemTime>) -> f64 {
     }).unwrap_or(0.0)
 }
 
+fn system_time_nanos(time: io::Result<std::time::SystemTime>) -> i128 {
+    time.ok().map(|value| match value.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos()),
+        Err(error) => {
+            let duration = error.duration();
+            -(i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos()))
+        }
+    }).unwrap_or(0)
+}
+
 #[cfg(unix)]
 fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     use std::os::unix::fs::MetadataExt;
     let ctime = metadata.ctime() as f64 * 1000.0 + metadata.ctime_nsec() as f64 / 1_000_000.0;
-    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "symlink": metadata.file_type().is_symlink(), "readonly": metadata.permissions().readonly(), "dev": metadata.dev(), "ino": metadata.ino(), "mode": metadata.mode(), "nlink": metadata.nlink(), "uid": metadata.uid(), "gid": metadata.gid(), "rdev": metadata.rdev(), "blksize": metadata.blksize(), "blocks": metadata.blocks(), "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": system_time_millis(metadata.modified()), "ctimeMs": ctime, "birthtimeMs": system_time_millis(metadata.created()) })
+    let exact = serde_json::json!({
+        "length": metadata.len().to_string(), "dev": metadata.dev().to_string(),
+        "ino": metadata.ino().to_string(), "mode": metadata.mode().to_string(),
+        "nlink": metadata.nlink().to_string(), "uid": metadata.uid().to_string(),
+        "gid": metadata.gid().to_string(), "rdev": metadata.rdev().to_string(),
+        "blksize": metadata.blksize().to_string(), "blocks": metadata.blocks().to_string(),
+        "atimeNs": (i128::from(metadata.atime()) * 1_000_000_000 + i128::from(metadata.atime_nsec())).to_string(),
+        "mtimeNs": (i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec())).to_string(),
+        "ctimeNs": (i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec())).to_string(),
+        "birthtimeNs": system_time_nanos(metadata.created()).to_string(),
+    });
+    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "symlink": metadata.file_type().is_symlink(), "readonly": metadata.permissions().readonly(), "dev": metadata.dev(), "ino": metadata.ino(), "mode": metadata.mode(), "nlink": metadata.nlink(), "uid": metadata.uid(), "gid": metadata.gid(), "rdev": metadata.rdev(), "blksize": metadata.blksize(), "blocks": metadata.blocks(), "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": system_time_millis(metadata.modified()), "ctimeMs": ctime, "birthtimeMs": system_time_millis(metadata.created()), "exact": exact })
 }
 
 #[cfg(not(unix))]
 fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     let modified = system_time_millis(metadata.modified());
-    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "symlink": metadata.file_type().is_symlink(), "readonly": metadata.permissions().readonly(), "dev": 0, "ino": 0, "mode": if metadata.is_dir() { 16877 } else { 33188 }, "nlink": 1, "uid": 0, "gid": 0, "rdev": 0, "blksize": 0, "blocks": 0, "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": modified, "ctimeMs": modified, "birthtimeMs": system_time_millis(metadata.created()) })
+    let exact = serde_json::json!({
+        "length": metadata.len().to_string(), "dev": "0", "ino": "0",
+        "mode": if metadata.is_dir() { "16877" } else { "33188" },
+        "nlink": "1", "uid": "0", "gid": "0", "rdev": "0", "blksize": "0", "blocks": "0",
+        "atimeNs": system_time_nanos(metadata.accessed()).to_string(),
+        "mtimeNs": system_time_nanos(metadata.modified()).to_string(),
+        "ctimeNs": system_time_nanos(metadata.modified()).to_string(),
+        "birthtimeNs": system_time_nanos(metadata.created()).to_string(),
+    });
+    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "symlink": metadata.file_type().is_symlink(), "readonly": metadata.permissions().readonly(), "dev": 0, "ino": 0, "mode": if metadata.is_dir() { 16877 } else { 33188 }, "nlink": 1, "uid": 0, "gid": 0, "rdev": 0, "blksize": 0, "blocks": 0, "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": modified, "ctimeMs": modified, "birthtimeMs": system_time_millis(metadata.created()), "exact": exact })
 }
 
 fn parse_fs_time(value: Option<&str>) -> io::Result<f64> {
@@ -731,6 +761,27 @@ thread_local! {
     static WASM_JS_IMPORTS: RefCell<(u32, HashMap<u32, WasmJsImport>)> = RefCell::new((1, HashMap::new()));
     #[cfg(feature = "wasm")]
     static WASM_JS_VALUES: RefCell<(u32, HashMap<u32, WasmJsValue>)> = RefCell::new((1, HashMap::new()));
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn fs_metadata_wire_preserves_integer_fields_and_nanoseconds() {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::env::temp_dir().join(format!(
+        "thaw_fs_exact_metadata_{}_{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test"),
+    ));
+    std::fs::write(&path, b"data").unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let record = fs_metadata_record(metadata.clone());
+    assert_eq!(record["exact"]["length"], metadata.len().to_string());
+    assert_eq!(record["exact"]["ino"], metadata.ino().to_string());
+    assert_eq!(record["exact"]["dev"], metadata.dev().to_string());
+    assert_eq!(record["exact"]["mtimeNs"],
+        (i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec())).to_string());
+    assert_eq!(system_time_nanos(Ok(std::time::UNIX_EPOCH - std::time::Duration::from_nanos(1))), -1);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[cfg(all(test, unix))]
