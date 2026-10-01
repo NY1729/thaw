@@ -566,6 +566,18 @@ fn validates_json_import_attributes_and_rejects_unsupported_types() {
 }
 
 #[test]
+fn nested_dynamic_import_rewrites_without_overlapping_ranges() {
+    // Unrun regression for an outer import whose argument contains another import.
+    let source = "async function choose() { return import((await import('./flag.js')) ? './a.js' : './b.js'); }";
+    let rewritten = rewrite_dynamic_imports(source).unwrap();
+    assert!(thaw_parser::parse_javascript_with_source_map(&rewritten).is_ok());
+    assert_eq!(rewritten.matches("requireAsync(").count(), 2);
+    assert!(!rewritten.contains("import("));
+    assert!(rewritten.contains("'./flag.js'"));
+    assert!(rewritten.contains("'./a.js' : './b.js'"));
+}
+
+#[test]
 fn nonliteral_dynamic_import_resolves_candidates_and_reuses_namespace() {
     use std::ffi::{CStr, CString};
 
