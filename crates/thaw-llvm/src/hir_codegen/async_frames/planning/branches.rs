@@ -125,6 +125,11 @@ impl<'ctx> HirCompiler<'ctx> {
         next_guard: &mut usize,
     ) -> Result<(), String> {
         let first_new_segment = segments.len();
+        if let Some(handler) = &rejection_handler {
+            // The same guard also identifies synchronous exceptions raised while
+            // compiling this statement, before an awaited Promise exists.
+            guarded_rethrow_handlers.insert(guard.to_string(), handler.clone());
+        }
         if let HirStmt::If(cond, then_body, else_body) = stmt {
             return self.append_nested_async_if(
                 segments,

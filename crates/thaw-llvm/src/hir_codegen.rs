@@ -744,7 +744,32 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_conditional_branch(has_exception, propagate_bb, continue_bb)
                 .map_err(|e| e.to_string())?;
             self.builder.position_at_end(propagate_bb);
-            self.build_default_return()?;
+            if let Some(completion) = self.active_async_completion {
+                self.reject_promise_with_pending_exception(
+                    completion,
+                    pending,
+                    "reject_frame_exception",
+                )?;
+                self.builder
+                    .build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
+                    .map_err(|e| e.to_string())?;
+                self.builder
+                    .build_store(self.pending_exception_object().as_pointer_value(), ptr_ty.const_null())
+                    .map_err(|e| e.to_string())?;
+                self.builder
+                    .build_store(
+                        self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                        self.context.i64_type().const_zero(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if function.get_type().get_return_type().is_some() {
+                    self.builder.build_return(Some(&completion)).map_err(|e| e.to_string())?;
+                } else {
+                    self.builder.build_return(None).map_err(|e| e.to_string())?;
+                }
+            } else {
+                self.build_default_return()?;
+            }
         }
 
         self.builder.position_at_end(continue_bb);

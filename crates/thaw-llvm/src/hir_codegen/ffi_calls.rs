@@ -1297,6 +1297,53 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    fn guard_ffi_variadic_integer(
+        &mut self,
+        value: FloatValue<'ctx>,
+        abi: FfiVariadicAbi,
+    ) -> Result<FloatValue<'ctx>, String> {
+        let (lower, upper) = match abi {
+            FfiVariadicAbi::I32 => (-(2.0_f64).powi(31), (2.0_f64).powi(31)),
+            FfiVariadicAbi::I64 => (-(2.0_f64).powi(63), (2.0_f64).powi(63)),
+            FfiVariadicAbi::U32 => (0.0, (2.0_f64).powi(32)),
+            FfiVariadicAbi::U64 => (0.0, (2.0_f64).powi(64)),
+            FfiVariadicAbi::Native => return Ok(value),
+        };
+        let truncated = self.builder.build_call(
+            self.module.get_function("llvm.trunc.f64").unwrap(),
+            &[value.into()],
+            "ffi_vararg_truncated",
+        ).map_err(|error| error.to_string())?
+        .try_as_basic_value().basic().ok_or("llvm.trunc returned no FFI variadic value")?
+        .into_float_value();
+        let f64_type = self.context.f64_type();
+        let above_lower = self.builder.build_float_compare(
+            FloatPredicate::OGE, truncated, f64_type.const_float(lower), "ffi_vararg_above_lower",
+        ).map_err(|error| error.to_string())?;
+        let below_upper = self.builder.build_float_compare(
+            FloatPredicate::OLT, truncated, f64_type.const_float(upper), "ffi_vararg_below_upper",
+        ).map_err(|error| error.to_string())?;
+        let valid = self.builder.build_and(above_lower, below_upper, "ffi_vararg_in_range")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let error_bb = self.context.append_basic_block(function, "ffi_vararg_range_error");
+        let valid_bb = self.context.append_basic_block(function, "ffi_vararg_valid");
+        self.builder.build_conditional_branch(valid, valid_bb, error_bb)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(error_bb);
+        let error = self.builder.build_global_string_ptr(
+            "\u{1}RangeError\u{1}FFI variadic integer out of range",
+            "ffi_vararg_range_message",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error.as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        self.builder.build_unconditional_branch(valid_bb)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(valid_bb);
+        Ok(truncated)
+    }
+
     fn compile_ffi_call(
         &mut self,
         sig: &FfiSignature,
@@ -1313,9 +1360,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .get_function(&sig.symbol)
             .expect("extern function was declared in compile_program's pre-pass");
 
+        // Evaluate every source argument before ABI conversion can reject one.
+        let values = args.iter().map(|arg| self.compile_expr(arg)).collect::<Result<Vec<_>, _>>()?;
         let mut compiled_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
-        for (index, (param_ty, arg)) in sig.params.iter().zip(args).enumerate() {
-            let value = self.compile_expr(arg)?;
+        for (index, (param_ty, value)) in sig.params.iter().zip(&values).enumerate() {
+            let value = *value;
             match param_ty {
                 HirType::Str
                     if sig.param_string_abis.get(index) == Some(&FfiStringAbi::PointerLength) =>
@@ -1336,11 +1385,12 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
         if let Some(variadic) = &sig.variadic {
-            for arg in &args[sig.params.len()..] {
-                let value = self.compile_expr(arg)?;
+            for value in &values[sig.params.len()..] {
+                let value = *value;
                 match variadic {
                     HirType::F64 => {
                         let value = value.into_float_value();
+                        let value = self.guard_ffi_variadic_integer(value, sig.variadic_abi)?;
                         let converted: BasicValueEnum<'ctx> = match sig.variadic_abi {
                             FfiVariadicAbi::Native => value.into(),
                             FfiVariadicAbi::I32 => self
