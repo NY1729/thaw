@@ -536,6 +536,74 @@ fn pbkdf2_bytes(
     output
 }
 
+#[cfg(target_os = "linux")]
+fn linux_cpu_times(stat: &str, ticks_per_second: u64) -> Vec<(usize, [u64; 5])> {
+    if ticks_per_second == 0 {
+        return Vec::new();
+    }
+    stat.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let index = fields.next()?.strip_prefix("cpu")?.parse::<usize>().ok()?;
+        // Linux publishes user, nice, system, idle, iowait, irq in this
+        // order. The guest columns are already included in user/nice.
+        let raw = fields.take(6).map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>().ok()?;
+        if raw.len() != 6 { return None; }
+        let milliseconds = |ticks: u64| {
+            ((ticks as u128 * 1000) / ticks_per_second as u128)
+                .min(u64::MAX as u128) as u64
+        };
+        Some((index, [raw[0], raw[1], raw[2], raw[3], raw[5]].map(milliseconds)))
+    }).collect()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cpu_metadata(cpu_info: &str) -> std::collections::HashMap<usize, (String, u64)> {
+    cpu_info.split("\n\n").filter_map(|block| {
+        let mut index = None;
+        let mut model = None;
+        let mut speed = None;
+        for line in block.lines() {
+            let Some((key, value)) = line.split_once(':') else { continue; };
+            match key.trim() {
+                "processor" => index = value.trim().parse::<usize>().ok(),
+                "model name" => model = Some(value.trim().to_string()),
+                "cpu MHz" => speed = value.trim().parse::<f64>().ok().map(|mhz| mhz.round() as u64),
+                _ => {}
+            }
+        }
+        Some((index?, (model.unwrap_or_default(), speed.unwrap_or(0))))
+    }).collect()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_cpu_info_tests {
+    use super::{linux_cpu_metadata, linux_cpu_times};
+
+    #[test]
+    fn parses_numbered_cpus_in_milliseconds_without_affinity_or_guest_double_counting() {
+        let stat = "cpu 999 999 999 999 999 999 999 999 999 999\n\
+                    cpu1 25 50 75 100 125 150 175 200 225 250\n\
+                    cpu3 250 500 750 1000 1250 1500 1750 2000 2250 2500\n";
+        assert_eq!(linux_cpu_times(stat, 250), vec![
+            (1, [100, 200, 300, 400, 600]),
+            (3, [1000, 2000, 3000, 4000, 6000]),
+        ]);
+        assert_eq!(linux_cpu_times("cpu7 18446744073709551615 1 2 3 4 5 6 7 8 9\n", 100),
+            vec![(7, [u64::MAX, 10, 20, 30, 50])]);
+        assert!(linux_cpu_times(stat, 0).is_empty());
+    }
+
+    #[test]
+    fn matches_core_metadata_by_processor_number() {
+        let info = "processor : 3\nmodel name : fast\ncpu MHz : 3200.5\n\n\
+                    processor : 1\nmodel name : efficient\ncpu MHz : 1700.25\n";
+        let metadata = linux_cpu_metadata(info);
+        assert_eq!(metadata.get(&1), Some(&("efficient".to_string(), 1700)));
+        assert_eq!(metadata.get(&3), Some(&("fast".to_string(), 3201)));
+    }
+}
+
 fn os_info_json() -> String {
     let platform = match std::env::consts::OS {
         "macos" => "darwin",
@@ -569,11 +637,28 @@ fn os_info_json() -> String {
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(0.0)
         .round() as u64;
-    let cpu_count = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1);
-    let cpus = (0..cpu_count)
-        .map(|_| serde_json::json!({ "model": model, "speed": speed, "times": { "user": 0, "nice": 0, "sys": 0, "idle": 0, "irq": 0 } }))
+    #[cfg(target_os = "linux")]
+    let cpus = {
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+        let metadata = linux_cpu_metadata(&cpu_info);
+        linux_cpu_times(&stat, u64::try_from(hz).unwrap_or(0)).into_iter()
+            .map(|(index, [user, nice, sys, idle, irq])| {
+                let (core_model, core_speed) = metadata.get(&index)
+                    .map(|(name, mhz)| (if name.is_empty() { model.as_str() } else { name.as_str() }, *mhz))
+                    .unwrap_or((model.as_str(), speed));
+                let frequency = std::fs::read_to_string(format!(
+                    "/sys/devices/system/cpu/cpu{index}/cpufreq/scaling_max_freq"
+                )).ok().and_then(|value| value.trim().parse::<u64>().ok())
+                    .map(|khz| khz / 1000).unwrap_or(core_speed);
+                serde_json::json!({ "model": core_model, "speed": frequency,
+                    "times": { "user": user, "nice": nice, "sys": sys, "idle": idle, "irq": irq } })
+            }).collect::<Vec<_>>()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let cpus = (0..std::thread::available_parallelism().map(usize::from).unwrap_or(1))
+        .map(|_| serde_json::json!({ "model": model, "speed": speed,
+            "times": { "user": 0, "nice": 0, "sys": 0, "idle": 0, "irq": 0 } }))
         .collect::<Vec<_>>();
     let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let memory_value = |name: &str| {
@@ -600,6 +685,7 @@ fn os_info_json() -> String {
         "hostname": hostname, "homedir": home, "tmpdir": tmp, "release": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim(),
         "version": std::fs::read_to_string("/proc/sys/kernel/version").unwrap_or_default().trim(), "machine": std::env::consts::ARCH,
         "endianness": if cfg!(target_endian = "little") { "LE" } else { "BE" }, "cpus": cpus,
+        "availableParallelism": std::thread::available_parallelism().map(usize::from).unwrap_or(1),
         "totalmem": memory_value("MemTotal:"), "freemem": memory_value("MemAvailable:"), "uptime": uptime, "loadavg": loadavg,
         "userInfo": { "username": std::env::var("USER").unwrap_or_default(), "homedir": home, "shell": std::env::var("SHELL").unwrap_or_default(), "uid": 0, "gid": 0 },
         "glibcVersionRuntime": glibc_version_runtime(),
