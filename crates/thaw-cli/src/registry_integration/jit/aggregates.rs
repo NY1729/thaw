@@ -948,17 +948,18 @@ macro_rules! jit_aggregates {
         if object.props.len() > fields.len() {
             return None;
         }
-        let mut properties = std::collections::HashMap::new();
+        let mut properties = Vec::new();
+        let mut names = std::collections::HashSet::new();
         for property in &object.props {
             let (name, value) = object_property(property)?;
-            if properties.insert(name, value).is_some() {
+            if !names.insert(name.clone()) || !fields.iter().any(|(field, _)| field == &name) {
                 return None;
             }
+            properties.push((name, value));
         }
-        if properties
-            .keys()
-            .any(|property| !fields.iter().any(|(field, _)| field == property))
-        {
+        if fields.iter().any(|(field, ty)| {
+            !names.contains(field) && !matches!(ty, thaw_hir::HirType::Optional(_))
+        }) {
             return None;
         }
         let field_size = |ty: &thaw_hir::HirType| {
@@ -976,15 +977,10 @@ macro_rules! jit_aggregates {
         };
         let size = u16::try_from(fields.iter().map(|(_, ty)| field_size(ty)).sum::<usize>()).ok()?;
         let mut output = vec![format!("objnew{size}")];
-        let mut offset = 0usize;
-        for (field, ty) in fields {
-            let Some(property) = properties.get(field) else {
-                if matches!(ty, thaw_hir::HirType::Optional(_)) {
-                    offset += field_size(ty);
-                    continue;
-                }
-                return None;
-            };
+        for (field, property) in &properties {
+            let index = fields.iter().position(|(name, _)| name == field)?;
+            let ty = &fields[index].1;
+            let offset = fields[..index].iter().map(|(_, ty)| field_size(ty)).sum::<usize>();
             let (value, operation) = match property {
                 ObjectReturnValue::Expression(expression) => match ty {
                     thaw_hir::HirType::Object(nested) => (
@@ -1044,7 +1040,6 @@ macro_rules! jit_aggregates {
                         if let Some(tag) = absent_tag {
                             output.push(format!("c{:016x}", tag.to_bits()));
                             output.push(format!("objsetu{offset}"));
-                            offset += field_size(ty);
                             continue;
                         }
                         match payload.as_ref() {
@@ -1130,7 +1125,6 @@ macro_rules! jit_aggregates {
                     thaw_hir::HirType::Optional(payload)
                     | thaw_hir::HirType::Nullable(payload) => {
                         if matches!(expression, Expr::Lit(Lit::Null(_))) {
-                            offset += field_size(ty);
                             continue;
                         }
                         match payload.as_ref() {
@@ -1298,7 +1292,6 @@ macro_rules! jit_aggregates {
             } else {
                 output.push(format!("objset{operation}{offset}"));
             }
-            offset += field_size(ty);
         }
         Some(output)
     }

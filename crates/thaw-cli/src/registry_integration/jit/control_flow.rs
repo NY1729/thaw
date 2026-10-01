@@ -193,6 +193,7 @@ macro_rules! jit_control_flow {
                     | "callableget"
                     | "callableset"
             )
+                || token.starts_with("recur")
                 || token.starts_with("rnreduce")
                 || token.starts_with("rnreduceright")
                 || token.starts_with("rnfilter")
