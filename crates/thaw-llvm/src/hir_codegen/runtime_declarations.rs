@@ -1146,9 +1146,13 @@ impl<'ctx> HirCompiler<'ctx> {
             f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        let regex_match_type = i8_ptr.fn_type(
+            &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into()],
+            false,
+        );
         for name in ["thaw_regex_match", "thaw_regex_match_all"] {
             self.module
-                .add_function(name, string_replace_type, Some(Linkage::External));
+                .add_function(name, regex_match_type, Some(Linkage::External));
         }
         let regex_split_type = i8_ptr.fn_type(
             &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into()],

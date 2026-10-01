@@ -2097,7 +2097,7 @@ impl<'a> FnLowerer<'a> {
                     // runtime records them per result buffer; a plain string
                     // array has no metadata, so these read as `-1`/null/empty.
                     HirType::Array(element)
-                        if element.as_ref() == &HirType::Str
+                        if element.as_ref() == &HirType::Optional(Box::new(HirType::Str))
                             && matches!(prop.sym.as_ref(), "groups" | "index" | "input") =>
                     {
                         Ok(match prop.sym.as_ref() {
@@ -2364,7 +2364,7 @@ impl<'a> FnLowerer<'a> {
                     (HirExpr::ArrayLen(Box::new(unwrapped)), HirType::F64)
                 }
                 MemberProp::Ident(property)
-                    if property.sym == *"groups" && element.as_ref() == &HirType::Str =>
+                    if property.sym == *"groups" && element.as_ref() == &HirType::Optional(Box::new(HirType::Str)) =>
                 {
                     let ty = HirType::Dictionary(Box::new(HirType::Optional(Box::new(
                         HirType::Str,
@@ -2378,7 +2378,7 @@ impl<'a> FnLowerer<'a> {
                     )
                 }
                 MemberProp::Ident(property)
-                    if property.sym == *"index" && element.as_ref() == &HirType::Str =>
+                    if property.sym == *"index" && element.as_ref() == &HirType::Optional(Box::new(HirType::Str)) =>
                 {
                     (
                         HirExpr::Call(
@@ -2389,7 +2389,7 @@ impl<'a> FnLowerer<'a> {
                     )
                 }
                 MemberProp::Ident(property)
-                    if property.sym == *"input" && element.as_ref() == &HirType::Str =>
+                    if property.sym == *"input" && element.as_ref() == &HirType::Optional(Box::new(HirType::Str)) =>
                 {
                     (
                         HirExpr::Call(

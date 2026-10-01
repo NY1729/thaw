@@ -2,10 +2,8 @@ thread_local! {
     static REGEX_CACHE: RefCell<std::collections::HashMap<(String, String), CompiledRegex>> =
         RefCell::new(std::collections::HashMap::new());
     /// Match metadata (named groups, UTF-16 match index, and input string)
-    /// keyed by the raw `[length][elem...]` buffer a successful
-    /// `exec`/`match`/`matchAll` produced. The generated code reads these
-    /// back through `.groups`/`.index`/`.input`; the buffer is the stable
-    /// identity every accessor can recover from its array handle.
+    /// keyed by the stable array handle. Array mutations replace the backing
+    /// buffer while preserving this handle.
     static REGEX_META: RefCell<std::collections::HashMap<usize, RegexMatchMeta>> =
         RefCell::new(std::collections::HashMap::new());
 }
@@ -42,14 +40,26 @@ fn store_regex_meta(pointer: *mut u8, meta: RegexMatchMeta) {
 // pointer stays valid/identity-stable for the process lifetime.
 unsafe extern "C" {
     fn thaw_json_parse(text: *const std::os::raw::c_char) -> *mut u8;
+    fn thaw_json_undefined() -> *mut u8;
+    fn thaw_json_object_set_json_owned(object: *mut u8, key: *const c_char, value: *mut u8);
 }
 
 fn groups_json_pointer(groups: serde_json::Map<String, serde_json::Value>) -> *mut u8 {
-    let text = serde_json::to_string(&serde_json::Value::Object(groups)).unwrap_or_default();
+    let text = serde_json::to_string(&serde_json::Value::Object(groups.clone())).unwrap_or_default();
     let Ok(text) = std::ffi::CString::new(text) else {
         return std::ptr::null_mut();
     };
-    unsafe { thaw_json_parse(text.as_ptr()) }
+    let object = unsafe { thaw_json_parse(text.as_ptr()) };
+    if !object.is_null() {
+        for (name, value) in groups {
+            if value.is_null() {
+                if let Ok(name) = std::ffi::CString::new(name) {
+                    unsafe { thaw_json_object_set_json_owned(object, name.as_ptr(), thaw_json_undefined()) };
+                }
+            }
+        }
+    }
+    object
 }
 
 /// A compiled pattern: the `regex` crate when it can compile the pattern,
@@ -62,9 +72,36 @@ enum CompiledRegex {
     Fancy(fancy_regex::Regex),
 }
 
+// JavaScript's shorthand digit and word classes are ASCII even with `u`.
+// The Rust engines default to Unicode classes, so translate the shorthands
+// before either engine sees the source. Escaped backslashes remain literals.
+fn js_ascii_classes(source: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    let mut chars = source.chars();
+    let mut in_class = false;
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('d') => result.push_str(if in_class { "0-9" } else { "[0-9]" }),
+                Some('w') => result.push_str(if in_class { "A-Za-z0-9_" } else { "[A-Za-z0-9_]" }),
+                Some('D') if !in_class => result.push_str("[^0-9]"),
+                Some('W') if !in_class => result.push_str("[^A-Za-z0-9_]"),
+                Some(other) => { result.push('\\'); result.push(other); }
+                None => result.push('\\'),
+            }
+        } else {
+            if ch == '[' { in_class = true; }
+            if ch == ']' { in_class = false; }
+            result.push(ch);
+        }
+    }
+    result
+}
+
 impl CompiledRegex {
     fn compile(source: &str, flags: &str) -> Option<Self> {
-        if let Ok(native) = regex::RegexBuilder::new(source)
+        let source = js_ascii_classes(source);
+        if let Ok(native) = regex::RegexBuilder::new(&source)
             .case_insensitive(flags.contains('i'))
             .multi_line(flags.contains('m'))
             .dot_matches_new_line(flags.contains('s'))
@@ -72,7 +109,7 @@ impl CompiledRegex {
         {
             return Some(Self::Native(native));
         }
-        fancy_regex::RegexBuilder::new(source)
+        fancy_regex::RegexBuilder::new(&source)
             .case_insensitive(flags.contains('i'))
             .multi_line(flags.contains('m'))
             .dot_matches_new_line(flags.contains('s'))
@@ -158,7 +195,7 @@ impl CompiledRegex {
         }
     }
 
-    fn split(&self, text: &str) -> Vec<String> {
+    fn split(&self, text: &str) -> Vec<Option<String>> {
         let mut parts = Vec::new();
         let mut cursor = 0;
         for captures in self.captures_iter(text) {
@@ -168,22 +205,17 @@ impl CompiledRegex {
             if start == end && (start == 0 || start == text.len()) {
                 continue;
             }
-            parts.push(text[cursor..start].to_string());
-            parts.extend(
-                captures.groups[1..]
-                    .iter()
-                    .map(|group| group.clone().unwrap_or_default()),
-            );
+            parts.push(Some(text[cursor..start].to_string()));
+            parts.extend(captures.groups[1..].iter().cloned());
             cursor = end;
         }
-        parts.push(text[cursor..].to_string());
+        parts.push(Some(text[cursor..].to_string()));
         parts
     }
 }
 
 /// A match's captured groups as owned strings (index 0 is the whole match).
-/// A group that did not participate is an empty string, matching the native
-/// array element type.
+/// A group that did not participate remains `None` in the optional element.
 struct RegexCaptures {
     start: usize,
     /// `None` for a group that did not participate in the match.
@@ -213,13 +245,9 @@ impl RegexCaptures {
         self.groups.get(index).and_then(|group| group.as_deref())
     }
 
-    /// The whole match followed by each group, a non-participating group as
-    /// an empty string (the native array element type is a plain string).
-    fn into_positional(self) -> Vec<String> {
+    /// The whole match followed by each group, preserving non-participants.
+    fn into_positional(self) -> Vec<Option<String>> {
         self.groups
-            .into_iter()
-            .map(|group| group.unwrap_or_default())
-            .collect()
     }
 }
 
@@ -229,10 +257,8 @@ impl RegexCaptures {
 ///
 /// Only the `i` (case-insensitive), `m` (multiline) and `s` (dot-all) flags
 /// are honored; the `u`/`v` unicode-mode flags are not tracked. `g`/`y`
-/// `lastIndex` state is tracked by `RegExp.prototype.exec`/`test` alone (see
-/// `thaw_regex_exec`/`thaw_regex_exec_advance`) -- `match`, `matchAll`,
-/// `replace`/`replaceAll` and `split` all still match as if searching from
-/// the start of the string every call.
+/// `lastIndex` state is threaded through `exec`/`test`/`match`/`matchAll`;
+/// `replace`/`replaceAll` and `split` still use their own search paths.
 fn with_compiled_regex<T>(
     source: &str,
     flags: &str,
@@ -270,26 +296,21 @@ fn wrap_array_handle(buffer: *mut u8) -> *mut u8 {
     handle
 }
 
-/// Writes `parts` into a fresh arena-allocated native `string[]` (length
-/// prefix, then one pointer-sized slot per element), returning null on
-/// allocation failure.
-fn arena_string_array(parts: Vec<String>) -> *mut u8 {
-    let output = thaw_arena::thaw_arena_alloc((parts.len() + 1) * 8, 8);
+fn arena_optional_string_array(parts: Vec<Option<String>>) -> *mut u8 {
+    let output = thaw_arena::thaw_arena_alloc(8 + parts.len() * 16, 8);
     if output.is_null() {
         return std::ptr::null_mut();
     }
     unsafe {
+        output.write_bytes(0, 8 + parts.len() * 16);
         output.cast::<u64>().write(parts.len() as u64);
-    }
+    };
     for (index, part) in parts.into_iter().enumerate() {
-        let Some(part) = arena_c_string(&part) else {
-            return std::ptr::null_mut();
-        };
+        let Some(part) = part else { continue };
+        let Some(part) = arena_c_string(&part) else { return std::ptr::null_mut() };
         unsafe {
-            output
-                .add(8 + index * 8)
-                .cast::<*const u8>()
-                .write_unaligned(part);
+            output.add(8 + index * 16).write(1);
+            output.add(16 + index * 16).cast::<*const u8>().write_unaligned(part);
         }
     }
     output
@@ -341,9 +362,10 @@ pub unsafe extern "C" fn thaw_regex_search(
     let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
     with_compiled_regex(&source, &flags, |regex| {
-        regex
-            .find_at(&value, 0)
-            .map(|(start, _)| value[..start].encode_utf16().count() as f64)
+        regex.find_at(&value, 0).and_then(|(start, _)| {
+            (!flags.contains('y') || start == 0)
+                .then(|| value[..start].encode_utf16().count() as f64)
+        })
     })
     .flatten()
     .unwrap_or(-1.0)
@@ -488,7 +510,7 @@ pub unsafe extern "C" fn thaw_regex_split(
         0
     };
     parts.truncate(limit);
-    arena_string_array(parts)
+    arena_optional_string_array(parts)
 }
 
 /// Converts a JavaScript `lastIndex` value (`ToLength` semantics: `NaN` and
@@ -565,13 +587,11 @@ pub unsafe extern "C" fn thaw_regex_exec(
                 .into_iter()
                 .enumerate()
                 .filter_map(|(group_index, name)| {
-                    let name = name?;
-                    captures.get(group_index).map(|capture| {
-                        (
-                            name.to_string(),
-                            serde_json::Value::String(capture.to_string()),
-                        )
-                    })
+                    name.map(|name| (
+                        name.to_string(),
+                        captures.get(group_index)
+                            .map_or(serde_json::Value::Null, |capture| serde_json::Value::String(capture.to_string())),
+                    ))
                 })
                 .collect();
             Some((
@@ -587,7 +607,7 @@ pub unsafe extern "C" fn thaw_regex_exec(
     if matches.is_empty() {
         return std::ptr::null_mut();
     }
-    let result = arena_string_array(matches);
+    let result = wrap_array_handle(arena_optional_string_array(matches));
     if !result.is_null() {
         store_regex_meta(result, RegexMatchMeta {
             groups,
@@ -605,10 +625,6 @@ pub unsafe extern "C" fn thaw_regex_exec(
 /// # Safety
 /// `matches` must be null or an array handle returned by Thaw.
 pub unsafe extern "C" fn thaw_regex_exec_groups(matches: *const u8) -> *mut u8 {
-    if matches.is_null() {
-        return std::ptr::null_mut();
-    }
-    let matches = unsafe { matches.cast::<*const u8>().read_unaligned() };
     if matches.is_null() {
         return std::ptr::null_mut();
     }
@@ -633,10 +649,6 @@ pub unsafe extern "C" fn thaw_regex_exec_index(matches: *const u8) -> f64 {
     if matches.is_null() {
         return -1.0;
     }
-    let matches = unsafe { matches.cast::<*const u8>().read_unaligned() };
-    if matches.is_null() {
-        return -1.0;
-    }
     REGEX_META.with(|stored| {
         stored
             .borrow()
@@ -656,10 +668,6 @@ pub unsafe extern "C" fn thaw_regex_exec_input(matches: *const u8) -> *const c_c
     if matches.is_null() {
         return std::ptr::null();
     }
-    let matches = unsafe { matches.cast::<*const u8>().read_unaligned() };
-    if matches.is_null() {
-        return std::ptr::null();
-    }
     let input = REGEX_META.with(|stored| {
         stored
             .borrow()
@@ -674,10 +682,9 @@ pub unsafe extern "C" fn thaw_regex_exec_input(matches: *const u8) -> *const c_c
 #[no_mangle]
 /// Computes the `lastIndex` a stateful (`g` or `y` flagged) `RegExp` should
 /// hold after a successful `exec`/`test` call that searched `value` starting
-/// at the UTF-16 code-unit index `last_index`, matching the specification's
-/// `AdvanceStringIndex` (a zero-length match advances by one code unit
-/// rather than looping forever) and its sticky-flag requirement that the
-/// match start exactly at `last_index`. Returns `-1` when there is no such
+/// at the UTF-16 code-unit index `last_index`. Empty matches leave lastIndex
+/// at their end; only iterative consumers advance past an empty match.
+/// Sticky matches must start exactly at `last_index`. Returns `-1` when there is no such
 /// match, `last_index` is out of range, or `source`/`flags` fails to
 /// compile -- the caller resets `lastIndex` to `0` in that case.
 ///
@@ -708,11 +715,7 @@ pub unsafe extern "C" fn thaw_regex_exec_advance(
         if sticky && start != byte_start {
             return -1.0;
         }
-        let mut units = value[..end].encode_utf16().count();
-        if start == end {
-            units += 1;
-        }
-        units as f64
+        value[..end].encode_utf16().count() as f64
     })
     .unwrap_or(-1.0)
 }
@@ -723,10 +726,8 @@ pub unsafe extern "C" fn thaw_regex_exec_advance(
 /// contains `g` (capture groups are not exposed in this mode, matching
 /// `String.prototype.match`'s own behavior for a global pattern), or the
 /// whole match followed by each capture group's text when it matches
-/// otherwise -- a group that did not participate in the match (for example
-/// one inside an unmatched alternative) is reported as an empty string
-/// rather than `undefined`, since the native array element type is a plain
-/// `string`. For the non-global form the result's `.index`/`.input`/`.groups`
+/// otherwise -- a group that did not participate remains `undefined`.
+/// For the non-global form the result's `.index`/`.input`/`.groups`
 /// metadata is recorded with `REGEX_META`, matching `RegExpBuiltinExec`;
 /// the global form exposes none of it, matching `.match()` with `g`. Returns
 /// a null pointer both when nothing matches and when `source`/`flags` fails
@@ -741,6 +742,7 @@ pub unsafe extern "C" fn thaw_regex_match(
     value: *const c_char,
     source: *const c_char,
     flags: *const c_char,
+    last_index: f64,
 ) -> *mut u8 {
     if value.is_null() || source.is_null() || flags.is_null() {
         return std::ptr::null_mut();
@@ -749,12 +751,35 @@ pub unsafe extern "C" fn thaw_regex_match(
     let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
     let global = flags.contains('g');
+    let sticky = flags.contains('y');
+    let start = if sticky && !global {
+        let Some(start) = utf16_index_to_byte_offset(&value, last_index_to_length(last_index)) else {
+            return std::ptr::null_mut();
+        };
+        start
+    } else { 0 };
     let mut meta = None;
     let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
         if global {
-            regex.find_iter(&value)
+            if sticky {
+                let mut matches = Vec::new();
+                let mut cursor = 0;
+                while let Some((found_start, end)) = regex.find_at(&value, cursor) {
+                    if found_start != cursor { break; }
+                    matches.push(Some(value[found_start..end].to_string()));
+                    if found_start == end {
+                        let Some(next) = value[end..].chars().next() else { break };
+                        cursor = end + next.len_utf8();
+                    } else {
+                        cursor = end;
+                    }
+                }
+                matches
+            } else {
+                regex.find_iter(&value).into_iter().map(Some).collect()
+            }
         } else {
-            match regex.captures(&value) {
+            match regex.captures_at(&value, start).filter(|captures| !sticky || captures.start == start) {
                 Some(captures) => {
                     let index = value[..captures.start].encode_utf16().count() as f64;
                     let groups = regex
@@ -762,13 +787,11 @@ pub unsafe extern "C" fn thaw_regex_match(
                         .into_iter()
                         .enumerate()
                         .filter_map(|(group_index, name)| {
-                            let name = name?;
-                            captures.get(group_index).map(|capture| {
-                                (
-                                    name.to_string(),
-                                    serde_json::Value::String(capture.to_string()),
-                                )
-                            })
+                            name.map(|name| (
+                                name.to_string(),
+                                captures.get(group_index)
+                                    .map_or(serde_json::Value::Null, |capture| serde_json::Value::String(capture.to_string())),
+                            ))
                         })
                         .collect();
                     meta = Some((groups_json_pointer(groups), index));
@@ -783,7 +806,7 @@ pub unsafe extern "C" fn thaw_regex_match(
     if matches.is_empty() {
         return std::ptr::null_mut();
     }
-    let result = arena_string_array(matches);
+    let result = wrap_array_handle(arena_optional_string_array(matches));
     if !result.is_null() {
         if let Some((groups, index)) = meta {
             store_regex_meta(result, RegexMatchMeta {
@@ -798,7 +821,7 @@ pub unsafe extern "C" fn thaw_regex_match(
 
 /// Writes `pointers` into a fresh arena-allocated array of raw pointers
 /// (length prefix, then one pointer-sized slot per element), returning
-/// null on allocation failure. Unlike `arena_string_array`, the pointers
+/// null on allocation failure. Unlike `arena_optional_string_array`, the pointers
 /// are written as-is rather than built from owned strings -- used for an
 /// array whose elements are themselves other arena-allocated arrays.
 fn arena_pointer_array(pointers: Vec<*mut u8>) -> *mut u8 {
@@ -823,7 +846,7 @@ fn arena_pointer_array(pointers: Vec<*mut u8>) -> *mut u8 {
 #[no_mangle]
 /// `String.prototype.matchAll`: an array of match-info arrays (the whole
 /// match followed by each capture group's text, same shape and
-/// empty-string-for-non-participating-group behavior as non-global
+/// undefined-for-non-participating-group behavior as non-global
 /// `.match()`), one per match found, in order. Unlike `.match()`, capture
 /// groups are always included here even though every match is found (that
 /// is the entire point of `matchAll` over a global `.match()`). Returns a
@@ -840,6 +863,7 @@ pub unsafe extern "C" fn thaw_regex_match_all(
     value: *const c_char,
     source: *const c_char,
     flags: *const c_char,
+    last_index: f64,
 ) -> *mut u8 {
     if value.is_null() || source.is_null() || flags.is_null() {
         return std::ptr::null_mut();
@@ -850,45 +874,50 @@ pub unsafe extern "C" fn thaw_regex_match_all(
     if !flags.contains('g') {
         return std::ptr::null_mut();
     }
+    let Some(start) = utf16_index_to_byte_offset(&value, last_index_to_length(last_index)) else {
+        return wrap_array_handle(arena_pointer_array(Vec::new()));
+    };
     let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
         let names = regex.capture_names();
-        regex
-            .captures_iter(&value)
-            .into_iter()
-            .map(|captures| {
-                let index = value[..captures.start].encode_utf16().count() as f64;
-                let groups = names
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(group_index, name)| {
-                        let name = (*name)?;
-                        captures.get(group_index).map(|capture| {
-                            (
-                                name.to_string(),
-                                serde_json::Value::String(capture.to_string()),
-                            )
-                        })
-                    })
-                    .collect();
-                (
-                    captures.into_positional(),
-                    groups_json_pointer(groups),
-                    index,
-                )
-            })
-            .collect::<Vec<_>>()
+        let mut matches = Vec::new();
+        let mut cursor = start;
+        while let Some(captures) = regex.captures_at(&value, cursor) {
+            if flags.contains('y') && captures.start != cursor {
+                break;
+            }
+            let match_start = captures.start;
+            let index = value[..match_start].encode_utf16().count() as f64;
+            let end = match_start + captures.get(0).unwrap_or("").len();
+            let groups = names.iter().enumerate().filter_map(|(group_index, name)| {
+                name.map(|name| (
+                    name.to_string(),
+                    captures.get(group_index).map_or(
+                        serde_json::Value::Null,
+                        |capture| serde_json::Value::String(capture.to_string()),
+                    ),
+                ))
+            }).collect();
+            matches.push((captures.into_positional(), groups_json_pointer(groups), index));
+            if end == match_start {
+                let Some(next) = value[end..].chars().next() else { break };
+                cursor = end + next.len_utf8();
+            } else {
+                cursor = end;
+            }
+        }
+        matches
     }) else {
         return std::ptr::null_mut();
     };
     let mut inner_arrays = Vec::with_capacity(matches.len());
     for (captures, groups, index) in matches {
-        let buffer = arena_string_array(captures);
+        let buffer = arena_optional_string_array(captures);
         let inner = wrap_array_handle(buffer);
         if inner.is_null() {
             return std::ptr::null_mut();
         }
         if !buffer.is_null() {
-            store_regex_meta(buffer, RegexMatchMeta {
+            store_regex_meta(inner, RegexMatchMeta {
                 groups,
                 index,
                 input: value.to_string(),
@@ -896,7 +925,7 @@ pub unsafe extern "C" fn thaw_regex_match_all(
         }
         inner_arrays.push(inner);
     }
-    arena_pointer_array(inner_arrays)
+    wrap_array_handle(arena_pointer_array(inner_arrays))
 }
 
 #[cfg(test)]
@@ -904,14 +933,28 @@ mod reset_tests {
     use super::*;
 
     #[test]
-    fn match_metadata_expires_with_its_arena_buffer() {
-        let buffer = thaw_arena::thaw_arena_alloc(8, 8);
-        store_regex_meta(buffer, RegexMatchMeta {
+    fn match_metadata_uses_stable_array_handle() {
+        let handle = wrap_array_handle(arena_optional_string_array(vec![Some("a".into())]));
+        store_regex_meta(handle, RegexMatchMeta {
+            groups: std::ptr::null_mut(),
+            index: 3.0,
+            input: "input".into(),
+        });
+        let replacement = arena_optional_string_array(vec![Some("a".into()), Some("x".into())]);
+        unsafe { handle.cast::<*mut u8>().write_unaligned(replacement) };
+        assert_eq!(unsafe { thaw_regex_exec_index(handle) }, 3.0);
+        thaw_arena::thaw_arena_reset();
+    }
+
+    #[test]
+    fn match_metadata_expires_with_its_arena_handle() {
+        let handle = thaw_arena::thaw_arena_alloc(16, 8);
+        store_regex_meta(handle, RegexMatchMeta {
             groups: std::ptr::null_mut(),
             index: 3.0,
             input: "old".into(),
         });
         thaw_arena::thaw_arena_reset();
-        REGEX_META.with(|stored| assert!(!stored.borrow().contains_key(&(buffer as usize))));
+        REGEX_META.with(|stored| assert!(!stored.borrow().contains_key(&(handle as usize))));
     }
 }

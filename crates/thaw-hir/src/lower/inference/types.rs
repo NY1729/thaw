@@ -1599,14 +1599,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, flags, "RegExp.exec flags")?;
                         self.expect_type(&HirType::Str, value, "RegExp.exec value")?;
                         self.expect_type(&HirType::F64, last_index, "RegExp.exec lastIndex")?;
-                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                        return Ok(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))));
                     }
                     "__thaw_regex_exec_groups" => {
                         let [matches] = args.as_slice() else {
                             return Err("RegExp groups expects one operand".into());
                         };
                         self.expect_type(
-                            &HirType::Array(Box::new(HirType::Str)),
+                            &HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))),
                             matches,
                             "RegExp groups result",
                         )?;
@@ -1619,7 +1619,7 @@ impl<'a> FnLowerer<'a> {
                             return Err("RegExp index expects one operand".into());
                         };
                         self.expect_type(
-                            &HirType::Array(Box::new(HirType::Str)),
+                            &HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))),
                             matches,
                             "RegExp index result",
                         )?;
@@ -1630,7 +1630,7 @@ impl<'a> FnLowerer<'a> {
                             return Err("RegExp input expects one operand".into());
                         };
                         self.expect_type(
-                            &HirType::Array(Box::new(HirType::Str)),
+                            &HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))),
                             matches,
                             "RegExp input result",
                         )?;
@@ -1669,23 +1669,25 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::F64);
                     }
                     "__thaw_regex_match" => {
-                        let [value, source, flags] = args.as_slice() else {
-                            return Err("String.match expects three operands".into());
+                        let [value, source, flags, last_index] = args.as_slice() else {
+                            return Err("String.match expects four operands".into());
                         };
                         self.expect_type(&HirType::Str, value, "match receiver")?;
                         self.expect_type(&HirType::Str, source, "match source")?;
                         self.expect_type(&HirType::Str, flags, "match flags")?;
-                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                        self.expect_type(&HirType::F64, last_index, "match lastIndex")?;
+                        return Ok(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))));
                     }
                     "__thaw_regex_match_all" => {
-                        let [value, source, flags] = args.as_slice() else {
-                            return Err("String.matchAll expects three operands".into());
+                        let [value, source, flags, last_index] = args.as_slice() else {
+                            return Err("String.matchAll expects four operands".into());
                         };
                         self.expect_type(&HirType::Str, value, "matchAll receiver")?;
                         self.expect_type(&HirType::Str, source, "matchAll source")?;
                         self.expect_type(&HirType::Str, flags, "matchAll flags")?;
+                        self.expect_type(&HirType::F64, last_index, "matchAll lastIndex")?;
                         return Ok(HirType::Array(Box::new(HirType::Array(Box::new(
-                            HirType::Str,
+                            HirType::Optional(Box::new(HirType::Str)),
                         )))));
                     }
                     "__thaw_regex_replace" | "__thaw_regex_replace_all" => {
@@ -1706,7 +1708,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, source, "split source")?;
                         self.expect_type(&HirType::Str, flags, "split flags")?;
                         self.expect_type(&HirType::F64, limit, "split limit")?;
-                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                        return Ok(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str)))));
                     }
                     "__thaw_string_code_point_at" => {
                         let [value, index] = args.as_slice() else {
