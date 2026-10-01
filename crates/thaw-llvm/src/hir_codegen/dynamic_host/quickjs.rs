@@ -68,6 +68,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_extract_value(result, 1, "quickjs_setter_error")
             .map_err(|error| error.to_string())?;
+        self.destroy_typed_host_arguments(array, args_json)?;
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
@@ -83,6 +84,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_parse returned no setter value")?;
+        self.destroy_typed_host_result_string(value)?;
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 

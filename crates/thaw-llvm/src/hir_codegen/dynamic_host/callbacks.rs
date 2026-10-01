@@ -984,6 +984,13 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             Some(HirType::Optional(inner)) => match *inner {
                 HirType::Function(params, ret) => (params, *ret, true, false),
+                HirType::CallableFunction(mut params, _, rest, ret) => {
+                    let has_rest = rest.is_some();
+                    if let Some(rest) = rest {
+                        params.push(HirType::Array(rest));
+                    }
+                    (params, *ret, true, has_rest)
+                }
                 _ => {
                     return Err(
                         "registerNativeCallback: could not determine the callback's own function type"
@@ -1008,17 +1015,104 @@ impl<'ctx> HirCompiler<'ctx> {
         // real params would already be an extraordinary callback), and
         // JS's own bitwise operators only ever work on 32 bits anyway.
         let closure = self.compile_expr(closure_expr)?;
-        let closure = if optional {
-            self.builder
-                .build_extract_value(closure.into_struct_value(), 1, "optional_native_callback")
+        if optional {
+            let closure = closure.into_struct_value();
+            let present = self.builder
+                .build_extract_value(closure, 0, "optional_native_callback_present")
                 .map_err(|error| error.to_string())?
+                .into_int_value();
+            let payload = self.builder
+                .build_extract_value(closure, 1, "optional_native_callback")
+                .map_err(|error| error.to_string())?
+                .into_pointer_value();
+            let function = self.current_function();
+            let registered = self.context.append_basic_block(function, "native_callback_present");
+            let absent = self.context.append_basic_block(function, "native_callback_absent");
+            let done = self.context.append_basic_block(function, "native_callback_done");
+            self.builder.build_conditional_branch(present, registered, absent)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(registered);
+            let value = self.compile_register_native_callback_from_closure_with_rest(
+                payload, &params, &ret, has_rest,
+            )?;
+            let registered_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(done)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(absent);
+            let undefined = self.builder.build_global_string_ptr("undefined", "native_callback_undefined")
+                .map_err(|error| error.to_string())?;
+            let undefined = self.builder.build_call(
+                self.module.get_function("thaw_js_get_global").unwrap(),
+                &[undefined.as_pointer_value().into()],
+                "native_callback_undefined_handle",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("thaw_js_get_global returned no undefined handle")?;
+            let absent_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(done)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(done);
+            let result = self.builder.build_phi(value.get_type(), "optional_native_callback_handle")
+                .map_err(|error| error.to_string())?;
+            result.add_incoming(&[(&value, registered_end), (&undefined, absent_end)]);
+            Ok(result.as_basic_value())
         } else {
-            closure
+            self.compile_register_native_callback_from_closure_with_rest(
+                closure.into_pointer_value(), &params, &ret, has_rest,
+            )
         }
-        .into_pointer_value();
-        self.compile_register_native_callback_from_closure_with_rest(
-            closure, &params, &ret, has_rest,
-        )
+    }
+
+    fn compile_quickjs_callback_argument(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        argument: &HirExpr,
+    ) -> Result<(), String> {
+        let Some(HirType::Optional(inner)) = self.expr_hir_type(argument) else {
+            let value = self.compile_register_native_callback(std::slice::from_ref(argument))?;
+            return self.compile_typed_dynamic_argument(array, value, &HirType::JsValue);
+        };
+        let (mut params, rest, ret) = match inner.as_ref() {
+            HirType::Function(params, ret) => (params.clone(), None, ret.as_ref()),
+            HirType::CallableFunction(params, _, rest, ret) => {
+                (params.clone(), rest.as_ref(), ret.as_ref())
+            }
+            _ => return Err("optional QuickJS callback must be a function".into()),
+        };
+        let has_rest = rest.is_some();
+        if let Some(rest) = rest {
+            params.push(HirType::Array(rest.clone()));
+        }
+        let tagged = self.compile_expr(argument)?.into_struct_value();
+        let present = self.builder
+            .build_extract_value(tagged, 0, "quickjs_callback_present")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let closure = self.builder
+            .build_extract_value(tagged, 1, "quickjs_callback_payload")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let function = self.current_function();
+        let present_block = self.context.append_basic_block(function, "quickjs_callback_present");
+        let absent_block = self.context.append_basic_block(function, "quickjs_callback_absent");
+        let done = self.context.append_basic_block(function, "quickjs_callback_done");
+        self.builder.build_conditional_branch(present, present_block, absent_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(present_block);
+        let callback = self.compile_register_native_callback_from_closure_with_rest(
+            closure, &params, ret, has_rest,
+        )?;
+        self.compile_typed_dynamic_argument(array, callback, &HirType::JsValue)?;
+        self.builder.build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(absent_block);
+        let undefined = self.compile_napi_undefined_json()?;
+        self.compile_json_array_push_owned(array, undefined)?;
+        self.builder.build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
     }
 
     pub(super) fn compile_register_native_callback_from_closure(
