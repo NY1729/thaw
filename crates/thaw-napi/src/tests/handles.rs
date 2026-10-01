@@ -448,6 +448,47 @@ fn value_extractors_reject_handles_owned_by_another_environment() {
     }
 }
 
+#[cfg(feature = "quickjs")]
+#[test]
+fn deleting_last_strong_reference_releases_pending_handle_once() {
+    static FINALIZED: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn finalize(_env: NapiEnv, _data: *mut c_void, _hint: *mut c_void) {
+        FINALIZED.fetch_add(1, Ordering::AcqRel);
+    }
+    FINALIZED.store(0, Ordering::Release);
+    let mut env = Box::new(Env::new());
+    let env_ptr = (&mut *env) as NapiEnv;
+    let value = env.alloc(Value::Object(HashMap::new()));
+    let mut first = ptr::null_mut();
+    let mut second = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            napi_wrap(
+                env_ptr,
+                value,
+                ptr::null_mut(),
+                Some(finalize),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            NAPI_OK
+        );
+        assert_eq!(napi_create_reference(env_ptr, value, 1, &mut first), NAPI_OK);
+        assert_eq!(napi_create_reference(env_ptr, value, 1, &mut second), NAPI_OK);
+    }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+
+    release_napi_handle(value as u64).unwrap();
+    assert_eq!(FINALIZED.load(Ordering::Acquire), 0);
+    unsafe { assert_eq!(napi_delete_reference(env_ptr, first), NAPI_OK); }
+    assert_eq!(FINALIZED.load(Ordering::Acquire), 0);
+    unsafe { assert_eq!(napi_delete_reference(env_ptr, second), NAPI_OK); }
+    assert_eq!(FINALIZED.load(Ordering::Acquire), 1);
+    unsafe { assert_eq!(napi_delete_reference(env_ptr, second), NAPI_INVALID_ARG); }
+    HOST.with(|host| host.borrow_mut().module_envs.clear());
+    assert_eq!(FINALIZED.load(Ordering::Acquire), 1);
+}
+
 #[test]
 fn references_enforce_environment_ownership_and_refcounts() {
     unsafe {
