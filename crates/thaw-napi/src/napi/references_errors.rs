@@ -15,6 +15,22 @@ pub unsafe extern "C" fn napi_create_reference(
     NAPI_OK
 }
 
+#[cfg(feature = "quickjs")]
+unsafe fn release_pending_napi_handle_if_unreferenced(env: NapiEnv, value: NapiValue) {
+    let released = env_mut(env).is_ok_and(|env| {
+        let still_referenced = env.references.iter().any(|reference| {
+            !reference.deleted && reference.value == value && reference.count > 0
+        });
+        !still_referenced && env.released_handles.remove(&(value as usize))
+    });
+    if released {
+        // Finalizers may call back into N-API; do not retain an Env/HOST borrow.
+        release_napi_handle(value as u64).unwrap_or_else(|error| {
+            HOST.with(|host| host.borrow_mut().last_error = error);
+        });
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn napi_delete_reference(
     env: NapiEnv,
@@ -23,7 +39,11 @@ pub unsafe extern "C" fn napi_delete_reference(
     let Ok(reference) = reference_mut(env, reference) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
+    #[cfg(feature = "quickjs")]
+    let value = reference.value;
     reference.deleted = true;
+    #[cfg(feature = "quickjs")]
+    release_pending_napi_handle_if_unreferenced(env, value);
     NAPI_OK
 }
 
@@ -75,22 +95,13 @@ pub unsafe extern "C" fn napi_reference_unref(
     reference.count -= 1;
     #[cfg(feature = "quickjs")]
     let value = reference.value;
-    #[cfg(feature = "quickjs")]
-    let released = reference.count == 0
-        && env_mut(env).is_ok_and(|env| {
-            let still_referenced = env.references.iter().any(|reference| {
-                !reference.deleted && reference.value == value && reference.count > 0
-            });
-            !still_referenced && env.released_handles.remove(&(value as usize))
-        });
+    let remaining = reference.count;
     if !result.is_null() {
-        *result = reference.count;
+        *result = remaining;
     }
     #[cfg(feature = "quickjs")]
-    if released {
-        release_napi_handle(value as u64).unwrap_or_else(|error| {
-            HOST.with(|host| host.borrow_mut().last_error = error);
-        });
+    if remaining == 0 {
+        release_pending_napi_handle_if_unreferenced(env, value);
     }
     NAPI_OK
 }
