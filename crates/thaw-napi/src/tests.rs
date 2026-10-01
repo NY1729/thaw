@@ -15,6 +15,74 @@ static RELEASED_HANDLE_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
 #[test]
+fn exported_callback_exception_is_consumed_before_the_next_call() {
+    unsafe extern "C" fn throws(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        assert_eq!(napi_throw_type_error(env, ptr::null(), c"first failure".as_ptr()), NAPI_OK);
+        ptr::null_mut()
+    }
+    unsafe extern "C" fn invalid_exception(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        env_mut(env).unwrap().exception = Some(ptr::null_mut());
+        ptr::null_mut()
+    }
+    unsafe extern "C" fn succeeds(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        env_mut(env).unwrap().alloc(Value::Number(7.0))
+    }
+
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let callbacks = [
+        ("stale-test::throw", throws as NapiCallback),
+        ("stale-test::invalid", invalid_exception as NapiCallback),
+        ("stale-test::good", succeeds as NapiCallback),
+    ];
+    let exports = callbacks.iter().map(|(name, callback)| {
+        let function = Function {
+            callback: *callback,
+            data: ptr::null_mut(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+        };
+        let value = env.alloc(Value::Function(function.clone()));
+        ((*name).to_string(), function, value)
+    }).collect::<Vec<_>>();
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        for (name, function, value) in exports {
+            host.functions.insert(name.clone(), function);
+            host.exports.insert(name, (env_ptr as usize, value));
+        }
+        host.module_envs.push(env);
+    });
+
+    unsafe {
+        let first = thaw_napi_call_result(c"stale-test::throw".as_ptr(), c"[]".as_ptr());
+        assert!(first.value.is_null());
+        let first_error = CString::from_raw(first.error).into_string().unwrap();
+        assert!(first_error.contains("\u{1}TypeError\u{1}first failure"), "{first_error}");
+        assert!((*env_ptr).exception.is_none());
+        let good = thaw_napi_call_result(c"stale-test::good".as_ptr(), c"[]".as_ptr());
+        assert!(good.error.is_null());
+        assert_eq!(CStr::from_ptr(good.value).to_str().unwrap(), "7.0");
+
+        let invalid = thaw_napi_call_result(c"stale-test::invalid".as_ptr(), c"[]".as_ptr());
+        assert!(invalid.value.is_null());
+        assert_eq!(CString::from_raw(invalid.error).into_string().unwrap(), "invalid exception");
+        assert!((*env_ptr).exception.is_none());
+        let good_again = thaw_napi_call_typed_result(c"stale-test::good".as_ptr(), c"[]".as_ptr());
+        assert!(good_again.error.is_null());
+        assert_eq!(CStr::from_ptr(good_again.value).to_str().unwrap(), "7.0");
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        for name in ["stale-test::throw", "stale-test::invalid", "stale-test::good"] {
+            host.functions.remove(name);
+            host.exports.remove(name);
+        }
+        host.module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+    });
+}
+
+#[test]
 fn nested_export_getter_preserves_its_exception() {
     unsafe extern "C" fn throwing_getter(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
         assert_eq!(napi_throw_type_error(env, ptr::null(), c"original getter failure".as_ptr()), NAPI_OK);
