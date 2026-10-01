@@ -1328,3 +1328,32 @@ fn web_writer_write_discards_sink_fulfillment_values() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn web_pipe_through_respects_prevent_abort() {
+    // Unrun regression: pipeThrough observes failure without changing the output.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("web_pipe_through_prevent_abort");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var failure = new Error('source'), source = new ReadableStream({ start(controller) { controller.error(failure); } }), transform = new TransformStream();
+      var output = source.pipeThrough(transform, { preventAbort: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      var reader = output.getReader(), writer = transform.writable.getWriter(), read = reader.read(), write = writer.write('after');
+      var outcomes = await Promise.allSettled([read, write]);
+      var first = outcomes[0].status === 'fulfilled' && outcomes[0].value.value === 'after';
+      await writer.close(); reader.releaseLock(); writer.releaseLock();
+      var normal = new ReadableStream({ start(controller) { controller.error(failure); } }).pipeThrough(new TransformStream()).getReader(), error;
+      try { await normal.read(); } catch (caught) { error = caught; }
+      normal.releaseLock();
+      return [first, outcomes[1].status, error === failure];
+    };"#).unwrap();
+    let modules = temp_registry("web_pipe_through_prevent_abort_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exercisePipeThroughOptions = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exercisePipeThroughOptions").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[true,"fulfilled",true]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
