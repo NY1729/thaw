@@ -1498,3 +1498,68 @@ fn fs_bigint_statfs_keeps_exact_wire_values_across_consumers() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[cfg(unix)]
+#[test]
+fn fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_cp_alias_safety");
+    fs::write(
+        dir.join("index.js"),
+        r#"var fs = require('node:fs'); module.exports = async function(root) {
+            var source = root + '/source', file = source + '/keep.txt', alias = root + '/alias';
+            fs.mkdirSync(source); fs.writeFileSync(file, 'intact'); fs.symlinkSync(source, alias);
+            function code(work) { try { work(); return 'none'; } catch (error) { return error.code; } }
+            var sync = code(function() { fs.cpSync(source, alias + '/sync', { recursive: true }); });
+            var asyncCode; try { await fs.promises.cp(source, alias + '/async', { recursive: true }); }
+            catch (error) { asyncCode = error.code; }
+            var callbackCode = await new Promise(function(resolve) {
+                fs.cp(source, alias + '/callback', { recursive: true }, function(error) { resolve(error && error.code); });
+            });
+            var dereferenced = code(function() {
+                fs.cpSync(alias, source + '/from-alias', { recursive: true, dereference: true });
+            });
+            var sameAlias = code(function() { fs.cpSync(source, alias, { recursive: true }); });
+            var hard = root + '/hardlink.txt'; fs.linkSync(file, hard);
+            var hardCp = code(function() { fs.cpSync(file, hard); });
+            var hardCopy = code(function() { fs.copyFileSync(file, hard); });
+            var raw = code(function() {
+                fs.cpSync(Buffer.from(source), Buffer.from(alias + '/raw'), { recursive: true });
+            });
+            var mutableSource = Buffer.from(file), mutableDestination = Buffer.from(root + '/filtered.txt');
+            fs.cpSync(mutableSource, mutableDestination, { filter: function() {
+                mutableSource.fill(0); mutableDestination.fill(0); return true;
+            } });
+            var filtered = fs.readFileSync(root + '/filtered.txt', 'utf8') === 'intact';
+            fs.symlinkSync(source, source + '/cycle');
+            var cycle = code(function() {
+                fs.cpSync(source, root + '/cycle-copy', { recursive: true, dereference: true });
+            });
+            return [sync, asyncCode, callbackCode, dereferenced, sameAlias, hardCp,
+                hardCopy, raw, cycle, fs.readFileSync(file, 'utf8'), fs.readFileSync(hard, 'utf8'),
+                fs.existsSync(source + '/sync'), fs.existsSync(source + '/async'),
+                fs.existsSync(source + '/callback'), fs.existsSync(source + '/from-alias'),
+                fs.existsSync(source + '/raw'), fs.existsSync(root + '/cycle-copy/cycle'), filtered];
+        };"#,
+    )
+    .unwrap();
+    let modules = temp_registry("builtin_fs_cp_alias_safety_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCpAliasSafety = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseCpAliasSafety").unwrap();
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let parsed: serde_json::Value = serde_json::from_str(&unsafe { CStr::from_ptr(result) }.to_string_lossy()).unwrap();
+    let values = parsed.as_array().unwrap();
+    assert!(values[..6].iter().all(|value| value == "EEXIST"));
+    assert_eq!(values[7], "EEXIST");
+    assert_eq!(values[8], "EEXIST");
+    assert_eq!(values[9], "intact");
+    assert_eq!(values[10], "intact");
+    assert!(values[11..17].iter().all(|value| value == false));
+    assert_eq!(values[17], true);
+    assert!(values[6].as_str().is_some_and(|code| code != "none"));
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
