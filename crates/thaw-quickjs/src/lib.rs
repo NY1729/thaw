@@ -1032,6 +1032,193 @@ fn os_info_json() -> rquickjs::Result<String> {
     Ok(info.to_string())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn os_priority_errno() -> *mut libc::c_int {
+    #[cfg(target_os = "linux")]
+    { unsafe { libc::__errno_location() } }
+    #[cfg(target_os = "macos")]
+    { unsafe { libc::__error() } }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn posix_priority_result(priority: i32, errno: i32) -> std::io::Result<i32> {
+    if priority == -1 && errno != 0 {
+        Err(std::io::Error::from_raw_os_error(errno))
+    } else {
+        Ok(priority)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn native_get_priority(pid: i32) -> std::io::Result<i32> {
+    // -1 is a valid nice value, so errno must be cleared before the call.
+    let errno = os_priority_errno();
+    unsafe { *errno = 0 };
+    let priority = unsafe { libc::getpriority(libc::PRIO_PROCESS, pid as libc::id_t) };
+    posix_priority_result(priority, unsafe { *errno })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn native_set_priority(pid: i32, priority: i32) -> std::io::Result<()> {
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, priority) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_priority_class(priority: i32) -> u32 {
+    if priority < -14 { 0x100 }       // REALTIME_PRIORITY_CLASS
+    else if priority < -7 { 0x80 }    // HIGH_PRIORITY_CLASS
+    else if priority < 0 { 0x8000 }   // ABOVE_NORMAL_PRIORITY_CLASS
+    else if priority < 10 { 0x20 }    // NORMAL_PRIORITY_CLASS
+    else if priority < 19 { 0x4000 }  // BELOW_NORMAL_PRIORITY_CLASS
+    else { 0x40 }                     // IDLE_PRIORITY_CLASS
+}
+
+#[cfg(target_os = "windows")]
+fn windows_nice_value(priority_class: u32) -> std::io::Result<i32> {
+    match priority_class {
+        0x100 => Ok(-20), 0x80 => Ok(-14), 0x8000 => Ok(-7),
+        0x20 => Ok(0), 0x4000 => Ok(10), 0x40 => Ok(19),
+        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+            "unrecognized Windows priority class")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_priority_handle(pid: i32, access: u32) -> std::io::Result<*mut std::ffi::c_void> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+    }
+    let handle = if pid == 0 { unsafe { GetCurrentProcess() } }
+        else { unsafe { OpenProcess(access, 0, pid as u32) } };
+    if handle.is_null() { Err(std::io::Error::last_os_error()) } else { Ok(handle) }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_close_priority_handle(pid: i32, handle: *mut std::ffi::c_void) {
+    if pid != 0 {
+        #[link(name = "kernel32")]
+        extern "system" { fn CloseHandle(handle: *mut std::ffi::c_void) -> i32; }
+        unsafe { CloseHandle(handle) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn native_get_priority(pid: i32) -> std::io::Result<i32> {
+    #[link(name = "kernel32")]
+    extern "system" { fn GetPriorityClass(handle: *mut std::ffi::c_void) -> u32; }
+    let handle = windows_priority_handle(pid, 0x1000)?; // PROCESS_QUERY_LIMITED_INFORMATION
+    let priority_class = unsafe { GetPriorityClass(handle) };
+    let result = if priority_class == 0 { Err(std::io::Error::last_os_error()) }
+        else { windows_nice_value(priority_class) };
+    windows_close_priority_handle(pid, handle);
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn native_set_priority(pid: i32, priority: i32) -> std::io::Result<()> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetPriorityClass(handle: *mut std::ffi::c_void, priority_class: u32) -> i32;
+    }
+    let handle = windows_priority_handle(pid, 0x0200)?; // PROCESS_SET_INFORMATION
+    let result = if unsafe { SetPriorityClass(handle, windows_priority_class(priority)) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else { Ok(()) };
+    windows_close_priority_handle(pid, handle);
+    result
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn native_get_priority(_pid: i32) -> std::io::Result<i32> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "OS priority is unsupported"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn native_set_priority(_pid: i32, _priority: i32) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "OS priority is unsupported"))
+}
+
+fn os_priority_result(result: std::io::Result<i32>) -> String {
+    match result {
+        Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
+        Err(error) => {
+            let errno = error.raw_os_error();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let code = match errno {
+                Some(value) if value == libc::ESRCH => "ESRCH",
+                Some(value) if value == libc::EACCES => "EACCES",
+                Some(value) if value == libc::EPERM => "EPERM",
+                _ => "UNKNOWN",
+            };
+            #[cfg(target_os = "windows")]
+            let code = match errno {
+                Some(87) => "ESRCH", Some(5) => "EACCES", _ => "UNKNOWN",
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            let code = "ENOSYS";
+            let code = if errno.is_none() { match error.kind() {
+                std::io::ErrorKind::Unsupported => "ENOSYS",
+                std::io::ErrorKind::InvalidInput => "EINVAL",
+                _ => code,
+            }} else { code };
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let uv_errno = errno.map(|value| -value).unwrap_or(match code {
+                "EINVAL" => -libc::EINVAL, "ENOSYS" => -libc::ENOSYS, _ => -4094,
+            });
+            #[cfg(target_os = "windows")]
+            let uv_errno = match code {
+                "ESRCH" => -4040, "EACCES" => -4092, "EINVAL" => -4071,
+                "ENOSYS" => -4054, _ => -4094,
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            let uv_errno = -4054;
+            serde_json::json!({ "ok": false, "code": code, "errno": uv_errno,
+                "message": error.to_string() }).to_string()
+        }
+    }
+}
+
+fn os_get_priority_json(pid: i32) -> String {
+    os_priority_result(native_get_priority(pid))
+}
+
+fn os_set_priority_json(pid: i32, priority: i32) -> String {
+    if !(-20..=19).contains(&priority) {
+        return os_priority_result(Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+            "priority must be between -20 and 19")));
+    }
+    os_priority_result(native_set_priority(pid, priority).map(|()| 0))
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_priority_classes_match_libuv_thresholds() {
+    for (input, class, output) in [(-20, 0x100, -20), (-15, 0x100, -20),
+        (-14, 0x80, -14), (-8, 0x80, -14), (-7, 0x8000, -7),
+        (-1, 0x8000, -7), (0, 0x20, 0), (9, 0x20, 0),
+        (10, 0x4000, 10), (18, 0x4000, 10), (19, 0x40, 19)] {
+        assert_eq!(windows_priority_class(input), class);
+        assert_eq!(windows_nice_value(class).unwrap(), output);
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn unix_getpriority_accepts_valid_minus_one() {
+    assert_eq!(posix_priority_result(-1, 0).unwrap(), -1);
+    assert_eq!(posix_priority_result(-1, libc::ESRCH).unwrap_err().raw_os_error(), Some(libc::ESRCH));
+    let current = native_get_priority(0).unwrap();
+    assert!((-20..=19).contains(&current));
+    let absent = native_get_priority(i32::MAX).unwrap_err();
+    assert_eq!(absent.raw_os_error(), Some(libc::ESRCH));
+}
+
 /// Backs `process.report.getReport().header.glibcVersionRuntime` -- real
 /// Node's own way of telling a glibc build apart from a musl one at
 /// runtime (`null`/absent on musl and non-Linux targets), which some native-addon loaders check

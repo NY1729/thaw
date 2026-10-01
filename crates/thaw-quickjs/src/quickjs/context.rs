@@ -1204,6 +1204,10 @@ fn ensure_context() {
                     .expect("failed to create JavaScript OS information source");
                 let os_identity_function = Function::new(ctx.clone(), os_identity_json)
                     .expect("failed to create JavaScript OS identity source");
+                let os_get_priority_function = Function::new(ctx.clone(), os_get_priority_json)
+                    .expect("failed to create JavaScript OS priority getter");
+                let os_set_priority_function = Function::new(ctx.clone(), os_set_priority_json)
+                    .expect("failed to create JavaScript OS priority setter");
                 let os_network_interfaces_function =
                     Function::new(ctx.clone(), network_interfaces_json)
                         .expect("failed to create JavaScript OS network interface source");
@@ -1865,6 +1869,12 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_os_identity", os_identity_function)
                     .expect("failed to install JavaScript OS identity source");
+                ctx.globals()
+                    .set("__thaw_os_get_priority", os_get_priority_function)
+                    .expect("failed to install JavaScript OS priority getter");
+                ctx.globals()
+                    .set("__thaw_os_set_priority", os_set_priority_function)
+                    .expect("failed to install JavaScript OS priority setter");
                 ctx.globals()
                     .set(
                         "__thaw_os_network_interfaces",
