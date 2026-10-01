@@ -1053,3 +1053,50 @@ fn fs_descriptor_vectors_stop_after_short_write_and_read_options_size_buffer() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn fs_watchers_track_missing_bigint_and_timer_lifetime() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_watch_missing_bigint");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(root) { var path = root + '/later.txt', seen = [], watcher; var done = new Promise(function(resolve) { watcher = fs.watchFile(path, { interval: 1, bigint: true }, function(now, before) { seen.push([String(before.size), String(now.size), typeof now.size, String(now.mtimeNs)]); if (seen.length === 1) fs.writeFileSync(path, 'x'); else if (seen.length === 2) fs.unlinkSync(path); else if (seen.length === 3) fs.writeFileSync(path, 'long'); else { fs.unwatchFile(path); resolve(); } }); }); var initiallyRefed = watcher._timer.hasRef(); watcher.unref(); var unrefed = watcher._timer.hasRef(); watcher.ref(); var rerefed = watcher._timer.hasRef(); await done; fs.symlinkSync(root, root + '/cycle'); var controller = new AbortController(), fsWatcher = fs.watch(root, { recursive: true, signal: controller.signal, persistent: false }), timerUnrefed = fsWatcher._timer.hasRef(); fsWatcher.ref(); var timerRefed = fsWatcher._timer.hasRef(); fsWatcher.close(); return [seen, initiallyRefed, unrefed, rerefed, watcher._timer, timerUnrefed, timerRefed, fsWatcher._timer]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_watch_missing_bigint_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchMissing = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(
+        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
+    )
+    .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsWatchMissing").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let events = parsed[0].as_array().unwrap();
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[0], serde_json::json!(["0", "0", "bigint", "0"]));
+    assert_eq!(events[1][0], "0");
+    assert_eq!(events[1][1], "1");
+    assert_eq!(events[1][2], "bigint");
+    assert_eq!(events[2], serde_json::json!(["1", "0", "bigint", "0"]));
+    assert_eq!(events[3][0], "0");
+    assert_eq!(events[3][1], "4");
+    assert_eq!(events[3][2], "bigint");
+    assert_eq!(parsed[1], true);
+    assert_eq!(parsed[2], false);
+    assert_eq!(parsed[3], true);
+    assert!(parsed[4].is_null());
+    assert_eq!(parsed[5], false);
+    assert_eq!(parsed[6], true);
+    assert!(parsed[7].is_null());
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
