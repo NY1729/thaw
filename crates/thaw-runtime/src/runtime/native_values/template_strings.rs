@@ -9,6 +9,17 @@ thread_local! {
         RefCell::new(std::collections::HashMap::new());
 }
 
+fn reset_template_strings(tracing: bool) {
+    TEMPLATE_RAW_STRINGS.with(|stored| {
+        let mut stored = stored.borrow_mut();
+        if tracing {
+            stored.retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer));
+        } else {
+            stored.clear();
+        }
+    });
+}
+
 #[no_mangle]
 /// Associates a tagged template's cooked-strings array with its raw
 /// sibling, called once per tagged-template evaluation right after the
@@ -42,6 +53,7 @@ pub unsafe extern "C" fn thaw_template_strings_register(cooked: *const u8, raw: 
         };
         strings.push(text);
     }
+    thaw_arena::register_reset_hook(reset_template_strings);
     TEMPLATE_RAW_STRINGS.with(|stored| {
         stored.borrow_mut().insert(cooked_buffer as usize, strings);
     });
@@ -68,4 +80,27 @@ pub unsafe extern "C" fn thaw_template_strings_raw(cooked: *const u8) -> *mut u8
         .with(|stored| stored.borrow().get(&(cooked_buffer as usize)).cloned())
         .unwrap_or_default();
     arena_string_array(strings)
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+
+    #[test]
+    fn raw_metadata_expires_with_its_cooked_buffer() {
+        let cooked_buffer = thaw_arena::thaw_arena_alloc(8, 8);
+        let raw_buffer = thaw_arena::thaw_arena_alloc(16, 8);
+        let cooked = thaw_arena::thaw_arena_alloc(16, 8);
+        let raw = thaw_arena::thaw_arena_alloc(16, 8);
+        unsafe {
+            raw_buffer.cast::<u64>().write(1);
+            raw_buffer.add(8).cast::<*const c_char>().write(c"raw".as_ptr());
+            cooked.cast::<*mut u8>().write(cooked_buffer);
+            raw.cast::<*mut u8>().write(raw_buffer);
+            thaw_template_strings_register(cooked, raw);
+        }
+        TEMPLATE_RAW_STRINGS.with(|stored| assert_eq!(stored.borrow().get(&(cooked_buffer as usize)), Some(&vec!["raw".to_string()])));
+        thaw_arena::thaw_arena_reset();
+        TEMPLATE_RAW_STRINGS.with(|stored| assert!(!stored.borrow().contains_key(&(cooked_buffer as usize))));
+    }
 }

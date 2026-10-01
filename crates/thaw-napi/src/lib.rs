@@ -793,7 +793,7 @@ pub struct CallbackInfo {
 struct Host {
     functions: HashMap<String, Function>,
     exports: HashMap<String, (usize, NapiValue)>,
-    compiled_callbacks: HashMap<(usize, usize), NapiValue>,
+    compiled_callbacks: HashMap<(usize, usize, usize), NapiValue>,
     libraries: Vec<*mut c_void>,
     embedded_files: Vec<std::fs::File>,
     // Addons retain `napi_env` pointers, so moving an Env during Vec growth
@@ -804,6 +804,7 @@ struct Host {
     // while unrelated calls grow the pending vector.
     #[allow(clippy::vec_box)]
     pending_call_envs: Vec<Box<Env>>,
+    unloading: bool,
     last_error: String,
 }
 
@@ -817,6 +818,7 @@ impl Host {
             embedded_files: Vec::new(),
             module_envs: Vec::new(),
             pending_call_envs: Vec::new(),
+            unloading: false,
             last_error: String::new(),
         }
     }

@@ -16,6 +16,24 @@ struct RegexMatchMeta {
     input: String,
 }
 
+fn reset_regex_meta(tracing: bool) {
+    REGEX_META.with(|stored| {
+        let mut stored = stored.borrow_mut();
+        if tracing {
+            stored.retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer));
+        } else {
+            stored.clear();
+        }
+    });
+}
+
+fn store_regex_meta(pointer: *mut u8, meta: RegexMatchMeta) {
+    thaw_arena::register_reset_hook(reset_regex_meta);
+    REGEX_META.with(|stored| {
+        stored.borrow_mut().insert(pointer as usize, meta);
+    });
+}
+
 // `thaw-runtime` has no Rust-level access to thaw-std's `Json` `Value`
 // type (see `AnyKey`'s own doc comment in `maps.rs`), so the named-capture
 // object is built through thaw-std's exported JSON entry point: serialize
@@ -571,15 +589,10 @@ pub unsafe extern "C" fn thaw_regex_exec(
     }
     let result = arena_string_array(matches);
     if !result.is_null() {
-        REGEX_META.with(|stored| {
-            stored.borrow_mut().insert(
-                result as usize,
-                RegexMatchMeta {
-                    groups,
-                    index,
-                    input: value.to_string(),
-                },
-            );
+        store_regex_meta(result, RegexMatchMeta {
+            groups,
+            index,
+            input: value.to_string(),
         });
     }
     result
@@ -773,15 +786,10 @@ pub unsafe extern "C" fn thaw_regex_match(
     let result = arena_string_array(matches);
     if !result.is_null() {
         if let Some((groups, index)) = meta {
-            REGEX_META.with(|stored| {
-                stored.borrow_mut().insert(
-                    result as usize,
-                    RegexMatchMeta {
-                        groups,
-                        index,
-                        input: value.to_string(),
-                    },
-                );
+            store_regex_meta(result, RegexMatchMeta {
+                groups,
+                index,
+                input: value.to_string(),
             });
         }
     }
@@ -880,18 +888,30 @@ pub unsafe extern "C" fn thaw_regex_match_all(
             return std::ptr::null_mut();
         }
         if !buffer.is_null() {
-            REGEX_META.with(|stored| {
-                stored.borrow_mut().insert(
-                    buffer as usize,
-                    RegexMatchMeta {
-                        groups,
-                        index,
-                        input: value.to_string(),
-                    },
-                );
+            store_regex_meta(buffer, RegexMatchMeta {
+                groups,
+                index,
+                input: value.to_string(),
             });
         }
         inner_arrays.push(inner);
     }
     arena_pointer_array(inner_arrays)
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+
+    #[test]
+    fn match_metadata_expires_with_its_arena_buffer() {
+        let buffer = thaw_arena::thaw_arena_alloc(8, 8);
+        store_regex_meta(buffer, RegexMatchMeta {
+            groups: std::ptr::null_mut(),
+            index: 3.0,
+            input: "old".into(),
+        });
+        thaw_arena::thaw_arena_reset();
+        REGEX_META.with(|stored| assert!(!stored.borrow().contains_key(&(buffer as usize))));
+    }
 }

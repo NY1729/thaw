@@ -29,6 +29,9 @@ fn executable_relative_path(path: &str) -> Result<std::path::PathBuf, String> {
 }
 
 unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
+    if HOST.with(|host| host.borrow().unloading) {
+        return Err("cannot load N-API addons while unloading".into());
+    }
     let path = executable_relative_path(path)?;
     let path_text = path.to_string_lossy();
     let path = CString::new(path_text.as_bytes())
@@ -54,9 +57,13 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     let init: RegisterV1 = if !direct.is_null() {
         std::mem::transmute::<*mut c_void, RegisterV1>(direct)
     } else if let Some(module) = registered {
-        module
-            .nm_register_func
-            .ok_or("registered N-API module has no init function")?
+        match module.nm_register_func {
+            Some(init) => init,
+            None => {
+                libc::dlclose(handle);
+                return Err("registered N-API module has no init function".into());
+            }
+        }
     } else {
         libc::dlclose(handle);
         return Err(
@@ -77,33 +84,61 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     } else {
         returned
     };
-    if let Some(exception) = env.exception {
-        let message = json_from_value(exception)?.to_string();
-        libc::dlclose(handle);
-        return Err(format!("addon initialization threw: {message}"));
-    }
-    let mut functions = Vec::new();
-    let mut exported_values = Vec::new();
-    match value_ref(exports).map_err(|_| "invalid exports value")? {
-        Value::Object(object) => {
-            for (name, value) in object {
-                if let PropertyKey::String(name) = name {
-                    if let Value::Function(function) =
-                        value_ref(*value).map_err(|_| "invalid export value")?
-                    {
-                        functions.push((name.clone(), function.clone()));
+    let initialized = (|| -> Result<_, String> {
+        if let Some(exception) = env.exception {
+            let message = json_from_value(exception)?.to_string();
+            return Err(format!("addon initialization threw: {message}"));
+        }
+        let mut functions = Vec::new();
+        let mut exported_values = Vec::new();
+        match value_ref(exports).map_err(|_| "invalid exports value")? {
+            Value::Object(object) => {
+                for (name, value) in object {
+                    if let PropertyKey::String(name) = name {
+                        if let Value::Function(function) =
+                            value_ref(*value).map_err(|_| "invalid export value")?
+                        {
+                            functions.push((name.clone(), function.clone()));
+                        }
+                        exported_values.push((name.clone(), *value));
                     }
-                    exported_values.push((name.clone(), *value));
                 }
             }
+            Value::Function(function) => {
+                let name = root_name.unwrap_or("default").to_string();
+                functions.push((name.clone(), function.clone()));
+                exported_values.push((name, exports));
+            }
+            _ => return Err("addon initialization returned neither an object nor a function".into()),
         }
-        Value::Function(function) => {
-            let name = root_name.unwrap_or("default").to_string();
-            functions.push((name.clone(), function.clone()));
-            exported_values.push((name, exports));
+        Ok((functions, exported_values))
+    })();
+    let (functions, exported_values) = match initialized {
+        Ok(values) => values,
+        Err(error) => {
+            if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
+                || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
+            {
+                // Async work and threadsafe functions retain both this Env
+                // and addon callbacks. The async poller drops pending Envs
+                // after those callbacks finish; unload_all closes libraries.
+                HOST.with(|host| {
+                    let mut host = host.borrow_mut();
+                    host.pending_call_envs.push(env);
+                    host.libraries.push(handle);
+                });
+            } else {
+                drop(env); // Finalizers and cleanup hooks may call into the addon.
+                if ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) == 0 {
+                    libc::dlclose(handle);
+                } else {
+                    // An asynchronous cleanup hook can still execute addon code.
+                    HOST.with(|host| host.borrow_mut().libraries.push(handle));
+                }
+            }
+            return Err(error);
         }
-        _ => return Err("addon initialization returned neither an object nor a function".into()),
-    }
+    };
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.functions.extend(functions);
@@ -381,38 +416,58 @@ pub unsafe extern "C" fn thaw_napi_load_named(path: *const c_char, root_name: *c
 
 #[no_mangle]
 pub extern "C" fn thaw_napi_unload_all() -> u8 {
-    if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
-        || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
-        || ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0
-    {
-        HOST.with(|host| {
-            host.borrow_mut().last_error =
-                "cannot unload N-API addons while asynchronous work or cleanup is active".into();
-        });
-        return 0;
+    struct UnloadGuard;
+    impl Drop for UnloadGuard {
+        fn drop(&mut self) {
+            HOST.with(|host| host.borrow_mut().unloading = false);
+        }
     }
-    HOST.with(|host| {
+
+    let Some((pending_envs, module_envs)) = HOST.with(|host| {
         let mut host = host.borrow_mut();
+        if host.unloading {
+            host.last_error = "N-API addon unload is already in progress".into();
+            return None;
+        }
+        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
+            || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
+            || ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0
+        {
+            host.last_error =
+                "cannot unload N-API addons while asynchronous work or cleanup is active".into();
+            return None;
+        }
+        host.unloading = true;
         host.functions.clear();
         host.exports.clear();
         host.compiled_callbacks.clear();
-        host.pending_call_envs.clear();
-        // Cleanup hooks and native finalizers must run while their addon code
-        // is still mapped.
-        host.module_envs.clear();
-        if ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0 {
+        Some((std::mem::take(&mut host.pending_call_envs), std::mem::take(&mut host.module_envs)))
+    }) else {
+        return 0;
+    };
+    let _unloading = UnloadGuard;
+    // Cleanup hooks and native finalizers may reenter HOST and addon code.
+    drop(pending_envs);
+    drop(module_envs);
+    let Some((libraries, embedded_files)) = HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
+            || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
+            || ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0
+        {
             host.last_error =
-                "cannot unload N-API addons while asynchronous cleanup is active".into();
-            return 0;
+                "cannot unload N-API addons while asynchronous work or cleanup is active".into();
+            return None;
         }
-        for handle in host.libraries.drain(..).rev() {
-            unsafe {
-                libc::dlclose(handle);
-            }
-        }
-        host.embedded_files.clear();
-        1
-    })
+        Some((std::mem::take(&mut host.libraries), std::mem::take(&mut host.embedded_files)))
+    }) else {
+        return 0;
+    };
+    for handle in libraries.into_iter().rev() {
+        unsafe { libc::dlclose(handle) };
+    }
+    drop(embedded_files);
+    1
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
@@ -908,14 +963,6 @@ fn wait_for_promise(value: NapiValue) -> Result<NapiValue, String> {
     }
 }
 
-fn module_file_name_for_export(name: &str) -> Option<CString> {
-    HOST.with(|host| {
-        let host = host.borrow();
-        let (env, _) = host.exports.get(name)?;
-        unsafe { Some((*(*env as NapiEnv)).module_file_name.clone()) }
-    })
-}
-
 unsafe fn call_impl(
     name: &str,
     args_json: &str,
@@ -1149,6 +1196,7 @@ unsafe fn call_export_with_functions(
         }
         let value = if let Some(callback) = function.callback {
             let callback_key = (
+                env as usize,
                 function.context as usize,
                 if function.context.is_null() {
                     callback as usize
@@ -1574,8 +1622,11 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
         let name = text(name)?;
         let args: Vec<JsonValue> = serde_json::from_str(&text(args)?)
             .map_err(|error| format!("invalid argument JSON: {error}"))?;
-        let function = HOST
-            .with(|host| host.borrow().functions.get(&name).cloned())
+        let (function, env_ptr) = HOST
+            .with(|host| {
+                let host = host.borrow();
+                Some((host.functions.get(&name)?.clone(), host.exports.get(&name)?.0 as NapiEnv))
+            })
             .ok_or_else(|| format!("no such native addon function `{name}`"))?;
         let callback = callback.ok_or("native addon callback is null")?;
         // Generated call sites create a small ABI adapter per invocation,
@@ -1583,6 +1634,7 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
         // closure context as the identity so subscribe/unsubscribe calls made
         // at different source locations still receive the same napi_value.
         let callback_key = (
+            env_ptr as usize,
             context as usize,
             if context.is_null() {
                 callback as usize
@@ -1590,14 +1642,10 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
                 0
             },
         );
-        let mut env = Box::new(Env::new());
-        if let Some(module_file_name) = module_file_name_for_export(&name) {
-            env.module_file_name = module_file_name;
-        }
-        let mut values: Vec<NapiValue> = args
-            .iter()
-            .map(|value| value_from_json(&mut env, value))
-            .collect();
+        let mut values: Vec<NapiValue> = {
+            let env = env_mut(env_ptr).map_err(|_| "invalid native addon environment")?;
+            args.iter().map(|value| value_from_json(&mut *env, value)).collect()
+        };
         let cached_callback =
             HOST.with(|host| host.borrow().compiled_callbacks.get(&callback_key).copied());
         let mut created_callback = None;
@@ -1609,27 +1657,30 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
                 context: context as usize,
             });
             let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
-            let value = env.alloc(Value::Function(Function {
-                callback: thaw_compiled_callback,
-                data: bridge_data,
-                properties: HashMap::new(),
-                _thaw_bridge: Some(bridge),
-            }));
+            let value = env_mut(env_ptr)
+                .map_err(|_| "invalid native addon environment")?
+                .alloc(Value::Function(Function {
+                    callback: thaw_compiled_callback,
+                    data: bridge_data,
+                    properties: HashMap::new(),
+                    _thaw_bridge: Some(bridge),
+                }));
             created_callback = Some(value);
             value
         };
         values.push(callback_value);
-        let this_arg = env.alloc(Value::Undefined);
+        let this_arg = env_mut(env_ptr)
+            .map_err(|_| "invalid native addon environment")?
+            .alloc(Value::Undefined);
         let mut info = CallbackInfo {
             args: values,
             this_arg,
             new_target: ptr::null_mut(),
             data: function.data,
         };
-        let env_ptr = &mut *env as NapiEnv;
         let value = callback_result(env_ptr, (function.callback)(env_ptr, &mut info));
-        if let Some(exception) = env.exception {
-            return Err(describe_env_exception(&mut *env as *mut Env, exception)?);
+        if let Some(exception) = (*env_ptr).exception.take() {
+            return Err(describe_env_exception(env_ptr, exception)?);
         }
         let value = wait_for_promise(value)?;
         let value = if value.is_null() {
@@ -1647,13 +1698,13 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
                         .insert(callback_key, callback);
                 });
             }
-            HOST.with(|host| host.borrow_mut().pending_call_envs.push(env));
         } else {
-            HOST.with(|host| {
+            let pending_envs = HOST.with(|host| {
                 let mut host = host.borrow_mut();
                 host.compiled_callbacks.remove(&callback_key);
-                host.pending_call_envs.clear();
+                std::mem::take(&mut host.pending_call_envs)
             });
+            drop(pending_envs);
         }
         Ok(value)
     })();
@@ -1704,6 +1755,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
         };
         let callback = callback.ok_or("native addon callback is null")?;
         let callback_key = (
+            env as usize,
             context as usize,
             if context.is_null() {
                 callback as usize
