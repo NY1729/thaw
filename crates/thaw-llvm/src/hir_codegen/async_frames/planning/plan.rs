@@ -374,8 +374,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         )
                     };
                     found = true;
-                    segments.last_mut().unwrap().awaited = Some(sleep_zero());
                     let condition_state = segments.len();
+                    segments.last_mut().unwrap().await_next = Some(condition_state);
                     let guard = format!("__thaw_loop_{next_guard}");
                     let body_guard = format!("__thaw_loop_body_{next_guard}");
                     next_guard += 1;

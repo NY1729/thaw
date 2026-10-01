@@ -101,6 +101,30 @@ fn frame_split_supports_await_inside_while_loop() {
     assert_eq!(compile_and_run(source, "await_while_loop"), "3\n3\n");
 }
 
+#[test]
+fn async_nested_loop_runs_until_first_await_synchronously() {
+    let source = r#"
+        async function update(trace: { value: number }): Promise<void> {
+            while (true) {
+                trace.value = 1;
+                while (true) {
+                    trace.value = 2;
+                    await sleep(1);
+                    break;
+                }
+                break;
+            }
+        }
+
+        function main(): void {
+            const trace: { value: number } = { value: 0 };
+            update(trace);
+            console.log(trace.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_nested_loop_sync_prefix"), "2\n");
+}
+
 /// Baseline coverage for a local declared *inside* an async `while`
 /// loop's body (re-declared every iteration, unlike a local declared
 /// before the loop) and captured by the closure `&&`/`||` desugar into
