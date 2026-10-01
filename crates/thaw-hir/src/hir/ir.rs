@@ -311,4 +311,12 @@ pub struct HirGlobal {
 pub enum HirInitStep {
     StoreGlobal(Symbol, HirExpr),
     Statement(HirStmt),
+    /// Compiler-owned shim region with declarations but no startup effect.
+    ExecutionBoundary(bool),
+    ModuleBoundary {
+        index: usize,
+        eager: bool,
+        runtime: bool,
+        static_dependencies: Vec<usize>,
+    },
 }

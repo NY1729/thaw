@@ -58,6 +58,83 @@ fn sourced_reexport_does_not_fall_back_to_a_same_named_local() {
 }
 
 #[test]
+fn type_only_imports_keep_interfaces_without_running_dependency_statements() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-only-module-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("types.ts"),
+        "export interface User { name: string; } export class Box { name: string = 'unused'; static { console.log('class static ran'); } } export enum Kind { One = 1 } console.log('type module ran');").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import type { User, Box, Kind } from './types'; function accept(box: Box, kind: Kind): void {} function main(): void { const user: User = { name: 'Ada' }; console.log(user.name); }";
+    std::fs::write(&entry, source).unwrap();
+    let module = module_graph::bundle(&entry, source, &Default::default(), &Default::default(), &Default::default(), &Default::default()).unwrap();
+    thaw_hir::lower_module(&module).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "Ada\n");
+    let named_type_source = "import { type User } from './types'; function main(): void { const user: User = { name: 'Grace' }; console.log(user.name); }";
+    std::fs::write(&entry, named_type_source).unwrap();
+    let named_type_module = module_graph::bundle(&entry, named_type_source, &Default::default(), &Default::default(), &Default::default(), &Default::default()).unwrap();
+    thaw_hir::lower_module(&named_type_module).unwrap();
+    let named_output = dir.join("named_app");
+    build(&entry, &named_output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let named_result = Command::new(&named_output).output().unwrap();
+    assert!(named_result.status.success());
+    assert_eq!(String::from_utf8_lossy(&named_result.stdout), "Grace\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_external_packages_are_resolved_without_runtime_loading() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-only-external-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("types.ts"), "import type { Hidden } from 'types-only'; export type Alias = Hidden;").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import type { Alias } from './types'; import { value } from 'runtime-package'; function main(): void { console.log(value); }";
+    std::fs::write(&entry, source).unwrap();
+    let all = module_graph::external_specifiers(&entry, source).unwrap();
+    assert!(all.iter().any(|(name, _)| name == "types-only"));
+    assert!(all.iter().any(|(name, _)| name == "runtime-package"));
+    let runtime = module_graph::external_runtime_specifiers(&entry, source).unwrap();
+    assert!(!runtime.contains("types-only"));
+    assert!(runtime.contains("runtime-package"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_module_keeps_link_features_for_retained_function_bodies() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-only-features-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("types.ts"),
+        "export interface Shape { value: number; } export function unused(): void { const locale = new Intl.Locale('en'); console.log(locale); }").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import type { Shape } from './types'; function main(): void { const shape: Shape = { value: 1 }; console.log(shape.value); }";
+    std::fs::write(&entry, source).unwrap();
+    assert!(module_graph::runtime_features(&entry, source).unwrap().contains("intl"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_registry_package_does_not_load_its_bundle() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-registry-{}", std::process::id()));
+    let registry = dir.join("registry");
+    let package = registry.join("modules").join("types-only");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export interface Shape { value: number; }\nexport function f(): number;\nexport const value: number;\nexport class Client { read(): number; }\n").unwrap();
+    std::fs::write(package.join("bundle.js"), "throw new Error('type-only bundle ran');\n").unwrap();
+    std::fs::write(dir.join("types.ts"), "import { f, value } from 'types-only'; export interface LocalShape { value: number; } export function unused(): number { return f() + value; }").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, "import type { Shape, Client } from 'types-only'; import type { LocalShape } from './types'; function accept(value: Shape, client: Client, local: LocalShape): void {} function main(): void { console.log('ok'); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn preserves_interface_declarations_for_typescript_merging() {
     let dir = std::env::temp_dir().join(format!("thaw interface merge {}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

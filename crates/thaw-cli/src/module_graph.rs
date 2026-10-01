@@ -15,6 +15,8 @@ struct LoadedModule {
     source: String,
     module: Module,
     dependencies: HashMap<String, usize>,
+    runtime_dependencies: HashSet<usize>,
+    static_dependencies: HashSet<usize>,
 }
 
 fn export_name(name: &ModuleExportName) -> Result<String, String> {
@@ -161,8 +163,10 @@ fn relative_candidates(from: &Path, specifier: &str) -> Vec<PathBuf> {
     }
 }
 
-fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
+fn dependency_specifiers(module: &Module) -> Result<Vec<(String, bool, bool)>, String> {
     let mut specs = Vec::new();
+    let mut runtime = HashSet::new();
+    let mut static_runtime = HashSet::new();
     let mut create_require_functions = HashSet::new();
     let mut module_namespaces = HashSet::new();
     for item in &module.body {
@@ -170,18 +174,29 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
             continue;
         };
         let source = match decl {
-            ModuleDecl::Import(import) => Some(&import.src),
-            ModuleDecl::ExportNamed(export) => export.src.as_ref(),
-            ModuleDecl::ExportAll(export) => Some(&export.src),
+            ModuleDecl::Import(import) => Some((&import.src, !import.type_only
+                && (import.specifiers.is_empty() || import.specifiers.iter().any(|specifier| {
+                    !matches!(specifier, ImportSpecifier::Named(named) if named.is_type_only)
+                })))),
+            ModuleDecl::ExportNamed(export) => export.src.as_ref().map(|source| (source,
+                !export.type_only && (export.specifiers.is_empty()
+                    || export.specifiers.iter().any(|specifier| {
+                        !matches!(specifier, thaw_parser::ast::ExportSpecifier::Named(named) if named.is_type_only)
+                    })))),
+            ModuleDecl::ExportAll(export) => Some((&export.src, !export.type_only)),
             _ => None,
         };
-        if let Some(source) = source {
+        if let Some((source, is_runtime)) = source {
             let spec = source
                 .value
                 .as_str()
                 .ok_or_else(|| "module specifiers must be valid UTF-8".to_string())?;
             if !specs.iter().any(|existing| existing == spec) {
                 specs.push(spec.to_string());
+            }
+            if is_runtime {
+                runtime.insert(spec.to_string());
+                static_runtime.insert(spec.to_string());
             }
             if matches!(spec, "module" | "node:module") {
                 if let ModuleDecl::Import(import) = decl {
@@ -273,6 +288,8 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
     };
     module.visit_with(&mut required);
     for specifier in required.specs {
+        runtime.insert(specifier.clone());
+        static_runtime.insert(specifier.clone());
         if !specs.contains(&specifier) {
             specs.push(specifier);
         }
@@ -309,11 +326,19 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
     let mut dynamic_imports = DynamicImportSpecs { specs: Vec::new() };
     module.visit_with(&mut dynamic_imports);
     for specifier in dynamic_imports.specs {
+        runtime.insert(specifier.clone());
+        // Dynamic imports remain eager until the lazy initializer ABI is
+        // connected; type-only reachability can be fixed independently.
+        static_runtime.insert(specifier.clone());
         if !specs.contains(&specifier) {
             specs.push(specifier);
         }
     }
-    Ok(specs)
+    Ok(specs.into_iter().map(|specifier| {
+        let is_runtime = runtime.contains(&specifier);
+        let is_static = static_runtime.contains(&specifier);
+        (specifier, is_runtime, is_static)
+    }).collect())
 }
 
 fn load_module(
@@ -353,7 +378,9 @@ fn load_module(
     let module = thaw_hir::normalize_top_level_destructuring(&module)
         .map_err(|error| format!("failed to normalize `{}`: {error}", path.display()))?;
     let mut dependencies = HashMap::new();
-    for specifier in dependency_specifiers(&module)? {
+    let mut runtime_dependencies = HashSet::new();
+    let mut static_dependencies = HashSet::new();
+    for (specifier, is_runtime, is_static) in dependency_specifiers(&module)? {
         if !specifier.starts_with('.') {
             continue;
         }
@@ -362,6 +389,8 @@ fn load_module(
             format!("{}: {error}", source_location(&path, &source, &specifier))
         })?;
         let dependency = load_module(dependency_path, None, transform, modules, loaded, visiting, watched)?;
+        if is_runtime { runtime_dependencies.insert(dependency); }
+        if is_static { static_dependencies.insert(dependency); }
         dependencies.insert(specifier, dependency);
     }
     visiting.pop();
@@ -371,6 +400,8 @@ fn load_module(
         source,
         module,
         dependencies,
+        runtime_dependencies,
+        static_dependencies,
     });
     loaded.insert(path, index);
     Ok(index)
@@ -825,6 +856,29 @@ impl VisitMut for RenameReferences<'_> {
         }
     }
 
+    fn visit_mut_ts_type_alias_decl(&mut self, alias: &mut thaw_parser::ast::TsTypeAliasDecl) {
+        alias.visit_mut_children_with(self);
+        if self.function_depth == 0 {
+            self.rename_ident(&mut alias.id);
+        }
+    }
+
+    fn visit_mut_ts_enum_decl(&mut self, declaration: &mut thaw_parser::ast::TsEnumDecl) {
+        declaration.visit_mut_children_with(self);
+        if self.function_depth == 0 {
+            self.rename_ident(&mut declaration.id);
+        }
+    }
+
+    fn visit_mut_ts_module_decl(&mut self, declaration: &mut thaw_parser::ast::TsModuleDecl) {
+        declaration.visit_mut_children_with(self);
+        if self.function_depth == 0 {
+            if let thaw_parser::ast::TsModuleName::Ident(name) = &mut declaration.id {
+                self.rename_ident(name);
+            }
+        }
+    }
+
     fn visit_mut_ts_property_signature(
         &mut self,
         property: &mut thaw_parser::ast::TsPropertySignature,
@@ -911,6 +965,12 @@ fn declaration_names(declaration: &Decl) -> Vec<String> {
         }
         Decl::Class(declaration) => vec![declaration.ident.sym.to_string()],
         Decl::TsInterface(declaration) => vec![declaration.id.sym.to_string()],
+        Decl::TsTypeAlias(declaration) => vec![declaration.id.sym.to_string()],
+        Decl::TsEnum(declaration) => vec![declaration.id.sym.to_string()],
+        Decl::TsModule(declaration) => match &declaration.id {
+            thaw_parser::ast::TsModuleName::Ident(name) => vec![name.sym.to_string()],
+            thaw_parser::ast::TsModuleName::Str(_) => Vec::new(),
+        },
         Decl::Var(declaration) => declaration
             .decls
             .iter()
@@ -954,6 +1014,21 @@ fn declared_names(module: &Module) -> Vec<String> {
         .collect()
 }
 
+fn reachable_modules(modules: &[LoadedModule], entry: usize, static_only: bool) -> HashSet<usize> {
+    let mut reachable = HashSet::new();
+    let mut pending = vec![entry];
+    while let Some(index) = pending.pop() {
+        if reachable.insert(index) {
+            pending.extend(if static_only {
+                &modules[index].static_dependencies
+            } else {
+                &modules[index].runtime_dependencies
+            }.iter().copied());
+        }
+    }
+    reachable
+}
+
 pub fn runtime_features(
     entry: &Path,
     source: &str,
@@ -970,6 +1045,9 @@ pub fn runtime_features(
     )?;
     Ok(modules
         .iter()
+        // Type-only modules retain their declarations and function bodies
+        // for type resolution, so code generation may still need their
+        // runtime symbols even though their initializers are not executed.
         .flat_map(|module| thaw_bridge::required_runtime_features(&module.source))
         .collect())
 }
@@ -1008,7 +1086,7 @@ pub fn external_specifiers(
     )?;
     let mut result = Vec::new();
     for module in modules {
-        for specifier in dependency_specifiers(&module.module)? {
+        for (specifier, _, _) in dependency_specifiers(&module.module)? {
             if !specifier.starts_with('.')
                 && !result.iter().any(|(existing, _)| existing == &specifier)
             {
@@ -1017,6 +1095,37 @@ pub fn external_specifiers(
         }
     }
     Ok(result)
+}
+
+/// External packages needed at runtime. The complete specifier list above is
+/// still used to resolve `.d.ts` exports for type-only imports.
+pub fn external_runtime_specifiers(
+    entry: &Path,
+    entry_source: &str,
+) -> Result<HashSet<String>, String> {
+    let mut modules = Vec::new();
+    let entry_index = load_module(
+        entry.canonicalize().map_err(|error| error.to_string())?,
+        Some(entry_source),
+        None,
+        &mut modules,
+        &mut HashMap::new(),
+        &mut Vec::new(),
+        &mut HashSet::new(),
+    )?;
+    let reachable = reachable_modules(&modules, entry_index, false);
+    let mut runtime = HashSet::new();
+    for (index, module) in modules.iter().enumerate() {
+        if !reachable.contains(&index) {
+            continue;
+        }
+        for (specifier, is_runtime, _) in dependency_specifiers(&module.module)? {
+            if is_runtime && !specifier.starts_with('.') {
+                runtime.insert(specifier);
+            }
+        }
+    }
+    Ok(runtime)
 }
 
 /// `nested`'s members name a package's own flattened `.d.ts` function
@@ -1116,6 +1225,8 @@ pub fn bundle_with_source_transform(
         &mut Vec::new(),
         &mut HashSet::new(),
     )?;
+    let runtime_reachable = reachable_modules(&modules, entry_index, false);
+    let eager_reachable = reachable_modules(&modules, entry_index, true);
 
     let mut exports: Vec<HashMap<String, String>> = vec![HashMap::new(); modules.len()];
     let mut namespace_exports: Vec<HashMap<String, HashMap<String, String>>> =
@@ -1691,6 +1802,33 @@ pub fn bundle_with_source_transform(
         exports[index] = public;
         namespace_exports[index] = public_namespaces;
         ambiguous_exports[index] = ambiguous;
+        // The marker survives HIR normalization and identifies the owner of
+        // each source-ordered initialization step. Type-only modules retain
+        // every declaration for type resolution, but their init group is
+        // never scheduled. Dynamic-only groups are invoked on first import.
+        let mut static_dependencies = modules[index]
+            .static_dependencies
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        static_dependencies.sort_unstable();
+        let marker = format!(
+            "__thaw_internal_module:{}:{}:{}:{}",
+            index,
+            usize::from(eager_reachable.contains(&index)),
+            usize::from(runtime_reachable.contains(&index)),
+            static_dependencies.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
+        );
+        bundled_items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(
+            thaw_parser::ast::ExprStmt {
+                span: Default::default(),
+                expr: Box::new(Expr::Lit(thaw_parser::ast::Lit::Str(thaw_parser::ast::Str {
+                    span: Default::default(),
+                    value: marker.into(),
+                    raw: None,
+                }))),
+            },
+        )));
         bundled_items.extend(items);
     }
 

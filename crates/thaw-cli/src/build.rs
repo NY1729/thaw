@@ -309,7 +309,9 @@ fn build_with_native_mode(
         .then(|| external_native_directories(output, &scratch))
         .transpose()?;
     let external_specifiers = module_graph::external_specifiers(input, &user_source)?;
+    let mut runtime_packages = module_graph::external_runtime_specifiers(input, &user_source)?;
     let mut resolved_packages = use_packages.to_vec();
+    runtime_packages.extend(use_packages.iter().cloned());
     for (specifier, location) in &external_specifiers {
         let package = if specifier.starts_with("node:") {
             thaw_registry::resolve_builtin(specifier)
@@ -403,6 +405,7 @@ fn build_with_native_mode(
     ) = generate_registry_shims(
         registry_dir,
         &resolved_packages,
+        &runtime_packages,
         &user_source,
         embed_native_addons,
         output,
@@ -411,6 +414,7 @@ fn build_with_native_mode(
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     let mut native_addons = resolved_packages
         .iter()
+        .filter(|package| runtime_packages.contains(*package))
         .filter_map(|package| thaw_registry::resolve(registry_dir, package).ok()?.native_addon)
         .collect::<Vec<_>>();
     native_addons.sort();
@@ -420,6 +424,7 @@ fn build_with_native_mode(
     // package-qualified alias `generate_registry_shims` actually
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
+    let registry_shim_len = registry_shim.len();
     let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
     if let Some(directory) = assets {
         shim_source.push_str(&generate_asset_shim(directory)?);
@@ -504,7 +509,24 @@ fn build_with_native_mode(
         &transform,
     )?;
     if !shim_source.is_empty() {
-        let mut shim = thaw_parser::parse_typescript(&shim_source)?;
+        let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_source_map(&shim_source)?;
+        for item in &mut shim.body {
+            let thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement)) = item else {
+                continue;
+            };
+            if shim_source_map.lookup_byte_offset(statement.span.lo).pos.0 as usize >= registry_shim_len {
+                continue;
+            }
+            let thaw_parser::ast::Expr::Lit(thaw_parser::ast::Lit::Str(value)) = statement.expr.as_ref() else {
+                continue;
+            };
+            if matches!(value.value.as_str(), Some("__thaw_internal_execution:0" | "__thaw_internal_execution:1")) {
+                // Only compiler-produced registry shim statements receive
+                // the sentinel span recognized by HIR; user source and
+                // later bridge shims cannot switch initializer execution.
+                statement.span = Default::default();
+            }
+        }
         shim.body.extend(module.body);
         module.body = shim.body;
     }

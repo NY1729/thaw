@@ -35,6 +35,38 @@ fn lower_top_level_initializers(
     }
     let mut steps = Vec::new();
     for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Expr(statement)) = item {
+            if statement.span == swc_common::DUMMY_SP {
+                if let Expr::Lit(Lit::Str(value)) = statement.expr.as_ref() {
+                    if let Some(mode) = value.value.as_str().and_then(|value| value.strip_prefix("__thaw_internal_execution:")) {
+                        let execute = match mode {
+                            "0" => false,
+                            "1" => true,
+                            _ => return Err("invalid internal execution boundary".into()),
+                        };
+                        steps.push(HirInitStep::ExecutionBoundary(execute));
+                        continue;
+                    }
+                    if let Some(encoded) = value.value.as_str().and_then(|value| value.strip_prefix("__thaw_internal_module:")) {
+                        let fields = encoded.split(':').collect::<Vec<_>>();
+                        if fields.len() != 4 {
+                            return Err("invalid internal module boundary".into());
+                        }
+                        let index = fields[0].parse().map_err(|_| "invalid internal module index")?;
+                        let eager = fields[1] == "1";
+                        let runtime = fields[2] == "1";
+                        let static_dependencies = if fields[3].is_empty() {
+                            Vec::new()
+                        } else {
+                            fields[3].split(',').map(str::parse).collect::<Result<Vec<_>, _>>()
+                                .map_err(|_| "invalid internal module dependency")?
+                        };
+                        steps.push(HirInitStep::ModuleBoundary { index, eager, runtime, static_dependencies });
+                        continue;
+                    }
+                }
+            }
+        }
         match item {
             ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) => {
                 for declarator in &declaration.decls {
