@@ -171,14 +171,35 @@ fn net_close_listener(handle: u32) {
     });
 }
 
+fn udp_error(error: io::Error) -> String {
+    let code = match error.kind() {
+        io::ErrorKind::AddrInUse => "EADDRINUSE",
+        io::ErrorKind::AddrNotAvailable => "EADDRNOTAVAIL",
+        io::ErrorKind::PermissionDenied => "EACCES",
+        io::ErrorKind::ConnectionRefused => "ECONNREFUSED",
+        io::ErrorKind::InvalidInput => "EINVAL",
+        io::ErrorKind::NotFound => "ENOENT",
+        _ => "EUNKNOWN",
+    };
+    #[cfg(unix)]
+    let code = match error.raw_os_error() {
+        Some(libc::ENETUNREACH) => "ENETUNREACH",
+        Some(libc::EHOSTUNREACH) => "EHOSTUNREACH",
+        Some(libc::EAFNOSUPPORT) => "EAFNOSUPPORT",
+        Some(libc::EBADF) => "EBADF",
+        _ => code,
+    };
+    format!("err|{code}|{error}")
+}
+
 fn udp_bind(host: &str, port: u16) -> String {
     match UdpSocket::bind((host, port)) {
         Ok(socket) => {
             let address = match socket.local_addr() {
                 Ok(address) => address,
-                Err(error) => return format!("err|{error}"),
+                Err(error) => return udp_error(error),
             };
-            let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+            if let Err(error) = socket.set_nonblocking(true) { return udp_error(error); }
             UDP_SOCKETS.with(|sockets| {
                 let mut sockets = sockets.borrow_mut();
                 let handle = sockets.0;
@@ -187,7 +208,7 @@ fn udp_bind(host: &str, port: u16) -> String {
                 format!("ok|{handle}|{}|{}", address.ip(), address.port())
             })
         }
-        Err(error) => format!("err|{error}"),
+        Err(error) => udp_error(error),
     }
 }
 
@@ -195,12 +216,11 @@ fn udp_send(handle: u32, value: &[u8], host: &str, port: u16) -> String {
     UDP_SOCKETS.with(|sockets| {
         let sockets = sockets.borrow();
         let Some(socket) = sockets.1.get(&handle) else {
-            return "err|socket is closed".to_string();
+            return "err|EBADF|socket is closed".to_string();
         };
-        socket
-            .send_to(value, (host, port))
+        (if socket.peer_addr().is_ok() { socket.send(value) } else { socket.send_to(value, (host, port)) })
             .map(|written| format!("ok|{written}"))
-            .unwrap_or_else(|error| format!("err|{error}"))
+            .unwrap_or_else(|error| udp_error(error))
     })
 }
 
@@ -208,7 +228,7 @@ fn udp_receive(handle: u32) -> String {
     UDP_SOCKETS.with(|sockets| {
         let sockets = sockets.borrow();
         let Some(socket) = sockets.1.get(&handle) else {
-            return "err|socket is closed".to_string();
+            return "err|EBADF|socket is closed".to_string();
         };
         let mut value = vec![0u8; 65_536];
         match socket.recv_from(&mut value) {
@@ -222,9 +242,38 @@ fn udp_receive(handle: u32) -> String {
                     length
                 )
             }
-            Err(error) => format!("err|{error}"),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => "pending".to_string(),
+            Err(error) => udp_error(error),
         }
     })
+}
+
+fn udp_connect(handle: u32, host: &str, port: u16) -> String {
+    UDP_SOCKETS.with(|sockets| {
+        let sockets = sockets.borrow();
+        let Some(socket) = sockets.1.get(&handle) else { return "err|EBADF|socket is closed".to_string(); };
+        socket.connect((host, port))
+            .map(|()| "ok".to_string())
+            .unwrap_or_else(|error| udp_error(error))
+    })
+}
+
+#[cfg(unix)]
+fn udp_disconnect(handle: u32) -> String {
+    use std::os::fd::AsRawFd;
+    UDP_SOCKETS.with(|sockets| {
+        let sockets = sockets.borrow();
+        let Some(socket) = sockets.1.get(&handle) else { return "err|EBADF|socket is closed".to_string(); };
+        let mut address: libc::sockaddr = unsafe { std::mem::zeroed() };
+        address.sa_family = libc::AF_UNSPEC as libc::sa_family_t;
+        let result = unsafe { libc::connect(socket.as_raw_fd(), &address, std::mem::size_of::<libc::sockaddr>() as libc::socklen_t) };
+        if result == 0 { "ok".to_string() } else { udp_error(io::Error::last_os_error()) }
+    })
+}
+
+#[cfg(not(unix))]
+fn udp_disconnect(_handle: u32) -> String {
+    "err|ENOTSUP|UDP disconnect is unsupported on this platform".to_string()
 }
 
 fn udp_close(handle: u32) {

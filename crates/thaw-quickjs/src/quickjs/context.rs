@@ -1009,19 +1009,24 @@ fn ensure_context() {
                     Function::new(ctx.clone(), |handle: u32| net_close_listener(handle))
                         .expect("failed to create JavaScript TCP listener closer");
                 let udp_bind_function = Function::new(ctx.clone(), |host: String, port: u32| {
-                    udp_bind(&host, port as u16)
+                    match u16::try_from(port) { Ok(port) => udp_bind(&host, port), Err(_) => "err|EINVAL|invalid UDP port".to_string() }
                 })
                 .expect("failed to create JavaScript UDP binder");
                 let udp_send_function = Function::new(
                     ctx.clone(),
                     |handle: u32, value: String, host: String, port: u32| {
-                        udp_send(handle, &hex_decode(&value), &host, port as u16)
+                        match u16::try_from(port) { Ok(port) if port != 0 => udp_send(handle, &hex_decode(&value), &host, port), _ => "err|EINVAL|invalid UDP port".to_string() }
                     },
                 )
                 .expect("failed to create JavaScript UDP sender");
                 let udp_receive_function =
                     Function::new(ctx.clone(), |handle: u32| udp_receive(handle))
                         .expect("failed to create JavaScript UDP receiver");
+                let udp_connect_function = Function::new(ctx.clone(), |handle: u32, host: String, port: u32| {
+                    match u16::try_from(port) { Ok(port) if port != 0 => udp_connect(handle, &host, port), _ => "err|EINVAL|invalid UDP port".to_string() }
+                }).expect("failed to create JavaScript UDP connector");
+                let udp_disconnect_function = Function::new(ctx.clone(), |handle: u32| udp_disconnect(handle))
+                    .expect("failed to create JavaScript UDP disconnector");
                 let udp_close_function =
                     Function::new(ctx.clone(), |handle: u32| udp_close(handle))
                         .expect("failed to create JavaScript UDP closer");
@@ -1759,6 +1764,12 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_udp_receive", udp_receive_function)
                     .expect("failed to install JavaScript UDP receiver");
+                ctx.globals()
+                    .set("__thaw_udp_connect", udp_connect_function)
+                    .expect("failed to install JavaScript UDP connector");
+                ctx.globals()
+                    .set("__thaw_udp_disconnect", udp_disconnect_function)
+                    .expect("failed to install JavaScript UDP disconnector");
                 ctx.globals()
                     .set("__thaw_udp_close", udp_close_function)
                     .expect("failed to install JavaScript UDP closer");
