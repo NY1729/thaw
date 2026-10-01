@@ -390,8 +390,8 @@
     const bytesFromHex = value => new Uint8Array(String(value).match(/../g)?.map(pair => parseInt(pair, 16)) || []);
     const compressionTransform = (operation, format) => {
       const normalized = String(format);
-      if (normalized !== 'gzip' && normalized !== 'deflate' && normalized !== 'deflate-raw' && normalized !== 'br') throw new TypeError('Unsupported compression format');
-      const nativeFormat = normalized === 'deflate-raw' ? 'deflateRaw' : normalized === 'br' ? 'brotli' : normalized, handle = __thaw_zlib_stream_create(operation, nativeFormat);
+      if (normalized !== 'gzip' && normalized !== 'deflate' && normalized !== 'deflate-raw' && normalized !== 'brotli') throw new TypeError('Unsupported compression format');
+      const nativeFormat = normalized === 'deflate-raw' ? 'deflateRaw' : normalized, handle = __thaw_zlib_stream_create(operation, nativeFormat);
       let active = true;
       const release = () => { if (active) { active = false; __thaw_zlib_stream_drop(handle); } };
       return new TransformStream({
