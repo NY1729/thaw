@@ -779,3 +779,67 @@ fn generate_module_init_captures_qualified_aliases_right_after_load() {
     );
     assert!(hoek_load < hoek_capture);
 }
+
+#[test]
+fn private_napi_value_envelopes_preserve_origins_across_result_paths() {
+    use std::ffi::{CStr, CString};
+
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let script = [r#"
+        globalThis.__thaw_napi_bridge_exports = () => '["direct"]';
+        globalThis.__thaw_napi_bridge_call = () => JSON.stringify({
+          kind: 'value',
+          value: JSON.parse('{"timestamp":0,"__thaw_napi_error__":"data","__thaw_napi_promise__":"ordinary","$__thaw_napi_undefined$":true,"nested":{"__proto__":null,"invalid":null,"numbers":[null,null,null]}}'),
+          origins: [[[], 'plain'], [['nested'], 'plain'],
+                    [['nested', '__proto__'], 'date', 0],
+                    [['nested', 'invalid'], 'date', null],
+                    [['nested', 'numbers', 0], 'nonfinite', 'NaN'],
+                    [['nested', 'numbers', 1], 'nonfinite', 'Infinity'],
+                    [['nested', 'numbers', 2], 'nonfinite', '-Infinity']]
+        });
+        var syncCount = 0;
+        globalThis.__thaw_napi_bridge_handle = operation => {
+          if (operation === 'sync_reference') {
+            var index = syncCount++;
+            if (index === 0) return JSON.stringify({kind:'value', value:{stamp:null}, origins:[[['stamp'],'date',0]]});
+            if (index === 1) return JSON.stringify({kind:'value', value:[null], origins:[[[0],'date',0]]});
+            return JSON.stringify({kind:'value', value:{'0':null}, origins:[[['0'],'nonfinite','NaN']]});
+          }
+          if (operation === 'promise_state') return JSON.stringify({kind:'resolved', value:null, origins:[[[], 'date', null]]});
+          if (operation === 'get') return JSON.stringify({kind:'value', value:null, origins:[[[], 'nonfinite', 'NaN']]});
+          if (operation === 'call_captured') return JSON.stringify({kind:'value', value:null, origins:[[[], 'date', 0]]});
+          if (operation === 'call') return JSON.stringify({kind:'value', value:null, origins:[[[], 'nonfinite', '-Infinity']]});
+          return JSON.stringify({kind:'value', value:true});
+        };
+    "#, &wrapped, r#"
+        globalThis.inspectPrivateNapiWire = () => {
+          const direct = require.addon().direct();
+          const nested = direct.nested;
+          const own = Object.getOwnPropertyDescriptor(nested, '__proto__');
+          const argument = {stamp: 1};
+          __thaw_napi_argument(argument);
+          __thaw_napi_sync_arguments([argument]);
+          const array = [1]; __thaw_napi_argument(array); __thaw_napi_sync_arguments([array]);
+          const numericObject = {'0': 1}; __thaw_napi_argument(numericObject); __thaw_napi_sync_arguments([numericObject]);
+          const settled = __thaw_napi_handle('promise_state', '5', '', []).value;
+          return [direct.timestamp === 0, direct instanceof Date === false,
+            direct.__thaw_napi_error__ === 'data',
+            direct.__thaw_napi_promise__ === 'ordinary' && direct['$__thaw_napi_undefined$'] === true,
+            own.value instanceof Date && own.value.getTime() === 0,
+            Object.getPrototypeOf(nested) === Object.prototype,
+            nested.invalid instanceof Date && Number.isNaN(nested.invalid.getTime()),
+            Number.isNaN(nested.numbers[0]), nested.numbers[1] === Infinity,
+            nested.numbers[2] === -Infinity,
+            Number.isNaN(__thaw_napi_handle('get', '5', '', []).value),
+            __thaw_napi_handle('call_captured', '5', '', []).value instanceof Date,
+            __thaw_napi_handle('call', '5', '', []).value === -Infinity,
+            settled instanceof Date && Number.isNaN(settled.getTime()),
+            argument.stamp instanceof Date && argument.stamp.getTime() === 0,
+            array[0] instanceof Date && array[0].getTime() === 0,
+            Number.isNaN(numericObject['0'])];
+        };
+    "#].join("\n");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"inspectPrivateNapiWire".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
+}
