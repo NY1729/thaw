@@ -852,6 +852,49 @@ fn installed_package_inlines_a_default_class_reexport() {
 }
 
 #[test]
+fn anonymous_default_declarations_survive_named_reexports() {
+    // Unrun regression: both declarations lack an identifier in their own
+    // files, but the entry exposes each under an ordinary public name.
+    let root = temp_registry("anonymous-default-reexports");
+    let entry = root.join("index.d.ts");
+    fs::write(&entry,
+        "export { default as make } from './make';\n\
+         export { default as Widget } from './widget';\n\
+         export { default as named } from './named';\n\
+         export { default as null } from './make';\n",
+    ).unwrap();
+    fs::write(root.join("make.d.ts"),
+        "export /* default boundary */ default\nfunction(value: string): number;",
+    ).unwrap();
+    fs::write(root.join("widget.d.ts"),
+        "declare class Base { inherited(): number; }\n\
+         export default /* class boundary */ class<T> extends Base { method(value: T): T; }",
+    ).unwrap();
+    fs::write(root.join("named.d.ts"),
+        "export /* named boundary */ default\nfunction original(value: string): string;",
+    ).unwrap();
+
+    let flattened = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(flattened.contains("function make(value: string): number"), "{flattened}");
+    assert!(flattened.contains("class __thaw_default_class_"), "{flattened}");
+    assert!(flattened.contains("as Widget"), "{flattened}");
+    assert!(flattened.contains("<T> extends Base"), "{flattened}");
+    assert!(flattened.contains("method(value: T): T"), "{flattened}");
+    assert!(flattened.contains("inherited(): number"), "{flattened}");
+    assert!(flattened.contains("function named(value: string): string"), "{flattened}");
+    assert!(flattened.contains("as null"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let async_normalized = reexported_default_declaration(
+        "async /* retained */ function(value: string): Promise<string>;",
+        "function", &entry, None, true, false,
+    ).unwrap();
+    assert!(async_normalized.contains("/* retained */ function __thaw_default_function_"), "{async_normalized}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn installed_package_inlines_a_default_reexported_literal_constant() {
     // `export { default as NIL } from './nil.js'` -- the exact same
     // barrel shape as `installed_package_inlines_default_reexports`
