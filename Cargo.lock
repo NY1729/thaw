@@ -3179,6 +3179,7 @@ name = "thaw-jit"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "thaw-arena",
 ]
 
 [[package]]
@@ -3200,6 +3201,7 @@ dependencies = [
  "libc",
  "serde_json",
  "tempfile",
+ "thaw-arena",
  "thaw-quickjs",
  "thaw-runtime",
  "thaw-std",
@@ -3259,6 +3261,7 @@ dependencies = [
  "sha1",
  "sha2",
  "signature 2.2.0",
+ "thaw-arena",
  "thaw-icu-data",
  "thaw-runtime",
  "thaw-std",

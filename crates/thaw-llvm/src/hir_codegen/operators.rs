@@ -60,53 +60,15 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn expr_is_string(&self, expr: &HirExpr) -> bool {
-        match expr {
-            HirExpr::Lit(HirLit::Str(_)) | HirExpr::EnvVar(_) | HirExpr::JsonAsString(_) => true,
-            HirExpr::Var(name) => self.variable_hir_types.get(name) == Some(&HirType::Str),
-            HirExpr::TypedIndex(_, _, element) => element == &HirType::Str,
-            HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
-                .iter()
-                .any(|(name, ty)| name == field && ty == &HirType::Str),
-            HirExpr::Assign(_, value) => self.expr_is_string(value),
-            HirExpr::PostfixUpdate(_, _) => false,
-            HirExpr::Call(callee, _) => match callee.as_ref() {
-                HirExpr::Var(name) => {
-                    self.function_return_types.get(name) == Some(&HirType::Str)
-                        || matches!(
-                            name.as_str(),
-                            "__thaw_string_concat"
-                                | "__thaw_bool_to_string"
-                                | "__thaw_number_to_string"
-                                | "__thaw_number_array_to_string"
-                                | "__thaw_string_array_to_string"
-                                | "__thaw_bool_array_to_string"
-                                | "__thaw_object_array_to_string"
-                                | "__thaw_bytes_to_string"
-                                | "__thaw_object_to_string"
-                                | "__thaw_number_array_join"
-                                | "__thaw_string_array_join"
-                                | "__thaw_bool_array_join"
-                                | "__thaw_object_array_join"
-                                | "__thaw_string_trim"
-                                | "__thaw_string_trim_start"
-                                | "__thaw_string_trim_end"
-                                | "fetch"
-                                | "JSON.stringify"
-                        )
-                }
-                HirExpr::Lambda(_, _, ret, _) => ret == &HirType::Str,
-                _ => false,
-            },
-            HirExpr::DynamicCall(signature, _) => signature.ret == HirType::Str,
-            _ => false,
-        }
+        self.expr_hir_type(expr) == Some(HirType::Str)
     }
 
     fn expr_hir_type(&self, expr: &HirExpr) -> Option<HirType> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Some(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Some(HirType::I64),
-            HirExpr::Lit(HirLit::Str(_)) => Some(HirType::Str),
+            HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))
+            | HirExpr::EnvVar(_) | HirExpr::JsonAsString(_) => Some(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Some(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
@@ -283,7 +245,22 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_stringify_keys_number_space"
                         | "__thaw_json_stringify_keys_string_space"
                         | "fetch"
-                        | "__thaw_string_concat" => return Some(HirType::Str),
+                        | "__thaw_string_concat"
+                        | "__thaw_bool_to_string"
+                        | "__thaw_number_to_string"
+                        | "__thaw_number_array_to_string"
+                        | "__thaw_string_array_to_string"
+                        | "__thaw_bool_array_to_string"
+                        | "__thaw_object_array_to_string"
+                        | "__thaw_bytes_to_string"
+                        | "__thaw_object_to_string"
+                        | "__thaw_number_array_join"
+                        | "__thaw_string_array_join"
+                        | "__thaw_bool_array_join"
+                        | "__thaw_object_array_join"
+                        | "__thaw_string_trim"
+                        | "__thaw_string_trim_start"
+                        | "__thaw_string_trim_end" => return Some(HirType::Str),
                         "__thaw_i64_to_string"
                         | "__thaw_i64_to_bigint_string"
                         | "__thaw_i64_to_radix_string" => return Some(HirType::Str),
@@ -537,7 +514,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         let compared = self
                             .builder
                             .build_call(
-                                self.module.get_function("strcmp").unwrap(),
+                                self.module.get_function("thaw_string_compare").unwrap(),
                                 &[lhs.into(), rhs.into()],
                                 "strcmp",
                             )

@@ -27,6 +27,24 @@ pub fn parse_typescript(source: &str) -> Result<Module, String> {
 /// rewrite parses the user's own `.ts` source this way, since it's real
 /// TypeScript, not plain JS).
 pub fn parse_typescript_with_source_map(source: &str) -> Result<(Module, Lrc<SourceMap>), String> {
+    parse_typescript_source(source, false)
+}
+
+/// Parses ambient declarations with SWC's declaration-file grammar.
+pub fn parse_declarations(source: &str) -> Result<Module, String> {
+    parse_declarations_with_source_map(source).map(|(module, _)| module)
+}
+
+pub fn parse_declarations_with_source_map(
+    source: &str,
+) -> Result<(Module, Lrc<SourceMap>), String> {
+    parse_typescript_source(source, true)
+}
+
+fn parse_typescript_source(
+    source: &str,
+    declarations: bool,
+) -> Result<(Module, Lrc<SourceMap>), String> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
 
@@ -38,20 +56,24 @@ pub fn parse_typescript_with_source_map(source: &str) -> Result<(Module, Lrc<Sou
     let syntax = Syntax::Typescript(TsSyntax {
         tsx: false,
         decorators: true,
+        dts: declarations,
         ..Default::default()
     });
 
     let lexer = Lexer::new(syntax, Default::default(), StringInput::from(&*fm), None);
     let mut parser = Parser::new_from(lexer);
 
-    for err in parser.take_errors() {
-        err.into_diagnostic(&handler).emit();
-    }
-
     let module = parser.parse_module().map_err(|err| {
         err.into_diagnostic(&handler).emit();
         "failed to parse TypeScript source".to_string()
     })?;
+    let errors = parser.take_errors();
+    if !errors.is_empty() {
+        for error in errors {
+            error.into_diagnostic(&handler).emit();
+        }
+        return Err("failed to parse TypeScript source".into());
+    }
     Ok((module, cm))
 }
 
@@ -82,14 +104,17 @@ pub fn parse_javascript_with_source_map(source: &str) -> Result<(Module, Lrc<Sou
     let lexer = Lexer::new(syntax, Default::default(), StringInput::from(&*fm), None);
     let mut parser = Parser::new_from(lexer);
 
-    for err in parser.take_errors() {
-        err.into_diagnostic(&handler).emit();
-    }
-
     let module = parser.parse_module().map_err(|err| {
         err.into_diagnostic(&handler).emit();
         "failed to parse JavaScript source".to_string()
     })?;
+    let errors = parser.take_errors();
+    if !errors.is_empty() {
+        for error in errors {
+            error.into_diagnostic(&handler).emit();
+        }
+        return Err("failed to parse JavaScript source".into());
+    }
     Ok((module, cm))
 }
 
@@ -124,5 +149,14 @@ mod tests {
     #[test]
     fn reports_a_syntax_error() {
         assert!(parse_typescript("function (").is_err());
+    }
+
+    #[test]
+    fn rejects_recovered_parse_errors() {
+        assert!(parse_typescript("function main(): void { const x; }").is_err());
+        assert!(parse_typescript("const x = 0123;").is_err());
+        assert!(parse_javascript("export const x;").is_err());
+        assert!(parse_declarations("export const x: number;").is_ok());
+        assert!(parse_declarations("export const x: ;").is_err());
     }
 }

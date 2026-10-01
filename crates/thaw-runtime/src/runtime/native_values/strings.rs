@@ -1,6 +1,7 @@
 // ---- WTF-8 <-> UTF-16 codec -------------------------------------------------
 //
-// Thaw native strings are NUL-terminated WTF-8: ordinary UTF-8, extended so
+// Thaw native strings are WTF-8 with length metadata for embedded NULs:
+// ordinary UTF-8, extended so
 // a lone UTF-16 surrogate (which valid UTF-8 cannot represent) is encoded as
 // its 3-byte WTF-8 sequence. `wtf8_decode_utf16` preserves lone surrogates
 // where `std::str::from_utf8_lossy` would replace one with 3 U+FFFD (one per
@@ -224,18 +225,26 @@ unsafe fn wtf8_case_map(value: *const c_char, upper: bool) -> *const c_char {
 }
 
 /// Allocates a NUL-terminated copy of raw WTF-8 bytes in the arena,
-/// mirroring `arena_c_string` (which requires valid UTF-8 and so cannot
-/// carry a lone surrogate).
+/// preserving both embedded NULs and lone surrogates.
 fn arena_wtf8(bytes: &[u8]) -> Option<*const u8> {
-    let destination = thaw_arena::thaw_arena_alloc(bytes.len() + 1, 1);
-    if destination.is_null() {
-        return None;
+    let pointer = thaw_arena::arena_string(bytes);
+    (!pointer.is_null()).then_some(pointer.cast())
+}
+
+/// Writes native text without treating embedded NULs as terminators.
+/// # Safety
+/// `value` must reference a live native or C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_console_write(value: *const c_char, descriptor: i32, newline: bool) {
+    unsafe { libc::fflush(std::ptr::null_mut()) };
+    let bytes = unsafe { wtf8_bytes(value) };
+    for mut remaining in [bytes, if newline { &b"\n"[..] } else { &[] }] {
+        while !remaining.is_empty() {
+            let count = unsafe { libc::write(descriptor, remaining.as_ptr().cast(), remaining.len()) };
+            if count > 0 { remaining = &remaining[count as usize..]; }
+            else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted { return; }
+        }
     }
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len());
-        destination.add(bytes.len()).write(0);
-    }
-    Some(destination)
 }
 
 #[no_mangle]

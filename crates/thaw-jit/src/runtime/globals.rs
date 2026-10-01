@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::ffi::{CStr, CString};
+use thaw_arena::NativeStr as CStr;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -426,7 +426,7 @@ extern "C" fn set_like_dictionary(handle: f64) -> f64 {
     })
 }
 
-static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
+static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 #[link(name = "m")]

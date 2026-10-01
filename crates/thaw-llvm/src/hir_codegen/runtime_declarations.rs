@@ -145,6 +145,11 @@ impl<'ctx> HirCompiler<'ctx> {
         );
 
         let strlen_type = i64_type.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function("thaw_string_byte_length", strlen_type, Some(Linkage::External));
+        for name in ["thaw_string_register", "thaw_string_register_literal"] {
+            self.module.add_function(name, i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false), Some(Linkage::External));
+        }
+        self.module.add_function("thaw_console_write", self.context.void_type().fn_type(&[i8_ptr.into(), i32_type.into(), self.context.bool_type().into()], false), Some(Linkage::External));
         self.module
             .add_function("strlen", strlen_type, Some(Linkage::External));
         let strcmp_type = i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);

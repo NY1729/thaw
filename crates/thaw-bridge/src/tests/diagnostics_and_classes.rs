@@ -226,13 +226,13 @@ fn extracts_quoted_and_numeric_class_property_keys() {
 }
 
 #[test]
-fn records_optional_and_default_constructor_arities() {
+fn records_optional_constructor_arities() {
     let classes = parse_dts_classes(
         r#"export class Client {
                 constructor(url: string, timeout?: number, retries?: number);
             }
             export class Cache {
-                constructor(size: number, enabled = true);
+                constructor(size: number, enabled?: boolean);
             }"#,
     )
     .unwrap();

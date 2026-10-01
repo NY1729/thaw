@@ -196,18 +196,53 @@ fn command_output_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, String> {
     use std::process::Stdio;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| error.to_string())?;
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let read = |mut pipe: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    };
+    let stdout = read(Box::new(stdout));
+    let stderr = read(Box::new(stderr));
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if child.try_wait().map_err(|error| error.to_string())?.is_some() {
-            return child.wait_with_output().map_err(|error| error.to_string());
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            if !stdout.is_finished() || !stderr.is_finished() {
+                if std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+            } else {
+            let collect = |reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
+                reader.join().map_err(|_| "output reader panicked".to_string())?
+                    .map_err(|error| error.to_string())
+            };
+            return Ok(std::process::Output {
+                status,
+                stdout: collect(stdout)?,
+                stderr: collect(stderr)?,
+            });
+            }
         }
         if std::time::Instant::now() >= deadline {
+            #[cfg(unix)]
+            unsafe {
+                unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
+                kill(-(child.id() as i32), 9);
+            }
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!("timed out after {} seconds", timeout.as_secs()));

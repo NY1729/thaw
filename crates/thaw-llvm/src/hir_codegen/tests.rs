@@ -204,6 +204,15 @@ fn build_staticlib(pkg: &str) -> std::path::PathBuf {
 }
 
 fn compile_and_invoke_lambda(source: &str, test_name: &str, event_body: &str) -> (String, String) {
+    let (mut requests, stdout) = compile_and_invoke_lambda_events(source, test_name, &[event_body]);
+    (requests.remove(0), stdout)
+}
+
+fn compile_and_invoke_lambda_events(
+    source: &str,
+    test_name: &str,
+    events: &[&str],
+) -> (Vec<String>, String) {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
@@ -246,26 +255,34 @@ fn compile_and_invoke_lambda(source: &str, test_name: &str, event_body: &str) ->
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let event_body = event_body.to_string();
+    let events = events
+        .iter()
+        .map(|event| event.to_string())
+        .collect::<Vec<_>>();
+    let invocation_count = events.len();
     let (tx, rx) = mpsc::channel();
     let server = std::thread::spawn(move || {
-        let (mut conn, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let _ = conn.read(&mut buf).unwrap();
-        let response = format!(
+        for event_body in events {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).unwrap();
+            let response = format!(
             "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: test-req-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             event_body.len(),
             event_body
         );
-        conn.write_all(response.as_bytes()).unwrap();
-        drop(conn);
+            conn.write_all(response.as_bytes()).unwrap();
+            drop(conn);
 
-        let (mut conn, _) = listener.accept().unwrap();
-        let mut buf = Vec::new();
-        conn.read_to_end(&mut buf).unwrap();
-        tx.send(String::from_utf8_lossy(&buf).into_owned()).unwrap();
-        conn.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            conn.read_to_end(&mut buf).unwrap();
+            tx.send(String::from_utf8_lossy(&buf).into_owned()).unwrap();
+            conn.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
             .unwrap();
+        }
     });
 
     let mut child = Command::new(&exe_path)
@@ -273,16 +290,19 @@ fn compile_and_invoke_lambda(source: &str, test_name: &str, event_body: &str) ->
         .stdout(Stdio::piped())
         .spawn()
         .expect("failed to spawn compiled Lambda handler binary");
-    let post_request = rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("handler never posted to the mock runtime API");
+    let post_requests = (0..invocation_count)
+        .map(|_| {
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("handler never posted to the mock runtime API")
+        })
+        .collect();
     server.join().unwrap();
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 
     (
-        post_request,
+        post_requests,
         String::from_utf8_lossy(&output.stdout).into_owned(),
     )
 }

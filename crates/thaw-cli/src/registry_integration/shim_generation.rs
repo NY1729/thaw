@@ -1478,6 +1478,9 @@ fn generate_registry_shims(
         )
         .collect();
     let mut module_init = thaw_bridge::generate_module_init(&module_bundles);
+    let runtime_features = module_bundles.iter()
+        .flat_map(|bundle| thaw_bridge::required_runtime_features(bundle.js_source))
+        .collect();
     if !platform_executables.is_empty() {
         let setup = platform_executables
             .iter()
@@ -1656,5 +1659,6 @@ fn generate_registry_shims(
         external_nested_namespaces,
         external_export_assignments,
         jit_fallback_reasons,
+        runtime_features,
     ))
 }

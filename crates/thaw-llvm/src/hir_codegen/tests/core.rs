@@ -2656,3 +2656,25 @@ fn unset_env_var_reads_as_empty_string_not_a_crash() {
     "#;
     assert_eq!(compile_and_run(source, "envvar_unset"), "\nstill alive\n");
 }
+#[test]
+fn embedded_nuls_survive_native_strings_and_json_boundaries() {
+    let source = r#"
+        function main(): void {
+            const s: string = "a\u0000b";
+            console.log(s.length, s.charCodeAt(1), s.charCodeAt(2));
+            console.log(s === "a", (s + "c").length, s.repeat(2).length);
+            console.log(s.slice(1).length, s.replace("b", "z").charCodeAt(1));
+            const value: any = s;
+            const restored: string = String(value);
+            console.log(restored.length, restored.charCodeAt(2), JSON.stringify(value));
+            const decoded: string = decodeURIComponent("a%00b");
+            console.log(decoded.length, encodeURIComponent(decoded));
+            console.log(s);
+            const object: any = JSON.parse('{"a\\u0000b":"x\\u0000y"}');
+            console.log(Object.keys(object)[0].length, String(Object.values(object)[0]).length);
+            console.log(String(eval("'a\\u0000b'")).length);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "embedded_nuls"),
+        "3 0 98\nfalse 4 6\n2 0\n3 98 \"a\\u0000b\"\n3 a%00b\na\0b\n3 3\n3\n");
+}

@@ -9,8 +9,10 @@
 //! async/await has no real executor (see thaw-runtime's own rationale for
 //! not using hyper/tokio in the Lambda poll loop -- same reasoning here).
 
-use std::ffi::{CStr, CString};
+#[cfg(test)]
+use std::ffi::CString;
 use std::os::raw::c_char;
+use thaw_arena::NativeStr as CStr;
 
 #[no_mangle]
 pub extern "C" fn thaw_fetch_get(url: *const c_char) -> *const c_char {
@@ -26,7 +28,7 @@ pub extern "C" fn thaw_fetch_get(url: *const c_char) -> *const c_char {
         Err(e) => format!("fetch error: {e}"),
     };
 
-    CString::new(body).unwrap_or_default().into_raw() as *const c_char
+    thaw_arena::owned_string(body)
 }
 
 #[cfg(test)]

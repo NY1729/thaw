@@ -14,11 +14,8 @@
 //! composes this crate's `thaw_js_call` with thaw-std's
 //! `thaw_json_stringify`/`thaw_json_parse` so a `Json` value flows in and
 //! out without this crate needing to know thaw-std's internal
-//! representation. A Promise-returning call is driven to completion by
-//! polling QuickJS's job queue (`Promise::finish`) rather than true
-//! non-blocking integration -- the same "poll until resolved" shortcut V1
-//! async/await already takes (docs/design/async-await.md), consistent
-//! rather than a special case.
+//! representation. The host event loop drives QuickJS jobs and platform work,
+//! and integrates native Promise callbacks through exported runtime hooks.
 //!
 //! Generated code uses `thaw_js_call_result` to route unknown functions,
 //! thrown JS exceptions, malformed arguments, and Promise rejections through
@@ -27,7 +24,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::{c_char, c_void};
@@ -41,6 +38,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+use thaw_arena::NativeStr as CStr;
 
 // `thaw_js_dynamic_object_query` (api.rs) calls thaw-std's `thaw_json_parse`
 // as an `extern "C"` declaration resolved at link time -- this crate has no
