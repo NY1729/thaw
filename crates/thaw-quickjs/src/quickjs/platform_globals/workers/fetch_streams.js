@@ -312,12 +312,12 @@
         const byteStream = this._byteStream, reader = this.getReader(), controllers = [null, null], cancelled = [false, false], reasons = [undefined, undefined], demand = [false, false];
         let reading = false, finished = false, resolveCancellation, rejectCancellation;
         const cancellation = new Promise((resolve, reject) => { resolveCancellation = resolve; rejectCancellation = reject; });
-        const finish = result => {
+        const finish = (errored, error) => {
           if (finished) return;
           finished = true;
           for (let index = 0; index < 2; index++) {
             if (cancelled[index]) continue;
-            if (result && result.error) controllers[index].error(result.error);
+            if (errored) controllers[index].error(error);
             else controllers[index].close();
           }
           resolveCancellation();
@@ -327,14 +327,14 @@
           reading = true;
           reader.read().then(result => {
             reading = false;
-            if (result.done) { finish(); return; }
+            if (result.done) { finish(false); return; }
             for (let index = 0; index < 2; index++) {
               if (cancelled[index]) continue;
               demand[index] = false;
               controllers[index].enqueue(byteStream ? new Uint8Array(result.value) : result.value);
             }
             pump();
-          }, error => { reading = false; finish({ error }); });
+          }, error => { reading = false; finish(true, error); });
         };
         const pull = index => { demand[index] = true; pump(); };
         const cancel = (index, reason) => {
