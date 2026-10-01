@@ -1462,13 +1462,17 @@ fn intern_string(encoded: &str) -> Option<*const c_char> {
         .step_by(2)
         .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
         .collect::<Option<Vec<_>>>()?;
-    let value = CString::new(bytes).ok()?;
+    let length = bytes.len();
+    let mut value = bytes;
+    value.push(0);
     let mut constants = STRING_CONSTANTS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap();
     let value = constants.entry(encoded.to_owned()).or_insert(value);
-    Some(value.as_ptr())
+    let pointer = value.as_ptr().cast();
+    unsafe { thaw_arena::thaw_string_register_literal(pointer, length) };
+    Some(pointer)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]

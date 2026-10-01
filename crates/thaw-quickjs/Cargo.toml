@@ -41,6 +41,7 @@ intl = [
 icu4c = ["intl"]
 
 [dependencies]
+thaw-arena = { path = "../thaw-arena" }
 aes = "0.8"
 base64 = "0.22"
 brotli = { version = "8", optional = true }

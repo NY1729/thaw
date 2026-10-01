@@ -163,6 +163,13 @@ requires general JavaScript semantics uses the embedded QuickJS compatibility
 layer. `thaw inspect` reports whether QuickJS or N-API is present and explains
 known fallback reasons.
 
+Native strings preserve embedded NULs and UTF-16 lone surrogates. Their C ABI
+remains pointer-based; pointer-length FFI signatures carry the full byte length.
+Lambda invocation cleanup traces registered globals and retains the arena
+generations containing reachable native values, so module state survives warm
+invocations. Unreachable generations are reclaimed; retained generations may
+also contain unused allocation space.
+
 ## Limitations
 
 Thaw supports a growing practical subset of TypeScript and Node.js, not every

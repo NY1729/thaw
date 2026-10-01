@@ -157,8 +157,7 @@ pub enum Classification {
     /// (`thaw_hir::HirExpr::FfiCall`), no QuickJS-NG involved.
     FastPath(Box<FfiSignature>),
     /// At least one parameter or the return type didn't map -- needs the
-    /// QuickJS-NG fallback path (docs/design/bridge.md section 7, not
-    /// implemented yet).
+    /// QuickJS-NG fallback path.
     Fallback { function: String, reason: String },
 }
 

@@ -873,7 +873,9 @@ unsafe fn text(ptr: *const c_char) -> Result<String, String> {
     if ptr.is_null() {
         return Err("null string pointer".into());
     }
-    Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    Ok(thaw_arena::NativeStr::from_ptr(ptr)
+        .to_string_lossy()
+        .into_owned())
 }
 
 unsafe fn env_mut<'a>(env: NapiEnv) -> Result<&'a mut Env, NapiStatus> {

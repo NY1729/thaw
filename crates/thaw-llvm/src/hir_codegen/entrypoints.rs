@@ -420,6 +420,18 @@ impl<'ctx> HirCompiler<'ctx> {
         let (main_fn, entry) = self.new_c_main();
         let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let enable = self.module.add_function("thaw_arena_enable_tracing",
+            self.context.void_type().fn_type(&[], false), Some(Linkage::External));
+        self.builder.build_call(enable, &[], "enable_invocation_tracing").map_err(|error| error.to_string())?;
+        let register = self.module.add_function(
+            "thaw_arena_register_root",
+            self.context.void_type().fn_type(&[pointer.into()], false),
+            Some(Linkage::External),
+        );
+        for (slot, ty, _) in self.global_variables.values().cloned().collect::<Vec<_>>() {
+            self.register_arena_root_slots(register, slot, ty)?;
+        }
         self.call_module_init_if_present(cleanup);
         self.configure_unhandled_rejection_reporter();
         let handler_ptr = handler_fn.as_global_value().as_pointer_value();
@@ -438,6 +450,35 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(cleanup);
         self.finish_c_main(None);
+        Ok(())
+    }
+
+    fn register_arena_root_slots(
+        &self,
+        register: FunctionValue<'ctx>,
+        slot: PointerValue<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<(), String> {
+        match ty {
+            BasicTypeEnum::PointerType(_) => {
+                self.builder.build_call(register, &[slot.into()], "register_global_root")
+                    .map_err(|error| error.to_string())?;
+            }
+            BasicTypeEnum::StructType(structure) => {
+                for (index, field) in structure.get_field_types().into_iter().enumerate() {
+                    let field_slot = self.builder.build_struct_gep(structure, slot, index as u32, "global_root_field")
+                        .map_err(|error| error.to_string())?;
+                    // Union payloads are represented as initialized i64 bits.
+                    if field == self.context.i64_type().into() {
+                        self.builder.build_call(register, &[field_slot.into()], "register_global_union_root")
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        self.register_arena_root_slots(register, field_slot, field)?;
+                    }
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 

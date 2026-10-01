@@ -870,3 +870,38 @@ fn builds_and_runs_a_multifile_async_json_lambda_handler() {
     assert!(request.ends_with("{\"message\":\"module lambda\"}"));
     let _ = std::fs::remove_dir_all(dir);
 }
+#[test]
+fn block_and_catch_bindings_do_not_shadow_outer_module_references() {
+    let dir = std::env::temp_dir().join(format!("thaw lexical blocks {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(dir.join("helper.ts"), "export function getValue(): number { return 9; }").unwrap();
+    std::fs::write(&input, r#"
+        import { getValue } from './helper';
+        import * as lib from './helper';
+        const value: number = 7;
+        function main(): void {
+            if (true) { const value: number = 3; console.log(value); }
+            console.log(value);
+            for (let value: number = 0; value < 1; value++) { console.log(value); }
+            console.log(value);
+            const f = (): void => {
+                { const value: number = 5; console.log(value); }
+                console.log(value);
+            };
+            f();
+            try { throw "caught"; } catch (value) { console.log(value); }
+            console.log(value);
+            { const getValue = (): number => 3; console.log(getValue()); }
+            console.log(getValue());
+            { const lib = { getValue: (): number => 4 }; console.log(lib.getValue()); }
+            console.log(lib.getValue());
+        }
+    "#).unwrap();
+    build(&input, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n7\n0\n7\n5\n7\ncaught\n7\n3\n9\n4\n9\n");
+    std::fs::remove_dir_all(dir).unwrap();
+}

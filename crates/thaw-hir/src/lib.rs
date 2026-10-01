@@ -1,12 +1,7 @@
-//! Thaw's typed intermediate representation. Definitions here mirror the
-//! design doc (section 6) plus the small amount of scaffolding (`HirStmt`,
-//! `HirParam`, `BinOp`, `FfiSignature`) that section only sketched.
-//!
-//! Phase 0 only *populates* a thin slice of this shape (see `lower.rs`):
-//! top-level functions with number/string/boolean/void params and returns,
-//! literals, identifiers, binary ops, and calls. The rest of the enum
-//! (`Promise`, `Union`, `FfiCall`, `DynamicCall`, ...) exists so the shape
-//! matches the target design, but nothing constructs those variants yet.
+//! Typed intermediate representation and TypeScript lowering for Thaw.
+//! Lowering resolves native layouts and call signatures, normalizes classes
+//! and control flow, and represents closures, tagged values, promises, FFI,
+//! and dynamic-host operations consumed by LLVM code generation.
 
 #[path = "hir/types.rs"]
 mod hir_types;

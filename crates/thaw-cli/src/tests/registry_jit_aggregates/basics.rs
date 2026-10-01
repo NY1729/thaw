@@ -159,10 +159,10 @@ fn bare_imports_automatically_resolve_registry_packages() {
                 import { square } from "math-kit/advanced";
                 import twice from "twice";
                 function main(): void {
-                    const sum: number = add(10, 11);
+                    const total: number = add(10, 11);
                     const difference: number = math.sub(13, 2);
                     console.log(twice(21));
-                    console.log(sum + difference);
+                    console.log(total + difference);
                     console.log(square(7));
                     console.log(greet("thaw"));
                     console.log(negate(false));
@@ -694,4 +694,3 @@ fn returning_switch_uses_jit_without_quickjs() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
-

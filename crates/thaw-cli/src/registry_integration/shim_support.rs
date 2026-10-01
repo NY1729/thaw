@@ -617,6 +617,7 @@ type RegistryShims = (
     ExternalNestedNamespaces,
     ExternalExportAssignments,
     JitFallbackReasons,
+    std::collections::BTreeSet<&'static str>,
 );
 /// `package -> the symbol its own `export = X;` assignment names`, for a
 /// bare `import * as X from "pkg"` (`module_graph.rs`).

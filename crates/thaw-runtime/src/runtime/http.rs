@@ -296,14 +296,7 @@ fn async_http_error(task: *mut AsyncHttpGet, message: String) {
 }
 
 fn arena_c_string(value: &str) -> Option<*const u8> {
-    let value = CString::new(value).ok()?;
-    let bytes = value.as_bytes_with_nul();
-    let destination = thaw_arena::thaw_arena_alloc(bytes.len(), 1);
-    if destination.is_null() {
-        return None;
-    }
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len()) };
-    Some(destination)
+    arena_wtf8(value.as_bytes())
 }
 
 fn arena_pointer_slot(value: *const u8) -> Option<*const u8> {
@@ -949,4 +942,3 @@ fn thaw_http_get_async_with_config(
     }
     completion
 }
-

@@ -443,6 +443,8 @@ impl Visit for PatternBindingCollector<'_> {
 }
 
 impl Visit for LocalBindingCollector {
+    fn visit_block_stmt(&mut self, _block: &thaw_parser::ast::BlockStmt) {}
+
     fn visit_var_declarator(&mut self, declaration: &thaw_parser::ast::VarDeclarator) {
         declaration
             .name
@@ -457,19 +459,95 @@ impl Visit for LocalBindingCollector {
         self.names.insert(declaration.ident.sym.to_string());
     }
 
-    fn visit_catch_clause(&mut self, clause: &thaw_parser::ast::CatchClause) {
-        if let Some(parameter) = &clause.param {
-            parameter.visit_with(&mut PatternBindingCollector(&mut self.names));
-        }
-        clause.body.visit_with(self);
-    }
+    fn visit_catch_clause(&mut self, _clause: &thaw_parser::ast::CatchClause) {}
 
     fn visit_function(&mut self, _function: &thaw_parser::ast::Function) {}
 
     fn visit_arrow_expr(&mut self, _arrow: &thaw_parser::ast::ArrowExpr) {}
+
+    fn visit_for_stmt(&mut self, _statement: &thaw_parser::ast::ForStmt) {}
+    fn visit_for_in_stmt(&mut self, _statement: &thaw_parser::ast::ForInStmt) {}
+    fn visit_for_of_stmt(&mut self, _statement: &thaw_parser::ast::ForOfStmt) {}
+    fn visit_switch_stmt(&mut self, _statement: &thaw_parser::ast::SwitchStmt) {}
+}
+
+#[derive(Default)]
+struct HoistedBindingCollector(LocalBindingCollector);
+
+impl Visit for HoistedBindingCollector {
+    fn visit_var_decl(&mut self, declaration: &thaw_parser::ast::VarDecl) {
+        if declaration.kind == thaw_parser::ast::VarDeclKind::Var {
+            for binding in &declaration.decls {
+                binding
+                    .name
+                    .visit_with(&mut PatternBindingCollector(&mut self.0.names));
+            }
+        }
+    }
+    fn visit_function(&mut self, _function: &thaw_parser::ast::Function) {}
+    fn visit_arrow_expr(&mut self, _arrow: &thaw_parser::ast::ArrowExpr) {}
 }
 
 impl VisitMut for RenameReferences<'_> {
+    fn visit_mut_switch_stmt(&mut self, statement: &mut thaw_parser::ast::SwitchStmt) {
+        statement.discriminant.visit_mut_with(self);
+        let saved = self.shadowed.clone();
+        let mut collector = LocalBindingCollector::default();
+        for case in &statement.cases {
+            for statement in &case.cons {
+                statement.visit_with(&mut collector);
+            }
+        }
+        self.shadowed.extend(collector.names);
+        statement.cases.visit_mut_with(self);
+        self.shadowed = saved;
+    }
+    fn visit_mut_for_stmt(&mut self, statement: &mut thaw_parser::ast::ForStmt) {
+        let saved = self.shadowed.clone();
+        if let Some(thaw_parser::ast::VarDeclOrExpr::VarDecl(declaration)) = &statement.init {
+            declaration.visit_with(&mut PatternBindingCollector(&mut self.shadowed));
+        }
+        statement.visit_mut_children_with(self);
+        self.shadowed = saved;
+    }
+
+    fn visit_mut_for_in_stmt(&mut self, statement: &mut thaw_parser::ast::ForInStmt) {
+        let saved = self.shadowed.clone();
+        statement
+            .left
+            .visit_with(&mut PatternBindingCollector(&mut self.shadowed));
+        statement.visit_mut_children_with(self);
+        self.shadowed = saved;
+    }
+
+    fn visit_mut_for_of_stmt(&mut self, statement: &mut thaw_parser::ast::ForOfStmt) {
+        let saved = self.shadowed.clone();
+        statement
+            .left
+            .visit_with(&mut PatternBindingCollector(&mut self.shadowed));
+        statement.visit_mut_children_with(self);
+        self.shadowed = saved;
+    }
+    fn visit_mut_block_stmt(&mut self, block: &mut thaw_parser::ast::BlockStmt) {
+        let mut collector = LocalBindingCollector::default();
+        for statement in &block.stmts {
+            statement.visit_with(&mut collector);
+        }
+        let saved = self.shadowed.clone();
+        self.shadowed.extend(collector.names);
+        block.visit_mut_children_with(self);
+        self.shadowed = saved;
+    }
+
+    fn visit_mut_catch_clause(&mut self, clause: &mut thaw_parser::ast::CatchClause) {
+        let saved = self.shadowed.clone();
+        if let Some(parameter) = &clause.param {
+            parameter.visit_with(&mut PatternBindingCollector(&mut self.shadowed));
+        }
+        clause.visit_mut_children_with(self);
+        self.shadowed = saved;
+    }
+
     fn visit_mut_function(&mut self, function: &mut thaw_parser::ast::Function) {
         let mut collector = LocalBindingCollector::default();
         for parameter in &function.params {
@@ -477,9 +555,9 @@ impl VisitMut for RenameReferences<'_> {
                 .pat
                 .visit_with(&mut PatternBindingCollector(&mut collector.names));
         }
-        if let Some(body) = &function.body {
-            body.visit_with(&mut collector);
-        }
+        let mut hoisted = HoistedBindingCollector::default();
+        function.body.visit_with(&mut hoisted);
+        collector.names.extend(hoisted.0.names);
         let saved = self.shadowed.clone();
         self.shadowed.extend(collector.names);
         self.function_depth += 1;
@@ -493,9 +571,9 @@ impl VisitMut for RenameReferences<'_> {
         for parameter in &arrow.params {
             parameter.visit_with(&mut PatternBindingCollector(&mut collector.names));
         }
-        if let thaw_parser::ast::ArrowFunctionBody::FunctionBody(body) = &*arrow.body {
-            body.visit_with(&mut collector);
-        }
+        let mut hoisted = HoistedBindingCollector::default();
+        arrow.body.visit_with(&mut hoisted);
+        collector.names.extend(hoisted.0.names);
         let saved = self.shadowed.clone();
         self.shadowed.extend(collector.names);
         self.function_depth += 1;
@@ -721,39 +799,6 @@ impl VisitMut for RenameReferences<'_> {
         }));
     }
 
-    fn visit_mut_call_expr(&mut self, call: &mut thaw_parser::ast::CallExpr) {
-        call.visit_mut_children_with(self);
-        if let Callee::Expr(callee) = &mut call.callee {
-            match &mut **callee {
-                Expr::Ident(ident) => {
-                    // Direct imported/module calls keep the bundler's established
-                    // callee resolution even when a local value has the same text
-                    // name. Non-callee identifier reads remain lexically scoped.
-                    if let Some(replacement) = self.names.get(ident.sym.as_ref()) {
-                        ident.sym = replacement.clone().into();
-                    }
-                }
-                Expr::Member(member) => {
-                    if let (Expr::Ident(namespace), thaw_parser::ast::MemberProp::Ident(property)) =
-                        (&*member.obj, &member.prop)
-                    {
-                        if let Some(target) = self
-                            .namespaces
-                            .get(namespace.sym.as_ref())
-                            .and_then(|exports| exports.get(property.sym.as_ref()))
-                        {
-                            **callee = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
-                                target.clone().into(),
-                                member.span,
-                            ));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     fn visit_mut_ts_type_ref(&mut self, reference: &mut TsTypeRef) {
         reference.visit_mut_children_with(self);
         if let TsEntityName::Ident(ident) = &mut reference.type_name {
@@ -898,6 +943,25 @@ fn declared_names(module: &Module) -> Vec<String> {
             _ => Vec::new(),
         })
         .collect()
+}
+
+pub fn runtime_features(
+    entry: &Path,
+    source: &str,
+) -> Result<std::collections::BTreeSet<&'static str>, String> {
+    let mut modules = Vec::new();
+    load_module(
+        entry.canonicalize().map_err(|error| error.to_string())?,
+        Some(source),
+        None,
+        &mut modules,
+        &mut HashMap::new(),
+        &mut Vec::new(),
+    )?;
+    Ok(modules
+        .iter()
+        .flat_map(|module| thaw_bridge::required_runtime_features(&module.source))
+        .collect())
 }
 
 pub fn external_specifiers(

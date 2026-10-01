@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::raw::{c_char, c_void};
@@ -6,6 +6,7 @@ use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use thaw_arena::NativeStr as CStr;
 
 #[cfg(test)]
 use thaw_runtime as _;
@@ -443,7 +444,7 @@ struct RequestContext {
     /// `request_body_string` via `context.connection`) -- caching a
     /// snapshot taken while the body is still streaming in would go
     /// stale the moment more bytes arrive.
-    _body_string: Option<CString>,
+    _body_string: Option<*const c_char>,
     /// `bodyHex()`'s cached result -- same complete-gated caching as
     /// `_body_string`, for the same reason.
     _body_hex: Option<CString>,
@@ -690,10 +691,8 @@ unsafe fn block_until_body_complete(context: &mut RequestContext) {
 }
 
 /// `request.body()` -- the request body received so far, as a lossy
-/// UTF-8 string (interior NULs dropped, which would otherwise truncate
-/// it -- JSON/form/text bodies, the target use case, are unaffected;
-/// binary bodies aren't supported through this method, use `bodyHex()`/
-/// `bodyBytes()`). Blocks until the body is actually complete (see
+/// UTF-8 string preserving embedded NULs. Use `bodyHex()`/`bodyBytes()`
+/// for byte-exact binary data. Blocks until the body is actually complete (see
 /// `block_until_body_complete`) the first time it's called for a still-
 /// streaming request -- so, matching this method's original guarantee,
 /// this is always the *whole* body, not a partial snapshot; a handler
@@ -703,13 +702,10 @@ unsafe extern "C" fn request_body_string(environment: *const c_void) -> *const c
     let context = request_context(environment);
     unsafe { block_until_body_complete(context) };
     if !(unsafe { request_body_is_complete(context) } && context._body_string.is_some()) {
-        let text = String::from_utf8_lossy(&context._raw_body).replace('\0', "\u{fffd}");
-        context._body_string = Some(CString::new(text).unwrap_or_default());
+        let text = String::from_utf8_lossy(&context._raw_body);
+        context._body_string = Some(thaw_arena::arena_string(text.as_bytes()));
     }
-    context
-        ._body_string
-        .as_ref()
-        .map_or(std::ptr::null(), |value| value.as_ptr())
+    context._body_string.unwrap_or(std::ptr::null())
 }
 
 /// `request.bodyHex()` -- the raw request body as a lowercase hex

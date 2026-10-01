@@ -18,7 +18,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::raw::c_char;
@@ -26,6 +26,7 @@ use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use thaw_arena::NativeStr as CStr;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
@@ -182,13 +183,14 @@ struct PromiseFdWait {
     deadline: Option<Instant>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FdWatcher {
     id: u64,
     fd: libc::c_int,
     interests: u8,
     callback: FdWatcherFn,
     context: *mut u8,
+    _root: thaw_arena::ArenaRoot,
 }
 
 static NEXT_FD_WATCHER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -297,7 +299,7 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
             .iter()
             .zip(&pollfds[wait_count..])
             .filter(|(_, pollfd)| pollfd.revents != 0)
-            .map(|(watcher, pollfd)| (*watcher, pollfd.revents))
+            .map(|(watcher, pollfd)| (watcher.clone(), pollfd.revents))
             .collect::<Vec<_>>()
     });
     let watcher_count = ready_watchers.len();
@@ -342,6 +344,7 @@ pub extern "C" fn thaw_runtime_watch_fd(
             interests,
             callback,
             context,
+            _root: thaw_arena::ArenaRoot::new(context as usize),
         });
     });
     id

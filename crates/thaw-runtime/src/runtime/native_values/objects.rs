@@ -91,12 +91,14 @@ pub unsafe extern "C" fn thaw_object_set_accessor(
         return false;
     };
     OBJECT_ACCESSORS.with(|accessors| {
-        accessors
-            .borrow_mut()
+        let mut accessors = accessors.borrow_mut();
+        let slot = &mut accessors
             .entry(object as usize)
             .or_default()
             .entry(property.to_owned())
-            .or_default()[setter as usize] = closure as usize;
+            .or_default()[setter as usize];
+        let previous = std::mem::replace(slot, closure as usize);
+        thaw_arena::replace_reference(object as usize, previous, closure as usize);
     });
     true
 }
@@ -129,6 +131,12 @@ pub unsafe extern "C" fn thaw_object_accessor(
 fn clear_object_states() {
     OBJECT_STATES.with(|states| states.borrow_mut().clear());
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().clear());
+}
+
+fn prune_object_states() {
+    if !thaw_arena::is_tracing() { clear_object_states(); return; }
+    OBJECT_STATES.with(|states| states.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
+    OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
 }
 
 #[cfg(test)]

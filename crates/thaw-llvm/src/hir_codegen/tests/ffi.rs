@@ -1500,6 +1500,8 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
 
         function main(): void {
             console.log(native_slice("hello"));
+            const embedded: string = native_slice("a\u0000b");
+            console.log(embedded.length, embedded.charCodeAt(1), embedded.charCodeAt(2));
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
@@ -1531,7 +1533,9 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         "#include <stdint.h>\n\
          typedef struct { const char *data; int64_t len; } ThawStringSlice;\n\
          static const char result[] = {'O', 'K', '!'};\n\
+         static const char embedded[] = {'A', 0, 'B'};\n\
          ThawStringSlice native_slice(const char *value, int64_t len) {\n\
+           if (len == 3 && value[0] == 'a' && value[1] == 0 && value[2] == 'b') return (ThawStringSlice){embedded, 3};\n\
            return value[0] == 'h' && len == 5 ? (ThawStringSlice){result, 3} : (ThawStringSlice){result, 0};\n\
          }\n",
     )
@@ -1562,7 +1566,7 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         .success());
     let output = Command::new(&exe_path).output().unwrap();
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "OK!\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "OK!\n3 0 66\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

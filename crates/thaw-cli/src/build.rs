@@ -398,6 +398,7 @@ fn build_with_native_mode(
         external_nested_namespaces,
         external_export_assignments,
         jit_fallback_reasons,
+        mut runtime_features,
     ) = generate_registry_shims(
         registry_dir,
         &resolved_packages,
@@ -551,36 +552,16 @@ fn build_with_native_mode(
     let runtime_lib = build_staticlib("thaw-runtime")?;
     let std_lib = build_staticlib("thaw-std")?;
     let jit_lib = build_staticlib("thaw-jit")?;
-    let uses_wasm = source_uses_wasm(&shim_source) || source_uses_wasm(&user_source);
-    let uses_tls = source_uses_tls(&shim_source) || source_uses_tls(&user_source);
-    let uses_brotli = source_uses_brotli(&shim_source) || source_uses_brotli(&user_source);
-    let uses_intl = source_uses_intl(&shim_source) || source_uses_intl(&user_source);
+    runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
+    runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
+    if icu4c { runtime_features.extend(["intl", "icu4c"]); }
     // A QuickJS-enabled `thaw-napi` staticlib already contains its Rust
     // dependency objects. Linking a second standalone QuickJS archive would
     // define every host symbol twice.
     let quickjs_lib = (uses_quickjs && !uses_napi)
         .then(|| {
-            let mut features = Vec::new();
-            if uses_brotli {
-                features.push("brotli");
-            }
-            if uses_tls {
-                features.push("tls");
-            }
-            if uses_wasm {
-                features.push("wasm");
-            }
-            if uses_intl {
-                features.push("intl");
-            }
-            if icu4c {
-                features.push("icu4c");
-            }
-            if features.len() == 3 {
-                build_staticlib("thaw-quickjs")
-            } else {
-                build_staticlib_with_features("thaw-quickjs", &features)
-            }
+            let features = runtime_features.iter().copied().collect::<Vec<_>>();
+            build_staticlib_with_features("thaw-quickjs", &features)
         })
         .transpose()?;
     let napi_lib = uses_napi
@@ -588,16 +569,8 @@ fn build_with_native_mode(
             if !uses_quickjs {
                 return build_staticlib_without_default_features("thaw-napi");
             }
-            let mut features = vec!["quickjs"];
-            if uses_brotli {
-                features.push("quickjs-brotli");
-            }
-            if uses_tls {
-                features.push("quickjs-tls");
-            }
-            if uses_wasm {
-                features.push("quickjs-wasm");
-            }
+            let features = napi_runtime_features(&runtime_features);
+            let features = features.iter().map(String::as_str).collect::<Vec<_>>();
             build_staticlib_with_features("thaw-napi", &features)
         })
         .transpose()?;
@@ -1047,45 +1020,41 @@ fn source_line_column(source: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+#[cfg(test)]
 fn source_uses_wasm(source: &str) -> bool {
-    ["WebAssembly", "node:wasi", "require('wasi')", "require(\"wasi\")"]
-        .iter()
-        .any(|marker| source.contains(marker))
+    thaw_bridge::required_runtime_features(source).contains("wasm")
 }
 
+#[cfg(test)]
 fn source_uses_tls(source: &str) -> bool {
-    source.contains("__thaw_tls_")
+    thaw_bridge::required_runtime_features(source).contains("tls")
 }
 
+#[cfg(test)]
 fn source_uses_brotli(source: &str) -> bool {
-    source.contains("brotli") || source.contains("Brotli")
+    thaw_bridge::required_runtime_features(source).contains("brotli")
 }
 
+#[cfg(test)]
 fn source_uses_intl(source: &str) -> bool {
-    // Deliberately narrower than "any `Intl.*` use": `DateTimeFormat`/
-    // `NumberFormat`/`ListFormat` still have a pure-JS, English-only
-    // fast path in `intl.js` that needs no icu4x data at all (and, once
-    // M4/M6/M7 land real per-locale rendering for those three, will
-    // still fall back to that same fast path when this feature is off
-    // -- see docs/design/intl-polyfill.md). Only the genuinely new
-    // capabilities that have no non-icu4x implementation at all should
-    // pull in thaw-icu-data by default.
-    //
-    // `String.prototype.localeCompare` is a separate, always-linked
-    // thaw-runtime primitive (crates/thaw-runtime/src/runtime/
-    // native_values/strings.rs), not part of thaw-quickjs's `intl`
-    // feature at all.
-    [
-        "Intl.Locale",
-        "Intl.PluralRules",
-        "Intl.Collator",
-        "Intl.Segmenter",
-        "Intl.RelativeTimeFormat",
-        "Intl.NumberFormat",
-        "Intl.DateTimeFormat",
-    ]
-    .iter()
-    .any(|marker| source.contains(marker))
+    thaw_bridge::required_runtime_features(source).contains("intl")
+}
+
+fn napi_runtime_features(features: &std::collections::BTreeSet<&str>) -> Vec<String> {
+    std::iter::once("quickjs".to_string())
+        .chain(features.iter().map(|feature| format!("quickjs-{feature}")))
+        .collect()
+}
+
+#[test]
+fn runtime_feature_selection_preserves_exact_requirements() {
+    let features = thaw_bridge::required_runtime_features(
+        "__thaw_tls_ brotli Intl.NumberFormat"
+    );
+    assert_eq!(features.iter().copied().collect::<Vec<_>>(), ["brotli", "intl", "tls"]);
+    assert_eq!(napi_runtime_features(&features), ["quickjs", "quickjs-brotli", "quickjs-intl", "quickjs-tls"]);
+    let features = ["icu4c", "intl"].into_iter().collect();
+    assert_eq!(napi_runtime_features(&features), ["quickjs", "quickjs-icu4c", "quickjs-intl"]);
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
