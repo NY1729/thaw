@@ -5132,6 +5132,207 @@ fn tee_closes_normally_and_keeps_cancellation_separate_from_errors() {
 }
 
 #[test]
+fn pipe_to_detects_destination_error_while_read_is_pending() {
+    assert_eq!(load(r#"
+      async function pipeToDetectsDestinationError(preventCancel) {
+        let destinationController, resolvePull, canceled;
+        const pullEntered = new Promise(resolve => { resolvePull = resolve; });
+        const source = new ReadableStream({
+          pull() { resolvePull(); },
+          cancel(reason) { canceled = reason; }
+        }, { highWaterMark: 0 });
+        const destination = new WritableStream({ start(controller) { destinationController = controller; } });
+        const error = new Error('destination');
+        const piping = source.pipeTo(destination, { preventCancel });
+        await pullEntered;
+        destinationController.error(error);
+        const rejected = await piping.then(() => false, reason => reason === error);
+        return [rejected, canceled === error, source.locked, destination.locked];
+      }
+    "#), 1);
+    assert_eq!(call("pipeToDetectsDestinationError", "[false]"), "[true,true,false,false]");
+    assert_eq!(call("pipeToDetectsDestinationError", "[true]"), "[true,false,false,false]");
+}
+
+#[test]
+fn pipe_to_waits_for_destination_capacity_before_reading() {
+    assert_eq!(load(r#"
+      async function pipeToWaitsForDestinationCapacity() {
+        let destinationController, canceled;
+        const source = new ReadableStream({ cancel(reason) { canceled = reason; } }, { highWaterMark: 0 });
+        const destination = new WritableStream({ start(controller) { destinationController = controller; } }, { highWaterMark: 0 });
+        const error = new Error('destination');
+        const piping = source.pipeTo(destination);
+        const hadNoReadRequest = source._reads.length === 0;
+        destinationController.error(error);
+        const rejected = await piping.then(() => false, reason => reason === error);
+        return [hadNoReadRequest, rejected, canceled === error, source.locked, destination.locked];
+      }
+    "#), 1);
+    assert_eq!(call("pipeToWaitsForDestinationCapacity", "[]"), "[true,true,true,false,false]");
+}
+
+#[test]
+fn pipe_to_observes_source_termination_while_backpressured() {
+    assert_eq!(load(r#"
+      async function pipeToObservesSourceTermination(errored) {
+        let sourceController, abortReason, closeCount = 0;
+        const source = new ReadableStream({ start(controller) { sourceController = controller; } }, { highWaterMark: 0 });
+        const destination = new WritableStream({
+          abort(reason) { abortReason = reason; },
+          close() { closeCount++; }
+        }, { highWaterMark: 0 });
+        const reason = new Error('source');
+        const piping = source.pipeTo(destination);
+        if (errored) sourceController.error(reason);
+        else sourceController.close();
+        const outcome = await piping.then(() => 'resolved', error => error === reason ? 'source-error' : 'other-error');
+        return [outcome, abortReason === reason, closeCount, source.locked, destination.locked];
+      }
+    "#), 1);
+    assert_eq!(call("pipeToObservesSourceTermination", "[false]"), "[\"resolved\",false,1,false,false]");
+    assert_eq!(call("pipeToObservesSourceTermination", "[true]"), "[\"source-error\",true,0,false,false]");
+}
+
+#[test]
+fn pipe_to_rejects_an_already_closed_destination() {
+    assert_eq!(load(r#"
+      async function pipeToRejectsClosedDestination() {
+        let canceled;
+        const source = new ReadableStream({ cancel(reason) { canceled = reason; } }, { highWaterMark: 0 });
+        const destination = new WritableStream();
+        await destination.close();
+        const outcome = await source.pipeTo(destination).then(() => false, error => error instanceof TypeError);
+        return [outcome, canceled instanceof TypeError, source.locked, destination.locked];
+      }
+    "#), 1);
+    assert_eq!(call("pipeToRejectsClosedDestination", "[]"), "[true,true,false,false]");
+}
+
+#[test]
+fn pipe_to_respects_ordered_initial_close_and_pending_destination_close() {
+    assert_eq!(load(r#"
+      async function pipeToOrderedCloseStates() {
+        const source = new ReadableStream({ start(controller) { controller.close(); } });
+        const destination = new WritableStream();
+        await destination.close();
+        const bothClosed = await source.pipeTo(destination).then(() => true, () => false);
+
+        let canceled, resolveClose, resolveEntered;
+        const entered = new Promise(resolve => { resolveEntered = resolve; });
+        const liveSource = new ReadableStream({ cancel(reason) { canceled = reason; } }, { highWaterMark: 0 });
+        const closingDestination = new WritableStream({ close() {
+          resolveEntered(); return new Promise(resolve => { resolveClose = resolve; });
+        } });
+        const closing = closingDestination.close();
+        const prematureClose = await liveSource.pipeTo(closingDestination)
+          .then(() => false, error => error instanceof TypeError);
+        await entered;
+        resolveClose();
+        await closing;
+        return [bothClosed, prematureClose, canceled instanceof TypeError,
+          source.locked, destination.locked, liveSource.locked, closingDestination.locked];
+      }
+    "#), 1);
+    assert_eq!(call("pipeToOrderedCloseStates", "[]"), "[true,true,true,false,false,false,false]");
+}
+
+#[test]
+fn pipe_to_preserves_prevent_flags_and_falsy_destination_reason() {
+    assert_eq!(load(r#"
+      async function pipeToPreventFlagsAndFalsyReason() {
+        let sourceController, abortCount = 0, closeCount = 0;
+        const failedSource = new ReadableStream({ start(controller) { sourceController = controller; } }, { highWaterMark: 0 });
+        const destination = new WritableStream({ abort() { abortCount++; } });
+        sourceController.error(false);
+        const sourceError = await failedSource.pipeTo(destination, { preventAbort: true })
+          .then(() => false, reason => reason === false);
+
+        const closedSource = new ReadableStream({ start(controller) { controller.close(); } });
+        const openDestination = new WritableStream({ close() { closeCount++; } });
+        const preventedClose = await closedSource.pipeTo(openDestination, { preventClose: true })
+          .then(() => true, () => false);
+
+        let errorController, canceled = false, cancelReason;
+        const waitingSource = new ReadableStream({ cancel(reason) { canceled = true; cancelReason = reason; } }, { highWaterMark: 0 });
+        const failedDestination = new WritableStream({ start(controller) { errorController = controller; } }, { highWaterMark: 0 });
+        const piping = waitingSource.pipeTo(failedDestination);
+        errorController.error(undefined);
+        const destinationError = await piping.then(() => false, reason => reason === undefined);
+        return [sourceError, abortCount, preventedClose, closeCount, openDestination.locked,
+          destinationError, canceled, cancelReason === undefined, waitingSource.locked, failedDestination.locked];
+      }
+    "#), 1);
+    assert_eq!(call("pipeToPreventFlagsAndFalsyReason", "[]"), "[true,0,true,0,false,true,true,true,false,false]");
+}
+
+#[test]
+fn pipe_to_distinguishes_equal_signal_and_source_error_reasons() {
+    assert_eq!(load(r#"
+      async function pipeToEqualErrorOrigins() {
+        const reason = new Error('shared');
+        let cancelAttempts = 0, abortCount = 0;
+        const source = new ReadableStream({ start(controller) { controller.error(reason); } }, { highWaterMark: 0 });
+        const originalCancel = source._cancel;
+        source._cancel = function(value) { cancelAttempts++; return originalCancel.call(this, value); };
+        const destination = new WritableStream({ abort() { abortCount++; } });
+        const signal = new AbortController();
+        const piping = source.pipeTo(destination, { signal: signal.signal });
+        signal.abort(reason);
+        const rejected = await piping.then(() => false, error => error === reason);
+        return [rejected, cancelAttempts, abortCount, source.locked, destination.locked];
+      }
+    "#), 1);
+    assert_eq!(call("pipeToEqualErrorOrigins", "[]"), "[true,0,1,false,false]");
+}
+
+#[test]
+fn pipe_to_initial_abort_precedes_source_and_destination_propagation() {
+    assert_eq!(load(r#"
+      async function pipeToInitialAbortPriority() {
+        const signalReason = new Error('signal');
+        const sourceReason = new Error('source');
+        const signal = new AbortController(); signal.abort(signalReason);
+        let erroredCancelCount = 0, erroredAbortReason;
+        const erroredSource = new ReadableStream({ start(controller) { controller.error(sourceReason); } });
+        const originalCancel = erroredSource._cancel;
+        erroredSource._cancel = function(reason) { erroredCancelCount++; return originalCancel.call(this, reason); };
+        const erroredDestination = new WritableStream({ abort(reason) { erroredAbortReason = reason; } });
+        const erroredOutcome = await erroredSource.pipeTo(erroredDestination, { signal: signal.signal })
+          .then(() => false, reason => reason === signalReason);
+
+        let closedAbortReason;
+        const closedSource = new ReadableStream({ start(controller) { controller.close(); } });
+        const closedDestination = new WritableStream({ abort(reason) { closedAbortReason = reason; } });
+        const closedOutcome = await closedSource.pipeTo(closedDestination, { signal: signal.signal })
+          .then(() => false, reason => reason === signalReason);
+
+        let readableCancelReason, preventedCancelCount = 0;
+        const readableSource = new ReadableStream({ cancel(reason) { readableCancelReason = reason; } });
+        const alreadyClosedDestination = new WritableStream();
+        await alreadyClosedDestination.close();
+        const destinationOutcome = await readableSource.pipeTo(alreadyClosedDestination, { signal: signal.signal })
+          .then(() => false, reason => reason === signalReason);
+
+        const preventedSource = new ReadableStream({ cancel() { preventedCancelCount++; } });
+        const preventedDestination = new WritableStream();
+        await preventedDestination.close();
+        const preventedOutcome = await preventedSource.pipeTo(preventedDestination,
+          { signal: signal.signal, preventCancel: true, preventAbort: true })
+          .then(() => false, reason => reason === signalReason);
+        return [erroredOutcome, erroredCancelCount, erroredAbortReason === signalReason,
+          closedOutcome, closedAbortReason === signalReason, destinationOutcome,
+          readableCancelReason === signalReason, preventedOutcome, preventedCancelCount,
+          erroredSource.locked, erroredDestination.locked, closedSource.locked,
+          closedDestination.locked, readableSource.locked, alreadyClosedDestination.locked,
+          preventedSource.locked, preventedDestination.locked];
+      }
+    "#), 1);
+    assert_eq!(call("pipeToInitialAbortPriority", "[]"),
+      "[true,0,true,true,true,true,true,true,0,false,false,false,false,false,false,false,false]");
+}
+
+#[test]
 fn crypto_buffer_regressions() {
     assert_eq!(
         load(r#"async function cryptoBufferRegressions() {
