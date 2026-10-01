@@ -1700,3 +1700,42 @@ fn fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn fs_write_stream_uses_configured_default_encoding() {
+    // Unrun regression: the shared Writable write/end path must use the
+    // filesystem stream's default encoding, with explicit writes overriding it.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_write_stream_encoding");
+    fs::write(dir.join("index.js"), r#"var fs = require('node:fs'); module.exports = async function(root) {
+        var write = function(path, options, chunks) { return new Promise(function(resolve, reject) {
+            var output = fs.createWriteStream(path, options); output.on('error', reject); output.on('finish', resolve);
+            chunks(output);
+        }); };
+        var hex = root + '/hex', override = root + '/override', bytes = root + '/bytes', changed = root + '/changed';
+        await write(hex, { encoding: 'hex' }, function(out) { out.end('6869'); });
+        await write(override, { encoding: 'hex' }, function(out) { out.end('6869', 'utf8'); });
+        await write(bytes, { encoding: 'hex' }, function(out) { out.end(Buffer.from('6869')); });
+        await write(changed, { encoding: 'hex' }, function(out) { out.setDefaultEncoding('base64'); out.end('eQ=='); });
+        var handlePath = root + '/handle', handle = await fs.promises.open(handlePath, 'w+');
+        await new Promise(function(resolve, reject) { var out = handle.createWriteStream({ encoding: 'hex', autoClose: false }); out.on('error', reject); out.on('finish', resolve); out.end('6869'); });
+        await handle.close();
+        return [hex, override, bytes, changed, handlePath].map(function(path) { return fs.readFileSync(path, 'utf8'); });
+    };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_write_stream_encoding_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWriteStreamEncoding = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseFsWriteStreamEncoding").unwrap();
+    let arguments =
+        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
+            .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["hi","6869","6869","y","hi"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
