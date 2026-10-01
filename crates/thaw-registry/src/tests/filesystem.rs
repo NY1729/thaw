@@ -964,6 +964,31 @@ fn fs_bigint_stats_include_host_identity_and_nanoseconds() {
 }
 
 #[test]
+fn fs_bigint_stats_keep_exact_wire_values_across_consumers() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_bigint_exact_wire");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(path) { fs.writeFileSync(path, 'x'); var original = globalThis.__thaw_fs, exact = { length: '9007199254740993', dev: '9007199254740995', ino: '9007199254740997', mode: '33188', nlink: '1', uid: '0', gid: '0', rdev: '0', blksize: '4096', blocks: '1', atimeNs: '-1', mtimeNs: '1000000000000000001', ctimeNs: '-1000001', birthtimeNs: '123456789' }, record = { ok: true, length: 9007199254740992, dev: 9007199254740996, ino: 9007199254740996, mode: 33188, nlink: 1, uid: 0, gid: 0, rdev: 0, blksize: 4096, blocks: 1, atimeMs: -0.000001, mtimeMs: 1000000000000, ctimeMs: -1.000001, birthtimeMs: 123.456789, file: true, directory: false, symlink: false, exact: exact }; globalThis.__thaw_fs = function(operation, filename, value, recursive) { if (operation === 'stat' || operation === 'lstat' || operation === 'fd_stat') return JSON.stringify(record); return original(operation, filename, value, recursive); }; var fd, handle; try { var normal = fs.statSync(path), sync = fs.statSync(path, { bigint: true }), callback = await new Promise(function(resolve, reject) { fs.stat(path, { bigint: true }, function(error, value) { error ? reject(error) : resolve(value); }); }), promised = await fs.promises.lstat(path, { bigint: true }); fd = fs.openSync(path, 'r'); var descriptor = fs.fstatSync(fd, { bigint: true }); handle = await fs.promises.open(path, 'r'); var handled = await handle.stat({ bigint: true }), resolveChange, rejectChange, change = new Promise(function(resolve, reject) { resolveChange = resolve; rejectChange = reject; }), watcher = fs.watchFile(path, { bigint: true, interval: 1 }, function(current, previous) { resolveChange([current.mtimeNs, previous.mtimeNs]); }), watched = watcher._previous.stats, timeout = setTimeout(function() { rejectChange(new Error('watchFile missed nanosecond change')); }, 500); record.exact.mtimeNs = '1000000000000000002'; var changed = await change; clearTimeout(timeout); fs.unwatchFile(path); return [normal.size, sync.size.toString(), sync.dev.toString(), sync.ino.toString(), sync.atimeNs.toString(), sync.atimeMs.toString(), sync.mtimeNs.toString(), sync.mtimeMs.toString(), sync.ctimeNs.toString(), sync.ctimeMs.toString(), sync.birthtimeNs.toString(), sync.birthtimeMs.toString(), callback.ino === sync.ino, promised.size === sync.size, descriptor.dev === sync.dev, handled.mtimeNs === sync.mtimeNs, watched.ino === sync.ino, sync.atime instanceof Date, changed[0] === sync.mtimeNs + 1n && changed[1] === sync.mtimeNs]; } finally { fs.unwatchFile(path); if (fd !== undefined) fs.closeSync(fd); if (handle) await handle.close(); globalThis.__thaw_fs = original; } };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_bigint_exact_wire_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsBigintExactWire = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let path = dir.join("exact.txt").to_string_lossy().into_owned();
+    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
+    let function = CString::new("exerciseFsBigintExactWire").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[9007199254740992,"9007199254740993","9007199254740995","9007199254740997","-1","0","1000000000000000001","1000000000000","-1000001","-1","123456789","123",true,true,true,true,true,true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn fs_promises_watch_iterates_changes_and_honors_abort() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_promises_watch");
