@@ -4943,6 +4943,139 @@ fn form_data_iteration_checks_receiver_at_call_time() {
 }
 
 #[test]
+fn readable_reader_closed_promises_follow_each_lock() {
+    assert_eq!(load(r#"
+      async function readableReaderClosedPromisesFollowLock() {
+        let controller;
+        const stream = new ReadableStream({ start(value) { controller = value; } });
+        const first = stream.getReader(), firstClosed = first.closed;
+        first.releaseLock();
+        const firstReleased = await firstClosed.then(() => false, error => error instanceof TypeError);
+        const firstAfterRelease = await first.closed.then(() => false, error => error instanceof TypeError);
+        const second = stream.getReader(), secondClosed = second.closed;
+        controller.close();
+        const secondResolved = await secondClosed.then(() => true, () => false);
+        second.releaseLock();
+        const settledStayedResolved = await secondClosed.then(() => true, () => false);
+        const releasedGetter = await second.closed.then(() => false, error => error instanceof TypeError);
+        const third = stream.getReader();
+        const closedLock = await third.closed.then(() => true, () => false);
+        third.releaseLock();
+        return [firstReleased, firstAfterRelease, secondResolved, settledStayedResolved, releasedGetter, closedLock];
+      }
+    "#), 1);
+    assert_eq!(call("readableReaderClosedPromisesFollowLock", "[]"), "[true,true,true,true,true,true]");
+}
+
+#[test]
+fn byob_reader_closed_promises_follow_each_lock_and_error() {
+    assert_eq!(load(r#"
+      async function byobReaderClosedPromisesFollowLock() {
+        let controller;
+        const reason = new Error('source');
+        const stream = new ReadableStream({ type: 'bytes', start(value) { controller = value; } });
+        const first = stream.getReader({ mode: 'byob' }), firstClosed = first.closed;
+        first.releaseLock();
+        const firstReleased = await firstClosed.then(() => false, error => error instanceof TypeError);
+        const second = stream.getReader({ mode: 'byob' }), secondClosed = second.closed;
+        controller.error(reason);
+        const secondErrored = await secondClosed.then(() => false, error => error === reason);
+        second.releaseLock();
+        const errorStayed = await secondClosed.then(() => false, error => error === reason);
+        const releasedGetter = await second.closed.then(() => false, error => error instanceof TypeError);
+        const third = stream.getReader({ mode: 'byob' });
+        const erroredLock = await third.closed.then(() => false, error => error === reason);
+        third.releaseLock();
+        return [firstReleased, secondErrored, errorStayed, releasedGetter, erroredLock];
+      }
+    "#), 1);
+    assert_eq!(call("byobReaderClosedPromisesFollowLock", "[]"), "[true,true,true,true,true]");
+}
+
+#[test]
+fn writer_ready_and_closed_promises_follow_each_lock() {
+    assert_eq!(load(r#"
+      async function writerReadyAndClosedPromisesFollowLock() {
+        const reason = new Error('abort');
+        const stream = new WritableStream({}, { highWaterMark: 0 });
+        const first = stream.getWriter(), firstReady = first.ready, firstClosed = first.closed;
+        first.releaseLock();
+        const releasedReady = await firstReady.then(() => false, error => error instanceof TypeError);
+        const releasedClosed = await firstClosed.then(() => false, error => error instanceof TypeError);
+        const firstAfterRelease = await first.ready.then(() => false, error => error instanceof TypeError);
+        const second = stream.getWriter(), secondReady = second.ready, secondClosed = second.closed;
+        await second.abort(reason);
+        const abortReady = await secondReady.then(() => false, error => error === reason);
+        const abortClosed = await secondClosed.then(() => false, error => error === reason);
+        second.releaseLock();
+        const releasedGetter = await second.closed.then(() => false, error => error instanceof TypeError);
+        const third = stream.getWriter();
+        const erroredLock = await third.closed.then(() => false, error => error === reason);
+        third.releaseLock();
+        return [releasedReady, releasedClosed, firstAfterRelease, abortReady, abortClosed, releasedGetter, erroredLock];
+      }
+    "#), 1);
+    assert_eq!(call("writerReadyAndClosedPromisesFollowLock", "[]"), "[true,true,true,true,true,true,true]");
+}
+
+#[test]
+fn writer_backpressure_reassignment_keeps_old_promise_rejected() {
+    assert_eq!(load(r#"
+      async function writerBackpressureReassignment() {
+        let resolveWrite, resolveEntered;
+        const entered = new Promise(resolve => { resolveEntered = resolve; });
+        const stream = new WritableStream({ write() { resolveEntered(); return new Promise(resolve => { resolveWrite = resolve; }); } });
+        const first = stream.getWriter(), initialReady = first.ready;
+        const writing = first.write('chunk');
+        const pendingReady = first.ready, pendingClosed = first.closed;
+        await entered;
+        first.releaseLock();
+        const oldReady = await pendingReady.then(() => false, error => error instanceof TypeError);
+        const oldClosed = await pendingClosed.then(() => false, error => error instanceof TypeError);
+        const settledInitial = await initialReady.then(() => true, () => false);
+        const second = stream.getWriter(), nextReady = second.ready, nextClosed = second.closed;
+        resolveWrite();
+        await writing;
+        const resumedReady = await nextReady.then(() => true, () => false);
+        await second.close();
+        const finishedClosed = await nextClosed.then(() => true, () => false);
+        second.releaseLock();
+        const releasedGetter = await second.ready.then(() => false, error => error instanceof TypeError);
+        const third = stream.getWriter();
+        const closedLock = await Promise.all([third.ready, third.closed]).then(() => true, () => false);
+        third.releaseLock();
+        return [oldReady, oldClosed, settledInitial, resumedReady, finishedClosed, releasedGetter, closedLock];
+      }
+    "#), 1);
+    assert_eq!(call("writerBackpressureReassignment", "[]"), "[true,true,true,true,true,true,true]");
+}
+
+#[test]
+fn writer_relock_during_abort_waits_for_closed_settlement() {
+    assert_eq!(load(r#"
+      async function writerRelockDuringAbort() {
+        let resolveAbort, resolveEntered;
+        const entered = new Promise(resolve => { resolveEntered = resolve; });
+        const reason = new Error('abort');
+        const stream = new WritableStream({ abort() { resolveEntered(); return new Promise(resolve => { resolveAbort = resolve; }); } });
+        const first = stream.getWriter(), firstClosed = first.closed;
+        const aborting = first.abort(reason);
+        await entered;
+        first.releaseLock();
+        const firstReleased = await firstClosed.then(() => false, error => error instanceof TypeError);
+        const second = stream.getWriter(), secondClosed = second.closed;
+        const secondReady = await second.ready.then(() => false, error => error === reason);
+        resolveAbort();
+        await aborting;
+        const secondReason = await secondClosed.then(() => false, error => error === reason);
+        second.releaseLock();
+        return [firstReleased, secondReady, secondReason];
+      }
+    "#), 1);
+    assert_eq!(call("writerRelockDuringAbort", "[]"), "[true,true,true]");
+}
+
+#[test]
 fn crypto_buffer_regressions() {
     assert_eq!(
         load(r#"async function cryptoBufferRegressions() {
