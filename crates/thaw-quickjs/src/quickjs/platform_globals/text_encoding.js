@@ -14,14 +14,14 @@
   };
   globalThis.TextEncoder = class TextEncoder {
     get encoding() { return 'utf-8'; }
-    encode(input = '') { return Uint8Array.from(encodeUtf8(input)); }
+    encode(input = '') { return Uint8Array.from(encodeUtf8(`${input}`)); }
     encodeInto(input, destination) {
       if (!(destination instanceof Uint8Array)) {
         throw new TypeError('destination must be a Uint8Array');
       }
       let read = 0;
       let written = 0;
-      for (const character of String(input)) {
+      for (const character of `${input}`) {
         const bytes = encodeUtf8(character);
         if (written + bytes.length > destination.length) break;
         destination.set(bytes, written);
