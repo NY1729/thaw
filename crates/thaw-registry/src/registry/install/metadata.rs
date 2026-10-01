@@ -136,7 +136,11 @@ fn collect_relative_files(root: &Path, dir: &Path, output: &mut Vec<String>) -> 
 fn wildcard_capture<'a>(pattern: &str, path: &'a str) -> Option<&'a str> {
     let pattern = pattern.strip_prefix("./").unwrap_or(pattern);
     let (prefix, suffix) = pattern.split_once('*')?;
-    if suffix.contains('*') || !path.starts_with(prefix) || !path.ends_with(suffix) {
+    if suffix.contains('*')
+        || path.len() < prefix.len() + suffix.len()
+        || !path.starts_with(prefix)
+        || !path.ends_with(suffix)
+    {
         return None;
     }
     Some(&path[prefix.len()..path.len() - suffix.len()])

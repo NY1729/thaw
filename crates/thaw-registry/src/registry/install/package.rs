@@ -243,12 +243,17 @@ fn add_installed_inner(
                 .map_err(|error| format!("failed to copy `{}`: {error}", source.display()))?;
         }
     }
+    let platform_executable = dest_dir.join("platform-executable");
     if let Some(executable) = select_optional_dependency_executable(node_modules_dir, &manifest)? {
-        fs::copy(&executable, dest_dir.join("platform-executable")).map_err(|error| {
+        fs::copy(&executable, &platform_executable).map_err(|error| {
             format!(
                 "failed to copy platform executable `{}`: {error}",
                 executable.display()
             )
+        })?;
+    } else if platform_executable.is_file() {
+        fs::remove_file(&platform_executable).map_err(|error| {
+            format!("failed to remove stale `{}`: {error}", platform_executable.display())
         })?;
     }
     fs::write(dest_dir.join("package.d.ts"), dts_source).map_err(|e| {
@@ -290,15 +295,19 @@ fn add_installed_inner(
     // a single-file package with no dependencies would otherwise get an
     // uninformative one-entry file next to `version.txt` saying the same
     // thing twice.
+    let lock_path = dest_dir.join("lock.json");
     if dependency_versions.len() > 1 {
         let lock_json = serde_json::to_string_pretty(&dependency_versions)
             .map_err(|e| format!("failed to serialize `lock.json` for `{name}`: {e}"))?;
-        fs::write(dest_dir.join("lock.json"), lock_json).map_err(|e| {
+        fs::write(&lock_path, lock_json).map_err(|e| {
             format!(
                 "failed to write `{}`: {e}",
                 dest_dir.join("lock.json").display()
             )
         })?;
+    } else if lock_path.is_file() {
+        fs::remove_file(&lock_path)
+            .map_err(|error| format!("failed to remove stale `{}`: {error}", lock_path.display()))?;
     }
 
     Ok(AddedPackage {

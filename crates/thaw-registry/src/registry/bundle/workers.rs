@@ -415,7 +415,9 @@ fn rewrite_static_worker_urls(
             continue;
         }
         output.push_str(&source[cursor..lo]);
+        output.push_str("(globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require, globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source, ");
         output.push_str(&replacement);
+        output.push(')');
         cursor = hi;
         if !worker_requires.contains(&relative) {
             worker_requires.push(relative);
