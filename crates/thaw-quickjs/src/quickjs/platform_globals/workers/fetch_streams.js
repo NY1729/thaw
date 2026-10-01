@@ -153,19 +153,26 @@
     globalThis.ReadableStream = class ReadableStream {
       static from(iterable) {
         if (iterable === null || iterable === undefined) { const error = new TypeError('value is not iterable'); error.code = 'ERR_ARG_NOT_ITERABLE'; throw error; }
-        const method = iterable[Symbol.asyncIterator] || iterable[Symbol.iterator];
+        const asyncMethod = iterable[Symbol.asyncIterator];
+        const asynchronous = asyncMethod !== null && asyncMethod !== undefined;
+        const method = asynchronous ? asyncMethod : iterable[Symbol.iterator];
         if (typeof method !== 'function') { const error = new TypeError('value is not iterable'); error.code = 'ERR_ARG_NOT_ITERABLE'; throw error; }
         const iterator = method.call(iterable);
-        if (!iterator || typeof iterator.next !== 'function') throw new TypeError('iterator must provide next()');
+        if (!iterator) throw new TypeError('iterator must provide next()');
+        const next = iterator.next;
+        if (typeof next !== 'function') throw new TypeError('iterator must provide next()');
         let chain = Promise.resolve(), done = false;
         return new ReadableStream({
           pull(controller) {
             chain = chain.then(async () => {
               if (done) return;
-              const result = await iterator.next();
-              if (!result || typeof result !== 'object') throw new TypeError('iterator result must be an object');
-              if (result.done) { done = true; controller.close(); }
-              else controller.enqueue(await result.value);
+              const step = next.call(iterator);
+              const result = asynchronous ? await step : step;
+              if (!result || (typeof result !== 'object' && typeof result !== 'function')) throw new TypeError('iterator result must be an object');
+              const finished = Boolean(result.done);
+              const value = asynchronous ? (finished ? undefined : result.value) : await result.value;
+              if (finished) { done = true; controller.close(); }
+              else controller.enqueue(value);
             }).catch(error => { done = true; controller.error(error); });
             return chain;
           },
