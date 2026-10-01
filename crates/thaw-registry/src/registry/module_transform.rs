@@ -495,8 +495,10 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
     use std::collections::{BTreeMap, BTreeSet};
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowExpr, BlockStmt, CatchClause, Decl, Expr, FnExpr, Function, ImportSpecifier, ModuleDecl,
-        ModuleExportName, ModuleItem, Pat, Prop, Stmt,
+        ArrowExpr, ArrowFunctionBody, BlockStmt, CatchClause, Class, Decl, Expr, FnExpr,
+        ForHead, ForInStmt, ForOfStmt, ForStmt, Function, ImportSpecifier, ModuleDecl,
+        ModuleExportName, ModuleItem, Pat, Prop, StaticBlock, Stmt, SwitchStmt, VarDecl,
+        VarDeclKind, VarDeclOrExpr,
     };
     use thaw_parser::common::Spanned;
 
@@ -552,6 +554,32 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
             }
         }
         names
+    }
+
+    fn variable_names(declaration: &VarDecl) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for declarator in &declaration.decls {
+            pattern_names(&declarator.name, &mut names);
+        }
+        names
+    }
+
+    fn hoisted_var_bindings(statements: &[Stmt]) -> BTreeSet<String> {
+        struct HoistedVars(BTreeSet<String>);
+        impl Visit for HoistedVars {
+            fn visit_var_decl(&mut self, declaration: &VarDecl) {
+                if declaration.kind == VarDeclKind::Var {
+                    self.0.extend(variable_names(declaration));
+                }
+                declaration.visit_children_with(self);
+            }
+            fn visit_function(&mut self, _: &Function) {}
+            fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
+            fn visit_class(&mut self, _: &Class) {}
+        }
+        let mut collector = HoistedVars(BTreeSet::new());
+        statements.visit_with(&mut collector);
+        collector.0
     }
 
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
@@ -616,14 +644,14 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
             let mut names = BTreeSet::new();
             for parameter in &function.params {
                 pattern_names(&parameter.pat, &mut names);
-                self.shadowed.push(names.clone());
-                parameter.visit_with(self);
-                self.shadowed.pop();
             }
             self.shadowed.push(names);
+            function.params.visit_with(self);
             function.decorators.visit_with(self);
             if let Some(body) = &function.body {
-                self.shadowed.push(direct_bindings(&body.stmts));
+                let mut names = direct_bindings(&body.stmts);
+                names.extend(hoisted_var_bindings(&body.stmts));
+                self.shadowed.push(names);
                 body.stmts.visit_with(self);
                 self.shadowed.pop();
             }
@@ -649,12 +677,70 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
             let mut names = BTreeSet::new();
             for parameter in &arrow.params {
                 pattern_names(parameter, &mut names);
-                self.shadowed.push(names.clone());
-                parameter.visit_with(self);
-                self.shadowed.pop();
             }
             self.shadowed.push(names);
+            arrow.params.visit_with(self);
+            if let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_ref() {
+                let mut body_names = direct_bindings(&body.stmts);
+                body_names.extend(hoisted_var_bindings(&body.stmts));
+                self.shadowed.push(body_names);
+            }
             arrow.body.visit_with(self);
+            if matches!(arrow.body.as_ref(), ArrowFunctionBody::FunctionBody(_)) {
+                self.shadowed.pop();
+            }
+            self.shadowed.pop();
+        }
+
+        fn visit_for_stmt(&mut self, statement: &ForStmt) {
+            let names = match statement.init.as_ref() {
+                Some(VarDeclOrExpr::VarDecl(declaration))
+                    if declaration.kind != VarDeclKind::Var => variable_names(declaration),
+                _ => BTreeSet::new(),
+            };
+            self.shadowed.push(names);
+            statement.visit_children_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
+            let names = match &statement.left {
+                ForHead::VarDecl(declaration) if declaration.kind != VarDeclKind::Var => {
+                    variable_names(declaration)
+                }
+                _ => BTreeSet::new(),
+            };
+            self.shadowed.push(names);
+            statement.visit_children_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_for_of_stmt(&mut self, statement: &ForOfStmt) {
+            let names = match &statement.left {
+                ForHead::VarDecl(declaration) if declaration.kind != VarDeclKind::Var => {
+                    variable_names(declaration)
+                }
+                _ => BTreeSet::new(),
+            };
+            self.shadowed.push(names);
+            statement.visit_children_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_switch_stmt(&mut self, statement: &SwitchStmt) {
+            statement.discriminant.visit_with(self);
+            let mut names = BTreeSet::new();
+            for case in &statement.cases {
+                names.extend(direct_bindings(&case.cons));
+            }
+            self.shadowed.push(names);
+            statement.cases.visit_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_static_block(&mut self, block: &StaticBlock) {
+            self.shadowed.push(hoisted_var_bindings(&block.body.stmts));
+            block.body.visit_with(self);
             self.shadowed.pop();
         }
 
