@@ -491,7 +491,42 @@ fn rewrite_dynamic_imports(source: &str) -> Option<String> {
     Some(output)
 }
 
-fn rewrite_live_import_references(source: &str) -> Option<String> {
+/// Choose one unused number range for every name introduced by ESM lowering.
+/// The reference pass and declaration pass must use the same offset.
+fn esm_synthetic_offset(source: &str) -> Option<usize> {
+    use std::collections::BTreeSet;
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Ident, ModuleDecl, ModuleItem};
+
+    #[derive(Default)]
+    struct Identifiers(BTreeSet<String>);
+    impl Visit for Identifiers {
+        fn visit_ident(&mut self, ident: &Ident) {
+            self.0.insert(ident.sym.to_string());
+        }
+    }
+
+    let (module, _) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
+    let mut identifiers = Identifiers::default();
+    module.visit_with(&mut identifiers);
+    let count = module.body.iter().filter(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::Import(_) | ModuleDecl::ExportAll(_)) => true,
+        ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => export.src.is_some(),
+        _ => false,
+    }).count();
+    let unused = |name: &str| !identifiers.0.contains(name) && !source.contains(name);
+    (0..).find(|offset| {
+        unused(&format!("__thaw_esm_key_{offset}"))
+            && (0..count).all(|index| {
+                let index = offset + index;
+                ["import", "reexport", "reexport_all"].iter().all(|kind| {
+                    unused(&format!("__thaw_esm_{kind}_{index}"))
+                })
+            })
+    })
+}
+
+fn rewrite_live_import_references(source: &str, synthetic_offset: usize) -> Option<String> {
     use std::collections::{BTreeMap, BTreeSet};
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
@@ -588,7 +623,7 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
         ModuleExportName::Str(value) => value.value.to_string_lossy().into_owned(),
     };
     let mut bindings = BTreeMap::<String, String>::new();
-    let mut synthetic_count = 0usize;
+    let mut synthetic_count = synthetic_offset;
     for item in &module.body {
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
@@ -1017,7 +1052,8 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
 
     let dynamic_source = rewrite_dynamic_imports(source);
     let source = dynamic_source.as_deref().unwrap_or(source);
-    let live_source = rewrite_live_import_references(source);
+    let synthetic_offset = esm_synthetic_offset(source)?;
+    let live_source = rewrite_live_import_references(source, synthetic_offset);
     let source = live_source.as_deref().unwrap_or(source);
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
     let has_esm_syntax = module
@@ -1060,9 +1096,9 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
     let mut prologue = String::new();
     let mut local_export_prologue = String::new();
     let mut rest = String::new();
-    let mut synthetic_count = 0usize;
+    let mut synthetic_count = synthetic_offset;
     let mut imported_bindings = BTreeMap::<String, String>::new();
-    let mut binding_counter = 0usize;
+    let mut binding_counter = synthetic_offset;
     for item in &module.body {
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
@@ -1102,6 +1138,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
         }
     }
 
+    let key_name = format!("__thaw_esm_key_{synthetic_offset}");
     for item in &module.body {
         match item {
             ModuleItem::Stmt(stmt) => {
@@ -1231,7 +1268,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                     js_string_literal(&spec)
                 ));
                 rest.push_str(&format!(
-                    "for (let __thaw_esm_key in {var_name}) {{ if (__thaw_esm_key !== 'default' && __thaw_esm_key !== '__esModule') Object.defineProperty(exports, __thaw_esm_key, {{ enumerable: true, get: function() {{ return {var_name}[__thaw_esm_key]; }} }}); }}\n"
+                    "for (let {key_name} in {var_name}) {{ if ({key_name} !== 'default' && {key_name} !== '__esModule') Object.defineProperty(exports, {key_name}, {{ enumerable: true, get: function() {{ return {var_name}[{key_name}]; }} }}); }}\n"
                 ));
             }
             // `import foo = require(...)`/`export = foo`/`export as
