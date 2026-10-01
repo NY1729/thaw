@@ -7,6 +7,42 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
+#[test]
+fn native_string_operations_preserve_utf16_units() {
+    let lone = thaw_string_from_char_code(0xD800 as f64);
+    let low = thaw_string_from_char_code(0xDC00 as f64);
+    let mut pair_bytes = unsafe { wtf8_bytes(lone) }.to_vec();
+    pair_bytes.extend_from_slice(unsafe { wtf8_bytes(low) });
+    let pair = arena_wtf8(&pair_bytes).unwrap().cast();
+    assert!(unsafe { thaw_string_is_well_formed(pair) });
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(lone) }), [0xD800]);
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(unsafe { thaw_string_trim(lone) }) }), [0xD800]);
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(unsafe { thaw_string_normalize(lone, c"NFC".as_ptr()) }) }), [0xD800]);
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(unsafe { thaw_unescape(c"%uD800".as_ptr()) }) }), [0xD800]);
+    assert_eq!(unsafe { CStr::from_ptr(thaw_escape(lone)) }.to_str().unwrap(), "%uD800");
+    assert_eq!(unsafe { thaw_string_char_code_at(thaw_string_from_char_code(2f64.powi(63)), 0.0) }, 0.0);
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(thaw_string_from_code_point(0xD800 as f64)) }), [0xD800]);
+    assert!(unsafe { thaw_encode_uri(lone) }.is_null());
+    assert!(unsafe { thaw_decode_uri_component(c"%+1".as_ptr()) }.is_null());
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(unsafe { thaw_decode_uri_component(lone) }) }), [0xD800]);
+    assert_eq!(unsafe { thaw_string_last_index_of(c"aba".as_ptr(), c"a".as_ptr(), f64::NAN) }, 2.0);
+    let face = thaw_string_from_code_point(0x1F600 as f64);
+    let replaced = unsafe { thaw_string_replace_all(face, c"".as_ptr(), c"x".as_ptr()) };
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(replaced) }), [b'x' as u16, 0xD83D, b'x' as u16, 0xDE00, b'x' as u16]);
+    let symbol = unsafe { thaw_symbol_new(c"x".as_ptr()) };
+    assert!(unsafe { thaw_symbol_key_for(symbol) }.is_null());
+    let first = unsafe { thaw_symbol_for(lone) };
+    let second = unsafe { thaw_symbol_for(thaw_string_from_char_code(0xD801 as f64)) };
+    assert_ne!(unsafe { wtf8_bytes(first) }, unsafe { wtf8_bytes(second) });
+    let sigma = unsafe { thaw_string_to_lower_case(c"ΟΣ".as_ptr()) };
+    assert_eq!(unsafe { CStr::from_ptr(sigma) }.to_str().unwrap(), "ος");
+    let turkic = unsafe { thaw_string_to_locale_lower_case(c"I\u{0307}".as_ptr(), c"tr".as_ptr()) };
+    assert_eq!(unsafe { CStr::from_ptr(turkic) }.to_str().unwrap(), "i");
+    let embedded_nul = thaw_arena::arena_string(b" a\0b ");
+    let trimmed = unsafe { thaw_string_trim(embedded_nul) };
+    assert_eq!(unsafe { wtf8_bytes(trimmed) }, b"a\0b");
+}
+
 static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static UNHANDLED_REJECTIONS: AtomicU64 = AtomicU64::new(0);
 

@@ -1075,7 +1075,7 @@ impl<'a> FnLowerer<'a> {
 
         if matches!(
             callee_name.as_str(),
-            "encodeURIComponent" | "encodeURI" | "atob" | "btoa" | "escape" | "unescape"
+            "atob" | "btoa" | "escape" | "unescape"
         ) {
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, &callee_name)?;
@@ -1084,8 +1084,6 @@ impl<'a> FnLowerer<'a> {
             };
             let value = self.coerce_primitive_to_string(value.clone())?;
             let intrinsic = match callee_name.as_str() {
-                "encodeURIComponent" => "__thaw_encode_uri_component",
-                "encodeURI" => "__thaw_encode_uri",
                 "atob" => "__thaw_atob",
                 "btoa" => "__thaw_btoa",
                 "escape" => "__thaw_escape",
@@ -1095,17 +1093,18 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
-        if matches!(callee_name.as_str(), "decodeURIComponent" | "decodeURI") {
+        if matches!(callee_name.as_str(), "encodeURIComponent" | "encodeURI" | "decodeURIComponent" | "decodeURI") {
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, &callee_name)?;
             let [value] = arguments.as_slice() else {
                 return Err(format!("`{callee_name}` expects exactly one argument"));
             };
             let value = self.coerce_primitive_to_string(value.clone())?;
-            let intrinsic = if callee_name == "decodeURIComponent" {
-                "__thaw_decode_uri_component"
-            } else {
-                "__thaw_decode_uri"
+            let intrinsic = match callee_name.as_str() {
+                "encodeURIComponent" => "__thaw_encode_uri_component",
+                "encodeURI" => "__thaw_encode_uri",
+                "decodeURIComponent" => "__thaw_decode_uri_component",
+                _ => "__thaw_decode_uri",
             };
             let raw_name = format!("__thaw_decode_uri_raw_{}", self.next_binding);
             self.next_binding += 1;
@@ -1122,7 +1121,7 @@ impl<'a> FnLowerer<'a> {
                         vec![HirExpr::Var(raw_name.clone())],
                     ),
                     vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                        "URI malformed".into(),
+                        "\u{1}URIError\u{1}URI malformed".into(),
                     )))],
                     Vec::new(),
                 ),

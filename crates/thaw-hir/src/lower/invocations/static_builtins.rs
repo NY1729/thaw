@@ -255,6 +255,41 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var(intrinsic.to_string())),
                             vec![value],
                         );
+                        if property.sym == *"keyFor" {
+                            let raw_name = format!("__thaw_symbol_key_raw_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(raw_name.clone(), HirType::Str);
+                            let body = HirExpr::Block(vec![
+                                HirStmt::Let(raw_name.clone(), HirType::Str, result),
+                                HirStmt::If(
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                                        vec![HirExpr::Var(raw_name.clone())],
+                                    ),
+                                    vec![HirStmt::Return(Some(HirExpr::OptionalNone(HirType::Str)))],
+                                    Vec::new(),
+                                ),
+                                HirStmt::Return(Some(HirExpr::OptionalSome(
+                                    Box::new(HirExpr::Var(raw_name)),
+                                    HirType::Str,
+                                ))),
+                            ]);
+                            let mut referenced = BTreeSet::new();
+                            collect_referenced_bindings(&body, &mut referenced);
+                            let captures = referenced.into_iter().filter_map(|captured| {
+                                self.scope.get(&captured).cloned().map(|ty| HirParam { name: captured, ty })
+                            }).collect();
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Lambda(
+                                    captures,
+                                    Vec::new(),
+                                    HirType::Optional(Box::new(HirType::Str)),
+                                    Box::new(body),
+                                )),
+                                Vec::new(),
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object"
@@ -4257,7 +4292,7 @@ impl<'a> FnLowerer<'a> {
                                     vec![var(&raw_name)],
                                 ),
                                 vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                                    "Invalid code point".into(),
+                                    "\u{1}RangeError\u{1}Invalid code point".into(),
                                 )))],
                                 Vec::new(),
                             ));

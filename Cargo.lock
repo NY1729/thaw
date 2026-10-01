@@ -3296,6 +3296,8 @@ version = "0.1.0"
 dependencies = [
  "fancy-regex",
  "icu_calendar",
+ "icu_casemap",
+ "icu_locale_core",
  "icu_normalizer",
  "jiff",
  "libc",
