@@ -361,30 +361,62 @@
         if (signal !== undefined && (!signal || typeof signal.aborted !== 'boolean' || typeof signal.addEventListener !== 'function')) throw new TypeError('signal must be an AbortSignal');
         const reader = this.getReader(); let writer;
         try { writer = destination.getWriter(); } catch (error) { reader.releaseLock(); throw error; }
-        let abort, abortPromise;
-        if (signal !== undefined) {
-          abortPromise = new Promise((resolve, reject) => { abort = () => reject(signal.reason); if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true }); });
-        }
-        const wait = operation => abortPromise ? Promise.race([operation, abortPromise]) : operation;
-        const isAbort = error => signal !== undefined && signal.aborted && error === signal.reason;
-        const abortBoth = async error => {
-          const actions = [];
-          if (!options.preventCancel) actions.push(reader.cancel(error));
-          if (!options.preventAbort) actions.push(writer.abort(error));
-          await Promise.all(actions);
-        };
+        let abort, abortEvent;
         try {
-          while (true) {
-            let result;
-            try { result = await wait(reader.read()); }
-            catch (error) { if (isAbort(error)) await abortBoth(error); else if (!options.preventAbort) await writer.abort(error); throw error; }
-            if (result.done) break;
-            try { await wait(writer.write(result.value)); }
-            catch (error) { if (isAbort(error)) await abortBoth(error); else if (!options.preventCancel) await reader.cancel(error); throw error; }
+          if (signal !== undefined) {
+            const abortPromise = new Promise((resolve, reject) => { abort = () => reject(signal.reason); if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true }); });
+            abortEvent = abortPromise.then(undefined, error => ({ kind: 'abort', error }));
           }
-          if (!options.preventClose) {
-            try { await wait(writer.close()); }
-            catch (error) { if (isAbort(error)) await abortBoth(error); else if (!options.preventCancel) await reader.cancel(error); throw error; }
+          const sourceEnded = reader.closed.then(() => ({ kind: 'sourceClosed' }), error => ({ kind: 'sourceError', error }));
+          const destinationEnded = writer.closed.then(() => ({ kind: 'destinationClosed' }), error => ({ kind: 'destinationError', error }));
+          const wait = (operation, watchSource = false, watchDestination = true) => {
+            const pending = [Promise.resolve(operation).then(value => ({ kind: 'value', value }), error => ({ kind: 'operationError', error }))];
+            if (abortEvent) pending.push(abortEvent);
+            if (watchSource) pending.push(sourceEnded);
+            if (watchDestination) pending.push(destinationEnded);
+            return Promise.race(pending);
+          };
+          const abortBoth = async error => {
+            const actions = [];
+            if (!options.preventAbort && destination._state === 'writable') actions.push(writer.abort(error));
+            if (!options.preventCancel && this._state === 'readable') actions.push(reader.cancel(error));
+            await Promise.all(actions);
+          };
+          const fail = async (event, phase) => {
+            const error = event.kind === 'destinationClosed' ? webInvalidState('WritableStream closed during pipe') : event.error;
+            if (event.kind === 'abort') await abortBoth(error);
+            else if (event.kind === 'destinationClosed' || event.kind === 'destinationError' || phase !== 'read') {
+              if (!options.preventCancel) await reader.cancel(error);
+            } else if (!options.preventAbort) await writer.abort(error);
+            throw error;
+          };
+          const currentState = () => {
+            if (this._state === 'errored') return { kind: 'sourceError', error: this._error };
+            if (destination._state === 'errored') return { kind: 'destinationError', error: destination._error };
+            if (this._state === 'closed') return { kind: 'sourceClosed' };
+            if (destination._state === 'closed' || destination._closeQueued) return { kind: 'destinationClosed' };
+            return null;
+          };
+          if (signal !== undefined && signal.aborted) await fail({ kind: 'abort', error: signal.reason }, 'ready');
+          while (true) {
+            const beforeReady = currentState();
+            if (beforeReady && beforeReady.kind === 'sourceClosed') break;
+            if (beforeReady) await fail(beforeReady, beforeReady.kind === 'sourceError' ? 'read' : 'ready');
+            const ready = await wait(writer.ready, true);
+            if (ready.kind === 'abort') await fail(ready, 'ready');
+            const afterReady = currentState() || ready;
+            if (afterReady.kind === 'sourceClosed') break;
+            if (afterReady.kind !== 'value') await fail(afterReady, afterReady.kind === 'sourceError' ? 'read' : 'ready');
+            const read = await wait(reader.read());
+            if (read.kind !== 'value') await fail(read, 'read');
+            const result = read.value;
+            if (result.done) break;
+            const written = await wait(writer.write(result.value), false, false);
+            if (written.kind !== 'value') await fail(written, 'write');
+          }
+          if (!options.preventClose && destination._state !== 'closed' && !destination._closeQueued) {
+            const closed = await wait(writer.close(), false, false);
+            if (closed.kind !== 'value') await fail(closed, 'close');
           }
         } finally {
           if (signal !== undefined && abort) signal.removeEventListener('abort', abort);
