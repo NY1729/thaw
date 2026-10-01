@@ -4766,6 +4766,23 @@ fn compiles_symbol_registry_and_description() {
     );
 }
 
+#[test]
+fn native_string_failures_are_typed_and_symbol_key_can_be_undefined() {
+    let source = r#"
+        function main(): void {
+            console.log(Symbol.keyFor(Symbol("x")) === undefined);
+            console.log(Symbol.keyFor(Symbol.for("")) === "");
+            try { encodeURIComponent(String.fromCharCode(0xD800)); }
+            catch (error) { console.log(error instanceof URIError, error.name); }
+            try { decodeURIComponent("%+1"); }
+            catch (error) { console.log(error instanceof URIError, error.name); }
+            try { String.fromCodePoint(0x110000); }
+            catch (error) { console.log(error instanceof RangeError, error.name); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_string_errors"), "true\ntrue\ntrue URIError\ntrue URIError\ntrue RangeError\n");
+}
+
 /// `Object.freeze`/`seal`/`preventExtensions` (identity in thaw's fixed
 /// layout), `String.prototype.substr` (Annex B), and `Reflect.has`/`get`/
 /// `deleteProperty`.

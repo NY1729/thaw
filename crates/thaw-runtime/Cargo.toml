@@ -16,6 +16,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 thaw-arena = { path = "../thaw-arena" }
 webpki-roots = "1.0"
 icu_normalizer = { version = "2.3.0", features = ["compiled_data"] }
+icu_casemap = { version = "2.3.0", features = ["compiled_data"] }
+icu_locale_core = "2.3.0"
 regex = "1"
 # Backreferences and lookaround, which the `regex` crate deliberately lacks;
 # used as a fallback so such patterns stay native instead of silently

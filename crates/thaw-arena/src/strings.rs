@@ -3,10 +3,16 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
+use std::sync::{Mutex, OnceLock};
 
 thread_local! {
     static LENGTHS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
-    static OWNED: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+fn owned_lengths() -> &'static Mutex<HashMap<usize, usize>> {
+    // ponytail: one process-wide lock for owned lengths; shard only if allocation contention is measured.
+    static OWNED: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+    OWNED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// A borrowed native string; unregistered pointers retain ordinary C semantics.
@@ -23,7 +29,7 @@ impl<'a> NativeStr<'a> {
                     .get(&(pointer as usize))
                     .map(|&(length, _)| length)
             })
-            .or_else(|| OWNED.with(|owned| owned.borrow().get(&(pointer as usize)).copied()));
+            .or_else(|| owned_lengths().lock().unwrap().get(&(pointer as usize)).copied());
         Self(match length {
             Some(length) => unsafe { std::slice::from_raw_parts(pointer.cast(), length) },
             None => unsafe { CStr::from_ptr(pointer) }.to_bytes(),
@@ -108,9 +114,7 @@ pub fn owned_string(bytes: impl AsRef<[u8]>) -> *mut c_char {
     let mut buffer = bytes.to_vec();
     buffer.push(0);
     let pointer = Box::into_raw(buffer.into_boxed_slice()) as *mut u8;
-    OWNED.with(|owned| {
-        owned.borrow_mut().insert(pointer as usize, bytes.len());
-    });
+    owned_lengths().lock().unwrap().insert(pointer as usize, bytes.len());
     pointer.cast()
 }
 
@@ -120,7 +124,7 @@ pub unsafe fn destroy_string(pointer: *mut c_char) {
     if pointer.is_null() {
         return;
     }
-    if let Some(length) = OWNED.with(|owned| owned.borrow_mut().remove(&(pointer as usize))) {
+    if let Some(length) = owned_lengths().lock().unwrap().remove(&(pointer as usize)) {
         unsafe {
             drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
                 pointer.cast::<u8>(),
@@ -152,5 +156,15 @@ mod tests {
             b"abc"
         );
         unsafe { destroy_string(pointer) };
+    }
+
+    #[test]
+    fn owned_string_keeps_embedded_nul_across_threads() {
+        let pointer = owned_string(b"a\0b") as usize;
+        std::thread::spawn(move || {
+            let pointer = pointer as *mut c_char;
+            assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
+            unsafe { destroy_string(pointer) };
+        }).join().unwrap();
     }
 }
