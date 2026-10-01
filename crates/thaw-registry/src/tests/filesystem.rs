@@ -23,7 +23,7 @@ fn fs_sync_and_promise_apis_operate_on_the_host_filesystem() {
     assert_eq!(
         result,
         format!(
-            r#"["onetwo","onetwo",true,false,6,"value.txt",true,true,false,false,["ENOENT","{}/work/missing","read"]]"#,
+            r#"["onetwo","onetwo",true,false,6,"value.txt",true,true,false,false,["ENOENT","{}/work/missing","open"]]"#,
             dir.to_string_lossy()
         )
     );
@@ -864,6 +864,35 @@ fn fs_numeric_open_flags_behave_like_their_string_equivalents() {
     );
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(result, r#"["hello",true,"one-two"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn fs_open_and_file_options_preserve_independent_flags() {
+    // Unrun regression: numeric O_CREAT must not imply O_TRUNC, and the
+    // file APIs must honor the caller's flag without closing caller-owned fds.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_independent_open_flags");
+    fs::write(
+        dir.join("index.js"),
+        r#"var fs = require('node:fs'), promises = require('node:fs/promises'); module.exports = async function(root) { var c = fs.constants, path = root + '/flag.txt', created = root + '/created.txt', missing = root + '/missing.txt'; fs.writeFileSync(path, 'abcdef'); var first = fs.openSync(path, c.O_RDWR | c.O_CREAT); fs.closeSync(first); var preserved = fs.readFileSync(path, 'utf8'); await new Promise(function(resolve, reject) { fs.open(path, c.O_RDWR | c.O_CREAT, function(error, fd) { if (error) return reject(error); fs.closeSync(fd); resolve(); }); }); var opened = await promises.open(path, c.O_RDWR | c.O_CREAT); await opened.close(); fs.writeFileSync(path, 'XY', { flag: 'r+' }); await new Promise(function(resolve, reject) { fs.writeFile(path, 'Z', { flag: 'r+' }, function(error) { error ? reject(error) : resolve(); }); }); await promises.writeFile(path, '!', { flag: 'r+' }); var beforeTrunc = fs.readFileSync(path, 'utf8'), invalid; try { fs.readFileSync(path, { flag: 'w', encoding: 'invalid-encoding' }); } catch(error) { invalid = error.name; } var afterInvalid = await promises.readFile(path, { flag: 'r', encoding: 'utf8' }), callbackRead = await new Promise(function(resolve, reject) { fs.readFile(path, { flag: 'r', encoding: 'utf8' }, function(error, value) { error ? reject(error) : resolve(value); }); }); var missingCode; try { fs.writeFileSync(missing, 'x', { flag: 'r+' }); } catch(error) { missingCode = error.code; } var empty = fs.readFileSync(created, { flag: 'a+' }).length; var fd = fs.openSync(path, 'r+'); fs.writeFileSync(fd, 'X', { flag: 'w' }); var descriptorTail = fs.readFileSync(fd, 'utf8'); fs.closeSync(fd); var truncate = fs.openSync(path, c.O_WRONLY | c.O_TRUNC); fs.closeSync(truncate); var combo = root + '/append-truncate.txt'; fs.writeFileSync(combo, 'old'); var comboFd = fs.openSync(combo, c.O_WRONLY | c.O_APPEND | c.O_TRUNC); fs.writeFileSync(comboFd, 'new'); fs.closeSync(comboFd); return [preserved, beforeTrunc, invalid, afterInvalid, callbackRead, missingCode, empty, fs.existsSync(created), descriptorTail, fs.readFileSync(path, 'utf8'), fs.readFileSync(combo, 'utf8')]; };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_independent_open_flags_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsIndependentFlags = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsIndependentFlags").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["abcdef","!Ycdef","TypeError","!Ycdef","!Ycdef","ENOENT",0,true,"Ycdef","","new"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
