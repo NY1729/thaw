@@ -1202,6 +1202,8 @@ fn ensure_context() {
                         .expect("failed to create JavaScript TLS listener closer");
                 let os_info_function = Function::new(ctx.clone(), os_info_json)
                     .expect("failed to create JavaScript OS information source");
+                let os_identity_function = Function::new(ctx.clone(), os_identity_json)
+                    .expect("failed to create JavaScript OS identity source");
                 let os_network_interfaces_function =
                     Function::new(ctx.clone(), network_interfaces_json)
                         .expect("failed to create JavaScript OS network interface source");
@@ -1860,6 +1862,9 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_os_info", os_info_function)
                     .expect("failed to install JavaScript OS information source");
+                ctx.globals()
+                    .set("__thaw_os_identity", os_identity_function)
+                    .expect("failed to install JavaScript OS identity source");
                 ctx.globals()
                     .set(
                         "__thaw_os_network_interfaces",
