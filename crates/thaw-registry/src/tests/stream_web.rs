@@ -1303,3 +1303,28 @@ fn readable_cancellation_closes_before_source_failure() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn web_writer_write_discards_sink_fulfillment_values() {
+    // Unrun regression: both immediate and asynchronous sink values are private.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("web_write_result");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var seen = [], results = [];
+      for (var asynchronous of [false, true]) {
+        var writer = new WritableStream({ write(chunk) { seen.push(chunk); return asynchronous ? Promise.resolve(42) : 42; } }).getWriter();
+        results.push(await writer.write('chunk') === undefined);
+        await writer.close(); writer.releaseLock();
+      }
+      return [results, seen];
+    };"#).unwrap();
+    let modules = temp_registry("web_write_result_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWriteResult = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseWriteResult").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,true],["chunk","chunk"]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
