@@ -1467,8 +1467,8 @@ pub fn bundle_with_source_transform(
                                     }
                                 }
                                 let target = source_exports
-                                    .and_then(|source| source.get(&original))
-                                    .or_else(|| names.get(&original))
+                                    .map(|source| source.get(&original))
+                                    .unwrap_or_else(|| names.get(&original))
                                     .ok_or_else(|| {
                                         if let Some(source) = &export.src {
                                             if let Some(specifier) = source.value.as_str() {

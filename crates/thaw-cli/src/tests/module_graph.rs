@@ -42,6 +42,22 @@ fn create_require_literal_calls_are_external_dependencies() {
 }
 
 #[test]
+fn sourced_reexport_does_not_fall_back_to_a_same_named_local() {
+    let dir = std::env::temp_dir().join(format!("thaw-reexport-source-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("other.ts"), "export const unrelated: number = 1;").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "const value: number = 2; export { value } from './other';";
+    std::fs::write(&entry, source).unwrap();
+    let error = module_graph::bundle(&entry, source, &Default::default(), &Default::default(), &Default::default(), &Default::default()).unwrap_err();
+    assert!(error.contains("cannot export unknown name `value`"), "{error}");
+    let local = "const value: number = 2; export { value };";
+    std::fs::write(&entry, local).unwrap();
+    assert!(module_graph::bundle(&entry, local, &Default::default(), &Default::default(), &Default::default(), &Default::default()).is_ok());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn preserves_interface_declarations_for_typescript_merging() {
     let dir = std::env::temp_dir().join(format!("thaw interface merge {}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
