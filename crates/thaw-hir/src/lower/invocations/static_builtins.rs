@@ -1375,9 +1375,9 @@ impl<'a> FnLowerer<'a> {
                                 return self.wrap_call_argument_bindings(result, &bindings);
                             }
                             ("deleteProperty", HirType::Json, Some(key)) => {
-                                let result = HirExpr::JsonDelete(
-                                    Box::new(target.clone()),
-                                    Box::new(HirExpr::Lit(HirLit::Str(key))),
+                                let result = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_object_delete_reflect".into())),
+                                    vec![target.clone(), HirExpr::Lit(HirLit::Str(key))],
                                 );
                                 return self.wrap_call_argument_bindings(result, &bindings);
                             }

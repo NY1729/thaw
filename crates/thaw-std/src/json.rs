@@ -9,11 +9,9 @@
 //! longer-lived user values remain live for the process lifetime like
 //! other Thaw heap values.
 //!
-//! There is no exception channel wired to any of this yet (`throw` only
-//! unwinds within a single HIR function -- see `HirStmt::Try`), so every
-//! failure mode here (parse errors, wrong-type access) degrades to a
-//! default value (`0.0`, `""`, `false`) instead of aborting or panicking
-//! across the FFI boundary.
+//! The compiled user-facing calls check runtime status after operations
+//! that can fail, then raise through the existing HIR exception channel.
+//! Internal marshaling callers retain the pointer/scalar FFI ABI.
 //!
 //! A genuinely *missing* key/index (`thaw_json_get`/`thaw_json_index`)
 //! degrades to a distinct `$__thaw_napi_undefined$`-tagged sentinel
@@ -42,8 +40,8 @@
 //! above -- see `top_level_undefined_string`'s own doc comment for why
 //! that's a string approximation rather than a real `undefined` return.
 
-use std::cell::{RefCell, UnsafeCell};
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell, UnsafeCell};
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::rc::Rc;
@@ -60,12 +58,41 @@ use thaw_arena::NativeStr as CStr;
 /// use (see that function's doc comment) -- needs a plain `*mut` it can
 /// return across the FFI boundary; a `RefCell` guard's lifetime can't
 /// cross that boundary at all.
-type SharedArray = Rc<UnsafeCell<Vec<Value>>>;
+type SharedArray = Rc<SharedValue<Vec<Value>>>;
 /// See `SharedArray`'s own doc comment -- identical reasoning, for
 /// objects. `serde_json::Map` (not a bare `HashMap`) to keep the
 /// existing `preserve_order` insertion-order behavior every consumer of
 /// `ordered_object_fields` already depends on.
-type SharedObject = Rc<UnsafeCell<indexmap::IndexMap<String, Value>>>;
+type SharedObject = Rc<SharedValue<indexmap::IndexMap<String, Value>>>;
+
+struct SharedValue<T> {
+    data: UnsafeCell<T>,
+}
+
+impl<T> SharedValue<T> {
+    fn get(&self) -> *mut T {
+        self.data.get()
+    }
+}
+
+impl<T> Drop for SharedValue<T> {
+    fn drop(&mut self) {
+        let key = self as *const Self as usize;
+        let _ = PROTOTYPES.try_with(|table| {
+            let previous = { table.borrow_mut().remove(&key) };
+            drop(previous);
+        });
+        let _ = ARRAY_HOLES.try_with(|holes| {
+            holes.borrow_mut().remove(&key);
+        });
+        unsafe { thaw_object_clear_state(key as *const u8) };
+    }
+}
+
+unsafe extern "C" {
+    fn thaw_object_clear_state(object: *const u8);
+    fn thaw_object_state(object: *const u8, query: u8) -> bool;
+}
 
 /// Thaw's own dynamic (`Json`/`any`-typed) value representation --
 /// deliberately *not* `serde_json::Value` (an earlier version of this
@@ -100,11 +127,11 @@ pub(crate) enum Value {
 
 impl Value {
     fn shared_array(items: Vec<Value>) -> Value {
-        Value::Array(Rc::new(UnsafeCell::new(items)))
+        Value::Array(Rc::new(SharedValue { data: UnsafeCell::new(items) }))
     }
 
     fn shared_object(fields: indexmap::IndexMap<String, Value>) -> Value {
-        Value::Object(Rc::new(UnsafeCell::new(fields)))
+        Value::Object(Rc::new(SharedValue { data: UnsafeCell::new(fields) }))
     }
 
     fn as_array(&self) -> Option<&Vec<Value>> {
@@ -209,12 +236,15 @@ impl Value {
             Value::Number(value) => Value::Number(value.clone()),
             Value::String(value) => Value::String(value.clone()),
             Value::Wtf8(bytes) => Value::Wtf8(bytes.clone()),
-            Value::Array(items) => Value::shared_array(
-                unsafe { &*items.get() }
-                    .iter()
-                    .map(Value::deep_clone)
-                    .collect(),
-            ),
+            Value::Array(items) => {
+                let copy = Value::shared_array(
+                    unsafe { &*items.get() }.iter().map(Value::deep_clone).collect(),
+                );
+                if let Value::Array(target) = &copy {
+                    copy_array_holes(items, target, 0);
+                }
+                copy
+            }
             Value::Object(fields) => Value::shared_object(
                 unsafe { &*fields.get() }
                     .iter()
@@ -237,21 +267,96 @@ impl std::fmt::Display for Value {
 
 thread_local! {
     // `Object.create(proto)`/`Object.setPrototypeOf` on a `Json`-typed
-    // value record its prototype by pointer identity -- this compiler's
-    // fixed-layout object model has no prototype *chain* (property lookup
-    // never walks it), only enough bookkeeping for `Object.getPrototypeOf`/
-    // `Reflect.getPrototypeOf` to read back exactly what was set. Same
+    // value record its prototype by shared identity. Same
     // pointer-identity side-table pattern `OBJECT_STATES` (thaw-runtime's
     // `objects.rs`) already uses for `Object.freeze`/`seal` state on
     // fixed-layout objects. Keyed by the *inner* shared container's own
-    // address (`Rc::as_ptr`, stable and shared across every alias/clone
-    // of the same logical object) rather than the outer `*mut Value`
-    // (which is now a fresh `leak`ed pointer on every read, `Value`
-    // itself no longer being the shared unit) -- `Json` values live for
-    // the process lifetime (see this file's own module doc comment
-    // above), so this key stays valid for as long as anything could
-    // still look it up.
-    static PROTOTYPES: RefCell<HashMap<usize, *mut Value>> = RefCell::new(HashMap::new());
+    // address (`Rc::as_ptr`, stable across every alias/clone). Values
+    // are owned clones so a prototype stays alive while the child does;
+    // SharedValue::drop clears its entry before address reuse.
+    static PROTOTYPES: RefCell<HashMap<usize, Value>> = RefCell::new(HashMap::new());
+    static ARRAY_HOLES: RefCell<HashMap<usize, HashSet<usize>>> = RefCell::new(HashMap::new());
+    static ASSIGN_ERROR: Cell<bool> = const { Cell::new(false) };
+    static PROTOTYPE_ERROR: Cell<bool> = const { Cell::new(false) };
+    static FROM_ENTRIES_ERROR: Cell<bool> = const { Cell::new(false) };
+    static PARSE_ERROR: Cell<bool> = const { Cell::new(false) };
+}
+
+fn object_writable(object: *const Value, key: &str) -> bool {
+    let state_key = unsafe { thaw_json_state_key(object) };
+    if unsafe { thaw_object_state(state_key, 2) } {
+        return false;
+    }
+    unsafe { thaw_object_state(state_key, 0) }
+        || unsafe { object.as_ref() }.is_some_and(|object| json_has_own_value(object, key))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_take_assign_error() -> u8 {
+    ASSIGN_ERROR.with(|error| u8::from(error.replace(false)))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_take_prototype_error() -> u8 {
+    PROTOTYPE_ERROR.with(|error| u8::from(error.replace(false)))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_take_from_entries_error() -> u8 {
+    FROM_ENTRIES_ERROR.with(|error| u8::from(error.replace(false)))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_take_parse_error() -> u8 {
+    PARSE_ERROR.with(|error| u8::from(error.replace(false)))
+}
+
+fn array_has_index(items: &SharedArray, index: usize) -> bool {
+    index < shared_array_ref(items).len()
+        && !ARRAY_HOLES.with(|holes| {
+            holes.borrow().get(&(Rc::as_ptr(items) as usize))
+                .is_some_and(|missing| missing.contains(&index))
+        })
+}
+
+fn mark_array_holes(items: &SharedArray, indices: impl IntoIterator<Item = usize>) {
+    ARRAY_HOLES.with(|holes| {
+        holes.borrow_mut().entry(Rc::as_ptr(items) as usize)
+            .or_default().extend(indices);
+    });
+}
+
+fn mark_array_present(items: &SharedArray, index: usize) {
+    ARRAY_HOLES.with(|holes| {
+        if let Some(missing) = holes.borrow_mut().get_mut(&(Rc::as_ptr(items) as usize)) {
+            missing.remove(&index);
+        }
+    });
+}
+
+fn copy_array_holes(source: &SharedArray, target: &SharedArray, skip: usize) {
+    ARRAY_HOLES.with(|holes| {
+        let mut holes = holes.borrow_mut();
+        if let Some(missing) = holes.get(&(Rc::as_ptr(source) as usize)).cloned() {
+            holes.insert(
+                Rc::as_ptr(target) as usize,
+                missing.into_iter().filter_map(|index| index.checked_sub(skip)).collect(),
+            );
+        }
+    });
+}
+
+/// Shared identity for Object.freeze/seal/preventExtensions. Drop removes
+/// runtime state before the Rc allocation can be reused.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_state_key(value: *const Value) -> *const u8 {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return std::ptr::null();
+    };
+    let Some(identity) = object_identity_key(value) else {
+        return value as *const Value as *const u8;
+    };
+    identity as *const u8
 }
 
 /// The stable identity key for `object`'s own shared container (see
@@ -369,14 +474,50 @@ pub unsafe extern "C" fn thaw_json_set_prototype(
     object: *mut Value,
     prototype: *mut Value,
 ) -> *mut Value {
+    PROTOTYPE_ERROR.with(|error| error.set(false));
     if object.is_null() {
+        PROTOTYPE_ERROR.with(|error| error.set(true));
         return object;
     }
     let Some(key) = object_identity_key(unsafe { &*object }) else {
+        PROTOTYPE_ERROR.with(|error| error.set(true));
         return object;
     };
+    let valid_prototype = match unsafe { prototype.as_ref() } {
+        Some(Value::Null | Value::Array(_)) => true,
+        Some(value @ Value::Object(_)) => {
+            !is_napi_undefined(value) && non_finite_number(value).is_none()
+        }
+        _ => false,
+    };
+    if !valid_prototype {
+        PROTOTYPE_ERROR.with(|error| error.set(true));
+        return object;
+    }
+    let previous = PROTOTYPES.with(|table| table.borrow().get(&key).cloned());
+    let previous_key = previous.as_ref().and_then(object_identity_key);
+    let new_key = unsafe { prototype.as_ref() }.and_then(object_identity_key);
+    if !unsafe { thaw_object_state(thaw_json_state_key(object), 0) }
+        && previous_key != new_key
+    {
+        PROTOTYPE_ERROR.with(|error| error.set(true));
+        return object;
+    }
+    let mut current = unsafe { &*prototype }.clone();
+    let mut seen = HashSet::new();
+    while let Some(identity) = object_identity_key(&current) {
+        if identity == key || !seen.insert(identity) {
+            PROTOTYPE_ERROR.with(|error| error.set(true));
+            return object;
+        }
+        let Some(next) = PROTOTYPES.with(|table| table.borrow().get(&identity).cloned()) else {
+            break;
+        };
+        current = next;
+    }
     PROTOTYPES.with(|table| {
-        table.borrow_mut().insert(key, prototype);
+        let previous = { table.borrow_mut().insert(key, unsafe { &*prototype }.clone()) };
+        drop(previous);
     });
     object
 }
@@ -390,9 +531,9 @@ pub extern "C" fn thaw_json_get_prototype(object: *const Value) -> *mut Value {
     let Some(key) = (unsafe { object.as_ref() }).and_then(object_identity_key) else {
         return leak(Value::Null);
     };
-    PROTOTYPES
-        .with(|table| table.borrow().get(&key).copied())
-        .unwrap_or_else(|| leak(Value::Null))
+    leak(PROTOTYPES
+        .with(|table| table.borrow().get(&key).cloned())
+        .unwrap_or(Value::Null))
 }
 
 #[no_mangle]
@@ -412,7 +553,7 @@ pub unsafe extern "C" fn thaw_json_clone(value: *const Value) -> *mut Value {
 }
 
 fn number_value(value: f64) -> Value {
-    if value.is_finite() && value.fract() == 0.0 {
+    if value.is_finite() && value.fract() == 0.0 && value.to_bits() != (-0.0f64).to_bits() {
         if value >= i64::MIN as f64 && value <= i64::MAX as f64 {
             return Value::Number((value as i64).into());
         }
@@ -742,7 +883,9 @@ impl<'a> JsonParser<'a> {
 
     fn parse(&mut self) -> Option<Value> {
         self.skip_whitespace();
-        self.parse_value()
+        let value = self.parse_value()?;
+        self.skip_whitespace();
+        (self.position == self.bytes.len()).then_some(value)
     }
 
     fn parse_value(&mut self) -> Option<Value> {
@@ -774,8 +917,16 @@ impl<'a> JsonParser<'a> {
             }
         }
         let text = std::str::from_utf8(&self.bytes[start..self.position]).ok()?;
-        let number: serde_json::Number = serde_json::from_str(text).ok()?;
-        Some(Value::Number(number))
+        if !valid_json_number(text.as_bytes()) {
+            return None;
+        }
+        if text == "-0" {
+            return Some(number_value(-0.0));
+        }
+        match serde_json::from_str::<serde_json::Number>(text) {
+            Ok(number) => Some(Value::Number(number)),
+            Err(_) => text.parse::<f64>().ok().map(number_value),
+        }
     }
 
     fn parse_string(&mut self) -> Option<Value> {
@@ -954,10 +1105,51 @@ impl<'a> JsonParser<'a> {
     }
 }
 
+fn valid_json_number(bytes: &[u8]) -> bool {
+    let mut index = usize::from(bytes.first() == Some(&b'-'));
+    if bytes.get(index) == Some(&b'0') {
+        index += 1;
+    } else {
+        let start = index;
+        while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+            index += 1;
+        }
+        if index == start || bytes[start] == b'0' {
+            return false;
+        }
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    if matches!(bytes.get(index), Some(&b'e' | &b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(&b'+' | &b'-')) {
+            index += 1;
+        }
+        let start = index;
+        while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    index == bytes.len()
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
     let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
-    let value = JsonParser::new(bytes).parse().unwrap_or(Value::Null);
+    let value = JsonParser::new(bytes).parse();
+    PARSE_ERROR.with(|error| error.set(value.is_none()));
+    let value = value.unwrap_or(Value::Null);
     leak(value)
 }
 
@@ -1114,7 +1306,7 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
             .unwrap_or_else(|| "Invalid Date".to_string()),
         other => inspect_json_value(other),
     };
-    CString::new(text).unwrap_or_default().into_raw()
+    thaw_arena::owned_string(text)
 }
 
 /// Real Node's `console.log`/`util.inspect` rendering of a `Json` value,
@@ -1507,11 +1699,7 @@ fn stringify_with_keys(value: *mut Value, keys: *const u8, indent: &[u8]) -> *co
 
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify_number_space(value: *mut Value, space: f64) -> *const c_char {
-    let width = if space.is_finite() {
-        space.trunc().clamp(0.0, 10.0) as usize
-    } else {
-        0
-    };
+    let width = space.trunc().clamp(0.0, 10.0) as usize;
     stringify_with_indent(value, &vec![b' '; width])
 }
 
@@ -1520,8 +1708,9 @@ pub extern "C" fn thaw_json_stringify_string_space(
     value: *mut Value,
     space: *const c_char,
 ) -> *const c_char {
-    let indent = to_str(space).chars().take(10).collect::<String>();
-    stringify_with_indent(value, indent.as_bytes())
+    let indent = wtf8_encode_utf16(&wtf8_decode_utf16(unsafe { CStr::from_ptr(space) }.to_bytes())
+        .into_iter().take(10).collect::<Vec<_>>());
+    stringify_with_indent(value, &indent)
 }
 
 #[no_mangle]
@@ -1535,11 +1724,7 @@ pub extern "C" fn thaw_json_stringify_keys_number_space(
     keys: *const u8,
     space: f64,
 ) -> *const c_char {
-    let width = if space.is_finite() {
-        space.trunc().clamp(0.0, 10.0) as usize
-    } else {
-        0
-    };
+    let width = space.trunc().clamp(0.0, 10.0) as usize;
     stringify_with_keys(value, keys, &vec![b' '; width])
 }
 
@@ -1549,8 +1734,9 @@ pub extern "C" fn thaw_json_stringify_keys_string_space(
     keys: *const u8,
     space: *const c_char,
 ) -> *const c_char {
-    let indent = to_str(space).chars().take(10).collect::<String>();
-    stringify_with_keys(value, keys, indent.as_bytes())
+    let indent = wtf8_encode_utf16(&wtf8_decode_utf16(unsafe { CStr::from_ptr(space) }.to_bytes())
+        .into_iter().take(10).collect::<Vec<_>>());
+    stringify_with_keys(value, keys, &indent)
 }
 
 #[no_mangle]
@@ -1578,6 +1764,13 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
     // callback with an untyped/`any` chunk parameter).
     let result = match json_array_or_buffer_data(value) {
         Some(items) if key == "length" => Value::Number((items.len() as u64).into()),
+        Some(_) if matches!(value, Value::Array(items) if array_index_key(&key)
+            .is_some_and(|index| !array_has_index(items, index as usize))) =>
+            json_get_with_prototype(value, &key),
+        Some(items) if array_index_key(&key).is_some() => items
+            .get(array_index_key(&key).unwrap() as usize)
+            .cloned()
+            .unwrap_or_else(napi_undefined_value),
         _ => json_get_with_prototype(value, &key),
     };
     leak(result)
@@ -1590,21 +1783,27 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
 /// isn't modelled (the prototype stores plain values).
 fn json_get_with_prototype(value: &Value, key: &str) -> Value {
     let mut current = value.clone();
-    for _ in 0..64 {
+    let mut seen = HashSet::new();
+    loop {
         if let Some(found) = current.as_object().and_then(|fields| fields.get(key)) {
             return found.clone();
+        }
+        if let (Value::Array(items), Some(index)) = (&current, array_index_key(key)) {
+            if array_has_index(items, index as usize) {
+                return shared_array_ref(items)[index as usize].clone();
+            }
         }
         let Some(identity) = object_identity_key(&current) else {
             break;
         };
-        let Some(prototype) = PROTOTYPES.with(|table| table.borrow().get(&identity).copied())
+        if !seen.insert(identity) {
+            break;
+        }
+        let Some(prototype) = PROTOTYPES.with(|table| table.borrow().get(&identity).cloned())
         else {
             break;
         };
-        if prototype.is_null() {
-            break;
-        }
-        current = unsafe { (*prototype).clone() };
+        current = prototype;
         if matches!(current, Value::Null) {
             break;
         }
@@ -1621,21 +1820,22 @@ pub extern "C" fn thaw_json_has(value: *mut Value, key: *const c_char) -> u8 {
     let key = to_str(key);
     let value = unsafe { &*value };
     let mut current = value.clone();
-    for _ in 0..64 {
+    let mut seen = HashSet::new();
+    loop {
         if json_has_own_value(&current, &key) {
             return 1;
         }
         let Some(identity) = object_identity_key(&current) else {
             return 0;
         };
-        let Some(prototype) = PROTOTYPES.with(|table| table.borrow().get(&identity).copied())
+        if !seen.insert(identity) {
+            return 0;
+        }
+        let Some(prototype) = PROTOTYPES.with(|table| table.borrow().get(&identity).cloned())
         else {
             return 0;
         };
-        if prototype.is_null() {
-            return 0;
-        }
-        current = unsafe { (*prototype).clone() };
+        current = prototype;
         if matches!(current, Value::Null) {
             return 0;
         }
@@ -1650,10 +1850,8 @@ fn json_has_own_value(value: &Value, key: &str) -> bool {
     match value {
         Value::Object(fields) => shared_object_ref(fields).contains_key(key),
         Value::Array(_) if key == "length" => true,
-        Value::Array(items) => key
-            .parse::<usize>()
-            .ok()
-            .is_some_and(|index| index.to_string() == key && index < shared_array_ref(items).len()),
+        Value::Array(items) => array_index_key(key)
+            .is_some_and(|index| array_has_index(items, index as usize)),
         _ => false,
     }
 }
@@ -1679,7 +1877,8 @@ pub extern "C" fn thaw_json_index(value: *mut Value, index: f64, key: *const c_c
     let valid_index =
         index.is_finite() && index >= 0.0 && index <= (u32::MAX - 1) as f64 && index.fract() == 0.0;
     let result = match value {
-        Value::Array(items) if valid_index => shared_array_ref(items).get(index as usize).cloned(),
+        Value::Array(items) if valid_index && array_has_index(items, index as usize) =>
+            shared_array_ref(items).get(index as usize).cloned(),
         // A Buffer-shaped object (`{"type":"Buffer","data":[...]}`)
         // indexed numerically -- see `json_array_or_buffer_data`'s own
         // doc comment. Only wins when the object is genuinely
@@ -1709,6 +1908,9 @@ pub unsafe extern "C" fn thaw_json_index_set(
     key: *const c_char,
     value: *mut Value,
 ) -> *mut Value {
+    if !object_writable(array, &to_str(key)) {
+        return value;
+    }
     if let (Some(container), Some(value)) = (unsafe { array.as_mut() }, unsafe { value.as_ref() }) {
         match container {
             Value::Array(items)
@@ -1718,6 +1920,11 @@ pub unsafe extern "C" fn thaw_json_index_set(
                     && index.fract() == 0.0 =>
             {
                 let index = index as usize;
+                let old_len = shared_array_ref(items).len();
+                if old_len < index {
+                    mark_array_holes(items, old_len..index);
+                }
+                mark_array_present(items, index);
                 let items = shared_array_ref_mut(items);
                 if items.len() <= index {
                     // A write past the end leaves the intermediate slots as
@@ -1798,8 +2005,13 @@ pub unsafe extern "C" fn thaw_json_index_get_mut(value: *mut Value, index: f64) 
     let Value::Array(items) = value else {
         unreachable!()
     };
-    let items = shared_array_ref_mut(items);
     let index = index as usize;
+    let old_len = shared_array_ref(items).len();
+    if old_len < index {
+        mark_array_holes(items, old_len..index);
+    }
+    mark_array_present(items, index);
+    let items = shared_array_ref_mut(items);
     if items.len() <= index {
         // Intermediate slots are real JS array holes reading as
         // `undefined` (see `thaw_json_index_set`'s own comment).
@@ -1831,17 +2043,14 @@ fn json_to_number(value: &Value) -> f64 {
         Value::Bool(flag) => f64::from(*flag),
         Value::String(text) => javascript_string_to_number(text),
         Value::Wtf8(bytes) => javascript_string_to_number(&wtf8_to_string(bytes)),
-        // `Number([])` is `0` (empty join is `""`), `Number([x])` is
-        // `x`'s own `ToNumber` (a one-element join has no comma), and
-        // anything else is `NaN` (a multi-element join always contains a
-        // comma, which no number literal can parse as).
-        Value::Array(items) => match shared_array_ref(items).as_slice() {
-            [] => 0.0,
-            [only] => json_to_number(only),
-            _ => f64::NAN,
-        },
+        Value::Array(_) => {
+            let joined = unsafe { thaw_json_array_join(value, c",".as_ptr()) };
+            let number = javascript_string_to_number(&to_str(joined));
+            unsafe { thaw_cstring_destroy(joined.cast_mut()) };
+            number
+        }
         Value::Object(_) if thaw_json_is_date_shape(value) != 0 => thaw_json_date_timestamp(value),
-        Value::Object(_) => 0.0,
+        Value::Object(_) => f64::NAN,
     }
 }
 
@@ -1935,7 +2144,7 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
     }
     let text = match value {
         Value::String(s) => s.clone(),
-        Value::Null => String::new(),
+        Value::Null => "null".to_string(),
         // Matches real JS `String(undefined)` -- without this, `other`
         // below would stringify the sentinel's own raw JSON shape
         // (`{"$__thaw_napi_undefined$":true}`) instead. Also fixes
@@ -1948,7 +2157,10 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
         other if non_finite_number(other).is_some() => {
             non_finite_display(non_finite_number(other).unwrap()).to_string()
         }
-        other => other.to_string(),
+        Value::Array(_) => {
+            return unsafe { thaw_json_array_join(value, c",".as_ptr()) };
+        }
+        Value::Object(_) => "[object Object]".to_string(),
     };
     thaw_arena::owned_string(text)
 }
@@ -1981,6 +2193,9 @@ pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return 0;
+    }
+    if let Some(number) = non_finite_number(value) {
+        return u8::from(!number.is_nan());
     }
     match value {
         Value::Null => 0,
@@ -2227,13 +2442,22 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
             wrap_array_handle(unsafe { thaw_json_string_entries(object) }) as usize as u64,
         ),
         8 => f64::from_bits(unsafe {
-            thaw_json_object_from_number_entries(unwrap_array_handle(object.cast()))
+            thaw_json_object_from_number_entries(
+                unwrap_array_handle(object.cast()),
+                unwrap_array_presence(object.cast()),
+            )
         } as usize as u64),
         9 => f64::from_bits(unsafe {
-            thaw_json_object_from_bool_entries(unwrap_array_handle(object.cast()))
+            thaw_json_object_from_bool_entries(
+                unwrap_array_handle(object.cast()),
+                unwrap_array_presence(object.cast()),
+            )
         } as usize as u64),
         10 => f64::from_bits(unsafe {
-            thaw_json_object_from_string_entries(unwrap_array_handle(object.cast()))
+            thaw_json_object_from_string_entries(
+                unwrap_array_handle(object.cast()),
+                unwrap_array_presence(object.cast()),
+            )
         } as usize as u64),
         11 => {
             f64::from_bits(unsafe { thaw_json_object_assign(object, key.cast()) } as usize as u64)
@@ -2510,6 +2734,19 @@ pub unsafe extern "C" fn thaw_json_is_nullish(value: *const Value) -> u8 {
     (matches!(value, Value::Null) || is_napi_undefined(value)).into()
 }
 
+#[no_mangle]
+/// # Safety
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_is_object_like(value: *const Value) -> u8 {
+    match unsafe { value.as_ref() } {
+        Some(Value::Array(_)) => 1,
+        Some(value @ Value::Object(_)) => {
+            u8::from(!is_napi_undefined(value) && non_finite_number(value).is_none())
+        }
+        _ => 0,
+    }
+}
+
 fn alloc_pointer_array(values: Vec<*mut u8>) -> *mut u8 {
     let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
     if output.is_null() {
@@ -2520,6 +2757,29 @@ fn alloc_pointer_array(values: Vec<*mut u8>) -> *mut u8 {
         unsafe { (output.add(8 + index * 8) as *mut *mut u8).write(value) };
     }
     output
+}
+
+fn enumerable_entries(value: &Value) -> Vec<(String, Value)> {
+    match value {
+        Value::Object(fields) => ordered_object_fields_shared(fields)
+            .into_iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
+        Value::Array(items) => shared_array_ref(items).iter().enumerate()
+            .filter(|(index, _)| array_has_index(items, *index))
+            .map(|(index, value)| (index.to_string(), value.clone())).collect(),
+        Value::String(text) => text.encode_utf16().enumerate()
+            .map(|(index, unit)| (index.to_string(), utf16_unit_value(unit))).collect(),
+        Value::Wtf8(bytes) => wtf8_decode_utf16(bytes).into_iter().enumerate()
+            .map(|(index, unit)| (index.to_string(), utf16_unit_value(unit))).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn utf16_unit_value(unit: u16) -> Value {
+    let bytes = wtf8_encode_utf16(&[unit]);
+    match String::from_utf8(bytes) {
+        Ok(text) => Value::String(text),
+        Err(error) => Value::Wtf8(error.into_bytes()),
+    }
 }
 
 /// Wraps a freshly built native `[length][elem...]` array/tuple `buffer`
@@ -2534,11 +2794,14 @@ fn wrap_array_handle(buffer: *mut u8) -> *mut u8 {
     if buffer.is_null() {
         return std::ptr::null_mut();
     }
-    let handle = thaw_arena::thaw_arena_alloc(8, 8);
+    let handle = thaw_arena::thaw_arena_alloc(16, 8);
     if handle.is_null() {
         return std::ptr::null_mut();
     }
-    unsafe { (handle as *mut *mut u8).write(buffer) };
+    unsafe {
+        (handle as *mut *mut u8).write(buffer);
+        (handle.add(8) as *mut *mut u8).write(std::ptr::null_mut());
+    }
     handle
 }
 
@@ -2555,21 +2818,20 @@ unsafe fn unwrap_array_handle(handle: *const u8) -> *const u8 {
     unsafe { (handle as *const *const u8).read() }
 }
 
+unsafe fn unwrap_array_presence(handle: *const u8) -> *const u8 {
+    if handle.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { (handle.add(8) as *const *const u8).read() }
+}
+
 #[no_mangle]
 /// # Safety
 ///
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
-    let keys = match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => ordered_object_fields_shared(fields)
-            .into_iter()
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>(),
-        Some(Value::Array(items)) => (0..shared_array_ref(items).len())
-            .map(|index| index.to_string())
-            .collect(),
-        _ => Vec::new(),
-    };
+    let keys = unsafe { value.as_ref() }.map(enumerable_entries).unwrap_or_default()
+        .into_iter().map(|(key, _)| key).collect::<Vec<_>>();
     alloc_pointer_array(
         keys.into_iter()
             .map(|key| thaw_arena::owned_string(key).cast())
@@ -2585,7 +2847,7 @@ pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
         return unsafe { thaw_json_keys(value) };
     };
     alloc_pointer_array(
-        (0..shared_array_ref(items).len())
+        (0..shared_array_ref(items).len()).filter(|index| array_has_index(items, *index))
             .map(|index| index.to_string())
             .chain(std::iter::once("length".to_string()))
             .map(|key| thaw_arena::owned_string(key).cast())
@@ -2598,14 +2860,8 @@ pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
 ///
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {
-    let values = match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => ordered_object_fields_shared(fields)
-            .into_iter()
-            .map(|(_, value)| value.clone())
-            .collect::<Vec<_>>(),
-        Some(Value::Array(items)) => shared_array_ref(items).clone(),
-        _ => Vec::new(),
-    };
+    let values = unsafe { value.as_ref() }.map(enumerable_entries).unwrap_or_default()
+        .into_iter().map(|(_, value)| value).collect::<Vec<_>>();
     alloc_pointer_array(
         values
             .into_iter()
@@ -2647,8 +2903,16 @@ fn alloc_scalar_array(
 /// `value` must be null or point to a valid JSON object containing numbers.
 pub unsafe extern "C" fn thaw_json_number_values(value: *const Value) -> *mut u8 {
     alloc_scalar_array(&object_values(value), 8, |slot, value| unsafe {
-        (slot as *mut f64).write(value.as_f64().unwrap_or(0.0));
+        (slot as *mut f64).write(non_finite_number(value).or_else(|| value.as_f64()).unwrap_or(0.0));
     })
+}
+
+fn native_string_value(value: &Value) -> *mut c_char {
+    match value {
+        Value::String(text) => thaw_arena::owned_string(text),
+        Value::Wtf8(bytes) => thaw_arena::owned_string(bytes),
+        _ => thaw_arena::owned_string(b""),
+    }
 }
 
 #[no_mangle]
@@ -2657,8 +2921,7 @@ pub unsafe extern "C" fn thaw_json_number_values(value: *const Value) -> *mut u8
 /// `value` must be null or point to a valid JSON object containing strings.
 pub unsafe extern "C" fn thaw_json_string_values(value: *const Value) -> *mut u8 {
     alloc_scalar_array(&object_values(value), 8, |slot, value| unsafe {
-        (slot as *mut *mut u8)
-            .write(thaw_arena::owned_string(value.as_str().unwrap_or_default()).cast());
+        (slot as *mut *mut u8).write(native_string_value(value).cast());
     })
 }
 
@@ -2677,18 +2940,7 @@ pub unsafe extern "C" fn thaw_json_bool_values(value: *const Value) -> *mut u8 {
 ///
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
-    let entries = match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => ordered_object_fields_shared(fields)
-            .into_iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<Vec<_>>(),
-        Some(Value::Array(items)) => shared_array_ref(items)
-            .iter()
-            .enumerate()
-            .map(|(index, value)| (index.to_string(), value.clone()))
-            .collect(),
-        _ => Vec::new(),
-    };
+    let entries = unsafe { value.as_ref() }.map(enumerable_entries).unwrap_or_default();
     alloc_pointer_array(
         entries
             .into_iter()
@@ -2733,7 +2985,7 @@ fn alloc_typed_entries(value: *const Value, write: impl Fn(*mut u8, &Value)) -> 
 /// `value` must be null or point to a valid JSON object containing numbers.
 pub unsafe extern "C" fn thaw_json_number_entries(value: *const Value) -> *mut u8 {
     alloc_typed_entries(value, |slot, value| unsafe {
-        (slot as *mut f64).write(value.as_f64().unwrap_or(0.0));
+        (slot as *mut f64).write(non_finite_number(value).or_else(|| value.as_f64()).unwrap_or(0.0));
     })
 }
 
@@ -2743,8 +2995,7 @@ pub unsafe extern "C" fn thaw_json_number_entries(value: *const Value) -> *mut u
 /// `value` must be null or point to a valid JSON object containing strings.
 pub unsafe extern "C" fn thaw_json_string_entries(value: *const Value) -> *mut u8 {
     alloc_typed_entries(value, |slot, value| unsafe {
-        (slot as *mut *mut u8)
-            .write(thaw_arena::owned_string(value.as_str().unwrap_or_default()).cast());
+        (slot as *mut *mut u8).write(native_string_value(value).cast());
     })
 }
 
@@ -2758,19 +3009,40 @@ pub unsafe extern "C" fn thaw_json_bool_entries(value: *const Value) -> *mut u8 
     })
 }
 
-fn object_from_typed_entries(entries: *const u8, read: impl Fn(*const u8) -> Value) -> *mut Value {
+fn object_from_typed_entries(
+    entries: *const u8,
+    presence: *const u8,
+    read: impl Fn(*const u8) -> Value,
+) -> *mut Value {
+    FROM_ENTRIES_ERROR.with(|error| error.set(false));
     let mut object = indexmap::IndexMap::new();
     if entries.is_null() {
         return leak(Value::shared_object(object));
     }
     let length = unsafe { (entries as *const i64).read() }.max(0) as usize;
     for index in 0..length {
+        if !presence.is_null() {
+            let mask_len = unsafe { (presence as *const u64).read() as usize };
+            if index < mask_len && unsafe { presence.add(8 + index).read() } == 0 {
+                FROM_ENTRIES_ERROR.with(|error| error.set(true));
+                break;
+            }
+        }
         let handle = unsafe { (entries.add(8 + index * 8) as *const *const u8).read() };
         let entry = unsafe { unwrap_array_handle(handle) };
         if entry.is_null() {
-            continue;
+            FROM_ENTRIES_ERROR.with(|error| error.set(true));
+            break;
+        }
+        if unsafe { (entry as *const i64).read() } < 2 {
+            FROM_ENTRIES_ERROR.with(|error| error.set(true));
+            break;
         }
         let key = unsafe { (entry.add(8) as *const *const c_char).read() };
+        if key.is_null() {
+            FROM_ENTRIES_ERROR.with(|error| error.set(true));
+            break;
+        }
         object.insert(to_str(key), read(unsafe { entry.add(16) }));
     }
     leak(Value::shared_object(object))
@@ -2780,8 +3052,8 @@ fn object_from_typed_entries(entries: *const u8, read: impl Fn(*const u8) -> Val
 /// # Safety
 ///
 /// `entries` must be null or point to a native `[string, number][]` array.
-pub unsafe extern "C" fn thaw_json_object_from_number_entries(entries: *const u8) -> *mut Value {
-    object_from_typed_entries(entries, |slot| {
+pub unsafe extern "C" fn thaw_json_object_from_number_entries(entries: *const u8, presence: *const u8) -> *mut Value {
+    object_from_typed_entries(entries, presence, |slot| {
         let value = unsafe { (slot as *const f64).read() };
         number_value(value)
     })
@@ -2791,8 +3063,8 @@ pub unsafe extern "C" fn thaw_json_object_from_number_entries(entries: *const u8
 /// # Safety
 ///
 /// `entries` must be null or point to a native `[string, string][]` array.
-pub unsafe extern "C" fn thaw_json_object_from_string_entries(entries: *const u8) -> *mut Value {
-    object_from_typed_entries(entries, |slot| {
+pub unsafe extern "C" fn thaw_json_object_from_string_entries(entries: *const u8, presence: *const u8) -> *mut Value {
+    object_from_typed_entries(entries, presence, |slot| {
         let value = unsafe { (slot as *const *const c_char).read() };
         string_value(value)
     })
@@ -2802,16 +3074,16 @@ pub unsafe extern "C" fn thaw_json_object_from_string_entries(entries: *const u8
 /// # Safety
 ///
 /// `entries` must be null or point to a native `[string, boolean][]` array.
-pub unsafe extern "C" fn thaw_json_object_from_bool_entries(entries: *const u8) -> *mut Value {
-    object_from_typed_entries(entries, |slot| Value::Bool(unsafe { slot.read() } != 0))
+pub unsafe extern "C" fn thaw_json_object_from_bool_entries(entries: *const u8, presence: *const u8) -> *mut Value {
+    object_from_typed_entries(entries, presence, |slot| Value::Bool(unsafe { slot.read() } != 0))
 }
 
 #[no_mangle]
 /// # Safety
 ///
 /// `entries` must be null or point to a native `[string, Json][]` array.
-pub unsafe extern "C" fn thaw_json_object_from_json_entries(entries: *const u8) -> *mut Value {
-    object_from_typed_entries(entries, |slot| {
+pub unsafe extern "C" fn thaw_json_object_from_json_entries(entries: *const u8, presence: *const u8) -> *mut Value {
+    object_from_typed_entries(entries, presence, |slot| {
         let value = unsafe { (slot as *const *const Value).read() };
         unsafe { value.as_ref() }.cloned().unwrap_or(Value::Null)
     })
@@ -2834,15 +3106,43 @@ fn json_number_is(left: f64, right: f64) -> bool {
     (left.is_nan() && right.is_nan()) || (left == right && left.to_bits() == right.to_bits())
 }
 
+fn string_bytes(value: &Value) -> Option<&[u8]> {
+    match value {
+        Value::String(text) => Some(text.as_bytes()),
+        Value::Wtf8(bytes) => Some(bytes.as_slice()),
+        _ => None,
+    }
+}
+
+fn same_string(left: &Value, right: &Value) -> Option<bool> {
+    Some(string_bytes(left)? == string_bytes(right)?)
+}
+
 #[no_mangle]
 /// # Safety
 ///
 /// Both operands must be null or point to valid JSON `Value`s.
 pub unsafe extern "C" fn thaw_json_object_is(left: *const Value, right: *const Value) -> u8 {
+    if let (Some(left), Some(right)) = (unsafe { left.as_ref() }, unsafe { right.as_ref() }) {
+        if is_napi_undefined(left) || is_napi_undefined(right) {
+            return u8::from(is_napi_undefined(left) && is_napi_undefined(right));
+        }
+        let left_number = non_finite_number(left);
+        let right_number = non_finite_number(right);
+        if left_number.is_some() || right_number.is_some() {
+            return u8::from(left_number.zip(right_number)
+                .is_some_and(|(left, right)| json_number_is(left, right)));
+        }
+    }
     let result = match (unsafe { left.as_ref() }, unsafe { right.as_ref() }) {
         (Some(Value::Null), Some(Value::Null)) => true,
         (Some(Value::Bool(left)), Some(Value::Bool(right))) => left == right,
         (Some(Value::String(left)), Some(Value::String(right))) => left == right,
+        (Some(Value::Wtf8(_)), Some(Value::Wtf8(_)))
+        | (Some(Value::String(_)), Some(Value::Wtf8(_)))
+        | (Some(Value::Wtf8(_)), Some(Value::String(_))) => {
+            same_string(unsafe { &*left }, unsafe { &*right }).unwrap_or(false)
+        }
         (Some(Value::Number(left)), Some(Value::Number(right))) => left
             .as_f64()
             .zip(right.as_f64())
@@ -2895,6 +3195,9 @@ pub unsafe extern "C" fn thaw_json_strict_equal(a: *const Value, b: *const Value
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
         (Value::String(x), Value::String(y)) => x == y,
+        (Value::Wtf8(_), Value::Wtf8(_))
+        | (Value::String(_), Value::Wtf8(_))
+        | (Value::Wtf8(_), Value::String(_)) => same_string(a_val, b_val).unwrap_or(false),
         (Value::Array(x), Value::Array(y)) => Rc::ptr_eq(x, y),
         (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
         _ => false,
@@ -2932,6 +3235,9 @@ pub unsafe extern "C" fn thaw_json_same_value_zero(a: *const Value, b: *const Va
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
         (Value::String(x), Value::String(y)) => x == y,
+        (Value::Wtf8(_), Value::Wtf8(_))
+        | (Value::String(_), Value::Wtf8(_))
+        | (Value::Wtf8(_), Value::String(_)) => same_string(a_val, b_val).unwrap_or(false),
         (Value::Array(x), Value::Array(y)) => Rc::ptr_eq(x, y),
         (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
         _ => false,
@@ -2964,7 +3270,7 @@ pub unsafe extern "C" fn thaw_json_identity_key(value: *const Value) -> u64 {
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_object_is_number(value: *const Value, other: f64) -> u8 {
     unsafe { value.as_ref() }
-        .and_then(Value::as_f64)
+        .and_then(|value| non_finite_number(value).or_else(|| value.as_f64()))
         .is_some_and(|value| json_number_is(value, other))
         .into()
 }
@@ -2979,8 +3285,8 @@ pub unsafe extern "C" fn thaw_json_object_is_string(
     other: *const c_char,
 ) -> u8 {
     unsafe { value.as_ref() }
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == to_str(other))
+        .and_then(string_bytes)
+        .is_some_and(|value| value == unsafe { CStr::from_ptr(other) }.to_bytes())
         .into()
 }
 
@@ -3207,7 +3513,7 @@ pub extern "C" fn thaw_json_map_or_set_get(value: *const Value, key: *const Valu
         else {
             continue;
         };
-        if unsafe { thaw_json_object_is(entry_key, key) } != 0 {
+        if unsafe { thaw_json_same_value_zero(entry_key, key) } != 0 {
             return leak(entry_value.clone());
         }
     }
@@ -3241,7 +3547,7 @@ pub extern "C" fn thaw_json_map_or_set_has(value: *const Value, key: *const Valu
         } else {
             entry
         };
-        (unsafe { thaw_json_object_is(candidate, key) }) != 0
+        (unsafe { thaw_json_same_value_zero(candidate, key) }) != 0
     }))
 }
 
@@ -3278,7 +3584,7 @@ pub extern "C" fn thaw_json_map_or_set_set(
         entry
             .as_array()
             .and_then(|pair| pair.first())
-            .is_some_and(|entry_key| unsafe { thaw_json_object_is(entry_key, key) } != 0)
+            .is_some_and(|entry_key| unsafe { thaw_json_same_value_zero(entry_key, key) } != 0)
     });
     match existing {
         Some(entry) => *entry = Value::shared_array(vec![key.clone(), new_value.clone()]),
@@ -3307,7 +3613,7 @@ pub extern "C" fn thaw_json_map_or_set_add(
     let values = shared_array_ref_mut(values_rc);
     let already_present = values
         .iter()
-        .any(|candidate| unsafe { thaw_json_object_is(candidate, element) } != 0);
+        .any(|candidate| unsafe { thaw_json_same_value_zero(candidate, element) } != 0);
     if !already_present {
         values.push(element.clone());
     }
@@ -3329,13 +3635,13 @@ pub extern "C" fn thaw_json_map_or_set_delete(
         let entries = shared_array_ref_mut(entries_rc);
         entries.retain(|entry| {
             let entry_key = entry.as_array().and_then(|pair| pair.first());
-            entry_key.is_none_or(|entry_key| unsafe { thaw_json_object_is(entry_key, key) } == 0)
+            entry_key.is_none_or(|entry_key| unsafe { thaw_json_same_value_zero(entry_key, key) } == 0)
         });
         return leak(value.clone());
     }
     if let Some(Value::Array(values_rc)) = fields.get("__thaw_set_values__") {
         let values = shared_array_ref_mut(values_rc);
-        values.retain(|candidate| unsafe { thaw_json_object_is(candidate, key) } == 0);
+        values.retain(|candidate| unsafe { thaw_json_same_value_zero(candidate, key) } == 0);
         return leak(value.clone());
     }
     leak(value.clone())
@@ -3492,12 +3798,16 @@ pub extern "C" fn thaw_json_array_length(value: *mut Value) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn thaw_json_array_slice(value: *mut Value, start: i64) -> *mut Value {
-    leak(Value::shared_array(
+    let copy = Value::shared_array(
         unsafe { value.as_ref() }
             .and_then(Value::as_array)
             .map(|values| values.iter().skip(start.max(0) as usize).cloned().collect())
             .unwrap_or_default(),
-    ))
+    );
+    if let (Some(Value::Array(source)), Value::Array(target)) = (unsafe { value.as_ref() }, &copy) {
+        copy_array_holes(source, target, start.max(0) as usize);
+    }
+    leak(copy)
 }
 
 #[no_mangle]
@@ -3506,8 +3816,12 @@ pub extern "C" fn thaw_json_object_new() -> *mut Value {
 }
 
 fn object_insert(object: *mut Value, key: *const c_char, value: Value) {
+    let key = to_str(key);
+    if !object_writable(object, &key) {
+        return;
+    }
     if let Some(fields) = (unsafe { object.as_ref() }).and_then(Value::as_object_mut) {
-        fields.insert(to_str(key), value);
+        fields.insert(key, value);
     }
 }
 
@@ -3557,6 +3871,31 @@ pub unsafe extern "C" fn thaw_json_object_set_json_owned(
 
 #[no_mangle]
 pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char) -> u8 {
+    let Some(value) = (unsafe { object.as_ref() }) else {
+        return 0;
+    };
+    if matches!(value, Value::Null) || is_napi_undefined(value) {
+        return 0;
+    }
+    let key = to_str(key);
+    if json_has_own_value(value, &key)
+        && unsafe { thaw_object_state(thaw_json_state_key(object), 1) }
+    {
+        return 0;
+    }
+    if let Value::Array(items) = value {
+        if key == "length" {
+            return 0;
+        }
+        if let Some(index) = array_index_key(&key) {
+            let index = index as usize;
+            if array_has_index(items, index) {
+                mark_array_holes(items, std::iter::once(index));
+                shared_array_ref_mut(items)[index] = napi_undefined_value();
+            }
+        }
+        return 1;
+    }
     if let Some(fields) = (unsafe { object.as_ref() }).and_then(Value::as_object_mut) {
         // `serde_json::Map::remove` (with the `preserve_order` feature
         // this crate builds with) is `swap_remove` -- it moves the map's
@@ -3570,7 +3909,7 @@ pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char
         // `lower_dictionary_object_rest`, which builds its rest object
         // by deleting the destructured keys from a full copy). Use the
         // order-preserving removal instead.
-        fields.shift_remove(&to_str(key));
+        fields.shift_remove(&key);
     }
     1
 }
@@ -3583,9 +3922,10 @@ pub unsafe extern "C" fn thaw_json_object_assign(
     target: *mut Value,
     source: *const Value,
 ) -> *mut Value {
-    let Some(target_fields) = (unsafe { target.as_ref() }).and_then(Value::as_object_mut) else {
+    ASSIGN_ERROR.with(|error| error.set(false));
+    if (unsafe { target.as_ref() }).and_then(Value::as_object).is_none() {
         return target;
-    };
+    }
     let Some(source) = (unsafe { source.as_ref() }) else {
         return target;
     };
@@ -3603,23 +3943,14 @@ pub unsafe extern "C" fn thaw_json_object_assign(
     if matches!(source, Value::Null) || is_napi_undefined(source) {
         return target;
     }
-    match source {
-        Value::Object(source_fields) => {
-            for (key, value) in shared_object_ref(source_fields) {
-                target_fields.insert(key.clone(), value.clone());
-            }
+    for (key, value) in enumerable_entries(source) {
+        if !object_writable(target, &key) {
+            ASSIGN_ERROR.with(|error| error.set(true));
+            break;
         }
-        // An array's own enumerable properties are its index keys
-        // (`"0"`, `"1"`, ...) -- `length` is non-enumerable and real
-        // `Object.assign`/spread never copies it (confirmed against
-        // Node: `Object.assign({}, [1,2,3])` -> `{0:1,1:2,2:3}`, no
-        // `length` key).
-        Value::Array(items) => {
-            for (index, value) in shared_array_ref(items).iter().enumerate() {
-                target_fields.insert(index.to_string(), value.clone());
-            }
+        if let Some(fields) = (unsafe { target.as_ref() }).and_then(Value::as_object_mut) {
+            fields.insert(key, value);
         }
-        _ => {}
     }
     target
 }
@@ -4170,5 +4501,90 @@ mod tests {
 
         let round_trip = thaw_json_from_number_array(native);
         assert_eq!(read_c_string(thaw_json_stringify(round_trip)), "[1.5,2,0]");
+    }
+
+    #[test]
+    fn dynamic_number_and_key_semantics() {
+        let negative_zero = leak(number_value(-0.0));
+        assert_eq!(unsafe { thaw_json_is_object_like(negative_zero) }, 0);
+        assert_eq!(unsafe { thaw_json_is_object_like(parse("[]")) }, 1);
+        assert_eq!(unsafe { thaw_json_is_object_like(parse("{}")) }, 1);
+        assert_eq!(thaw_json_as_number(negative_zero).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(unsafe { thaw_json_object_is_number(negative_zero, -0.0) }, 1);
+        assert!(thaw_json_as_number(parse("[true]")).is_nan());
+        assert!(thaw_json_as_number(parse("{}")).is_nan());
+        assert_eq!(thaw_json_as_bool(leak(number_value(f64::NAN))), 0);
+        assert_eq!(unsafe {
+            thaw_json_same_value_zero(
+                leak(number_value(f64::NAN)),
+                leak(number_value(f64::NAN)),
+            )
+        }, 1);
+        let surrogate = parse(r#""\ud800""#);
+        assert_eq!(unsafe { thaw_json_strict_equal(surrogate, surrogate) }, 1);
+    }
+
+    #[test]
+    fn dynamic_array_holes_and_string_sources() {
+        let array = parse("[1,2]");
+        let zero = c"0".as_ptr();
+        assert_eq!(thaw_json_object_delete(array, zero), 1);
+        assert_eq!(unsafe { thaw_json_has_own(array, zero) }, 0);
+        assert_eq!(unsafe { thaw_json_is_undefined(thaw_json_get(array, zero)) }, 1);
+        assert_eq!(thaw_json_array_length(array), 2);
+        assert_eq!(unsafe { (thaw_json_keys(array) as *const i64).read() }, 1);
+
+        let target = thaw_json_object_new();
+        let source = parse(r#""ab""#);
+        unsafe { thaw_json_object_assign(target, source) };
+        assert_eq!(read_c_string(thaw_json_stringify(target)), r#"{"0":"a","1":"b"}"#);
+    }
+
+    #[test]
+    fn json_parse_rejects_trailing_text_and_entries_have_full_handles() {
+        let trailing = parse("1 2");
+        assert_eq!(thaw_json_take_parse_error(), 1);
+        assert_eq!(read_c_string(thaw_json_stringify(trailing)), "null");
+
+        let entries = unsafe { thaw_json_entries(parse(r#"{"a":1}"#)) };
+        let handle = unsafe { (entries.add(8) as *const *mut u8).read() };
+        assert!(!handle.is_null());
+        assert!(unsafe { (handle.add(8) as *const *const u8).read() }.is_null());
+    }
+
+    #[test]
+    fn from_entries_rejects_absent_outer_slot() {
+        // Both ABI headers are read as aligned 64-bit integers. The first
+        // presence byte after the header is zero, so slot 0 is absent.
+        let entries = [1_u64, 0];
+        let presence = [1_u64, 0];
+        let result = unsafe {
+            thaw_json_object_from_number_entries(
+                entries.as_ptr().cast::<u8>(),
+                presence.as_ptr().cast::<u8>(),
+            )
+        };
+        assert_eq!(thaw_json_take_from_entries_error(), 1);
+        assert_eq!(thaw_json_take_from_entries_error(), 0);
+        assert_eq!(read_c_string(thaw_json_stringify(result)), "{}");
+        unsafe { thaw_json_destroy(result) };
+    }
+
+    #[test]
+    fn prototype_cycle_is_rejected_and_metadata_lives_until_last_alias() {
+        let object = parse("{}");
+        let alias = leak(unsafe { &*object }.clone());
+        let prototype = parse(r#"{"inherited":1}"#);
+        let key = object_identity_key(unsafe { &*object }).unwrap();
+        unsafe { thaw_json_set_prototype(object, prototype) };
+        assert_eq!(thaw_json_take_prototype_error(), 0);
+        unsafe { thaw_json_set_prototype(prototype, object) };
+        assert_eq!(thaw_json_take_prototype_error(), 1);
+        assert!(PROTOTYPES.with(|table| table.borrow().contains_key(&key)));
+        unsafe { thaw_json_destroy(object) };
+        assert!(PROTOTYPES.with(|table| table.borrow().contains_key(&key)));
+        unsafe { thaw_json_destroy(alias) };
+        assert!(!PROTOTYPES.with(|table| table.borrow().contains_key(&key)));
+        unsafe { thaw_json_destroy(prototype) };
     }
 }

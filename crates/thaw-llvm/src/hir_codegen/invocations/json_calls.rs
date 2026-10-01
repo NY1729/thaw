@@ -22,7 +22,36 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match name {
             "JSON.parse" => {
-                return self.compile_single_arg_call("thaw_json_parse", args, "JSON.parse")
+                let [source] = args else {
+                    return Err("JSON.parse expects one argument".into());
+                };
+                let source = self.compile_expr(source)?;
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_json_parse").unwrap(),
+                    &[source.into()], "json_parse",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON.parse returned no value")?;
+                let error = self.builder.build_call(
+                    self.module.get_function("thaw_json_take_parse_error").unwrap(),
+                    &[], "json_parse_error",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON parse status returned no value")?.into_int_value();
+                let function = self.current_function();
+                let invalid = self.context.append_basic_block(function, "json_parse_invalid");
+                let valid = self.context.append_basic_block(function, "json_parse_valid");
+                let failed = self.builder.build_int_compare(
+                    IntPredicate::NE, error, self.context.i8_type().const_zero(), "json_parse_failed",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(failed, invalid, valid)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(invalid);
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[result.into()], "discard_invalid_json",
+                ).map_err(|error| error.to_string())?;
+                self.compile_throw_builtin_error("SyntaxError", "Unexpected token in JSON")?;
+                self.builder.position_at_end(valid);
+                return Ok(result);
             }
             "JSON.stringify" => {
                 // The `_public` variant omits/nulls a nested napi-
@@ -413,7 +442,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let object = self.compile_expr(object)?;
                 let prototype = self.compile_expr(prototype)?;
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_json_set_prototype").unwrap(),
@@ -423,7 +452,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or_else(|| "thaw_json_set_prototype returned no value".to_string());
+                    .ok_or("thaw_json_set_prototype returned no value")?;
+                let error = self.builder.build_call(
+                    self.module.get_function("thaw_json_take_prototype_error").unwrap(),
+                    &[], "json_prototype_error",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON prototype error status returned no value")?.into_int_value();
+                let function = self.current_function();
+                let invalid = self.context.append_basic_block(function, "json_prototype_invalid");
+                let valid = self.context.append_basic_block(function, "json_prototype_valid");
+                let failed = self.builder.build_int_compare(
+                    IntPredicate::NE, error, self.context.i8_type().const_zero(), "json_prototype_failed",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(failed, invalid, valid)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(invalid);
+                self.compile_throw_type_error("Invalid prototype")?;
+                self.builder.position_at_end(valid);
+                return Ok(result);
             }
             "__thaw_json_get_prototype" => {
                 return self.compile_single_arg_call(
@@ -469,10 +515,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or_else(|| "thaw_json_index_get_mut returned no value".to_string());
             }
             "__thaw_json_keys" | "__thaw_json_own_keys" => {
-                let result = self
-                    .compile_single_arg_call(name.trim_start_matches("__"), args, "Object.keys")?
-                    .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                return self.compile_json_enumeration(name.trim_start_matches("__"), args);
             }
             "__thaw_array_keys" => {
                 let [array, include_length] = args else {
@@ -494,50 +537,53 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_json_values" => {
-                let result = self
-                    .compile_single_arg_call("thaw_json_values", args, "Object.values")?
-                    .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                return self.compile_json_enumeration("thaw_json_values", args);
             }
             "__thaw_json_number_values"
             | "__thaw_json_string_values"
             | "__thaw_json_bool_values" => {
-                let result = self
-                    .compile_single_arg_call(
-                        name.trim_start_matches("__"),
-                        args,
-                        "Object.values",
-                    )?
-                    .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                return self.compile_json_enumeration(name.trim_start_matches("__"), args);
             }
             "__thaw_json_entries" => {
-                let result = self
-                    .compile_single_arg_call("thaw_json_entries", args, "Object.entries")?
-                    .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                return self.compile_json_enumeration("thaw_json_entries", args);
             }
             "__thaw_json_number_entries"
             | "__thaw_json_string_entries"
             | "__thaw_json_bool_entries" => {
-                let result = self
-                    .compile_single_arg_call(
-                        name.trim_start_matches("__"),
-                        args,
-                        "Object.entries",
-                    )?
-                    .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                return self.compile_json_enumeration(name.trim_start_matches("__"), args);
             }
             "__thaw_json_object_from_number_entries"
             | "__thaw_json_object_from_string_entries"
             | "__thaw_json_object_from_bool_entries"
             | "__thaw_json_object_from_json_entries" => {
-                return self.compile_single_array_arg_call(
-                    name.trim_start_matches("__"),
-                    args,
-                    "Object.fromEntries",
-                )
+                let [entries] = args else {
+                    return Err("Object.fromEntries expects one argument".into());
+                };
+                let handle = self.compile_expr(entries)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
+                let result = self.builder.build_call(
+                    self.module.get_function(name.trim_start_matches("__")).unwrap(),
+                    &[buffer.into(), presence.into()], "object_from_entries",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Object.fromEntries returned no value")?;
+                let error = self.builder.build_call(
+                    self.module.get_function("thaw_json_take_from_entries_error").unwrap(),
+                    &[], "object_from_entries_error",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Object.fromEntries error status returned no value")?.into_int_value();
+                let function = self.current_function();
+                let invalid = self.context.append_basic_block(function, "object_from_entries_invalid");
+                let valid = self.context.append_basic_block(function, "object_from_entries_valid");
+                let failed = self.builder.build_int_compare(
+                    IntPredicate::NE, error, self.context.i8_type().const_zero(), "object_from_entries_failed",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(failed, invalid, valid)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(invalid);
+                self.compile_throw_type_error("Iterator value is not an entry object")?;
+                self.builder.position_at_end(valid);
+                return Ok(result);
             }
             "__thaw_json_object_assign" => {
                 let [target, source] = args else {
@@ -545,7 +591,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let target = self.compile_expr(target)?;
                 let source = self.compile_expr(source)?;
-                return self
+                self.compile_guard_json_non_nullish(target, "Cannot convert undefined or null to object")?;
+                let assigned = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_json_object_assign").unwrap(),
@@ -555,7 +602,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("Object.assign returned no value".into());
+                    .ok_or("Object.assign returned no value")?;
+                let error = self.builder.build_call(
+                    self.module.get_function("thaw_json_take_assign_error").unwrap(),
+                    &[], "object_assign_error",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Object.assign error status returned no value")?.into_int_value();
+                let function = self.current_function();
+                let blocked = self.context.append_basic_block(function, "object_assign_blocked");
+                let allowed = self.context.append_basic_block(function, "object_assign_allowed");
+                let failed = self.builder.build_int_compare(
+                    IntPredicate::NE, error, self.context.i8_type().const_zero(), "object_assign_failed",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(failed, blocked, allowed)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(blocked);
+                self.compile_throw_type_error("Cannot assign to read only or non-extensible object")?;
+                self.builder.position_at_end(allowed);
+                return Ok(assigned);
             }
             "__thaw_json_array_slice" => {
                 let [value, start] = args else {
@@ -589,6 +653,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let value = self.compile_expr(value)?;
                 let key = self.compile_expr(key)?;
+                self.compile_guard_json_non_nullish(value, "Cannot convert undefined or null to object")?;
                 let result = self
                     .builder
                     .build_call(
@@ -613,7 +678,51 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string());
             }
             "__thaw_json_has" => {
-                return self.compile_i8_predicate_call("thaw_json_has", args, "json_has");
+                let [value, key] = args else {
+                    return Err("JSON has expects two operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let key = self.compile_expr(key)?;
+                self.compile_guard_json_non_nullish(value, "Cannot use 'in' with undefined or null")?;
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_json_has").unwrap(),
+                    &[value.into(), key.into()], "json_has",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON has returned no value")?.into_int_value();
+                return self.builder.build_int_compare(
+                    IntPredicate::NE, result, self.context.i8_type().const_zero(), "json_has_bool",
+                ).map(Into::into).map_err(|error| error.to_string());
+            }
+            "__thaw_json_object_delete_reflect" => {
+                let [value, key] = args else {
+                    return Err("Reflect.deleteProperty expects two operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let key = self.compile_expr(key)?;
+                let is_object = self.builder.build_call(
+                    self.module.get_function("thaw_json_is_object_like").unwrap(),
+                    &[value.into()], "json_reflect_receiver_object",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Reflect.deleteProperty receiver check returned no value")?.into_int_value();
+                let function = self.current_function();
+                let invalid = self.context.append_basic_block(function, "json_reflect_receiver_invalid");
+                let valid = self.context.append_basic_block(function, "json_reflect_receiver_valid");
+                let is_object = self.builder.build_int_compare(
+                    IntPredicate::NE, is_object, self.context.i8_type().const_zero(), "json_reflect_is_object",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(is_object, valid, invalid)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(invalid);
+                self.compile_throw_type_error("Reflect.deleteProperty requires an object")?;
+                self.builder.position_at_end(valid);
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_json_object_delete").unwrap(),
+                    &[value.into(), key.into()], "json_reflect_delete",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Reflect.deleteProperty returned no value")?.into_int_value();
+                return self.builder.build_int_compare(
+                    IntPredicate::NE, result, self.context.i8_type().const_zero(), "json_reflect_deleted",
+                ).map(Into::into).map_err(|error| error.to_string());
             }
             "__thaw_json_is_null" => {
                 return self.compile_i8_predicate_call(
@@ -650,5 +759,46 @@ impl<'ctx> HirCompiler<'ctx> {
             _ => {}
         }
         unreachable!("JSON call name was checked before dispatch")
+    }
+
+    fn compile_guard_json_non_nullish(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        message: &str,
+    ) -> Result<(), String> {
+        let nullish = self.builder.build_call(
+            self.module.get_function("thaw_json_is_nullish").unwrap(),
+            &[value.into()], "json_receiver_nullish",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("JSON nullish check returned no value")?.into_int_value();
+        let function = self.current_function();
+        let invalid = self.context.append_basic_block(function, "json_receiver_invalid");
+        let valid = self.context.append_basic_block(function, "json_receiver_valid");
+        let is_nullish = self.builder.build_int_compare(
+            IntPredicate::NE, nullish, self.context.i8_type().const_zero(), "json_is_nullish",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(is_nullish, invalid, valid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.compile_throw_type_error(message)?;
+        self.builder.position_at_end(valid);
+        Ok(())
+    }
+
+    fn compile_json_enumeration(
+        &mut self,
+        runtime: &str,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err(format!("{runtime} expects one argument"));
+        };
+        let value = self.compile_expr(value)?;
+        self.compile_guard_json_non_nullish(value, "Cannot convert undefined or null to object")?;
+        let result = self.builder.build_call(
+            self.module.get_function(runtime).unwrap(), &[value.into()], "json_enumeration",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("JSON enumeration returned no value")?.into_pointer_value();
+        Ok(self.compile_array_wrap(result)?.into())
     }
 }
