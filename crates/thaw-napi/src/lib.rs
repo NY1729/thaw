@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize,
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+#[path = "napi/version.rs"]
+mod napi_version;
+
 // With the `quickjs` feature (on by default), this crate transitively
 // needs thaw-quickjs's `thaw_js_dynamic_object_query`, which calls
 // thaw-std's `thaw_json_parse` as an `extern "C"` declaration resolved at
