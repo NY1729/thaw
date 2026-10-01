@@ -1069,7 +1069,13 @@
     // it matches every curated locale whose numbering system is Latin
     // (`en`/`de`/`fr`/`ja`/`ar`/`bn`), where localized exponent symbols
     // aren't available without new data.
-    _formatScientific(number) {
+    _formatScientific(number, original) {
+      const exact = this._exactScientificDigits(original);
+      if (exact !== null) {
+        const render = digits => this._useRealLocaleData
+          ? String(__thaw_intl_number_format(this.locale, digits, false)) : digits;
+        return `${render(exact.mantissa)}E${exact.exponent < 0 ? '-' : ''}${render(String(Math.abs(exact.exponent)))}`;
+      }
       const magnitude = Math.abs(number);
       const minFrac = this._minimumFractionDigits === undefined ? 0 : this._minimumFractionDigits;
       const maxFrac = this._maximumFractionDigits === undefined ? 3 : this._maximumFractionDigits;
@@ -1097,6 +1103,42 @@
         ? String(__thaw_intl_number_format(this.locale, digits, false))
         : digits;
       return `${render(mantissaText)}E${exponent < 0 ? '-' : ''}${render(String(Math.abs(exponent)))}`;
+    }
+
+    _exactScientificDigits(value) {
+      const text = typeof value === 'bigint' ? value.toString()
+        : typeof value === 'string' ? value.trim() : null;
+      if (text === null || text.length > 10000) return null;
+      const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(text);
+      if (!match) return null;
+      const power = Number(match[5] || 0);
+      if (!Number.isSafeInteger(power)) return null;
+      const coefficient = `${match[2] || '0'}${match[3] === undefined ? match[4] || '' : match[3]}`;
+      const leading = /^0*/.exec(coefficient)[0].length;
+      const significant = coefficient.slice(leading);
+      const exponent10 = significant ? (match[2] || '0').length - leading - 1 + power : 0;
+      if (!Number.isSafeInteger(exponent10)) return null;
+      let exponent = significant && this._notation === 'engineering'
+        ? Math.floor(exponent10 / 3) * 3 : exponent10;
+      const width = significant ? exponent10 - exponent + 1 : 1;
+      const padded = (significant || '0').padEnd(width, '0');
+      const signed = match[1] === '-' ? '-' : '';
+      const raw = `${signed}${padded.slice(0, width)}${padded.length > width ? `.${padded.slice(width)}` : ''}`;
+      let rounded = this._exactStandardDigits(raw);
+      if (rounded === null) return null;
+      const carryWidth = this._notation === 'engineering' ? 3 : 1;
+      if (rounded.intPart.length > carryWidth) {
+        exponent += carryWidth;
+        const shifted = `${signed}${rounded.intPart.slice(0, -carryWidth)}.${rounded.intPart.slice(-carryWidth)}${rounded.fracPart}`;
+        rounded = this._exactStandardDigits(shifted);
+        if (rounded === null) return null;
+      }
+      return { mantissa: rounded.fracPart ? `${rounded.intPart}.${rounded.fracPart}` : rounded.intPart, exponent };
+    }
+
+    _exactNotationDigits(value) {
+      return this._notation === 'scientific' || this._notation === 'engineering'
+        ? this._exactScientificDigits(value) : this._exactStandardDigits(value);
     }
 
     resolvedOptions() {
@@ -1265,13 +1307,6 @@
       return { intPart, fracPart, groupDigits };
     }
 
-    _styleGrouping(text, digits, groupDigits) {
-      if (groupDigits || typeof __thaw_intl_number_format !== 'function') return text;
-      const grouped = String(__thaw_intl_number_format(this.locale, digits, true));
-      const ungrouped = String(__thaw_intl_number_format(this.locale, digits, false));
-      return grouped === ungrouped ? text : text.replace(grouped, ungrouped);
-    }
-
     format(value) {
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
@@ -1287,14 +1322,14 @@
           this._compactDisplay === 'long'));
       }
       if (this._notation !== 'standard') {
-        return `${sign}${this._formatScientific(number)}`;
+        return `${sign}${this._formatScientific(number, value)}`;
       }
       const { intPart, fracPart, groupDigits } = this._standardDigits(number, value);
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
       const signedDigits = `${sign}${digits}`;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
-        const result = __thaw_intl_percent_format(this.locale, signedDigits);
-        if (result) return this._styleGrouping(result, digits, groupDigits);
+        const result = __thaw_intl_percent_format(this.locale, signedDigits, groupDigits);
+        if (result) return result;
       }
       if (this._style === 'currency') {
         // `currencySign: 'accounting'` renders a negative amount in
@@ -1302,18 +1337,17 @@
         const accounting = this._currencySign === 'accounting' && sign === '-';
         const value = accounting ? digits : signedDigits;
         if (typeof __thaw_intl_currency_format === 'function') {
-          const result = __thaw_intl_currency_format(this.locale, value, this._currency, this._currencyDisplay);
+          const result = __thaw_intl_currency_format(this.locale, value, this._currency, this._currencyDisplay, groupDigits);
           if (result) {
-            const formatted = this._styleGrouping(result, digits, groupDigits);
-            return accounting ? `(${formatted})` : formatted;
+            return accounting ? `(${result})` : result;
           }
         }
         const text = `${this._currency} ${value}`;
         return accounting ? `(${text})` : text;
       }
       if (this._style === 'unit' && typeof __thaw_intl_unit_format === 'function') {
-        const result = __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay);
-        if (result) return this._styleGrouping(result, digits, groupDigits);
+        const result = __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay, groupDigits);
+        if (result) return result;
       }
       // Sign is handled here, not passed to the native call: it's
       // applied identically across every curated locale (confirmed),
@@ -1405,8 +1439,8 @@
       return parts;
     }
 
-    _scientificParts(number) {
-      const text = this._formatScientific(number);
+    _scientificParts(number, original) {
+      const text = this._formatScientific(number, original);
       const separatorIndex = text.indexOf('E');
       const mantissa = text.slice(0, separatorIndex);
       const exponent = text.slice(separatorIndex + 1);
@@ -1492,10 +1526,11 @@
     // `compact` parts; `scientific`/`engineering` emit mantissa +
     // `exponentSeparator`/`exponentInteger` parts.
     formatToParts(value) {
-      const input = this._exactStandardDigits(value) !== null ? value : Number(value);
+      const exact = this._exactNotationDigits(value);
+      const input = exact !== null ? value : Number(value);
       const full = this.format(input);
       const number = this._style === 'percent' ? Number(input) * 100 : Number(input);
-      if (!Number.isFinite(number) && this._exactStandardDigits(input) === null) {
+      if (!Number.isFinite(number) && exact === null) {
         const type = Number.isNaN(number) ? 'nan' : 'infinity';
         const sign = this._signFor(number);
         const marker = type === 'nan' ? 'NaN' : 'Infinity';
@@ -1528,7 +1563,7 @@
       if (this._notation === 'scientific' || this._notation === 'engineering') {
         const parts = [];
         if (sign) parts.push({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign });
-        parts.push(...this._scientificParts(number));
+        parts.push(...this._scientificParts(number, input));
         return parts;
       }
       const { intPart, fracPart, groupDigits } = this._standardDigits(number, input);
@@ -1617,11 +1652,16 @@
     formatRange(start, end) {
       const startNumber = this._style === 'percent' ? Number(start) * 100 : Number(start);
       const endNumber = this._style === 'percent' ? Number(end) * 100 : Number(end);
-      if ((!Number.isFinite(startNumber) && this._exactStandardDigits(start) === null) ||
-          (!Number.isFinite(endNumber) && this._exactStandardDigits(end) === null)) {
+      const startExact = this._exactNotationDigits(start);
+      const endExact = this._exactNotationDigits(end);
+      if ((!Number.isFinite(startNumber) && startExact === null) ||
+          (!Number.isFinite(endNumber) && endExact === null)) {
         throw new RangeError('Invalid value');
       }
-      if (typeof __thaw_intl_number_range_icu4c === 'function') {
+      const scientific = this._notation === 'scientific' || this._notation === 'engineering';
+      const nativeExact = !scientific ||
+        (this._exactStandardDigits(start) !== null && this._exactStandardDigits(end) !== null);
+      if (nativeExact && typeof __thaw_intl_number_range_icu4c === 'function') {
         const asText = (number, { intPart, fracPart }) =>
           `${number < 0 || Object.is(number, -0) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
         const startText = asText(startNumber, this._standardDigits(startNumber, start));
@@ -1634,10 +1674,10 @@
         );
         if (formatted) return formatted;
       }
-      const startExact = this._exactStandardDigits(start);
-      const endExact = this._exactStandardDigits(end);
       const same = startExact && endExact
-        ? startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart &&
+        ? (scientific
+          ? startExact.mantissa === endExact.mantissa && startExact.exponent === endExact.exponent
+          : startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart) &&
           this._signFor(startNumber) === this._signFor(endNumber)
         : startNumber === endNumber;
       if (same) return `~${this.format(start)}`;
@@ -1676,11 +1716,16 @@
     formatRangeToParts(start, end) {
       const startNumber = this._style === 'percent' ? Number(start) * 100 : Number(start);
       const endNumber = this._style === 'percent' ? Number(end) * 100 : Number(end);
-      if ((!Number.isFinite(startNumber) && this._exactStandardDigits(start) === null) ||
-          (!Number.isFinite(endNumber) && this._exactStandardDigits(end) === null)) {
+      const startExact = this._exactNotationDigits(start);
+      const endExact = this._exactNotationDigits(end);
+      if ((!Number.isFinite(startNumber) && startExact === null) ||
+          (!Number.isFinite(endNumber) && endExact === null)) {
         throw new RangeError('Invalid value');
       }
-      if (typeof __thaw_intl_number_range_parts_icu4c === 'function') {
+      const scientific = this._notation === 'scientific' || this._notation === 'engineering';
+      const nativeExact = !scientific ||
+        (this._exactStandardDigits(start) !== null && this._exactStandardDigits(end) !== null);
+      if (nativeExact && typeof __thaw_intl_number_range_parts_icu4c === 'function') {
         const asText = (number, { intPart, fracPart }) =>
           `${number < 0 || Object.is(number, -0) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
         const parts = JSON.parse(
@@ -1693,10 +1738,10 @@
         );
         if (parts.length) return parts;
       }
-      const startExact = this._exactStandardDigits(start);
-      const endExact = this._exactStandardDigits(end);
       const same = startExact && endExact
-        ? startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart &&
+        ? (scientific
+          ? startExact.mantissa === endExact.mantissa && startExact.exponent === endExact.exponent
+          : startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart) &&
           this._signFor(startNumber) === this._signFor(endNumber)
         : startNumber === endNumber;
       if (same) {

@@ -1260,16 +1260,16 @@ fn ensure_context() {
                 #[cfg(feature = "intl")]
                 let intl_percent_format_function = Function::new(
                     ctx.clone(),
-                    |locale: String, digits: String| {
-                        intl_percent_format(&locale, &digits).unwrap_or_default()
+                    |locale: String, digits: String, grouping: bool| {
+                        intl_percent_format(&locale, &digits, grouping).unwrap_or_default()
                     },
                 )
                 .expect("failed to create JavaScript Intl percent formatter");
                 #[cfg(feature = "intl")]
                 let intl_currency_format_function = Function::new(
                     ctx.clone(),
-                    |locale: String, digits: String, currency: String, display: String| {
-                        intl_currency_format(&locale, &digits, &currency, &display)
+                    |locale: String, digits: String, currency: String, display: String, grouping: bool| {
+                        intl_currency_format(&locale, &digits, &currency, &display, grouping)
                             .unwrap_or_default()
                     },
                 )
@@ -1277,8 +1277,8 @@ fn ensure_context() {
                 #[cfg(feature = "intl")]
                 let intl_unit_format_function = Function::new(
                     ctx.clone(),
-                    |locale: String, digits: String, unit: String, width: String| {
-                        intl_unit_format(&locale, &digits, &unit, &width).unwrap_or_default()
+                    |locale: String, digits: String, unit: String, width: String, grouping: bool| {
+                        intl_unit_format(&locale, &digits, &unit, &width, grouping).unwrap_or_default()
                     },
                 )
                 .expect("failed to create JavaScript Intl unit formatter");
