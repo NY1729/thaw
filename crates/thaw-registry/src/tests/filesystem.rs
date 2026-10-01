@@ -1,4 +1,81 @@
 #[test]
+fn fs_async_file_operations_observe_abort_before_io_and_between_chunks() {
+    // Unrun regression: pre-aborted and pre-dispatch signals cannot mutate
+    // files, while an iterable write stops before its next chunk.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_async_abort");
+    fs::write(dir.join("index.js"), r#"var fs = require('node:fs'), promises = require('node:fs/promises');
+        module.exports = async function(root) {
+            var path = root + '/value.txt';
+            fs.writeFileSync(path, 'keep');
+            var pre = new AbortController(); pre.abort('pre');
+            function details(error) { return [error.name, error.code, error.cause]; }
+            var promiseRead, promiseWrite, promiseAppend;
+            try { await promises.readFile(path, { signal: pre.signal }); } catch (error) { promiseRead = details(error); }
+            try { await promises.writeFile(path, 'changed', { signal: pre.signal }); } catch (error) { promiseWrite = details(error); }
+            try { await promises.appendFile(path, 'changed', { signal: pre.signal }); } catch (error) { promiseAppend = details(error); }
+            var callbackRead = await new Promise(function(resolve) { fs.readFile(path, { signal: pre.signal }, function(error) { resolve(details(error)); }); });
+            var callbackWrite = await new Promise(function(resolve) { fs.writeFile(path, 'changed', { signal: pre.signal }, function(error) { resolve(details(error)); }); });
+            var callbackAppend = await new Promise(function(resolve) { fs.appendFile(path, 'changed', { signal: pre.signal }, function(error) { resolve(details(error)); }); });
+            var beforeIo = fs.readFileSync(path, 'utf8');
+            var during = new AbortController(), pending = promises.writeFile(path, 'changed', { signal: during.signal }), preDispatch;
+            during.abort('dispatch');
+            try { await pending; } catch (error) { preDispatch = details(error); }
+            var invalidPromise, invalidCallback, promiseGetterCall, promiseGetter, callbackGetter;
+            try { await promises.writeFile(path, 'changed', { signal: 7 }); } catch (error) { invalidPromise = error.code; }
+            invalidCallback = await new Promise(function(resolve) { fs.writeFile(path, 'changed', { signal: 7 }, function(error) { resolve(error.code); }); });
+            try { var getterPending = promises.readFile(path, { get signal() { throw new Error('signal getter'); } }); promiseGetterCall = getterPending instanceof Promise; await getterPending; } catch (error) { promiseGetter = error.message; }
+            callbackGetter = await new Promise(function(resolve) { fs.writeFile(path, 'changed', { get signal() { throw new Error('signal getter'); } }, function(error) { resolve(error.message); }); });
+            var scalarSignal = new AbortController(), scalarError, iterableSignal = new AbortController(), iterableError, readSignal = new AbortController(), readError;
+            try { await promises.writeFile(path, 'changed', { signal: scalarSignal.signal, get encoding() { scalarSignal.abort('scalar'); return 'utf8'; } }); } catch (error) { scalarError = details(error); }
+            try { await promises.writeFile(path, ['changed'], { signal: iterableSignal.signal, get flag() { iterableSignal.abort('iterable'); return 'w'; } }); } catch (error) { iterableError = details(error); }
+            try { await promises.readFile(path, { signal: readSignal.signal, get encoding() { readSignal.abort('read'); return 'utf8'; } }); } catch (error) { readError = details(error); }
+            var afterGetters = fs.readFileSync(path, 'utf8');
+            var handle = await promises.open(path, 'r+'), handleRead, handleWrite, handleAppend, handleGetterError, handleGetterCall;
+            try { await handle.readFile({ signal: pre.signal }); } catch (error) { handleRead = details(error); }
+            try { await handle.writeFile('changed', { signal: pre.signal }); } catch (error) { handleWrite = details(error); }
+            try { await handle.appendFile('changed', { signal: pre.signal }); } catch (error) { handleAppend = details(error); }
+            var borrowedSignal = new AbortController();
+            try { var borrowedPending = handle.writeFile('changed', { signal: borrowedSignal.signal, get encoding() { borrowedSignal.abort('borrowed'); return 'utf8'; } }); handleGetterCall = borrowedPending instanceof Promise; await borrowedPending; } catch (error) { handleGetterError = details(error); }
+            var descriptor = handle.fd, fdSignal = new AbortController(), fdGetterError;
+            Object.defineProperty(handle, 'fd', { configurable: true, get: function() { fdSignal.abort('descriptor'); return descriptor; } });
+            try { await handle.writeFile('changed', { signal: fdSignal.signal }); } catch (error) { fdGetterError = details(error); }
+            var coercionErrors = [];
+            for (var operation of ['read', 'scalar', 'iterable']) {
+                var coercionSignal = new AbortController(), label = operation;
+                Object.defineProperty(handle, 'fd', { configurable: true, value: operation === 'iterable'
+                    ? { valueOf: function() { return this; }, toString: function() { coercionSignal.abort(label); return String(descriptor); } }
+                    : { valueOf: function() { coercionSignal.abort(label); return descriptor; } } });
+                try {
+                    if (operation === 'read') await handle.readFile({ signal: coercionSignal.signal });
+                    else if (operation === 'scalar') await handle.writeFile('changed', { signal: coercionSignal.signal });
+                    else await handle.writeFile(['changed'], { signal: coercionSignal.signal });
+                    coercionErrors.push(null);
+                } catch (error) { coercionErrors.push(details(error)); }
+            }
+            Object.defineProperty(handle, 'fd', { configurable: true, writable: true, value: descriptor });
+            var borrowedIntact = await handle.readFile('utf8');
+            await handle.close();
+            var handleIntact = fs.readFileSync(path, 'utf8');
+            var between = new AbortController(), partial, betweenError;
+            async function* chunks() { yield 'A'; between.abort('between'); yield 'B'; }
+            try { await promises.writeFile(path, chunks(), { signal: between.signal }); } catch (error) { betweenError = details(error); }
+            partial = fs.readFileSync(path, 'utf8');
+            return [promiseRead, promiseWrite, promiseAppend, callbackRead, callbackWrite, callbackAppend, beforeIo, preDispatch, invalidPromise, invalidCallback, promiseGetterCall, promiseGetter, callbackGetter, scalarError, iterableError, readError, afterGetters, handleRead, handleWrite, handleAppend, handleGetterCall, handleGetterError, fdGetterError, coercionErrors, borrowedIntact, handleIntact, betweenError, partial];
+        };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_async_abort_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseAsyncAbort = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseAsyncAbort").unwrap().as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],"keep",["AbortError","ABORT_ERR","dispatch"],"ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE",true,"signal getter","signal getter",["AbortError","ABORT_ERR","scalar"],["AbortError","ABORT_ERR","iterable"],["AbortError","ABORT_ERR","read"],"keep",["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],["AbortError","ABORT_ERR","pre"],true,["AbortError","ABORT_ERR","borrowed"],["AbortError","ABORT_ERR","descriptor"],[["AbortError","ABORT_ERR","read"],["AbortError","ABORT_ERR","scalar"],["AbortError","ABORT_ERR","iterable"]],"keep","keep",["AbortError","ABORT_ERR","between"],"A"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn fs_promise_write_file_consumes_iterables_and_keeps_descriptor_ownership() {
     // Unrun regression: iterable chunks must be written in order through one
     // descriptor; an iterator failure rejects and closes only an opened path.
