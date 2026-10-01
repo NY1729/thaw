@@ -362,7 +362,7 @@ pub unsafe extern "C" fn thaw_js_call_reference(
             with_context(|ctx| match call_impl(ctx, &name, &args_json) {
                 Ok(text) => text,
                 Err(reason) => {
-                    format!("{{\"__thaw_error__\":{}}}", json_escape_string(&reason))
+                    format!("\u{2}{}", json_escape_string(&reason))
                 }
             })
         } else {
@@ -373,7 +373,7 @@ pub unsafe extern "C" fn thaw_js_call_reference(
             ) {
                 Ok(text) => text,
                 Err(reason) => {
-                    format!("{{\"__thaw_error__\":{}}}", json_escape_string(&reason))
+                    format!("\u{2}{}", json_escape_string(&reason))
                 }
             }
         }

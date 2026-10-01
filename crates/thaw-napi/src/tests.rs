@@ -14,6 +14,47 @@ static RELEASED_HANDLE_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_os = "linux")]
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "quickjs")]
+#[test]
+fn quickjs_reference_throw_sets_napi_exception_without_spoofing_returned_object() {
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.__thaw_napi_reference_746291201 = () => ({ __thaw_error__: 'ordinary' }); globalThis.__thaw_napi_reference_746291202 = () => { throw new TypeError('callback boom'); };".as_ptr()),
+        1
+    );
+    let mut env = Env::new();
+    let this_arg = env.alloc(Value::Undefined);
+    for (reference, throws) in [(746291201_usize, false), (746291202, true)] {
+        let bridge = Arc::new(ThawCallbackBridge {
+            callback: ThawCallback::QuickJs(thaw_quickjs::thaw_js_call_reference),
+            context: reference,
+        });
+        let mut info = CallbackInfo {
+            args: vec![],
+            this_arg,
+            new_target: ptr::null_mut(),
+            data: Arc::as_ptr(&bridge) as *mut c_void,
+        };
+        let result = unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info) };
+        if throws {
+            assert!(result.is_null());
+            let mut error = ptr::null_mut();
+            unsafe { assert_eq!(napi_get_and_clear_last_exception(&mut env, &mut error), NAPI_OK); }
+            assert!(matches!(unsafe { value_ref(error) }, Ok(Value::Error(message)) if message.contains("callback boom")));
+            let mut name = ptr::null_mut();
+            unsafe { assert_eq!(napi_get_named_property(&mut env, error, c"name".as_ptr(), &mut name), NAPI_OK); }
+            assert!(matches!(unsafe { value_ref(name) }, Ok(Value::String(value)) if value == "TypeError"));
+            let forwarded = unsafe { describe_env_exception(&mut env, error) }.unwrap();
+            assert!(forwarded.starts_with("\u{1}TypeError\u{1}"));
+            assert_eq!(forwarded.matches("\u{1}TypeError\u{1}").count(), 1);
+        } else {
+            let Ok(Value::Object(fields)) = (unsafe { value_ref(result) }) else { panic!("callback result was not an object") };
+            let returned = fields.get(&PropertyKey::String("__thaw_error__".into())).copied().unwrap();
+            assert!(matches!(unsafe { value_ref(returned) }, Ok(Value::String(value)) if value == "ordinary"));
+            assert!(env.exception.is_none());
+        }
+    }
+}
+
 #[test]
 fn exported_callback_exception_is_consumed_before_the_next_call() {
     unsafe extern "C" fn throws(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {

@@ -2275,6 +2275,23 @@ fn thrown_exception_reports_an_error_object_instead_of_crashing() {
 }
 
 #[test]
+fn napi_reference_callback_separates_throw_from_returned_error_shaped_object() {
+    assert_eq!(load(r#"globalThis.__thaw_napi_reference_746291101 = () => ({ __thaw_error__: 'ordinary' });
+globalThis.__thaw_napi_reference_746291102 = () => { throw new TypeError('boom\0tail'); };"#), 1);
+    let args = c"[]";
+    let returned = unsafe { thaw_js_call_reference(746291101_usize as *mut std::ffi::c_void, args.as_ptr()) };
+    let returned = unsafe { CStr::from_ptr(returned) }.to_str().unwrap();
+    assert_eq!(returned, r#"{"__thaw_error__":"ordinary"}"#);
+    let thrown = unsafe { thaw_js_call_reference(746291102_usize as *mut std::ffi::c_void, args.as_ptr()) };
+    let thrown = unsafe { CStr::from_ptr(thrown) }.to_str().unwrap();
+    let message: String = serde_json::from_str(thrown.strip_prefix('\u{2}').unwrap()).unwrap();
+    assert!(message.starts_with("\u{1}TypeError\u{1}"));
+    assert!(message.contains("boom"));
+    assert!(message.contains('\0'));
+    assert!(message.contains("tail"));
+}
+
+#[test]
 fn result_abi_separates_success_from_javascript_exceptions() {
     assert_eq!(
         load("function ok() { return 42; } function boom() { throw new Error('kaboom'); }"),
