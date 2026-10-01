@@ -835,3 +835,142 @@ fn merged_callable_interface_keeps_each_signature() {
     .unwrap();
     assert_eq!(functions.iter().filter(|function| function.name == "f").count(), 2);
 }
+#[test]
+fn namespace_qualified_interfaces_keep_separate_object_layouts() {
+    let functions = parse_dts(r#"
+        declare namespace A { interface Options { a: number; } }
+        declare namespace B { interface Options { b: string; } }
+        export declare function useA(value: A.Options): void;
+        export declare function useB(value: B.Options): void;
+    "#).unwrap();
+    let a = functions.iter().find(|function| function.name == "useA").unwrap();
+    let b = functions.iter().find(|function| function.name == "useB").unwrap();
+    assert_eq!(a.params[0].1, DtsType::Native(HirType::Object(vec![("a".into(), HirType::F64)])));
+    assert_eq!(b.params[0].1, DtsType::Native(HirType::Object(vec![("b".into(), HirType::Str)])));
+}
+
+#[test]
+fn export_assignment_inherits_interface_methods() {
+    let functions = parse_dts(r#"
+        declare namespace API {
+            interface Base { foo(): string; }
+            interface Public extends Base { bar(): number; }
+        }
+        declare const api: API.Public;
+        export = api;
+    "#).unwrap();
+    assert!(functions.iter().any(|function| function.name == "foo"));
+    assert!(functions.iter().any(|function| function.name == "bar"));
+}
+
+#[test]
+fn namespace_aliases_resolve_in_their_lexical_scope() {
+    let functions = parse_dts(r#"
+        type Value = number;
+        declare namespace A {
+            type Value = string;
+            type Options = { value: Value };
+        }
+        export declare function f(value: A.Options): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("value".into(), HirType::Str)])));
+}
+
+#[test]
+fn namespace_alias_shadows_outer_interface_in_member_type() {
+    let functions = parse_dts(r#"
+        interface Value { wrong: number; }
+        declare namespace A {
+            type Value = string;
+            interface Options { value: Value; }
+        }
+        export declare function f(value: A.Options): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("value".into(), HirType::Str)])));
+}
+
+#[test]
+fn qualified_generic_alias_preserves_outer_substitution() {
+    let functions = parse_dts(r#"
+        declare namespace A { interface Box<T> { value: T; } }
+        declare namespace B { interface Box<T> { wrong: string; } }
+        type Wrapped<T> = A.Box<T>;
+        export declare function f(value: Wrapped<number>): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("value".into(), HirType::F64)])));
+}
+
+#[test]
+fn inherited_export_method_uses_its_declaration_namespace() {
+    let functions = parse_dts(r#"
+        interface Options { wrong: boolean; }
+        declare namespace API {
+            interface Options { x: number; }
+            interface Base { foo(value: Options): void; }
+            namespace V2 { interface Public extends Base {} }
+        }
+        declare namespace Other { interface Options { other: string; } }
+        declare const api: API.V2.Public;
+        export = api;
+    "#).unwrap();
+    let foo = functions.iter().find(|function| function.name == "foo").unwrap();
+    assert_eq!(foo.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
+
+#[test]
+fn method_type_parameter_precedes_same_named_namespace_alias() {
+    let functions = parse_dts(r#"
+        declare namespace API {
+            type T = string;
+            interface Public { echo<T>(value: T): T; }
+        }
+        declare const api: API.Public;
+        export = api;
+    "#).unwrap();
+    let echo = functions.iter().find(|function| function.name == "echo").unwrap();
+    assert_eq!(echo.params[0].1, DtsType::Native(HirType::Json));
+}
+
+#[test]
+fn namespace_function_signature_uses_local_type_layout() {
+    let functions = parse_dts(r#"
+        interface Options { wrong: boolean; }
+        declare namespace API {
+            interface Options { x: number; }
+            function run(value: Options): void;
+        }
+    "#).unwrap();
+    let run = functions.iter().find(|function| function.name == "run").unwrap();
+    assert_eq!(run.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
+
+#[test]
+fn nested_namespace_interface_extends_parent_scope() {
+    let functions = parse_dts(r#"
+        declare namespace API {
+            interface Base { x: number; }
+            namespace V2 { interface Public extends Base { y: string; } }
+        }
+        export declare function f(value: API.V2.Public): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![
+        ("x".into(), HirType::F64), ("y".into(), HirType::Str),
+    ])));
+}
+
+#[test]
+fn relative_qualified_type_reference_uses_enclosing_namespace() {
+    let functions = parse_dts(r#"
+        declare namespace API {
+            namespace V2 { interface Options { x: number; } }
+            type Selected = V2.Options;
+        }
+        export declare function f(value: API.Selected): void;
+    "#).unwrap();
+    let f = functions.iter().find(|function| function.name == "f").unwrap();
+    assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}

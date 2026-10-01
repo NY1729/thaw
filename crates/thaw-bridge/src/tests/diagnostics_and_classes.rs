@@ -608,3 +608,86 @@ fn merged_namespace_constructor_interface_keeps_each_signature() {
     let maker = classes.iter().find(|class| class.name == "Maker").unwrap();
     assert_eq!(maker.constructors.len(), 2);
 }
+#[test]
+fn class_return_identity_excludes_scalar_aliases_and_ambiguous_namespace_classes() {
+    let classes = parse_dts_classes(r#"
+        type Label = string;
+        declare namespace A { class Label {} }
+        declare namespace A { class Client {} }
+        declare namespace B { class Client {} }
+        declare namespace A { class Solo {} }
+        declare class Provider {
+            label(): Label;
+            ambiguous(): A.Client;
+            unique(): A.Solo;
+            self(): this;
+        }
+    "#).unwrap();
+    let provider = classes.iter().find(|class| class.name == "Provider").unwrap();
+    let label = provider.methods.iter().find(|method| method.name == "label").unwrap();
+    assert_eq!(label.ret, DtsType::Native(HirType::Str));
+    assert_eq!(label.return_instance_class, None);
+    let ambiguous = provider.methods.iter().find(|method| method.name == "ambiguous").unwrap();
+    assert_eq!(ambiguous.return_instance_class, None);
+    let unique = provider.methods.iter().find(|method| method.name == "unique").unwrap();
+    assert_eq!(unique.return_instance_class.as_deref(), Some("Solo"));
+    let this = provider.methods.iter().find(|method| method.name == "self").unwrap();
+    assert_eq!(this.return_instance_class.as_deref(), Some("Provider"));
+}
+
+#[test]
+fn duplicate_namespace_class_does_not_claim_this_instance_identity() {
+    let classes = parse_dts_classes(r#"
+        declare namespace A { class Client { chain(): this; } }
+        declare namespace B { class Client { chain(): this; } }
+    "#).unwrap();
+    let client = classes.iter().find(|class| class.name == "Client").unwrap();
+    let chain = client.methods.iter().find(|method| method.name == "chain").unwrap();
+    assert_eq!(chain.return_instance_class, None);
+}
+
+#[test]
+fn namespace_class_method_uses_local_interface_layout() {
+    let classes = parse_dts_classes(r#"
+        declare namespace A {
+            interface Options { x: number; }
+            class Provider { use(value: Options): void; get(): Options; }
+        }
+        declare namespace B { interface Options { y: string; } class Options {} }
+    "#).unwrap();
+    let provider = classes.iter().find(|class| class.name == "Provider").unwrap();
+    let method = provider.methods.iter().find(|method| method.name == "use").unwrap();
+    assert_eq!(method.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+    let getter = provider.methods.iter().find(|method| method.name == "get").unwrap();
+    assert_eq!(getter.return_instance_class, None);
+}
+
+#[test]
+fn namespace_construct_signature_uses_local_parameter_layout() {
+    let classes = parse_dts_classes(r#"
+        interface Options { wrong: boolean; }
+        declare namespace API {
+            interface Options { x: number; }
+            interface Factory { new(value: Options): Client; }
+        }
+        declare const Client: API.Factory;
+    "#).unwrap();
+    let client = classes.iter().find(|class| class.name == "Client").unwrap();
+    assert_eq!(client.constructors[0].params[0].1,
+        DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
+
+#[test]
+fn namespace_alias_construct_signature_uses_target_scope() {
+    let classes = parse_dts_classes(r#"
+        interface Options { wrong: boolean; }
+        declare namespace API {
+            interface Options { x: number; }
+            interface Maker { new(value: Options): Client; }
+            export { Maker as Public };
+        }
+    "#).unwrap();
+    let maker = classes.iter().find(|class| class.name == "Maker").unwrap();
+    assert_eq!(maker.constructors[0].params[0].1,
+        DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+}
