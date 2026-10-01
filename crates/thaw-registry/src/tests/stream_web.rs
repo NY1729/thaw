@@ -1142,3 +1142,38 @@ fn stream_size_strategies_validate_and_capture_the_size_function_once() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn binary_transform_streams_enforce_buffer_sources() {
+    // Unrun: pending reads let transform errors reach both sides without backpressure.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("binary_transform_buffer_sources");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      async function reject(stream, chunk) {
+        var reader = stream.readable.getReader(), writer = stream.writable.getWriter();
+        var read = reader.read(), outcomes = await Promise.allSettled([writer.write(chunk), read]);
+        return outcomes.map(function (outcome) { return outcome.status === 'rejected' && outcome.reason.name === 'TypeError'; });
+      }
+      var errors = [];
+      for (var create of [function () { return new TextDecoderStream(); }, function () { return new CompressionStream('gzip'); }, function () { return new DecompressionStream('gzip'); }]) errors.push(await reject(create(), [65]));
+      var bytes = new Uint8Array([0, 65, 66, 0]), decoder = new TextDecoderStream(), reader = decoder.readable.getReader(), writer = decoder.writable.getWriter(), read = reader.read();
+      await writer.write(new DataView(bytes.buffer, 1, 2)); var text = (await read).value; await writer.close();
+      var shared = null;
+      if (typeof SharedArrayBuffer === 'function') {
+        var buffer = new SharedArrayBuffer(2); new Uint8Array(buffer).set([67, 68]);
+        decoder = new TextDecoderStream(); reader = decoder.readable.getReader(); writer = decoder.writable.getWriter(); read = reader.read();
+        await writer.write(buffer); var decoded = (await read).value; await writer.close();
+        shared = [decoded, await reject(new CompressionStream('gzip'), buffer), await reject(new DecompressionStream('gzip'), new Uint8Array(buffer))];
+      }
+      return [errors, text, shared];
+    };"#).unwrap();
+    let modules = temp_registry("binary_transform_buffer_sources_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseBinaryTransforms = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseBinaryTransforms").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert!(result == r#"[[[true,true],[true,true],[true,true]],"AB",null]"# || result == r#"[[[true,true],[true,true],[true,true]],"AB",["CD",[true,true],[true,true]]]"#, "{result}");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
