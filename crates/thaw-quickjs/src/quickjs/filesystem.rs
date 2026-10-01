@@ -669,11 +669,73 @@ fn fs_open_fd(path: &std::path::Path, value: &str, table: &mut FsHandleTable) ->
             use std::os::unix::ffi::OsStrExt;
             let path = CString::new(path.as_os_str().as_bytes())
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+            #[cfg(target_os = "macos")]
+            let bits = {
+                // The JS constants are Linux-valued. Translate the advertised
+                // bitmask before passing it to Darwin's different O_* values.
+                const SYNC: i32 = 1_052_672;
+                const SUPPORTED: i32 = 3 | 64 | 128 | 256 | 512 | 1024 | 65_536 | 131_072 | SYNC;
+                if bits < 0 || bits & !SUPPORTED != 0 || bits & 3 == 3 ||
+                    (bits & SYNC != 0 && bits & SYNC != SYNC) {
+                    return Err(io::Error::new(io::ErrorKind::Unsupported,
+                        "numeric open flags contain unsupported bits"));
+                }
+                let mut native = bits & 3;
+                for (advertised, platform) in [
+                    (64, libc::O_CREAT), (128, libc::O_EXCL),
+                    (256, libc::O_NOCTTY), (512, libc::O_TRUNC),
+                    (1024, libc::O_APPEND), (65_536, libc::O_DIRECTORY),
+                    (131_072, libc::O_NOFOLLOW),
+                ] { if bits & advertised != 0 { native |= platform; } }
+                if bits & SYNC == SYNC { native |= libc::O_SYNC; }
+                native
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            return Err(io::Error::new(io::ErrorKind::Unsupported,
+                "numeric open flags are unsupported on this Unix platform"));
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let bits = bits | libc::O_CLOEXEC;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let raw = unsafe { libc::open(path.as_ptr(), bits, mode as libc::mode_t) };
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if raw < 0 { return Err(io::Error::last_os_error()); }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             unsafe { std::fs::File::from_raw_fd(raw) }
         }
-        #[cfg(not(unix))] {
+        #[cfg(windows)] {
+            use std::os::windows::fs::OpenOptionsExt;
+            let supported = 3 | 64 | 128 | 512 | 1024;
+            if bits < 0 || bits & !supported != 0 || bits & 3 == 3 {
+                return Err(io::Error::new(io::ErrorKind::Unsupported,
+                    "numeric open flags contain unsupported bits"));
+            }
+            let mut options = std::fs::OpenOptions::new();
+            let access = bits & 3;
+            options.read(access == 0 || access == 2);
+            options.write(access == 1 || access == 2);
+            // Match libuv's CreateFileW access rights. Explicit access_mode
+            // keeps append/truncate and read-only/create independent; Rust's
+            // default OpenOptions validation rejects those combinations.
+            const FILE_GENERIC_READ: u32 = 0x0012_0089;
+            const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+            const FILE_WRITE_DATA: u32 = 0x0002;
+            const FILE_APPEND_DATA: u32 = 0x0004;
+            let mut desired_access = match access {
+                0 => FILE_GENERIC_READ,
+                1 => FILE_GENERIC_WRITE,
+                _ => FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            };
+            if bits & 1024 != 0 {
+                desired_access = (desired_access & !FILE_WRITE_DATA) | FILE_APPEND_DATA;
+            }
+            options.access_mode(desired_access);
+            if bits & 1024 != 0 && access != 0 { options.append(true); }
+            if bits & 128 != 0 && bits & 64 != 0 { options.create_new(true); }
+            else if bits & 64 != 0 { options.create(true); }
+            if bits & 512 != 0 { options.truncate(true); }
+            options.open(path)?
+        }
+        #[cfg(not(any(unix, windows)))] {
             let _ = bits;
             return Err(io::Error::new(io::ErrorKind::Unsupported, "numeric open flags are unsupported"));
         }
