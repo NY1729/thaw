@@ -210,7 +210,7 @@ fn fs_promise_file_handles_manage_repeated_operations_and_streams() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,9,"abcde",["ab","cd","e"],true,true,-1,true,"EBADF","function"]"#
+        r#"[true,9,"",[],true,true,-1,true,"EBADF","function"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -222,7 +222,7 @@ fn fs_file_handles_support_positioned_buffer_reads_and_writes() {
     let dir = temp_registry("builtin_fs_file_handle_positions");
     fs::write(
             dir.join("index.js"),
-            "var promises = require('node:fs/promises'); module.exports = async function (path) { var handle = await promises.open(path, 'w+'); await handle.writeFile('abcdef'); var first = Buffer.alloc(4, 46), read = await handle.read(first, 1, 2, 2); var written = await handle.write(Buffer.from('XYZ'), 1, 2, 4); var textWrite = await handle.write('!', 1, 'utf8'); var sequential = Buffer.alloc(3), sequentialRead = await handle.read(sequential, 0, 3, null); var value = await handle.readFile('utf8'); await handle.close(); return [read.bytesRead, read.buffer.toString(), written.bytesWritten, written.buffer.toString(), textWrite.bytesWritten, textWrite.buffer, sequentialRead.bytesRead, sequential.toString(), value]; };",
+            "var promises = require('node:fs/promises'); module.exports = async function (path) { var handle = await promises.open(path, 'w+'); await handle.writeFile('abcdef'); var first = Buffer.alloc(4, 46), read = await handle.read(first, 1, 2, 2); var written = await handle.write(Buffer.from('XYZ'), 1, 2, 4); var textWrite = await handle.write('!', 1, 'utf8'); var sequential = Buffer.alloc(3), sequentialRead = await handle.read(sequential, 0, 3, null); var value = await handle.readFile('utf8'); await handle.close(); return [read.bytesRead, read.buffer.toString(), written.bytesWritten, written.buffer.toString(), textWrite.bytesWritten, textWrite.buffer, sequentialRead.bytesRead, sequential.toString('hex'), value]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_fs_file_handle_positions_node_modules");
@@ -241,7 +241,7 @@ fn fs_file_handles_support_positioned_buffer_reads_and_writes() {
         arguments.as_ptr(),
     );
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[2,".cd.",2,"XYZ",1,"!",3,"a!c","a!cdYZ"]"#);
+    assert_eq!(result, r#"[2,".cd.",2,"XYZ",1,"!",0,"000000",""]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -995,3 +995,61 @@ fn fs_promises_watch_iterates_changes_and_honors_abort() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+
+#[test]
+fn fs_retained_descriptors_survive_rename_unlink_and_enforce_native_flags() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_retained_descriptors");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = function(root) { var path = root + '/original.txt', renamed = root + '/renamed.txt', created = root + '/readonly.txt', appended = root + '/append.txt'; fs.writeFileSync(path, 'abcdef'); var fd = fs.openSync(path, 'r+'), first = Buffer.alloc(2), second = Buffer.alloc(2), positioned = Buffer.alloc(1), last = Buffer.alloc(2); fs.readSync(fd, first, 0, 2, null); fs.renameSync(path, renamed); fs.unlinkSync(renamed); fs.readSync(fd, second, 0, 2, -1); fs.readSync(fd, positioned, { position: 0, length: 1 }); fs.readSync(fd, last, 0, 2, null); var size = fs.fstatSync(fd).size, blocks = fs.statfsSync(root).blocks; fs.fsyncSync(fd); fs.fdatasyncSync(fd); fs.closeSync(fd); var closed; try { fs.readSync(fd, Buffer.alloc(1)); } catch (error) { closed = error.code; } var readonly = fs.openSync(created, fs.constants.O_RDONLY | fs.constants.O_CREAT, 384), denied; try { fs.writeSync(readonly, Buffer.from('x')); } catch (error) { denied = error.code; } fs.closeSync(readonly); fs.writeFileSync(appended, 'one'); var appendFd = fs.openSync(appended, 'a+'); fs.writeSync(appendFd, '!', 0, 'utf8'); fs.closeSync(appendFd); return [first.toString(), second.toString(), positioned.toString(), last.toString(), size, Number.isFinite(blocks), closed, denied, fs.readFileSync(appended, 'utf8'), fs.existsSync(path), fs.existsSync(renamed), fs.existsSync(created)]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_retained_descriptors_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsRetainedDescriptors = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(
+        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
+    )
+    .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsRetainedDescriptors").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["ab","cd","a","ef",6,true,"EBADF","EBADF","one!",false,false,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn fs_descriptor_vectors_stop_after_short_write_and_read_options_size_buffer() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_fd_short_vector");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(path) { fs.writeFileSync(path, 'abcdef'); var handle = await fs.promises.open(path, 'r+'), sized = await handle.read({ offset: 2, length: 4, position: 0 }), empty = await handle.read({ offset: 3, length: 0, position: 0 }), host = globalThis.__thaw_fs, writes = [], count; try { globalThis.__thaw_fs = function(operation, target, value, recursive) { if (operation === 'fd_write') { writes.push(value); return JSON.stringify({ ok: true, length: 1 }); } return host(operation, target, value, recursive); }; count = fs.writevSync(handle.fd, [Buffer.from('abc'), Buffer.from('def')]); } finally { globalThis.__thaw_fs = host; await handle.close(); } return [sized.bytesRead, sized.buffer.length, sized.buffer.toString('hex'), empty.bytesRead, empty.buffer.length, count, writes.length, writes[0]]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_fd_short_vector_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFdShortVector = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let path = dir.join("short-vector.txt").to_string_lossy().into_owned();
+    let arguments = CString::new(serde_json::to_string(&[path]).unwrap()).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsFdShortVector").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[4,6,"000061626364",0,3,1,1,"-1:616263"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}

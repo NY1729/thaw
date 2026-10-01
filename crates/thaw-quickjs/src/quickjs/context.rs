@@ -966,13 +966,17 @@ fn ensure_context() {
                     })
                     .expect("failed to create streaming zlib closer")
                 };
-                let fs_function = Function::new(
-                    ctx.clone(),
-                    |operation: String, path: String, value: String, recursive: bool| {
-                        host_fs(operation, path, value, recursive)
-                    },
-                )
-                .expect("failed to create JavaScript filesystem function");
+                let fs_handles = Rc::new(RefCell::new(FsHandleTable::new()));
+                let fs_function = {
+                    let handles = Rc::clone(&fs_handles);
+                    Function::new(
+                        ctx.clone(),
+                        move |operation: String, path: String, value: String, recursive: bool| {
+                            host_fs(operation, path, value, recursive, &mut handles.borrow_mut())
+                        },
+                    )
+                    .expect("failed to create JavaScript filesystem function")
+                };
                 let tcp_connect = Function::new(ctx.clone(), |host: String, port: u32| {
                     net_connect(&host, port as u16)
                 })
