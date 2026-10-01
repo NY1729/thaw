@@ -41,7 +41,11 @@ macro_rules! jit_loop_expressions {
             let target = context.loop_depth;
             context
                 .loop_labels
-                .push((labeled.label.sym.to_string(), target));
+                .push((
+                    labeled.label.sym.to_string(),
+                    target,
+                    matches!(labeled.body.as_ref(), Stmt::Switch(_)),
+                ));
             let result = encode_loop_effects(
                 labeled.body.as_ref(),
                 parameters,
@@ -250,15 +254,26 @@ macro_rules! jit_loop_expressions {
         }
         if let Stmt::Break(statement) = statement {
             let label = statement.label.as_ref()?.sym.to_string();
-            let target = context
+            let label_index = context
                 .loop_labels
                 .iter()
-                .rev()
-                .find(|(name, _)| name == &label)
-                .map(|(_, depth)| *depth)?;
-            let distance = context
-                .loop_depth
-                .checked_sub(target.checked_add(1)?)?;
+                .rposition(|(name, _, _)| name == &label)?;
+            let (_, depth, is_switch) = &context.loop_labels[label_index];
+            let target = (*depth, *is_switch);
+            // `switchbreak` can only leave the innermost active switch.
+            if target.1
+                && context.loop_labels[label_index + 1..]
+                    .iter()
+                    .filter(|(name, _, _)| name.is_empty())
+                    .count() != 1
+            {
+                return None;
+            }
+            let distance = if target.1 {
+                0
+            } else {
+                context.loop_depth.checked_sub(target.0.checked_add(1)?)?
+            };
             encode_finalizers(
                 finalizers,
                 loop_control.break_finalizer_depth,
@@ -267,7 +282,11 @@ macro_rules! jit_loop_expressions {
                 context,
                 output,
             )?;
-            output.push(format!("break{distance}"));
+            output.push(if target.1 {
+                "switchbreak".into()
+            } else {
+                format!("break{distance}")
+            });
             return Some(());
         }
         if matches!(statement, Stmt::Continue(statement) if statement.label.is_none()) {
@@ -288,11 +307,11 @@ macro_rules! jit_loop_expressions {
                 .loop_labels
                 .iter()
                 .rev()
-                .find(|(name, _)| name == &label)
-                .map(|(_, depth)| *depth)?;
+                .find(|(name, _, _)| name == &label)
+                .map(|(_, depth, is_switch)| (*depth, *is_switch))?;
             let distance = context
                 .loop_depth
-                .checked_sub(target.checked_add(1)?)?;
+                .checked_sub(target.0.checked_add(1)?)?;
             encode_finalizers(
                 finalizers,
                 loop_control.continue_finalizer_depth,
@@ -301,11 +320,16 @@ macro_rules! jit_loop_expressions {
                 context,
                 output,
             )?;
+            if target.1 {
+                return None;
+            }
             output.push(format!("continue{distance}"));
             return Some(());
         }
         if let Stmt::Switch(statement) = statement {
-            return encode_loop_switch(
+            // Empty names mark active switches; JavaScript labels are nonempty identifiers.
+            context.loop_labels.push((String::new(), context.loop_depth, true));
+            let result = encode_loop_switch(
                 statement,
                 parameters,
                 locals,
@@ -314,6 +338,8 @@ macro_rules! jit_loop_expressions {
                 context,
                 output,
             );
+            context.loop_labels.pop();
+            return result;
         }
         if let Stmt::Try(statement) = statement {
             let mut nested_finalizers = finalizers.to_vec();

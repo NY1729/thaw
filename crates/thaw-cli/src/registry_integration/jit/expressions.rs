@@ -1626,18 +1626,13 @@ macro_rules! jit_expressions {
                     return None;
                 };
                 if matches!(kind, JitKind::Array | JitKind::Dictionary) {
-                    // Arrays and dictionaries are unconditionally truthy in JavaScript
-                    // (even when empty), so the runtime value never needs checking:
-                    // `a || b` always yields `a` and `a && b` always yields `b`. Both
-                    // sides were already validated as encodable above; only the
-                    // statically-selected side's tokens need to survive into the
-                    // output, and the other side's evaluation (side effects
-                    // included) is correctly never observed at runtime either way.
-                    output.extend(if binary.op == BinaryOp::LogicalAnd {
-                        right
-                    } else {
-                        left
-                    });
+                    // Arrays and dictionaries are truthy. `&&` still evaluates
+                    // the left side before selecting the right side's value.
+                    output.extend(left);
+                    if binary.op == BinaryOp::LogicalAnd {
+                        output.push("drop".into());
+                        output.extend(right);
+                    }
                     return Some(());
                 }
                 output.extend(left);
@@ -2342,6 +2337,13 @@ macro_rules! jit_expressions {
                     })
                     .flatten()
                     .filter(|_| !call.args.is_empty());
+                if matches!(method, "push" | "unshift")
+                    && call.args.len() > 1
+                    && local_insert.is_none()
+                    && !jit_single_pure_value(&encoded_receiver)
+                {
+                    return None;
+                }
                 if local_insert.is_none() {
                     output.extend(encoded);
                 }
@@ -2689,7 +2691,10 @@ macro_rules! jit_expressions {
                             context,
                             &mut encoded_value,
                         )?;
-                        if jit_expression_kind(&encoded_value)?.0 != expected {
+                        if jit_expression_kind(&encoded_value)?.0 != expected
+                            || (method == "unshift" && arguments.len() > 1
+                                && !jit_single_pure_value(&encoded_value))
+                        {
                             return None;
                         }
                         output.extend(encoded_value);
