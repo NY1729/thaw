@@ -119,7 +119,7 @@ pub fn set_ffi_error_abi(
             | HirExpr::UnionTag(inner, _)
             | HirExpr::UnionValue(inner, _, _) => visit_expr(inner, symbol, abi, found),
             HirExpr::RecursiveClosure(_, _, closure) => visit_expr(closure, symbol, abi, found),
-            HirExpr::TypedClosure(_, closure) => visit_expr(closure, symbol, abi, found),
+            HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => visit_expr(closure, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::PromiseNew(executor, _, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
@@ -339,7 +339,7 @@ pub fn set_ffi_ownership(
             HirExpr::RecursiveClosure(_, _, closure) => {
                 update_expr(closure, symbol, returns, errors, found)
             }
-            HirExpr::TypedClosure(_, closure) => {
+            HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => {
                 update_expr(closure, symbol, returns, errors, found)
             }
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
@@ -716,7 +716,7 @@ pub fn set_ffi_string_abi(
                 aggregate_return_abi,
                 found,
             ),
-            HirExpr::TypedClosure(_, closure) => update_expr(
+            HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => update_expr(
                 closure,
                 symbol,
                 params,

@@ -2613,3 +2613,121 @@ fn custom_symbol_iterator_with_a_discriminated_iterator_result() {
         "1\n2\n3\n4\n"
     );
 }
+
+#[test]
+fn non_arrow_function_expression_forwards_json_receiver() {
+    let source = r#"
+        function main(): void {
+            const add: (delta: number) => number = function(this: Json, delta: number): number {
+                return Number(this["base"]) + delta;
+            };
+            const holder: Json = { base: 7 };
+            console.log(add.call(holder, 3));
+            const other: Json = { base: 10 };
+            const bound = add.bind(other);
+            console.log(bound(2));
+            const plain = function(delta: number): number { return delta + 1; };
+            console.log(plain(4));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_json_this"), "10\n12\n5\n");
+}
+
+#[test]
+fn nested_non_arrow_receiver_does_not_capture_outer_this() {
+    let source = r#"
+        function main(): void {
+            const outer = function(this: Json): number {
+                const lexical = (): number => Number(this["base"]);
+                const inner = function(this: Json): number { return Number(this["base"]); };
+                const innerHolder: Json = { base: 20 };
+                return inner.call(innerHolder) + lexical();
+            };
+            const outerHolder: Json = { base: 3 };
+            console.log(outer.call(outerHolder));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nested_non_arrow_receivers"), "23\n");
+}
+
+#[test]
+fn non_arrow_function_expression_generator_keeps_this_receiver() {
+    let source = r#"
+        function main(): void {
+            const make = function*(this: Json, increment: number): Generator<number, void, undefined> {
+                yield Number(this["base"]) + increment;
+            };
+            const holder: Json = { base: 7 };
+            const iterator = make.call(holder, 3);
+            console.log(iterator.next().value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_generator_this"), "10\n");
+}
+
+#[test]
+fn non_arrow_function_expression_validates_native_class_receiver() {
+    let source = r#"
+        class Base { value: number; constructor(value: number) { this.value = value; } }
+        class Derived extends Base { constructor(value: number) { super(value); } }
+        class Other { value: number; constructor(value: number) { this.value = value; } }
+        function main(): void {
+            const read = function(this: Base): number { return this.value; };
+            console.log(read.call(new Base(3)));
+            console.log(read.call(new Derived(4)));
+            try { read.call(new Other(5) as Base); } catch (error) { console.log("TypeError"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_native_this"), "3\n4\nTypeError\n");
+}
+
+#[test]
+fn generic_non_arrow_function_infers_this_for_call_apply_and_bind() {
+    let source = r#"
+        function main(): void {
+            const choose = function<T>(this: T, value: T): T { return this; };
+            const alias = choose;
+            console.log(alias.call(7, 7));
+            console.log(alias.apply(8, [8] as [number]));
+            const bound = alias.bind(9);
+            console.log(bound(9));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_non_arrow_this"), "7\n8\n9\n");
+}
+
+#[test]
+fn generic_non_arrow_scoped_alias_and_empty_operations() {
+    let source = r#"
+        function main(): void {
+            const choose = function<T>(this: T): T { return this; };
+            {
+                const choose = function<T>(this: T, value: T): T { return value; };
+                console.log(choose.call(3, 4));
+            }
+            console.log(choose.call(5));
+            console.log(typeof choose.call());
+            console.log(typeof choose.apply());
+            console.log(typeof choose.bind()());
+            console.log(choose.apply(6));
+            console.log(choose.apply(7, null));
+            console.log(choose.apply(8, undefined));
+            let effects = 0;
+            function missing(): null { effects++; return null; }
+            console.log(choose.apply(9, missing()));
+            console.log(effects);
+            const order: string[] = [];
+            function receiver(): number { order.push("receiver"); return 10; }
+            function tuple(): [] { order.push("tuple"); return []; }
+            function extra(): number { order.push("extra"); return 1; }
+            function absent(): null { order.push("null"); return null; }
+            console.log(choose.apply(receiver(), tuple(), extra()));
+            console.log(order.join(","));
+            order.length = 0;
+            console.log(choose.apply(receiver(), absent(), extra()));
+            console.log(order.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_this_scoped_empty"),
+        "4\n5\nundefined\nundefined\nundefined\n6\n7\n8\n9\n1\n10\nreceiver,tuple,extra\n10\nreceiver,null,extra\n");
+}

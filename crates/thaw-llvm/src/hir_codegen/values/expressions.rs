@@ -275,7 +275,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::RecursiveClosure(name, ty, closure) => {
                 self.compile_recursive_closure(name, ty, closure)
             }
-            HirExpr::TypedClosure(_, closure) => self.compile_expr(closure),
+            HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => self.compile_expr(closure),
             HirExpr::FunctionRef(name, params, ret) => self.compile_function_ref(name, params, ret),
             HirExpr::MethodRef(unbound, explicit, params, ret, is_static, receiver_class) => {
                 self.compile_method_ref(unbound, explicit, params, ret, *is_static, receiver_class.as_deref())

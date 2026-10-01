@@ -294,6 +294,9 @@ impl<'a> FnLowerer<'a> {
         if let Some(invoked) = self.lower_object_prototype_to_string_call(call)? {
             return Ok(invoked);
         }
+        if let Some(generic) = self.lower_generic_arrow_operation(call)? {
+            return Ok(generic);
+        }
         if let Some(bound) = self.lower_function_bind(call)? {
             return Ok(bound);
         }

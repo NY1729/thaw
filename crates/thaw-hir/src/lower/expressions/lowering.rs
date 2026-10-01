@@ -2563,10 +2563,7 @@ impl<'a> FnLowerer<'a> {
             },
 
             Expr::Arrow(arrow) => self.lower_arrow(arrow),
-            Expr::Fn(function) => {
-                let arrow = function_expression_as_arrow(function)?;
-                self.lower_arrow(&arrow)
-            }
+            Expr::Fn(function) => self.lower_function_expression(function, None),
 
             Expr::Array(array_lit) => {
                 if array_lit

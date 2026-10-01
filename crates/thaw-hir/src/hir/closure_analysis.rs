@@ -103,7 +103,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishIsNone(value, _)
         | HirExpr::NullishValue(value, _) => collect_closure_captures_expr(value, names),
         HirExpr::RecursiveClosure(_, _, closure) => collect_closure_captures_expr(closure, names),
-        HirExpr::TypedClosure(_, closure) => collect_closure_captures_expr(closure, names),
+        HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => collect_closure_captures_expr(closure, names),
         HirExpr::PromiseThen(source, callback, _, _, _, _) => {
             collect_closure_captures_expr(source, names);
             collect_closure_captures_expr(callback, names);

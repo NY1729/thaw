@@ -153,6 +153,11 @@ impl<'ctx> HirCompiler<'ctx> {
             )),
             HirExpr::RecursiveClosure(_, ty, _) => Some(ty.clone()),
             HirExpr::TypedClosure(ty, _) => Some(ty.clone()),
+            HirExpr::NonArrowFunction(closure) => match closure.as_ref() {
+                HirExpr::Lambda(_, params, ret, _) if params.first().is_some_and(|param| param.name == "__thaw_this") =>
+                    Some(HirType::Function(params[1..].iter().map(|param| param.ty.clone()).collect(), Box::new(ret.clone()))),
+                _ => self.expr_hir_type(closure),
+            },
             HirExpr::FunctionRef(_, params, ret) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }

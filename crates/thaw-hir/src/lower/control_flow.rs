@@ -157,7 +157,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishIsNone(value, _)
         | HirExpr::NullishValue(value, _) => collect_referenced_bindings(value, names),
         HirExpr::RecursiveClosure(_, _, closure) => collect_referenced_bindings(closure, names),
-        HirExpr::TypedClosure(_, closure) => collect_referenced_bindings(closure, names),
+        HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => collect_referenced_bindings(closure, names),
         HirExpr::Lambda(captures, _, _, _) => {
             names.extend(captures.iter().map(|capture| capture.name.clone()));
         }
@@ -305,6 +305,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         // function value is evaluated at this expression boundary.
         HirExpr::RecursiveClosure(..)
         | HirExpr::TypedClosure(..)
+        | HirExpr::NonArrowFunction(..)
         | HirExpr::Lambda(..)
         | HirExpr::FunctionRef(..)
         | HirExpr::MethodRef(..)

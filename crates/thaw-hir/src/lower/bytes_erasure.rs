@@ -350,6 +350,7 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_ty(ty);
             erase_expr(closure);
         }
+        HirExpr::NonArrowFunction(closure) => erase_expr(closure),
         HirExpr::FunctionRef(_, types, ret) | HirExpr::MethodRef(_, _, types, ret, _, _) => {
             erase_tys(types);
             erase_ty(ret);

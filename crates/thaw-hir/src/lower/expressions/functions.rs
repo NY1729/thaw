@@ -1,4 +1,65 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_function_expression(
+        &mut self,
+        expression: &swc_ecma_ast::FnExpr,
+        contextual: Option<(&[HirType], Option<&HirType>)>,
+    ) -> Result<HirExpr, String> {
+        let arrow = function_expression_as_arrow(expression)?;
+        let receiver = self.function_expression_receiver_type(expression)?;
+        let previous = self.non_arrow_receiver.replace(receiver);
+        let lowered = match contextual {
+            Some((params, ret)) => self.lower_contextual_arrow(&arrow, params, ret),
+            None => self.lower_arrow(&arrow),
+        };
+        self.non_arrow_receiver = previous;
+        lowered.map(|closure| HirExpr::NonArrowFunction(Box::new(closure)))
+    }
+
+    fn function_expression_receiver_type(
+        &self,
+        expression: &swc_ecma_ast::FnExpr,
+    ) -> Result<HirType, String> {
+        if let Some(this) = &expression.function.this_param {
+            let annotation = this.type_ann.as_ref()
+                .ok_or("function expression `this` needs a type annotation")?;
+            lower_ts_type(&annotation.type_ann, self.interfaces, self.generic_interfaces)
+        } else {
+            Ok(HirType::Json)
+        }
+    }
+
+    fn store_generic_function_expression_receiver(
+        &mut self,
+        name: &str,
+        expression: &swc_ecma_ast::FnExpr,
+    ) -> Result<(), String> {
+        if let Some(annotation) = expression.function.this_param.as_ref()
+            .and_then(|this| this.type_ann.as_ref())
+        {
+            self.generic_non_arrow_receiver_templates
+                .insert(name.to_string(), annotation.type_ann.clone());
+        } else {
+            let receiver = self.function_expression_receiver_type(expression)?;
+            self.generic_non_arrow_receivers.insert(name.to_string(), receiver);
+        }
+        Ok(())
+    }
+
+    fn specialized_generic_receiver(
+        &self,
+        name: &str,
+        signature: &FnSignature,
+        concrete_types: &[HirType],
+    ) -> Result<Option<HirType>, String> {
+        if let Some(template) = self.generic_non_arrow_receiver_templates.get(name) {
+            let substitution = signature.generic_type_params.iter().cloned()
+                .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
+            return resolve_ts_type_with_substitution(template, &substitution,
+                self.interfaces, self.generic_interfaces, &mut Vec::new()).map(Some);
+        }
+        Ok(self.generic_non_arrow_receivers.get(name).cloned())
+    }
+
     fn lower_sparse_mapping_returns(&mut self, statements: &mut [HirStmt]) -> Result<(), String> {
         for statement in statements {
             match statement {
@@ -122,7 +183,7 @@ impl<'a> FnLowerer<'a> {
                 .or_default()
                 .push(hir_name.clone());
         }
-        let lowered = self.lower_contextual_arrow(&arrow, params, Some(ret));
+        let lowered = self.lower_function_expression(expression, Some((params, Some(ret))));
         if internal != outer_name {
             if let Some(saved) = saved_internal {
                 self.bindings.insert(internal, saved);
@@ -130,7 +191,10 @@ impl<'a> FnLowerer<'a> {
                 self.bindings.remove(&internal);
             }
         }
-        let closure = self.coerce_to_declared(&ty, lowered?)?;
+        let closure = self.coerce_to_declared(
+            &ty,
+            lowered?,
+        )?;
         Ok(Some((
             hir_name.clone(),
             ty.clone(),
@@ -141,6 +205,10 @@ impl<'a> FnLowerer<'a> {
     fn lower_arrow(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
         let sparse_mapping_result = self.sparse_mapping_result;
         self.sparse_mapping_result = false;
+        let receiver = self.non_arrow_receiver.take();
+        let saved_class_static_context = self.class_static_context;
+        let saved_class_context = self.class_context.clone();
+        let saved_unbound_this_context = self.unbound_this_context;
         if arrow.type_params.is_some() {
             return Err("generic arrow functions are not supported yet".into());
         }
@@ -158,7 +226,7 @@ impl<'a> FnLowerer<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         if arrow.is_generator {
-            return self.lower_generator_arrow(arrow, source_params, None);
+            return self.lower_generator_arrow(arrow, source_params, None, receiver);
         }
         let declared_return = arrow
             .return_type
@@ -173,7 +241,16 @@ impl<'a> FnLowerer<'a> {
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let result = (|| {
-            let mut params = Vec::with_capacity(source_params.len());
+            let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
+            if let Some(receiver) = &receiver {
+                self.class_static_context = false;
+                self.class_context = None;
+                self.unbound_this_context = false;
+                let name = "__thaw_this".to_string();
+                self.scope.insert(name.clone(), receiver.clone());
+                self.bindings.entry("this".into()).or_default().push(name.clone());
+                params.push(HirParam { name, ty: receiver.clone() });
+            }
             let mut destructuring = Vec::new();
             for (pattern, param) in arrow.params.iter().zip(source_params) {
                 // A callback parameter annotated `any`/`unknown` that the
@@ -411,8 +488,16 @@ impl<'a> FnLowerer<'a> {
             let return_type = declared_return.clone().unwrap_or(inferred_return);
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&body, &mut referenced);
+            if !referenced.contains("__thaw_this") {
+                params.retain(|param| param.name != "__thaw_this");
+            }
             let captures = referenced
                 .into_iter()
+                // A nested ordinary function may reuse the hidden receiver name
+                // from an outer function. Its own parameter wins over that
+                // outer binding; a nested lexical arrow has no such parameter
+                // and still captures the enclosing receiver.
+                .filter(|name| !params.iter().any(|param| param.name == name.as_str()))
                 .filter_map(|name| {
                     saved_scope
                         .get(&name)
@@ -431,6 +516,9 @@ impl<'a> FnLowerer<'a> {
         self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
         self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
+        self.class_static_context = saved_class_static_context;
+        self.class_context = saved_class_context;
+        self.unbound_this_context = saved_unbound_this_context;
         result
     }
 
@@ -439,6 +527,7 @@ impl<'a> FnLowerer<'a> {
         arrow: &swc_ecma_ast::ArrowExpr,
         source_params: Vec<HirParam>,
         inferred_return: Option<HirType>,
+        receiver: Option<HirType>,
     ) -> Result<HirExpr, String> {
         let ArrowFunctionBody::FunctionBody(block) = arrow.body.as_ref() else {
             return Err("generator function expression needs a body".into());
@@ -462,9 +551,21 @@ impl<'a> FnLowerer<'a> {
         let saved_return = self.ret_type.clone();
         let saved_generator_yields = self.generator_yields.clone();
         let saved_generator_finalizers = self.generator_finalizers.clone();
+        let saved_class_static_context = self.class_static_context;
+        let saved_class_context = self.class_context.clone();
+        let saved_unbound_this_context = self.unbound_this_context;
         let result = (|| {
-            let mut params = Vec::with_capacity(source_params.len());
+            let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
             let mut body = Vec::new();
+            if let Some(receiver) = &receiver {
+                self.class_static_context = false;
+                self.class_context = None;
+                self.unbound_this_context = false;
+                let name = "__thaw_this".to_string();
+                self.scope.insert(name.clone(), receiver.clone());
+                self.bindings.entry("this".into()).or_default().push(name.clone());
+                params.push(HirParam { name, ty: receiver.clone() });
+            }
             for (pattern, param) in arrow.params.iter().zip(source_params.clone()) {
                 let name = self.bind_local(&param.name, param.ty.clone());
                 self.mark_array_parameter(&name, &param.ty);
@@ -489,8 +590,16 @@ impl<'a> FnLowerer<'a> {
             let expression = HirExpr::Block(body);
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&expression, &mut referenced);
+            if !referenced.contains("__thaw_this") {
+                params.retain(|param| param.name != "__thaw_this");
+            }
             let captures = referenced
                 .into_iter()
+                // A nested ordinary function may reuse the hidden receiver name
+                // from an outer function. Its own parameter wins over that
+                // outer binding; a nested lexical arrow has no such parameter
+                // and still captures the enclosing receiver.
+                .filter(|name| !params.iter().any(|param| param.name == name.as_str()))
                 .filter_map(|name| {
                     saved_scope
                         .get(&name)
@@ -514,11 +623,14 @@ impl<'a> FnLowerer<'a> {
         self.ret_type = saved_return;
         self.generator_yields = saved_generator_yields;
         self.generator_finalizers = saved_generator_finalizers;
+        self.class_static_context = saved_class_static_context;
+        self.class_context = saved_class_context;
+        self.unbound_this_context = saved_unbound_this_context;
         if result.is_ok()
             && hir_type_contains_dynamic(&declared_return)
             && inferred_return != declared_return
         {
-            return self.lower_generator_arrow(arrow, source_params, Some(inferred_return));
+            return self.lower_generator_arrow(arrow, source_params, Some(inferred_return), receiver);
         }
         result
     }
@@ -597,7 +709,19 @@ impl<'a> FnLowerer<'a> {
         expected_return: Option<&HirType>,
     ) -> Result<HirExpr, String> {
         let Some(internal) = self.generic_arrow_self_names.get(name).cloned() else {
-            return self.lower_contextual_arrow(arrow, parameter_types, expected_return);
+            let signature = self.generic_arrow_signature(arrow)?;
+            let concrete = infer_generic_type_tuple(&signature, parameter_types,
+                self.interfaces, self.generic_interfaces, expected_return)?;
+            let receiver = self.specialized_generic_receiver(name, &signature, &concrete)?;
+            let previous = std::mem::replace(&mut self.non_arrow_receiver, receiver);
+            let closure = self.lower_contextual_arrow(arrow, parameter_types, expected_return);
+            self.non_arrow_receiver = previous;
+            let closure = closure?;
+            return Ok(if self.generic_non_arrow_names.contains(name) {
+                HirExpr::NonArrowFunction(Box::new(closure))
+            } else {
+                closure
+            });
         };
         let signature = self.generic_arrow_signature(arrow)?;
         let concrete_types = infer_generic_type_tuple(
@@ -618,7 +742,7 @@ impl<'a> FnLowerer<'a> {
                     .generic_type_params
                     .iter()
                     .cloned()
-                    .zip(concrete_types)
+                    .zip(concrete_types.iter().cloned())
                     .collect::<HashMap<_, _>>();
                 resolve_ts_type_with_substitution(
                     declared,
@@ -628,6 +752,7 @@ impl<'a> FnLowerer<'a> {
                     &mut Vec::new(),
                 )?
             };
+        let receiver = self.specialized_generic_receiver(name, &signature, &concrete_types)?;
         let self_type = HirType::Function(parameter_types.to_vec(), Box::new(return_type));
         let self_name = format!("__thaw_recursive_generic_{}", self.next_binding);
         self.next_binding += 1;
@@ -637,14 +762,23 @@ impl<'a> FnLowerer<'a> {
             .entry(internal.clone())
             .or_default()
             .push(self_name.clone());
+        let previous = std::mem::replace(&mut self.non_arrow_receiver, receiver);
         let lowered = self.lower_contextual_arrow(arrow, parameter_types, expected_return);
+        self.non_arrow_receiver = previous;
         self.scope.remove(&self_name);
         if let Some(saved) = saved_binding {
             self.bindings.insert(internal.clone(), saved);
         } else {
             self.bindings.remove(&internal);
         }
-        lowered.map(|closure| HirExpr::RecursiveClosure(self_name, self_type, Box::new(closure)))
+        lowered.map(|closure| {
+            let closure = if self.generic_non_arrow_names.contains(name) {
+                HirExpr::NonArrowFunction(Box::new(closure))
+            } else {
+                closure
+            };
+            HirExpr::RecursiveClosure(self_name, self_type, Box::new(closure))
+        })
     }
 
     fn lower_contextual_arrow(
@@ -887,6 +1021,10 @@ impl<'a> FnLowerer<'a> {
         let parameter_types = declared_parameter_types.as_slice();
         let sparse_mapping_result = self.sparse_mapping_result;
         self.sparse_mapping_result = false;
+        let receiver = self.non_arrow_receiver.take();
+        let saved_class_static_context = self.class_static_context;
+        let saved_class_context = self.class_context.clone();
+        let saved_unbound_this_context = self.unbound_this_context;
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_sparse_arrays = self.sparse_arrays.clone();
@@ -894,7 +1032,16 @@ impl<'a> FnLowerer<'a> {
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
         let result = (|| {
-            let mut params = Vec::with_capacity(parameter_types.len());
+            let mut params = Vec::with_capacity(parameter_types.len() + usize::from(receiver.is_some()));
+            if let Some(receiver) = &receiver {
+                self.class_static_context = false;
+                self.class_context = None;
+                self.unbound_this_context = false;
+                let name = "__thaw_this".to_string();
+                self.scope.insert(name.clone(), receiver.clone());
+                self.bindings.entry("this".into()).or_default().push(name.clone());
+                params.push(HirParam { name, ty: receiver.clone() });
+            }
             let mut destructuring = Vec::new();
             for (index, (pat, ty)) in arrow.params.iter().zip(parameter_types).enumerate() {
                 let source_name = match pat {
@@ -1064,8 +1211,16 @@ impl<'a> FnLowerer<'a> {
             };
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&body, &mut referenced);
+            if !referenced.contains("__thaw_this") {
+                params.retain(|param| param.name != "__thaw_this");
+            }
             let captures = referenced
                 .into_iter()
+                // A nested ordinary function may reuse the hidden receiver name
+                // from an outer function. Its own parameter wins over that
+                // outer binding; a nested lexical arrow has no such parameter
+                // and still captures the enclosing receiver.
+                .filter(|name| !params.iter().any(|param| param.name == name.as_str()))
                 .filter_map(|name| {
                     saved_scope
                         .get(&name)
@@ -1081,6 +1236,9 @@ impl<'a> FnLowerer<'a> {
         self.conservative_sparse_arrays = saved_conservative_sparse_arrays;
         self.sparse_array_functions = saved_sparse_array_functions;
         self.ret_type = saved_return;
+        self.class_static_context = saved_class_static_context;
+        self.class_context = saved_class_context;
+        self.unbound_this_context = saved_unbound_this_context;
         result
     }
 }
@@ -1117,6 +1275,8 @@ fn rest_aware_closure(arrow: &swc_ecma_ast::ArrowExpr, closure: HirExpr) -> HirE
     let HirType::Array(element) = &last.ty else {
         return closure;
     };
+    let receiver_offset = usize::from(fixed.first().is_some_and(|param| param.name == "__thaw_this"));
+    let fixed = &fixed[receiver_offset..];
     let optional = arrow.params[..fixed.len()]
         .iter()
         .map(|parameter| match parameter {
