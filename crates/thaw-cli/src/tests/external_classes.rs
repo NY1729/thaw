@@ -1524,3 +1524,80 @@ fn factory_return_tracking_ignores_shadowed_import_alias() {
     assert_eq!(rewritten.matches("client_kind(").count(), 2);
     assert!(rewritten.contains("const value = factory(); value.kind(); let factory: any;"));
 }
+
+#[test]
+fn type_only_class_alias_keeps_instance_methods_without_runtime_constructor() {
+    // Unrun regression: a type-only alias and a live value alias share
+    // structural class metadata, but only the latter gets a constructor.
+    let source = r#"
+        declare class Client {
+            constructor(value: string);
+            method(): string;
+            static create(): Client;
+        }
+        export type { Client };
+        export type { Client as TypeClient };
+        export { Client as LiveClient };
+    "#;
+    let mut classes = thaw_bridge::parse_dts_classes(source).unwrap();
+    let type_names = thaw_bridge::exported_type_names(source);
+    let value_names = thaw_bridge::exported_value_names(source);
+    let only_types = exclusive_type_only_value_names(&type_names, &value_names, &[], &classes, &[]);
+    restrict_type_only_class_values(&mut classes, &only_types);
+    let internal = classes.iter().find(|class| class.name == "Client").unwrap();
+    assert!(!internal.constructible);
+    assert!(internal.constructors.is_empty());
+    let ty = classes.iter().find(|class| class.name == "TypeClient").unwrap();
+    assert!(!ty.constructible);
+    assert!(ty.constructors.is_empty());
+    assert!(ty.methods.iter().any(|method| method.name == "method" && !method.is_static));
+    assert!(!ty.methods.iter().any(|method| method.is_static));
+    let live = classes.iter().find(|class| class.name == "LiveClient").unwrap();
+    assert!(live.constructible);
+    assert!(!live.constructors.is_empty());
+    assert!(live.methods.iter().any(|method| method.name == "create" && method.is_static));
+}
+
+#[test]
+fn type_only_namespace_gates_nested_class_runtime_value() {
+    let source = r#"
+        declare namespace Types {
+            export class Client { constructor(); method(): string; static create(): Client; }
+        }
+        export type { Types };
+    "#;
+    let mut classes = thaw_bridge::parse_dts_classes(source).unwrap();
+    let type_names = thaw_bridge::exported_type_names(source);
+    let value_names = thaw_bridge::exported_value_names(source);
+    let only_types = exclusive_type_only_value_names(&type_names, &value_names, &[], &classes, &[]);
+    assert!(only_types.contains("Types.Client"));
+    restrict_type_only_class_values(&mut classes, &only_types);
+    let client = classes.iter().find(|class| class.name == "Types.Client").unwrap();
+    assert!(!client.constructible);
+    assert!(client.methods.iter().any(|method| method.name == "method"));
+    assert!(!client.methods.iter().any(|method| method.is_static));
+}
+
+#[test]
+fn value_export_of_same_class_name_wins_over_type_only_marker() {
+    let source = "export declare class Client { constructor(); static create(): Client; } export type { Client };";
+    let mut classes = thaw_bridge::parse_dts_classes(source).unwrap();
+    let type_names = thaw_bridge::exported_type_names(source);
+    let value_names = thaw_bridge::exported_value_names(source);
+    let only_types = exclusive_type_only_value_names(&type_names, &value_names, &[], &classes, &[]);
+    assert!(!only_types.contains("Client"));
+    restrict_type_only_class_values(&mut classes, &only_types);
+    assert!(classes.iter().find(|class| class.name == "Client").unwrap().constructible);
+}
+
+#[test]
+fn explicitly_type_only_callable_has_no_runtime_function_classification() {
+    let source = "declare function f(value: string): number; export type { f };";
+    let mut functions = thaw_bridge::parse_dts(source).unwrap();
+    let only_types = exclusive_type_only_value_names(
+        &thaw_bridge::exported_type_names(source),
+        &thaw_bridge::exported_value_names(source),
+        &functions, &[], &[]);
+    functions.retain(|function| !only_types.contains(&function.name));
+    assert!(functions.is_empty());
+}

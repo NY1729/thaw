@@ -643,6 +643,7 @@ fn dts_source_with_reexported_functions_inner(
         export_assignment_value_type_name(&module).as_deref(),
     )?);
     let named_import_targets = named_import_targets(entry_path, &module);
+    let named_type_import_targets = named_type_import_targets(entry_path, &module);
     let mut local_export_visited = std::collections::BTreeSet::new();
     let local_exports = all_reexported_function_declarations(
         entry_path,
@@ -676,12 +677,39 @@ fn dts_source_with_reexported_functions_inner(
             let Some(original) = export_name(&named.orig) else {
                 continue;
             };
+            if export.src.is_none()
+                && !named_import_targets.contains_key(&original)
+                && named_type_import_targets.contains_key(&original) {
+                continue;
+            }
+            if export.src.is_none() {
+                if let Some((target, imported)) = named_import_targets.get(&original) {
+                    let mut visited = std::collections::BTreeSet::new();
+                    if reexport_is_type_only(target, imported, &mut visited)? == Some(true) {
+                        continue;
+                    }
+                }
+            }
+            if let Some(target) = &target_path {
+                let mut visited = std::collections::BTreeSet::new();
+                if reexport_is_type_only(target, &original, &mut visited)? == Some(true) {
+                    continue;
+                }
+            }
             let exported = named
                 .exported
                 .as_ref()
                 .and_then(export_name)
                 .unwrap_or_else(|| original.clone());
             if seen.contains(&exported) {
+                continue;
+            }
+            // A same-file binding already has its declaration in the entry
+            // source. Imported bindings still need following even when the
+            // export specifier has no `as` clause.
+            if export.src.is_none() && exported == original
+                && !named_import_targets.contains_key(&original)
+                && !import_equals_targets.contains_key(&original) {
                 continue;
             }
             let declarations = match &target_path {
@@ -732,12 +760,66 @@ fn dts_source_with_reexported_functions_inner(
             if !declarations.is_empty() {
                 seen.insert(exported.clone());
             }
-            for mut snippet in declarations {
-                if exported != original {
-                    snippet = export_function_as(snippet, &exported, entry_path);
-                }
+            for snippet in reexported_declarations_as(declarations, &exported, entry_path, false) {
                 output.push('\n');
                 output.push_str(&snippet);
+            }
+        }
+    }
+    // Named type re-exports have no runtime binding, but the target's
+    // declaration must still be present for class instances and aliases.
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.type_only {
+            if let Some(target) = export.src.as_ref()
+                .and_then(|source| source.value.as_str())
+                .and_then(|source| declaration_reexport_path(entry_path, source)) {
+                for specifier in &export.specifiers {
+                    let ExportSpecifier::Namespace(namespace) = specifier else { continue };
+                    let ModuleExportName::Ident(alias) = &namespace.name else { continue };
+                    let mut visited = std::collections::BTreeSet::new();
+                    let snippets = all_reexported_type_declarations(&target, &mut visited)?;
+                    append_flattened_type(&mut output,
+                        type_only_namespace_declaration(alias.sym.as_ref(), snippets));
+                }
+            }
+        }
+        for specifier in &export.specifiers {
+            let ExportSpecifier::Named(named) = specifier else { continue };
+            let ModuleExportName::Ident(original) = &named.orig else { continue };
+            let imported_only_as_type = export.src.is_none()
+                && !named_import_targets.contains_key(original.sym.as_ref())
+                && named_type_import_targets.contains_key(original.sym.as_ref());
+            let source_target = export.src.as_ref()
+                .and_then(|source| source.value.as_str())
+                .and_then(|source| declaration_reexport_path(entry_path, source))
+                .map(|target| (target, original.sym.to_string()))
+                .or_else(|| named_import_targets.get(original.sym.as_ref()).cloned());
+            let source_only_as_type = if let Some((target, imported)) = source_target {
+                let mut visited = std::collections::BTreeSet::new();
+                reexport_is_type_only(&target, &imported, &mut visited)? == Some(true)
+            } else { false };
+            if !export.type_only && !named.is_type_only
+                && !imported_only_as_type && !source_only_as_type { continue; }
+            let public = named.exported.as_ref().unwrap_or(&named.orig);
+            let ModuleExportName::Ident(public) = public else { continue };
+            let target = export.src.as_ref()
+                .and_then(|source| source.value.as_str())
+                .and_then(|source| declaration_reexport_path(entry_path, source))
+                .or_else(|| named_import_targets.get(original.sym.as_ref()).map(|(path, _)| path.clone()))
+                .or_else(|| named_type_import_targets.get(original.sym.as_ref()).map(|(path, _)| path.clone()));
+            if let Some(target) = target {
+                let target_name = named_import_targets.get(original.sym.as_ref())
+                    .filter(|_| export.src.is_none())
+                    .or_else(|| named_type_import_targets.get(original.sym.as_ref()).filter(|_| export.src.is_none()))
+                    .map_or(original.sym.as_ref(), |(_, name)| name.as_str());
+                let declarations = reexported_class_or_interface_declarations(&target, target_name)?;
+                for snippet in reexported_declarations_as(
+                    declarations, public.sym.as_ref(), entry_path, true,
+                ) {
+                    append_flattened_type(&mut output,
+                        snippet);
+                }
             }
         }
     }
@@ -802,8 +884,11 @@ fn dts_source_with_reexported_functions_inner(
             continue;
         };
         for snippet in all_reexported_type_declarations(&target_path, &mut visited_types)? {
-            output.push('\n');
-            output.push_str(&snippet);
+            append_flattened_type(&mut output, if export.type_only {
+                type_only_declaration(snippet, None)
+            } else {
+                snippet
+            });
         }
         if export.type_only {
             continue;
@@ -881,8 +966,7 @@ fn dts_source_with_reexported_functions_inner(
     if let Some(target_path) = export_assignment_namespace_import_target(entry_path, &module) {
         let mut visited_types = std::collections::BTreeSet::new();
         for snippet in all_reexported_type_declarations(&target_path, &mut visited_types)? {
-            output.push('\n');
-            output.push_str(&snippet);
+            append_flattened_type(&mut output, snippet);
         }
         let mut visited = std::collections::BTreeSet::new();
         for (_, snippet) in all_reexported_function_declarations(&target_path, &mut visited)? {
@@ -1054,7 +1138,7 @@ fn all_reexported_type_declarations(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<Vec<String>, String> {
-    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem};
+    use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
     use thaw_parser::common::{SourceMapper, Spanned};
 
     if !visited.insert(path.to_path_buf()) {
@@ -1068,6 +1152,8 @@ fn all_reexported_type_declarations(
     })?;
     let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
     let mut declarations = Vec::new();
+    let value_imports = named_import_targets(path, &module);
+    let type_imports = named_type_import_targets(path, &module);
     for item in &module.body {
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export))
@@ -1087,14 +1173,279 @@ fn all_reexported_type_declarations(
             ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) => {
                 if let Some(source) = export.src.value.as_str() {
                     if let Some(target) = declaration_reexport_path(path, source) {
-                        declarations.extend(all_reexported_type_declarations(&target, visited)?);
+                        for snippet in all_reexported_type_declarations(&target, visited)? {
+                            declarations.push(if export.type_only {
+                                type_only_declaration(snippet, None)
+                            } else {
+                                snippet
+                            });
+                        }
                     }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
+                for specifier in &export.specifiers {
+                    let ExportSpecifier::Named(named) = specifier else { continue };
+                    let ModuleExportName::Ident(original) = &named.orig else { continue };
+                    let exported = named.exported.as_ref().unwrap_or(&named.orig);
+                    let ModuleExportName::Ident(exported) = exported else { continue };
+                    let imported = value_imports.get(original.sym.as_ref())
+                        .or_else(|| type_imports.get(original.sym.as_ref()));
+                    let imported_only_as_type = export.src.is_none()
+                        && !value_imports.contains_key(original.sym.as_ref())
+                        && type_imports.contains_key(original.sym.as_ref());
+                    let target = export.src.as_ref()
+                        .and_then(|source| source.value.as_str())
+                        .and_then(|source| declaration_reexport_path(path, source))
+                        .or_else(|| imported.map(|(path, _)| path.clone()))
+                        .or_else(|| export.src.is_none().then(|| path.to_path_buf()));
+                    let Some(target) = target else { continue };
+                    let target_name = if export.src.is_some() {
+                        original.sym.as_ref()
+                    } else {
+                        imported.map_or(original.sym.as_ref(), |(_, name)| name.as_str())
+                    };
+                    let mut status_visited = std::collections::BTreeSet::new();
+                    let inherited_type_only = imported_only_as_type
+                        || reexport_is_type_only(&target, target_name, &mut status_visited)? == Some(true);
+                    let resolved = reexported_class_or_interface_declarations(&target, target_name)?
+                        .into_iter().filter(|snippet| is_type_declaration_snippet(snippet)).collect();
+                    declarations.extend(reexported_declarations_as(
+                        resolved, exported.sym.as_ref(), path,
+                        export.type_only || named.is_type_only || inherited_type_only,
+                    ));
+                }
+                for specifier in &export.specifiers {
+                    if !export.type_only { continue; }
+                    let ExportSpecifier::Namespace(namespace) = specifier else { continue };
+                    let ModuleExportName::Ident(alias) = &namespace.name else { continue };
+                    let Some(source) = export.src.as_ref().and_then(|source| source.value.as_str()) else { continue };
+                    let Some(target) = declaration_reexport_path(path, source) else { continue };
+                    let snippets = all_reexported_type_declarations(&target, visited)?;
+                    declarations.push(type_only_namespace_declaration(alias.sym.as_ref(), snippets));
                 }
             }
             _ => {}
         }
     }
+    visited.remove(path);
     Ok(declarations)
+}
+
+// Keep the declaration's structural type while marking its public name as
+// type-only. The bridge reads this explicit export separately from value
+// exports, because even an unexported `declare class` has an instance shape.
+fn type_only_declaration(snippet: String, exported: Option<&str>) -> String {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt, TsModuleName};
+    let Ok(module) = thaw_parser::parse_declarations(&snippet) else { return snippet };
+    let declaration = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+        ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+        _ => None,
+    });
+    let name = declaration.and_then(|declaration| match declaration {
+        Decl::Class(class) => Some(class.ident.sym.as_ref()),
+        Decl::TsInterface(interface) => Some(interface.id.sym.as_ref()),
+        Decl::TsTypeAlias(alias) => Some(alias.id.sym.as_ref()),
+        Decl::TsEnum(enumeration) => Some(enumeration.id.sym.as_ref()),
+        Decl::TsModule(module) => match &module.id {
+            TsModuleName::Ident(ident) => Some(ident.sym.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    });
+    let Some(name) = name else { return snippet };
+    let public = exported.unwrap_or(name);
+    let bare = snippet.trim_start().strip_prefix("export ")
+        .map_or(snippet.as_str(), |declaration| declaration);
+    // A value alias generated for this class may cross a later `export
+    // type *` edge. Carry its public name as a type and remove the value
+    // export; the class body and its self references stay under `name`.
+    let value_alias_prefix = format!("export {{ {name} as ");
+    let own_type_marker = format!("export type {{ {name} }};");
+    let mut aliases = Vec::new();
+    let body = bare.lines().filter(|line| {
+        if let Some(alias) = line.strip_prefix(&value_alias_prefix)
+            .and_then(|suffix| suffix.strip_suffix(" };")) {
+            aliases.push(alias.to_string());
+            false
+        } else if *line == own_type_marker.as_str() {
+            false
+        } else {
+            true
+        }
+    }).collect::<Vec<_>>().join("\n");
+    let mut result = format!("{body}\nexport type {{ {name} }};");
+    if name != public {
+        aliases.push(public.to_string());
+    }
+    for alias in aliases {
+        let marker = format!("export type {{ {name} as {alias} }};");
+        if !result.contains(&marker) {
+            result.push('\n');
+            result.push_str(&marker);
+        }
+    }
+    result
+}
+
+fn append_flattened_type(output: &mut String, snippet: String) {
+    // The same source declaration can be reached through `export type *`
+    // and an explicitly named alias. Keep one structural declaration but
+    // all public type markers, so the flattened `.d.ts` stays parseable.
+    if snippet.trim_start().starts_with("declare namespace ") {
+        if !output.contains(&snippet) {
+            output.push('\n');
+            output.push_str(&snippet);
+        }
+        return;
+    }
+    if let Some(marker) = snippet.find("\nexport type {") {
+        let declaration = &snippet[..marker];
+        if output.contains(declaration) {
+            for alias in snippet[marker..].lines().filter(|line| line.starts_with("export type {") || line.starts_with("export {")) {
+                if !output.contains(alias) {
+                    output.push('\n');
+                    output.push_str(alias);
+                }
+            }
+            return;
+        }
+    } else if output.contains(&snippet) {
+        return;
+    }
+    output.push('\n');
+    output.push_str(&snippet);
+}
+
+fn type_only_namespace_declaration(alias: &str, snippets: Vec<String>) -> String {
+    let body = snippets.into_iter().map(|snippet| {
+        let snippet = snippet.trim_start();
+        snippet.strip_prefix("export declare ")
+            .map_or_else(|| snippet.to_string(), |rest| format!("export {rest}"))
+    }).collect::<Vec<_>>().join("\n");
+    format!("declare namespace {alias} {{\n{body}\n}}\nexport type {{ {alias} }};")
+}
+
+fn is_type_declaration_snippet(snippet: &str) -> bool {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt};
+    let Ok(module) = thaw_parser::parse_declarations(snippet) else { return false };
+    module.body.iter().any(|item| {
+        let declaration = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+            ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+            _ => None,
+        };
+        matches!(declaration,
+            Some(Decl::Class(_) | Decl::TsInterface(_) | Decl::TsTypeAlias(_)
+                | Decl::TsEnum(_) | Decl::TsModule(_)))
+    })
+}
+
+fn is_runtime_declaration_snippet(snippet: &str) -> bool {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt};
+    let Ok(module) = thaw_parser::parse_declarations(snippet) else { return false };
+    module.body.iter().any(|item| {
+        let declaration = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+            ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+            _ => None,
+        };
+        matches!(declaration, Some(Decl::Class(_) | Decl::Fn(_) | Decl::Var(_)
+            | Decl::TsEnum(_) | Decl::TsModule(_)))
+    })
+}
+
+fn declaration_identity(snippet: &str) -> Option<String> {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat, Stmt, TsModuleName};
+    let module = thaw_parser::parse_declarations(snippet).ok()?;
+    let declaration = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+        ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+        _ => None,
+    })?;
+    match declaration {
+        Decl::Class(class) => Some(class.ident.sym.to_string()),
+        Decl::Fn(function) => Some(function.ident.sym.to_string()),
+        Decl::Var(variable) => variable.decls.first().and_then(|declarator| match &declarator.name {
+            Pat::Ident(binding) => Some(binding.id.sym.to_string()),
+            _ => None,
+        }),
+        Decl::TsInterface(interface) => Some(interface.id.sym.to_string()),
+        Decl::TsTypeAlias(alias) => Some(alias.id.sym.to_string()),
+        Decl::TsEnum(enumeration) => Some(enumeration.id.sym.to_string()),
+        Decl::TsModule(module) => match &module.id {
+            TsModuleName::Ident(ident) => Some(ident.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// The resolver returns the selected declaration first, followed by its
+// merged namespace/overloads and any imported superclass or type support.
+// Only declarations with the selected binding's identity receive the public
+// alias; an appended Base must remain Base when exporting Derived.
+fn reexported_declarations_as(
+    declarations: Vec<String>,
+    exported: &str,
+    origin: &Path,
+    type_only: bool,
+) -> Vec<String> {
+    let selected = declarations.first().and_then(|snippet| declaration_identity(snippet));
+    declarations.into_iter().map(|snippet| {
+        let is_selected = selected.is_some()
+            && selected.as_deref() == declaration_identity(&snippet).as_deref();
+        if type_only {
+            return type_only_declaration(snippet, is_selected.then_some(exported));
+        }
+        if !is_selected {
+            return if is_type_declaration_snippet(&snippet) {
+                type_only_declaration(snippet, None)
+            } else {
+                snippet
+            };
+        }
+        if is_runtime_declaration_snippet(&snippet) {
+            export_value_declaration_as(snippet, exported, origin)
+        } else {
+            type_only_declaration(snippet, Some(exported))
+        }
+    }).collect()
+}
+
+fn export_value_declaration_as(snippet: String, exported: &str, origin: &Path) -> String {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt, TsModuleName};
+    let Ok(module) = thaw_parser::parse_declarations(&snippet) else { return snippet };
+    let declaration = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+        ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+        _ => None,
+    });
+    match declaration {
+        Some(Decl::Class(class)) => {
+            let name = class.ident.sym.as_ref();
+            if name == exported { return snippet; }
+            let bare = snippet.trim_start().strip_prefix("export ").unwrap_or(&snippet);
+            // Keep the class's declared identity for `extends` and self
+            // returns. The bridge clones its shape for the public alias.
+            format!("{bare}\nexport type {{ {name} }};\nexport {{ {name} as {exported} }};")
+        }
+        Some(Decl::TsEnum(enumeration)) => {
+            let name = enumeration.id.sym.as_ref();
+            if name == exported { return snippet; }
+            let bare = snippet.trim_start().strip_prefix("export ").unwrap_or(&snippet);
+            format!("{bare}\nexport {{ {name} as {exported} }};")
+        }
+        Some(Decl::TsModule(module)) => {
+            let TsModuleName::Ident(ident) = &module.id else { return snippet };
+            let name = ident.sym.as_ref();
+            if name == exported { return snippet; }
+            let bare = snippet.trim_start().strip_prefix("export ").unwrap_or(&snippet);
+            format!("{bare}\nexport {{ {name} as {exported} }};")
+        }
+        _ => export_function_as(snippet, exported, origin),
+    }
 }
 
 /// A same-file `import * as X from "SOURCE"; export { X[, X as Y], ... };`
@@ -2433,6 +2784,126 @@ fn named_import_targets(
     targets
 }
 
+/// Type-only imports feed local `export type { Local }` declarations but
+/// must never enter the value import resolver above.
+fn named_type_import_targets(
+    entry_path: &Path,
+    module: &thaw_parser::ast::Module,
+) -> std::collections::HashMap<String, (PathBuf, String)> {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+    let mut targets = std::collections::HashMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue };
+        let Some(source) = import.src.value.as_str() else { continue };
+        let Some(path) = declaration_reexport_path(entry_path, source) else { continue };
+        for specifier in &import.specifiers {
+            match specifier {
+                ImportSpecifier::Named(named) if import.type_only || named.is_type_only => {
+                    let original = match &named.imported {
+                        Some(ModuleExportName::Ident(original)) => original.sym.to_string(),
+                        Some(ModuleExportName::Str(_)) => continue,
+                        None => named.local.sym.to_string(),
+                    };
+                    targets.insert(named.local.sym.to_string(), (path.clone(), original));
+                }
+                ImportSpecifier::Default(default) if import.type_only => {
+                    targets.insert(default.local.sym.to_string(), (path.clone(), "default".to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+    targets
+}
+
+// `export { Local }` can re-export an `import type` without repeating the
+// `type` keyword. Track the declaration's provenance through named and
+// wildcard barrels; a value edge wins when both kinds expose one name.
+fn reexport_is_type_only(
+    path: &Path,
+    name: &str,
+    visited: &mut std::collections::BTreeSet<(PathBuf, String)>,
+) -> Result<Option<bool>, String> {
+    use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, Pat, Stmt};
+    if !visited.insert((path.to_path_buf(), name.to_string())) { return Ok(None); }
+    let source = fs::read_to_string(path).map_err(|error|
+        format!("failed to read re-exported declarations `{}`: {error}", path.display()))?;
+    let module = thaw_parser::parse_declarations(&source)?;
+    let value_imports = named_import_targets(path, &module);
+    let type_imports = named_type_import_targets(path, &module);
+    let decl_kind = |declaration: &Decl, local: &str| match declaration {
+        Decl::Class(class) if class.ident.sym == local => Some(false),
+        Decl::Fn(function) if function.ident.sym == local => Some(false),
+        Decl::TsInterface(interface) if interface.id.sym == local => Some(true),
+        Decl::TsTypeAlias(alias) if alias.id.sym == local => Some(true),
+        Decl::TsEnum(enumeration) if enumeration.id.sym == local => Some(false),
+        Decl::TsModule(namespace) if matches!(&namespace.id,
+            thaw_parser::ast::TsModuleName::Ident(ident) if ident.sym == local) => Some(false),
+        Decl::Var(variables) if variables.decls.iter().any(|declarator|
+            matches!(&declarator.name, Pat::Ident(binding) if binding.id.sym == local)) => Some(false),
+        _ => None,
+    };
+    let local_kind = |local: &str| module.body.iter().filter_map(|item| match item {
+        ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+        _ => None,
+    }).filter_map(|declaration| decl_kind(declaration, local))
+        .fold(None, |status, candidate| merge_type_only_status(status, Some(candidate)));
+    let mut status = None;
+    for item in &module.body {
+        let candidate = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                decl_kind(&export.decl, name)
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
+                let mut named_status = None;
+                for specifier in &export.specifiers {
+                    let ExportSpecifier::Named(named) = specifier else { continue };
+                    let ModuleExportName::Ident(original) = &named.orig else { continue };
+                    let public = named.exported.as_ref().unwrap_or(&named.orig);
+                    let ModuleExportName::Ident(public) = public else { continue };
+                    if public.sym != name { continue; }
+                    let kind = if export.type_only || named.is_type_only { Some(true) }
+                    else if let Some(target) = export.src.as_ref()
+                        .and_then(|source| source.value.as_str())
+                        .and_then(|source| declaration_reexport_path(path, source)) {
+                        reexport_is_type_only(&target, original.sym.as_ref(), visited)?
+                    } else if value_imports.contains_key(original.sym.as_ref()) {
+                        let (target, imported) = &value_imports[original.sym.as_ref()];
+                        reexport_is_type_only(target, imported, visited)?.or(Some(false))
+                    } else if type_imports.contains_key(original.sym.as_ref()) {
+                        Some(true)
+                    } else {
+                        local_kind(original.sym.as_ref())
+                    };
+                    named_status = merge_type_only_status(named_status, kind);
+                }
+                named_status
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) if name != "default" => {
+                let target = export.src.value.as_str()
+                    .and_then(|source| declaration_reexport_path(path, source));
+                if let Some(target) = target {
+                    reexport_is_type_only(&target, name, visited)?
+                        .map(|inherited| export.type_only || inherited)
+                } else { None }
+            }
+            _ => None,
+        };
+        status = merge_type_only_status(status, candidate);
+    }
+    visited.remove(&(path.to_path_buf(), name.to_string()));
+    Ok(status)
+}
+
+fn merge_type_only_status(current: Option<bool>, next: Option<bool>) -> Option<bool> {
+    match (current, next) {
+        (Some(left), Some(right)) => Some(left && right),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 /// Same shape as `reexported_function_declarations`, but for a class or
 /// interface declared directly in `path` under `name` (the counterpart
 /// to that function's `Decl::Fn` handling for `Decl::Class`/
@@ -2576,6 +3047,8 @@ fn reexported_class_or_interface_declarations_inner(
                 }
             }
             Decl::TsInterface(interface) => interface.id.sym == local_name,
+            Decl::TsTypeAlias(alias) => alias.id.sym == local_name,
+            Decl::TsEnum(enumeration) => enumeration.id.sym == local_name,
             // A class/interface can be merged with a same-named
             // `declare namespace X { ... }` block (a common real-world
             // pattern for attaching static types alongside a class, e.g.
@@ -2635,6 +3108,13 @@ fn reexported_class_or_interface_declarations_inner(
         }
     }
     if declarations.is_empty() {
+        let imports = named_import_targets(path, &module);
+        let type_imports = named_type_import_targets(path, &module);
+        if let Some((target, original)) = imports.get(&local_name)
+            .or_else(|| type_imports.get(&local_name)) {
+            return reexported_class_or_interface_declarations_inner(
+                target, original, visited);
+        }
         // The name isn't declared in this file at all -- follow a *barrel*
         // re-export (`export { X } from "./y.js"`) into the target file,
         // exactly the way `reexported_function_declarations` already does
@@ -2648,9 +3128,6 @@ fn reexported_class_or_interface_declarations_inner(
             let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
                 continue;
             };
-            if export.type_only {
-                continue;
-            }
             let Some(source) = export.src.as_ref().and_then(|source| source.value.as_str())
             else {
                 continue;
@@ -2662,9 +3139,6 @@ fn reexported_class_or_interface_declarations_inner(
                 let ExportSpecifier::Named(named) = specifier else {
                     continue;
                 };
-                if named.is_type_only {
-                    continue;
-                }
                 let export_name = |candidate: &ModuleExportName| match candidate {
                     ModuleExportName::Ident(ident) => Some(ident.sym.to_string()),
                     ModuleExportName::Str(_) => None,

@@ -40,6 +40,10 @@ struct ResolvedPackage {
     /// at all -- both are bound purely by an `import *`).
     namespace_self_aliases: std::collections::HashSet<String>,
     type_only_exports: std::collections::HashSet<String>,
+    /// Explicit type exports with no corresponding public value export.
+    /// Their class instance signatures remain available, but they do not
+    /// have a constructor, static member, or module value at runtime.
+    type_only_value_names: std::collections::HashSet<String>,
     /// Every `NAME -> { member name -> real flattened function name }`
     /// nested-namespace table this package's own `.d.ts` declares -- see
     /// `thaw_bridge::nested_namespace_members`'s own doc comment. Real
