@@ -1117,3 +1117,28 @@ fn text_decoder_stream_exposes_the_settings_acquired_by_its_decoder() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+
+#[test]
+fn stream_size_strategies_validate_and_capture_the_size_function_once() {
+    // Unrun regression for both consumers of the shared size validation.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("stream_size_validation");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var errors = []; for (var constructor of [ReadableStream, WritableStream]) for (var size of [null, 0, false, 'size']) { try { new constructor({}, { size: size }); } catch (error) { errors.push(error.name); } }
+      var readableGets = 0, writableGets = 0, controller, measured = [];
+      var readable = new ReadableStream({ start(value) { controller = value; } }, { highWaterMark: 4, get size() { readableGets++; return readableGets === 1 ? function (chunk) { return chunk.length; } : null; } });
+      controller.enqueue('xx'); var remaining = controller.desiredSize;
+      var writable = new WritableStream({}, { get size() { writableGets++; return writableGets === 1 ? function (chunk) { measured.push(chunk); return 1; } : null; } }), writer = writable.getWriter(); await writer.write(3); await writer.close();
+      return [errors, readableGets, writableGets, remaining, measured];
+    };"#).unwrap();
+    let modules = temp_registry("stream_size_validation_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseSizeValidation = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseSizeValidation").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"],1,1,2,[3]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
