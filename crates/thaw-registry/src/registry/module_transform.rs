@@ -779,7 +779,7 @@ fn rewrite_import_meta_urls(source: &str) -> String {
             .0 as usize;
         output.replace_range(
             lo..hi,
-            "{url: ('file://' + __filename), resolve: function() { throw new Error('import.meta.resolve is not supported'); }}",
+            "({url: ('file://' + __filename), resolve: function() { throw new Error('import.meta.resolve is not supported'); }})",
         );
     }
     output
@@ -906,7 +906,12 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
         .iter()
         .any(|item| matches!(item, ModuleItem::ModuleDecl(_)));
     if !has_esm_syntax {
-        return live_source.or(dynamic_source);
+        let rewritten = rewrite_import_meta_urls(source);
+        return if rewritten == source {
+            live_source.or(dynamic_source)
+        } else {
+            Some(rewritten)
+        };
     }
 
     let snippet = |span: thaw_parser::common::Span| cm.span_to_snippet(span).ok();
