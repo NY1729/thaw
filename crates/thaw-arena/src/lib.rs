@@ -26,6 +26,7 @@ thread_local! {
     static REFERENCES: RefCell<BTreeMap<usize, Vec<usize>>> = const { RefCell::new(BTreeMap::new()) };
     static TRACING: Cell<bool> = const { Cell::new(false) };
     static PINNED: RefCell<BTreeMap<usize, usize>> = const { RefCell::new(BTreeMap::new()) };
+    static RESET_HOOKS: RefCell<Vec<fn(bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A runtime-owned reference, released when its callback or watcher is dropped.
@@ -116,6 +117,25 @@ pub fn was_reclaimed(pointer: usize) -> bool {
     })
 }
 
+/// Registers thread-local side-table cleanup after each arena reset.
+/// The hook receives whether tracing preserved reachable allocations; when
+/// true, it may use `was_reclaimed` to discard only dead identities.
+pub fn register_reset_hook(hook: fn(bool)) {
+    RESET_HOOKS.with(|hooks| {
+        let mut hooks = hooks.borrow_mut();
+        if !hooks.contains(&hook) {
+            hooks.push(hook);
+        }
+    });
+}
+
+fn run_reset_hooks(tracing: bool) {
+    let hooks = RESET_HOOKS.with(|hooks| hooks.borrow().clone());
+    for hook in hooks {
+        hook(tracing);
+    }
+}
+
 /// Allocates `size` bytes aligned to `align` from the thread-local arena.
 /// Returns a null pointer if `align` isn't a valid alignment (a power of
 /// two) or the underlying allocation fails.
@@ -157,6 +177,7 @@ pub extern "C" fn thaw_arena_reset() {
     if !is_tracing() {
         strings::reset_lengths(false);
         ARENA.with(|arena| arena.borrow_mut().reset());
+        run_reset_hooks(false);
         return;
     }
     ALLOCATIONS.with(|allocations| {
@@ -237,6 +258,7 @@ pub extern "C" fn thaw_arena_reset() {
         });
     });
     strings::reset_lengths(true);
+    run_reset_hooks(true);
 }
 
 #[cfg(test)]

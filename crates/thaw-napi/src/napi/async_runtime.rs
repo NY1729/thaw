@@ -738,11 +738,12 @@ pub extern "C" fn thaw_napi_poll_async_work() -> usize {
     if LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
         && ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
     {
-        HOST.with(|host| {
+        let pending_envs = HOST.with(|host| {
             let mut host = host.borrow_mut();
             host.compiled_callbacks.clear();
-            host.pending_call_envs.clear();
+            std::mem::take(&mut host.pending_call_envs)
         });
+        drop(pending_envs);
     }
     completed
 }
@@ -775,11 +776,12 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
         std::thread::sleep(Duration::from_millis(1));
     }
     if LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0 {
-        HOST.with(|host| {
+        let pending_envs = HOST.with(|host| {
             let mut host = host.borrow_mut();
             host.compiled_callbacks.clear();
-            host.pending_call_envs.clear();
+            std::mem::take(&mut host.pending_call_envs)
         });
+        drop(pending_envs);
     }
     completed
 }
