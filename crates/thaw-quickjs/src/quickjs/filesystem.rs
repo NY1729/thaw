@@ -175,6 +175,19 @@ fn fs_statfs_type(call: impl FnOnce(*mut libc::statfs) -> libc::c_int) -> io::Re
 }
 
 #[cfg(unix)]
+fn fs_statfs_record(stats: libc::statvfs, fs_type: u64) -> serde_json::Value {
+    let exact = serde_json::json!({
+        "type": fs_type.to_string(), "bsize": stats.f_bsize.to_string(),
+        "blocks": stats.f_blocks.to_string(), "bfree": stats.f_bfree.to_string(),
+        "bavail": stats.f_bavail.to_string(), "files": stats.f_files.to_string(),
+        "ffree": stats.f_ffree.to_string(),
+    });
+    serde_json::json!({ "ok": true, "type": fs_type, "bsize": stats.f_bsize,
+        "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail,
+        "files": stats.f_files, "ffree": stats.f_ffree, "exact": exact })
+}
+
+#[cfg(unix)]
 fn fs_statfs(path: &std::path::Path) -> io::Result<serde_json::Value> {
     use std::os::unix::ffi::OsStrExt;
     let path = CString::new(path.as_os_str().as_bytes())
@@ -188,9 +201,7 @@ fn fs_statfs(path: &std::path::Path) -> io::Result<serde_json::Value> {
     let fs_type = fs_statfs_type(|record| unsafe { libc::statfs(path.as_ptr(), record) })?;
     #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "aix")))]
     let fs_type = 0;
-    Ok(
-        serde_json::json!({ "ok": true, "type": fs_type, "bsize": stats.f_bsize, "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail, "files": stats.f_files, "ffree": stats.f_ffree }),
-    )
+    Ok(fs_statfs_record(stats, fs_type))
 }
 
 #[cfg(not(unix))]
@@ -689,7 +700,7 @@ fn fs_fd_operation(operation: &str, fd: u32, value: &str, table: &mut FsHandleTa
                 let fs_type = fs_statfs_type(|record| unsafe { libc::fstatfs(file.as_raw_fd(), record) })?;
                 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "aix")))]
                 let fs_type = 0;
-                Ok(serde_json::json!({ "ok": true, "type": fs_type, "bsize": stats.f_bsize, "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail, "files": stats.f_files, "ffree": stats.f_ffree }))
+                Ok(fs_statfs_record(stats, fs_type))
             }
             #[cfg(not(unix))] { Err(io::Error::new(io::ErrorKind::Unsupported, "filesystem statistics are unsupported")) }
         }
@@ -995,4 +1006,26 @@ fn fs_raw_path_transport_rejects_malformed_hex_and_nul() {
     assert_eq!(fs_raw_path("f").unwrap_err().kind(), io::ErrorKind::InvalidInput);
     assert_eq!(fs_raw_path("fg").unwrap_err().kind(), io::ErrorKind::InvalidInput);
     assert_eq!(fs_raw_path("610062").unwrap_err().kind(), io::ErrorKind::InvalidInput);
+}
+
+#[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn fs_statfs_record_preserves_large_counters_as_decimal_strings() {
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    stats.f_bsize = 9_007_199_254_740_995;
+    stats.f_blocks = 9_007_199_254_740_997;
+    stats.f_bfree = 9_007_199_254_740_999;
+    stats.f_bavail = 9_007_199_254_741_001;
+    stats.f_files = 9_007_199_254_741_003;
+    stats.f_ffree = 9_007_199_254_741_005;
+    let record = fs_statfs_record(stats, 9_007_199_254_740_993);
+    for (key, expected) in [
+        ("type", "9007199254740993"), ("bsize", "9007199254740995"),
+        ("blocks", "9007199254740997"), ("bfree", "9007199254740999"),
+        ("bavail", "9007199254741001"), ("files", "9007199254741003"),
+        ("ffree", "9007199254741005"),
+    ] {
+        assert_eq!(record["exact"][key], expected);
+    }
+    assert!(record["blocks"].is_number());
 }

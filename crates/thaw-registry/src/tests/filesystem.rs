@@ -1441,3 +1441,60 @@ fn fs_directory_iterator_closes_on_early_exit() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn fs_bigint_statfs_keeps_exact_wire_values_across_consumers() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_statfs_bigint_exact_wire");
+    fs::write(
+        dir.join("index.js"),
+        r#"var fs = require('node:fs'); module.exports = async function(root) {
+            var path = root + '/value.txt', original = globalThis.__thaw_fs;
+            fs.writeFileSync(path, 'x');
+            var exact = { type: '9007199254740993', bsize: '9007199254740995',
+                blocks: '9007199254740997', bfree: '9007199254740999',
+                bavail: '9007199254741001', files: '9007199254741003',
+                ffree: '9007199254741005' };
+            var record = { ok: true, type: 9007199254740992, bsize: 9007199254740996,
+                blocks: 9007199254740996, bfree: 9007199254741000,
+                bavail: 9007199254741000, files: 9007199254741004,
+                ffree: 9007199254741004, exact: exact };
+            globalThis.__thaw_fs = function(operation, filename, value, recursive) {
+                if (operation === 'statfs' || operation === 'fd_statfs') return JSON.stringify(record);
+                return original(operation, filename, value, recursive);
+            };
+            var handle;
+            try {
+                var normal = fs.statfsSync(root), sync = fs.statfsSync(root, { bigint: true });
+                var callback = await new Promise(function(resolve, reject) {
+                    fs.statfs(root, { bigint: true }, function(error, result) { error ? reject(error) : resolve(result); });
+                });
+                var promised = await fs.promises.statfs(root, { bigint: true });
+                handle = await fs.promises.open(path, 'r');
+                var descriptor = await handle.statfs({ bigint: true });
+                var keys = ['type','bsize','blocks','bfree','bavail','files','ffree'];
+                return [normal.type, typeof normal.blocks,
+                    keys.every(function(key) { return sync[key].toString() === exact[key]; }),
+                    keys.every(function(key) { return callback[key] === sync[key]; }),
+                    keys.every(function(key) { return promised[key] === sync[key]; }),
+                    keys.every(function(key) { return descriptor[key] === sync[key]; })];
+            } finally {
+                if (handle) await handle.close();
+                globalThis.__thaw_fs = original;
+            }
+        };"#,
+    )
+    .unwrap();
+    let modules = temp_registry("builtin_fs_statfs_bigint_exact_wire_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStatfsExact = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseStatfsExact").unwrap();
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[9007199254740992,\"number\",true,true,true,true]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
