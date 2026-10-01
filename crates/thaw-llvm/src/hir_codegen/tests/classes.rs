@@ -2816,3 +2816,52 @@ fn non_arrow_nullable_and_disjoint_union_receivers() {
     assert_eq!(compile_and_run(source, "non_arrow_nullable_union_receiver"),
         "undefined number undefined\nTypeError\nobject number\nundefined object number\nTypeError\nnumber string\nundefined object\n");
 }
+
+
+#[test]
+fn non_arrow_receiver_union_routes_json_and_number_by_producer_kind() {
+    let source = r#"
+        function main(): void {
+            const kind = function(this: Json | number): string { return typeof this; };
+            const holder: Json = { value: 7 };
+            console.log(kind.call(3), kind.call(holder));
+            const broad = function(this: Json | string): string { return typeof this; };
+            console.log(broad.call("text"), broad.call(holder));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_union_json_number"),
+        "number object\nstring object\n");
+}
+
+#[test]
+fn non_arrow_receiver_union_checks_each_native_class_identity() {
+    let source = r#"
+        class Base { value: number; constructor(value: number) { this.value = value; } }
+        class Derived extends Base { constructor(value: number) { super(value); } }
+        class Other { value: number; constructor(value: number) { this.value = value; } }
+        class Stranger { value: number; constructor(value: number) { this.value = value; } }
+        function main(): void {
+            const pair = function(this: Base | Other): string { return typeof this; };
+            console.log(pair.call(new Base(1)), pair.call(new Other(2)));
+            try { pair.call(new Stranger(3) as Base); }
+            catch (error) { console.log("TypeError"); }
+            const inherited = function(this: Base | Derived): string { return typeof this; };
+            console.log(inherited.call(new Base(4)), inherited.call(new Derived(5)));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_union_classes"),
+        "object object\nTypeError\nobject object\n");
+}
+
+#[test]
+fn non_arrow_string_literal_this_uses_string_receiver_abi() {
+    let source = r#"
+        function main(): void {
+            const echo = function(this: "open"): string { return this; };
+            console.log(echo.call("open"));
+            try { echo.call("closed" as "open"); }
+            catch (error) { console.log("TypeError"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_literal_this"), "open\nTypeError\n");
+}
