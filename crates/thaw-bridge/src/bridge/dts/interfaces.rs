@@ -235,7 +235,7 @@ struct GenericInterfaces<'a> {
 /// doc comment for the scope limits this mirrors (no nested-inside-
 /// another-interface use, no `extends` on the generic interface itself).
 fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInterfaces<'_>) {
-    let mut raw: HashMap<String, &TsInterfaceDecl> = HashMap::new();
+    let mut raw: HashMap<String, Vec<&TsInterfaceDecl>> = HashMap::new();
     let mut names = Vec::new();
     let mut generic = GenericInterfaces::default();
     generic.classes.extend(
@@ -253,7 +253,7 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
             if !raw.contains_key(&name) {
                 names.push(name.clone());
             }
-            raw.insert(name, iface);
+            raw.entry(name).or_default().push(iface);
         }
     }
     for alias in module
@@ -294,7 +294,7 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
 
 fn resolve_interface(
     name: &str,
-    raw: &HashMap<String, &TsInterfaceDecl>,
+    raw: &HashMap<String, Vec<&TsInterfaceDecl>>,
     generic: &GenericInterfaces,
     resolved: &mut HashMap<String, DtsType>,
     in_progress: &mut Vec<String>,
@@ -309,15 +309,12 @@ fn resolve_interface(
         resolved.insert(name.to_string(), ty.clone());
         return ty;
     }
-    let Some(iface) = raw.get(name) else {
+    let Some(declarations) = raw.get(name) else {
         return DtsType::Unsupported(format!("unknown or generic interface `{name}`"));
     };
 
-    if iface
-        .body
-        .body
-        .iter()
-        .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
+    if declarations.iter().any(|iface| iface.body.body.iter()
+        .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_))))
     {
         let ty = DtsType::Native(HirType::JsValue);
         resolved.insert(name.to_string(), ty.clone());
@@ -342,7 +339,8 @@ fn resolve_interface(
     // adds of its own -- real example: axios's `AxiosStatic extends
     // AxiosInstance`, where `AxiosInstance` itself has call signatures.
     let mut base_is_opaque = false;
-    'extends: for base in &iface.extends {
+    'extends: for iface in declarations {
+    for base in &iface.extends {
         if base.type_args.is_some() {
             failure =
                 Some("extends a base with type arguments, which is not classified yet".to_string());
@@ -393,7 +391,9 @@ fn resolve_interface(
         }
     }
 
+    }
     if failure.is_none() {
+        'members: for iface in declarations {
         for member in &iface.body.body {
             if let TsTypeElement::TsIndexSignature(signature) = member {
                 let value = match index_signature_value(signature) {
@@ -477,6 +477,10 @@ fn resolve_interface(
                 }
             }
         }
+        if failure.is_some() {
+            break 'members;
+        }
+        }
     }
 
     in_progress.pop();
@@ -524,7 +528,7 @@ fn resolve_interface(
 /// interface table (`resolve_interfaces`).
 fn resolve_type_with_interfaces(
     ty: &TsType,
-    raw: &HashMap<String, &TsInterfaceDecl>,
+    raw: &HashMap<String, Vec<&TsInterfaceDecl>>,
     generic: &GenericInterfaces,
     resolved: &mut HashMap<String, DtsType>,
     in_progress: &mut Vec<String>,

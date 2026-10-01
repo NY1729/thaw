@@ -93,12 +93,10 @@ fn constructor_interface_classes(
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Vec<DtsClass> {
-    let interface_bodies = module
-        .body
-        .iter()
-        .flat_map(extract_interface_decls)
-        .map(|iface| (iface.id.sym.to_string(), &iface.body))
-        .collect::<HashMap<_, _>>();
+    let mut interface_bodies: HashMap<String, Vec<&swc_ecma_ast::TsInterfaceBody>> = HashMap::new();
+    for iface in module.body.iter().flat_map(extract_interface_decls) {
+        interface_bodies.entry(iface.id.sym.to_string()).or_default().push(&iface.body);
+    }
 
     let var_decls = module.body.iter().filter_map(|item| match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(declaration))) => {
@@ -125,36 +123,42 @@ fn constructor_interface_classes(
                 TsEntityName::Ident(name) => name.sym.to_string(),
                 TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
             };
-            let body = interface_bodies.get(&interface_name)?;
-            let construct_signature = body.body.iter().find_map(|member| match member {
-                TsTypeElement::TsConstructSignatureDecl(decl) => Some(decl),
-                _ => None,
-            })?;
-            let type_ann = construct_signature.type_ann.clone()?;
-            let synthetic_fn_type = TsFnType {
-                span: construct_signature.span,
-                params: construct_signature.params.clone(),
-                type_params: construct_signature.type_params.clone(),
-                type_ann,
-            };
+            let bodies = interface_bodies.get(&interface_name)?;
             let name = binding.id.sym.to_string();
-            let function = lower_dts_fn_type(
-                &name,
-                &synthetic_fn_type,
-                interfaces,
-                generic_interfaces,
-                &HashMap::new(),
-                &HashMap::new(),
-            );
+            let constructors = bodies.iter().flat_map(|body| body.body.iter()).filter_map(|member| {
+                let TsTypeElement::TsConstructSignatureDecl(signature) = member else {
+                    return None;
+                };
+                let synthetic_fn_type = TsFnType {
+                    span: signature.span,
+                    params: signature.params.clone(),
+                    type_params: signature.type_params.clone(),
+                    type_ann: signature.type_ann.clone()?,
+                };
+                let function = lower_dts_fn_type(
+                    &name, &synthetic_fn_type, interfaces, generic_interfaces,
+                    &HashMap::new(), &HashMap::new(),
+                );
+                Some(DtsConstructor {
+                    params: function.params,
+                    required_params: function.required_params,
+                    rest_param: function.rest_param,
+                    overloaded: false,
+                })
+            }).collect::<Vec<_>>();
+            if constructors.is_empty() {
+                return None;
+            }
+            let overloaded = constructors.len() > 1;
+            let constructors = constructors.into_iter().map(|mut constructor| {
+                constructor.overloaded = overloaded;
+                constructor
+            }).collect();
             Some(DtsClass {
                 name,
                 extends: None,
                 constructible: true,
-                constructors: vec![DtsConstructor {
-                    params: function.params,
-                    required_params: function.required_params,
-                    overloaded: false,
-                }],
+                constructors,
                 methods: Vec::new(),
                 properties: Vec::new(),
             })
@@ -189,41 +193,55 @@ fn self_constructible_interface_classes(
     if alias_targets.is_empty() {
         return Vec::new();
     }
-    module
-        .body
-        .iter()
-        .flat_map(extract_interface_decls)
-        .filter(|interface| alias_targets.contains(&interface.id.sym.to_string()))
-        .filter_map(|interface| {
-            let construct_signature = interface.body.body.iter().find_map(|member| match member {
-                TsTypeElement::TsConstructSignatureDecl(decl) => Some(decl),
-                _ => None,
-            })?;
-            let type_ann = construct_signature.type_ann.clone()?;
-            let synthetic_fn_type = TsFnType {
-                span: construct_signature.span,
-                params: construct_signature.params.clone(),
-                type_params: construct_signature.type_params.clone(),
-                type_ann,
-            };
+    let mut declarations: HashMap<String, Vec<&TsInterfaceDecl>> = HashMap::new();
+    let mut names = Vec::new();
+    for interface in module.body.iter().flat_map(extract_interface_decls) {
+        if alias_targets.contains(interface.id.sym.as_str()) {
             let name = interface.id.sym.to_string();
-            let function = lower_dts_fn_type(
-                &name,
-                &synthetic_fn_type,
-                interfaces,
-                generic_interfaces,
-                &HashMap::new(),
-                &HashMap::new(),
-            );
+            if !declarations.contains_key(&name) {
+                names.push(name.clone());
+            }
+            declarations.entry(name).or_default().push(interface);
+        }
+    }
+    names.into_iter().filter_map(|name| {
+            let interfaces_for_name = declarations.get(&name)?;
+            let constructors = interfaces_for_name.iter()
+                .flat_map(|interface| interface.body.body.iter())
+                .filter_map(|member| {
+                let TsTypeElement::TsConstructSignatureDecl(signature) = member else {
+                    return None;
+                };
+                let synthetic_fn_type = TsFnType {
+                    span: signature.span,
+                    params: signature.params.clone(),
+                    type_params: signature.type_params.clone(),
+                    type_ann: signature.type_ann.clone()?,
+                };
+                let function = lower_dts_fn_type(
+                    &name, &synthetic_fn_type, interfaces, generic_interfaces,
+                    &HashMap::new(), &HashMap::new(),
+                );
+                Some(DtsConstructor {
+                    params: function.params,
+                    required_params: function.required_params,
+                    rest_param: function.rest_param,
+                    overloaded: false,
+                })
+            }).collect::<Vec<_>>();
+            if constructors.is_empty() {
+                return None;
+            }
+            let overloaded = constructors.len() > 1;
+            let constructors = constructors.into_iter().map(|mut constructor| {
+                constructor.overloaded = overloaded;
+                constructor
+            }).collect();
             Some(DtsClass {
                 name,
                 extends: None,
                 constructible: true,
-                constructors: vec![DtsConstructor {
-                    params: function.params,
-                    required_params: function.required_params,
-                    overloaded: false,
-                }],
+                constructors,
                 methods: Vec::new(),
                 properties: Vec::new(),
             })
@@ -339,11 +357,10 @@ fn extract_class_decls(item: &ModuleItem) -> Vec<(&str, &Class)> {
             extract_class_decls_from_decl(&export.decl)
         }
         ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
-            DefaultDecl::Class(class) => class
-                .ident
-                .as_ref()
-                .map(|ident| vec![(ident.sym.as_str(), class.class.as_ref())])
-                .unwrap_or_default(),
+            DefaultDecl::Class(class) => vec![(
+                class.ident.as_ref().map(|ident| ident.sym.as_str()).unwrap_or("default"),
+                class.class.as_ref(),
+            )],
             _ => Vec::new(),
         },
         _ => Vec::new(),
@@ -951,12 +968,29 @@ fn lower_dts_class(
         match member {
             ClassMember::Constructor(constructor)
                 if is_public_member(constructor.accessibility) => constructors.push(DtsConstructor {
-                params: lower_class_params(&constructor.params, interfaces, generic_interfaces),
+                params: lower_class_params(
+                    if matches!(constructor.params.last(), Some(ParamOrTsParamProp::Param(param)) if matches!(&param.pat, Pat::Rest(_))) {
+                        &constructor.params[..constructor.params.len() - 1]
+                    } else {
+                        &constructor.params
+                    },
+                    interfaces,
+                    generic_interfaces,
+                ),
                 required_params: constructor
                     .params
                     .iter()
                     .take_while(|param| class_param_is_required(param))
                     .count(),
+                rest_param: constructor.params.last().and_then(|param| {
+                    let ParamOrTsParamProp::Param(param) = param else { return None; };
+                    let Pat::Rest(rest) = &param.pat else { return None; };
+                    let Pat::Ident(binding) = rest.arg.as_ref() else { return None; };
+                    let ty = rest.type_ann.as_ref().map(|annotation| {
+                        classify_ts_type(rest_element_type(&annotation.type_ann), interfaces, generic_interfaces)
+                    }).unwrap_or_else(|| DtsType::Unsupported("missing rest type annotation".into()));
+                    Some((binding.id.sym.to_string(), ty))
+                }),
                 overloaded: false,
             }),
             ClassMember::Method(method) if is_public_member(method.accessibility) => {

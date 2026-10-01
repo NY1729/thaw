@@ -199,6 +199,21 @@ fn bridge_type_satisfies_constraint(actual: &HirType, constraint: &HirType) -> b
         return true;
     }
     match constraint {
+        HirType::Optional(inner) => match actual {
+            HirType::Optional(value) => bridge_type_satisfies_constraint(value, inner),
+            HirType::Nullable(_) | HirType::Nullish(_) => false,
+            other => bridge_type_satisfies_constraint(other, inner),
+        },
+        HirType::Nullable(inner) => match actual {
+            HirType::Nullable(value) => bridge_type_satisfies_constraint(value, inner),
+            HirType::Optional(_) | HirType::Nullish(_) => false,
+            other => bridge_type_satisfies_constraint(other, inner),
+        },
+        HirType::Nullish(inner) => match actual {
+            HirType::Optional(value) | HirType::Nullable(value) | HirType::Nullish(value) =>
+                bridge_type_satisfies_constraint(value, inner),
+            other => bridge_type_satisfies_constraint(other, inner),
+        },
         HirType::Union(elements) => elements
             .iter()
             .any(|element| bridge_type_satisfies_constraint(actual, element)),
