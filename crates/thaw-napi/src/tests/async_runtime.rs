@@ -570,6 +570,72 @@ fn threadsafe_finalizer_and_remaining_owners_keep_module_env_live() {
     assert_eq!(thaw_napi_unload_all(), 1);
 }
 
+
+#[test]
+fn method_with_callback_can_stop_its_own_pending_async_work() {
+    unsafe extern "C" fn stop_work(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        let gate = &*((*info).data as *const Arc<WorkerGate>);
+        let mut state = gate.state.lock().unwrap();
+        state.1 = true;
+        gate.changed.notify_all();
+        ptr::null_mut()
+    }
+    unsafe extern "C" fn unused_callback(
+        _context: *mut c_void,
+        _error: *const c_char,
+        _result: *const c_char,
+    ) {
+        panic!("stop method must not invoke its callback");
+    }
+
+    let _guard = lock_async_test();
+    let gate = Arc::new(WorkerGate {
+        state: Mutex::new((0, false)),
+        changed: Condvar::new(),
+    });
+    let gate_data = Box::into_raw(Box::new(Arc::clone(&gate)));
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let method = env.alloc(Value::Function(Function {
+        callback: stop_work,
+        data: gate_data.cast(),
+        properties: HashMap::new(),
+        _thaw_bridge: None,
+    }));
+    let receiver = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("stop".into()), method,
+    )])));
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    let mut work = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_create_async_work(
+            env_ptr, ptr::null_mut(), ptr::null_mut(),
+            Some(blocking_execute), None, gate_data.cast(), &mut work,
+        ), NAPI_OK);
+        assert_eq!(napi_queue_async_work(env_ptr, work), NAPI_OK);
+    }
+    let mut state = gate.state.lock().unwrap();
+    while state.0 == 0 {
+        state = gate.changed.wait(state).unwrap();
+    }
+    drop(state);
+    unsafe {
+        let result = thaw_napi_call_method_with_callback_result(
+            receiver as u64, c"stop".as_ptr(), c"[]".as_ptr(),
+            Some(unused_callback), ptr::null_mut(), 1,
+        );
+        assert!(result.error.is_null());
+        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "null");
+        assert!(gate.state.lock().unwrap().1);
+        assert_eq!(thaw_napi_run_async_work(), 1);
+        assert_eq!(napi_delete_async_work(env_ptr, work), NAPI_OK);
+        HOST.with(|host| {
+            host.borrow_mut().module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+        });
+        drop(Box::from_raw(gate_data));
+    }
+}
+
 #[test]
 fn threadsafe_function_queues_worker_calls_and_finalizes_on_main_thread() {
     let _guard = lock_async_test();
