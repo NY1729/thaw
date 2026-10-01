@@ -1275,3 +1275,31 @@ fn stream_async_iterator_releases_locks_and_forwards_return_reason() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn readable_cancellation_closes_before_source_failure() {
+    // Unrun regression for synchronous throws and rejected cancellation.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("readable_cancel_failure");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var results = [];
+      for (var asynchronous of [false, true]) {
+        var failure = new Error('cancel'), reason = { reason: true }, received;
+        var stream = new ReadableStream({ cancel(value) { received = value; if (asynchronous) return Promise.reject(failure); throw failure; } }), reader = stream.getReader(), pending = reader.read(), closed = reader.closed;
+        var cancellation = reader.cancel(reason), outcomes = await Promise.allSettled([pending, closed, cancellation]);
+        var later = await reader.read();
+        results.push([outcomes[0].status, outcomes[0].value.done, outcomes[1].status, outcomes[2].status, outcomes[2].reason === failure, received === reason, later.done]);
+        reader.releaseLock();
+      }
+      return results;
+    };"#).unwrap();
+    let modules = temp_registry("readable_cancel_failure_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCancelFailure = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseCancelFailure").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["fulfilled",true,"fulfilled","rejected",true,true,true],["fulfilled",true,"fulfilled","rejected",true,true,true]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}

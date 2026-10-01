@@ -244,7 +244,7 @@
         const elementSize = view instanceof DataView ? 1 : view.BYTES_PER_ELEMENT, result = new Promise((resolve, reject) => this._byobReads.push({ reader, view, elementSize, minBytes: min * elementSize, filled: 0, resolve, reject })); this._notifyCapacity(); this._drainByob(); this._prepareByobRequest();
         return result;
       }
-      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); const finish = () => this._finishCloseIfReady(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(finish); finish(); return Promise.resolve(); }
+      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); this._finishCloseIfReady(); return Promise.resolve().then(() => typeof this._source.cancel === 'function' ? this._source.cancel(reason) : undefined).then(() => undefined); }
       cancel(reason) { if (this.locked) return Promise.reject(webInvalidState('ReadableStream is locked')); this._disturbed = true; return this._cancel(reason); }
       tee() {
         if (this.locked) throw webInvalidState('ReadableStream is locked');
