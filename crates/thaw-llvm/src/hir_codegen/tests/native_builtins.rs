@@ -9289,8 +9289,8 @@ fn compiles_promise_keyed_combinators() {
     );
 }
 
-/// Backreferences and lookaround, which the `regex` crate lacks; the runtime
-/// falls back to `fancy-regex` so such patterns stay native instead of
+/// Backreferences and lookaround use the runtime's JavaScript-pattern
+/// backend, so such patterns stay native instead of
 /// silently reporting "no match".
 #[test]
 fn compiles_regex_backreferences_and_lookaround() {

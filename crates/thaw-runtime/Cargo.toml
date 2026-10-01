@@ -18,11 +18,9 @@ webpki-roots = "1.0"
 icu_normalizer = { version = "2.3.0", features = ["compiled_data"] }
 icu_casemap = { version = "2.3.0", features = ["compiled_data"] }
 icu_locale_core = "2.3.0"
-regex = "1"
-# Backreferences and lookaround, which the `regex` crate deliberately lacks;
-# used as a fallback so such patterns stay native instead of silently
-# reporting "no match".
-fancy-regex = "0.18"
+regex = "1" # Also used by Date/Temporal parsers in this crate.
+# JavaScript syntax and UTF-16/UCS-2 search positions, including surrogate halves.
+regress = { version = "0.11.1", features = ["utf16"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 # Timezone database + civil-time arithmetic for the native Temporal
 # `ZonedDateTime` support (thaw-quickjs uses the same crate for `Intl`).
