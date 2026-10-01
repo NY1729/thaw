@@ -608,6 +608,33 @@ impl VisitMut for RenameReferences<'_> {
     }
 
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        // Resolve a complete external namespace path before a child member
+        // can be rewritten on its own. The export table keeps qualified
+        // keys such as `Outer.Inner.make` distinct from another `make`.
+        if let Expr::Member(member) = &*expr {
+            let mut path = Vec::new();
+            let mut current: &Expr = expr;
+            while let Expr::Member(segment) = current {
+                let thaw_parser::ast::MemberProp::Ident(property) = &segment.prop else { break; };
+                path.push(property.sym.as_ref());
+                current = segment.obj.as_ref();
+            }
+            if let Expr::Ident(root) = current {
+                if !self.shadowed.contains(root.sym.as_ref()) && path.len() > 1 {
+                    path.reverse();
+                    if let Some(target) = self.namespaces.get(root.sym.as_ref())
+                        .and_then(|exports| exports.get(&path.join(".")))
+                    {
+                        let span = member.span;
+                        let target = target.clone();
+                        *expr = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
+                            target.into(), span,
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
         // `a instanceof B`'s right operand is a bare class-identifier
         // *type* reference, not an ordinary value read. A *local* class
         // (declared in this module, or imported from a relative module in

@@ -35,6 +35,12 @@ fn class_identifier(name: &str) -> String {
     format!("__thaw_class_{encoded}")
 }
 
+fn function_identifier(name: &str) -> String {
+    if !name.contains('.') { return name.to_string(); }
+    let encoded = name.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    format!("__thaw_function_{encoded}")
+}
+
 fn class_is_error_family(name: &str, classes: &[thaw_bridge::DtsClass]) -> bool {
     let mut current = name;
     let mut seen = std::collections::HashSet::new();
@@ -166,8 +172,23 @@ fn generate_registry_shims(
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
         let explicit_type_exports = thaw_bridge::exported_type_names(&package.dts_source);
         let value_exports = thaw_bridge::exported_value_names(&package.dts_source);
-        let type_only_value_names = exclusive_type_only_value_names(
+        let type_only_namespaces = thaw_bridge::type_only_namespace_names(&package.dts_source);
+        let mut nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
+        let live_namespace_origins = nested_namespaces.keys()
+            .filter(|namespace| !type_only_namespaces.contains(*namespace))
+            .cloned().collect::<Vec<_>>();
+        let mut type_only_value_names = exclusive_type_only_value_names(
             &explicit_type_exports, &value_exports, &functions, &classes, &values);
+        type_only_value_names.retain(|name| !live_namespace_origins.iter().any(|namespace| {
+            name == namespace || name.starts_with(&format!("{namespace}."))
+        }));
+        let hidden_namespaces = thaw_bridge::nonpublic_namespace_sources(&package.dts_source);
+        for name in classes.iter().map(|class| &class.name)
+            .chain(values.iter().map(|value| &value.name)) {
+            if hidden_namespaces.iter().any(|namespace| name.starts_with(&format!("{namespace}."))) {
+                type_only_value_names.insert(name.clone());
+            }
+        }
         functions.retain(|function| !type_only_value_names.contains(&function.name));
         values.retain(|value| !type_only_value_names.contains(&value.name));
         restrict_type_only_class_values(&mut classes, &type_only_value_names);
@@ -223,12 +244,18 @@ fn generate_registry_shims(
             thaw_bridge::self_referential_namespace_aliases(&package.dts_source);
         let mut type_only_exports = explicit_type_exports;
         type_only_exports.extend(classes.iter().map(|class| class.name.clone()));
-        let mut nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
+        nested_namespaces.retain(|namespace, _| !type_only_namespaces.contains(namespace));
         for (namespace, members) in &mut nested_namespaces {
             for (member, target) in members {
                 let identity = format!("{namespace}.{member}");
-                if classes.iter().any(|class| class.name == identity) {
+                let parent = identity.rsplit_once('.').map(|(parent, _)| parent).unwrap_or(namespace);
+                let scoped_target = format!("{parent}.{target}");
+                if classes.iter().any(|class| class.name == identity)
+                    || functions.iter().any(|function| function.name == identity) {
                     *target = identity;
+                } else if classes.iter().any(|class| class.name == scoped_target)
+                    || functions.iter().any(|function| function.name == scoped_target) {
+                    *target = scoped_target;
                 }
             }
         }
@@ -338,7 +365,7 @@ fn generate_registry_shims(
             if !matches!(classification, thaw_bridge::Classification::Fallback { .. }) {
                 continue;
             }
-            let alias = format!("{}_{name}", sanitize_identifier(&pkg.name));
+            let alias = format!("{}_{}", sanitize_identifier(&pkg.name), function_identifier(name));
             let qualified_key = format!("{}::{name}", pkg.name);
             qualified_by_package
                 .entry(pkg.name.clone())
@@ -964,6 +991,7 @@ fn generate_registry_shims(
                     .as_deref()
                     .filter(|_| pkg.native_addon.is_none())
                     .and_then(|source| {
+                        if function.name.contains('.') { return None; }
                         jit_export(
                             source,
                             &function.name,
@@ -1062,7 +1090,8 @@ fn generate_registry_shims(
                     // skipped for a third reason -- see `is_reserved_js_
                     // identifier`'s own doc comment -- again leaving the
                     // qualified alias as the only way to reach it.
-                    if !colliding.contains(&function.name)
+                    if !function.name.contains('.')
+                        && !colliding.contains(&function.name)
                         && !thaw_bridge::shadows_a_thaw_literal_identifier(&function.name)
                         && !thaw_bridge::is_reserved_js_identifier(&function.name)
                     {
@@ -1568,7 +1597,7 @@ fn generate_registry_shims(
                     // package (see `jit_targets`'s own comment). Every
                     // other Fallback function still needs its binding.
                     thaw_bridge::Classification::Fallback { .. }
-                        if !jit_targets.contains(&(pkg.name.clone(), name.clone())) =>
+                        if !name.contains('.') && !jit_targets.contains(&(pkg.name.clone(), name.clone())) =>
                     {
                         Some(name.clone())
                     }
@@ -1577,6 +1606,7 @@ fn generate_registry_shims(
                 .collect();
             let mut qualified_aliases: Vec<(String, String)> = qualified
                 .iter()
+                .filter(|q| !q.name.contains('.'))
                 .map(|q| (q.name.clone(), q.qualified_key.clone()))
                 .collect();
             for class in &pkg.classes {
@@ -1603,7 +1633,12 @@ fn generate_registry_shims(
                 .iter()
                 .flat_map(|(namespace, members)| {
                     members.iter().filter_map(move |(member, target)| {
-                        let path = format!("{namespace}.{member}");
+                        let path = if pkg.commonjs_export_assignment.as_deref() == Some(namespace.as_str()) {
+                            member.clone()
+                        } else {
+                            format!("{namespace}.{member}")
+                        };
+                        if !path.contains('.') { return None; }
                         if pkg.type_only_value_names.contains(&path) { return None; }
                         let runtime_key = if pkg.classes.iter().any(|class| class.name == path) {
                             path.clone()
@@ -1648,6 +1683,7 @@ fn generate_registry_shims(
                 .map(|class| class.name.clone()).collect();
             if runtime_package && (dynamic_packages.contains(&pkg.name)
                 || !fallback_names.is_empty()
+                || !nested_namespace_aliases.is_empty()
                 || pkg.native_addon.is_some()
                 || pkg.classes.iter().any(|class| !pkg.type_only_value_names.contains(&class.name))
                 || !value_exports.is_empty())
@@ -1819,7 +1855,7 @@ fn generate_registry_shims(
                 typed_targets
                     .get(&(pkg.name.clone(), name.clone()))
                     .cloned()
-                    .unwrap_or_else(|| format!("{}_{name}", sanitize_identifier(&pkg.name)))
+                    .unwrap_or_else(|| format!("{}_{}", sanitize_identifier(&pkg.name), function_identifier(name)))
             } else {
                 name.clone()
             };

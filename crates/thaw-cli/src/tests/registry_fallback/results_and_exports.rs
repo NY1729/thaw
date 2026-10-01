@@ -2205,6 +2205,71 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn deep_namespace_functions_keep_independent_bindings_and_receivers() {
+    // Unrun integration regression: both a named namespace import and a
+    // package namespace import resolve the complete qualified path.
+    let dir = std::env::temp_dir().join(format!("thaw-deep-function-ns-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("deep-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        export declare namespace Outer {
+            namespace Left { function make(): string; }
+            namespace Right { function make(): string; }
+        }
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "module.exports = { Outer: { Left: { tag: 'left', make: function() { return this.tag; } }, Right: { tag: 'right', make: function() { return this.tag; } } } };"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { Outer } from "deep-kit";
+        import * as whole from "deep-kit";
+        function main(): void {
+            console.log(Outer.Left.make(), whole.Outer.Right.make());
+        }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "left right\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn namespace_value_alias_exposes_runtime_member_while_type_alias_stays_inert() {
+    // Unrun integration regression: the declaration's source namespace is
+    // not necessarily its public JavaScript property path.
+    let dir = std::env::temp_dir().join(format!("thaw-namespace-value-alias-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("alias-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        declare namespace Shared {
+            class Result { method(): string; }
+            function make(): Result;
+        }
+        export type { Shared as Shape };
+        export { Shared as Runtime };
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "function Result() {} Result.prototype.method = function() { return 'runtime'; }; module.exports = { Runtime: { Result: Result, make: function() { return new Result(); } } };"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { Runtime, type Shape } from "alias-kit";
+        function main(): void { console.log(Runtime.make().method()); }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "runtime\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A three-level nested-namespace member chain (`pkg.mid.member`) whose
 /// *middle* segment is itself a resolvable package member (real example:
 /// winston's `winston.format.json`/`winston.transports.Console`, where
