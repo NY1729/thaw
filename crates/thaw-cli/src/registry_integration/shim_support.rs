@@ -628,6 +628,7 @@ type RegistryShims = (
     ExternalNamespaceAliases,
     ExternalNestedNamespaces,
     ExternalExportAssignments,
+    std::collections::HashMap<String, usize>,
     JitFallbackReasons,
     std::collections::BTreeSet<&'static str>,
 );

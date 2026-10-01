@@ -310,8 +310,11 @@ fn build_with_native_mode(
         .transpose()?;
     let external_specifiers = module_graph::external_specifiers(input, &user_source)?;
     let mut runtime_packages = module_graph::external_runtime_specifiers(input, &user_source)?;
+    let mut static_packages = module_graph::external_static_specifiers(input, &user_source)?;
+    let dynamic_packages = module_graph::external_dynamic_specifiers(input, &user_source)?;
     let mut resolved_packages = use_packages.to_vec();
     runtime_packages.extend(use_packages.iter().cloned());
+    static_packages.extend(use_packages.iter().cloned());
     for (specifier, location) in &external_specifiers {
         let package = if specifier.starts_with("node:") {
             thaw_registry::resolve_builtin(specifier)
@@ -400,12 +403,15 @@ fn build_with_native_mode(
         external_namespace_aliases,
         external_nested_namespaces,
         external_export_assignments,
+        external_module_indices,
         jit_fallback_reasons,
         mut runtime_features,
     ) = generate_registry_shims(
         registry_dir,
         &resolved_packages,
         &runtime_packages,
+        &static_packages,
+        &dynamic_packages,
         &user_source,
         embed_native_addons,
         output,
@@ -506,6 +512,7 @@ fn build_with_native_mode(
         &external_nested_namespaces,
         &external_resolutions,
         &external_export_assignments,
+        &external_module_indices,
         &transform,
     )?;
     if !shim_source.is_empty() {
@@ -520,7 +527,8 @@ fn build_with_native_mode(
             let thaw_parser::ast::Expr::Lit(thaw_parser::ast::Lit::Str(value)) = statement.expr.as_ref() else {
                 continue;
             };
-            if matches!(value.value.as_str(), Some("__thaw_internal_execution:0" | "__thaw_internal_execution:1")) {
+            if matches!(value.value.as_str(), Some("__thaw_internal_execution:0" | "__thaw_internal_execution:1"))
+                || value.value.as_str().is_some_and(|text| text.starts_with("__thaw_internal_module:")) {
                 // Only compiler-produced registry shim statements receive
                 // the sentinel span recognized by HIR; user source and
                 // later bridge shims cannot switch initializer execution.

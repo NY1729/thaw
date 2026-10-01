@@ -198,6 +198,7 @@ pub struct HirCompiler<'ctx> {
     arena_variables: HashSet<String>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
     global_variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>, HirType)>,
+    module_exception_roots: Vec<PointerValue<'ctx>>,
     function_return_types: HashMap<String, HirType>,
     ffi_signatures: HashMap<String, FfiSignature>,
     /// Stack of enclosing `try` targets. `throw` and a failed nested Thaw
@@ -239,6 +240,7 @@ impl<'ctx> HirCompiler<'ctx> {
             arena_variables: HashSet::new(),
             async_frame_cells: HashSet::new(),
             global_variables: HashMap::new(),
+            module_exception_roots: Vec::new(),
             function_return_types: HashMap::new(),
             ffi_signatures: HashMap::new(),
             catch_stack: Vec::new(),
@@ -280,6 +282,16 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         self.emit_top_level_init(program)?;
         for func in &program.functions {
+            if func.name.starts_with("__thaw_lazy_module_")
+                && func.name["__thaw_lazy_module_".len()..]
+                    .parse::<usize>()
+                    .ok()
+                    .is_some_and(|index| program.initializers.iter().any(|step| {
+                        matches!(step, HirInitStep::ModuleBoundary { index: owner, runtime: true, .. } if *owner == index)
+                    }))
+            {
+                continue;
+            }
             self.compile_function_body(func)?;
         }
 
@@ -381,6 +393,22 @@ impl<'ctx> HirCompiler<'ctx> {
         if program.initializers.is_empty() {
             return Ok(());
         }
+        let mut common = Vec::new();
+        let mut groups: Vec<(usize, bool, bool, Vec<usize>, Vec<HirInitStep>)> = Vec::new();
+        for step in &program.initializers {
+            if let HirInitStep::ModuleBoundary { index, eager, runtime, static_dependencies } = step {
+                groups.push((*index, *eager, *runtime, static_dependencies.clone(), Vec::new()));
+            } else if let Some((_, _, _, _, steps)) = groups.last_mut() {
+                steps.push(step.clone());
+            } else {
+                common.push(step.clone());
+            }
+        }
+        for (index, _, runtime, dependencies, steps) in &groups {
+            if *runtime {
+                self.emit_guarded_module_init(*index, dependencies, steps)?;
+            }
+        }
         let bool_type = self.context.bool_type();
         let guard = self
             .module
@@ -416,14 +444,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.catch_stack.clear();
         self.seed_global_variables();
         let mut execute = true;
-        for step in &program.initializers {
+        for step in &common {
             match step {
                 HirInitStep::ExecutionBoundary(enabled) => {
                     execute = *enabled;
                 }
-                HirInitStep::ModuleBoundary { eager, .. } => {
-                    execute = *eager;
-                }
+                HirInitStep::ModuleBoundary { .. } => unreachable!(),
                 _ if !execute => {}
                 HirInitStep::StoreGlobal(name, expression) => {
                     let value = self.compile_expr(expression)?;
@@ -439,6 +465,29 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
         }
+        for (index, eager, runtime, _, _) in &groups {
+            if self.builder.get_insert_block().is_some_and(|block| block.get_terminator().is_some()) {
+                break;
+            }
+            if !eager || !runtime {
+                continue;
+            }
+            let function = self.module.get_function(&format!("__thaw_lazy_module_{index}"))
+                .ok_or_else(|| format!("missing module initializer {index}"))?;
+            self.builder.build_call(function, &[], "initialize_eager_module")
+                .map_err(|error| error.to_string())?;
+            let pending = self.builder.build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                self.pending_exception().as_pointer_value(),
+                "eager_module_exception",
+            ).map_err(|error| error.to_string())?.into_pointer_value();
+            let failed = self.builder.build_is_not_null(pending, "eager_module_failed")
+                .map_err(|error| error.to_string())?;
+            let next = self.context.append_basic_block(init, "next_eager_module");
+            self.builder.build_conditional_branch(failed, done, next)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(next);
+        }
         if self
             .builder
             .get_insert_block()
@@ -452,6 +501,117 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_return(None)
             .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn emit_guarded_module_init(
+        &mut self,
+        index: usize,
+        dependencies: &[usize],
+        steps: &[HirInitStep],
+    ) -> Result<(), String> {
+        let name = format!("__thaw_lazy_module_{index}");
+        let function = self.module.get_function(&name)
+            .ok_or_else(|| format!("missing generated module initializer {index}"))?;
+        let state_ty = self.context.i8_type();
+        let state = self.module.add_global(state_ty, None, &format!("{name}_state"));
+        state.set_linkage(Linkage::Internal);
+        state.set_initializer(&state_ty.const_zero());
+        let exception_slots = [
+            (PENDING_EXCEPTION_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+            (PENDING_EXCEPTION_OBJECT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+            (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
+            (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
+            (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
+            (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
+        ];
+        let mut cached = Vec::new();
+        for (symbol, ty) in exception_slots {
+            let slot = self.module.add_global(ty, None, &format!("{name}_{symbol}"));
+            slot.set_linkage(Linkage::Internal);
+            slot.set_initializer(&ty.const_zero());
+            if symbol == PENDING_EXCEPTION_SYMBOL || symbol == PENDING_EXCEPTION_OBJECT_SYMBOL {
+                self.module_exception_roots.push(slot.as_pointer_value());
+            }
+            cached.push((self.module.get_global(symbol).unwrap(), slot, ty));
+        }
+        let entry = self.context.append_basic_block(function, "entry");
+        let first = self.context.append_basic_block(function, "first_import");
+        let prior = self.context.append_basic_block(function, "prior_import");
+        let restore = self.context.append_basic_block(function, "restore_failure");
+        let failed = self.context.append_basic_block(function, "cache_failure");
+        let done = self.context.append_basic_block(function, "done");
+        self.builder.position_at_end(entry);
+        let current = self.builder.build_load(state_ty, state.as_pointer_value(), "module_state")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let uninitialized = self.builder.build_int_compare(IntPredicate::EQ, current, state_ty.const_zero(), "module_uninitialized")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(uninitialized, first, prior)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(prior);
+        let had_failed = self.builder.build_int_compare(IntPredicate::EQ, current, state_ty.const_int(3, false), "module_had_failed")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(had_failed, restore, done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(restore);
+        for (pending, saved, ty) in &cached {
+            let value = self.builder.build_load(*ty, saved.as_pointer_value(), "saved_exception")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(pending.as_pointer_value(), value)
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(first);
+        self.builder.build_store(state.as_pointer_value(), state_ty.const_int(1, false))
+            .map_err(|error| error.to_string())?;
+        self.variables.clear();
+        self.variable_hir_types.clear();
+        self.arena_variables.clear();
+        self.catch_stack.clear();
+        self.seed_global_variables();
+        self.catch_stack.push(failed);
+        for dependency in dependencies {
+            let initializer = self.module.get_function(&format!("__thaw_lazy_module_{dependency}"))
+                .ok_or_else(|| format!("missing static dependency initializer {dependency}"))?;
+            self.builder.build_call(initializer, &[], "initialize_static_dependency")
+                .map_err(|error| error.to_string())?;
+            self.branch_on_pending_exception()?;
+        }
+        let mut execute = true;
+        for step in steps {
+            match step {
+                HirInitStep::ExecutionBoundary(enabled) => execute = *enabled,
+                HirInitStep::ModuleBoundary { .. } => unreachable!(),
+                _ if !execute => {}
+                HirInitStep::StoreGlobal(name, expression) => {
+                    let value = self.compile_expr(expression)?;
+                    let (pointer, _, _) = self.global_variables[name];
+                    self.builder.build_store(pointer, value).map_err(|error| error.to_string())?;
+                }
+                HirInitStep::Statement(statement) => {
+                    if self.compile_stmt(statement)? { break; }
+                }
+            }
+        }
+        self.catch_stack.pop();
+        if self.builder.get_insert_block().is_some_and(|block| block.get_terminator().is_none()) {
+            self.builder.build_store(state.as_pointer_value(), state_ty.const_int(2, false))
+                .map_err(|error| error.to_string())?;
+            self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        }
+        self.builder.position_at_end(failed);
+        for (pending, saved, ty) in &cached {
+            let value = self.builder.build_load(*ty, pending.as_pointer_value(), "failed_exception")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(saved.as_pointer_value(), value)
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.build_store(state.as_pointer_value(), state_ty.const_int(3, false))
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        self.builder.build_return(None).map_err(|error| error.to_string())?;
         Ok(())
     }
 

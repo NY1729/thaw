@@ -801,12 +801,12 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
         } else {
             wrapped
         };
-        out.push_str("    loadScript(\"globalThis.__thaw_intrinsic_Array = globalThis.Array;\");\n");
+        out.push_str("    if (!loadScript(\"globalThis.__thaw_intrinsic_Array = globalThis.Array;\")) throw new Error(\"failed to initialize module globals\");\n");
         out.push_str(&format!(
-            "    loadScript(\"{}\");\n",
+            "    if (!loadScript(\"{}\")) {{ loadScript(\"globalThis.Array = globalThis.__thaw_intrinsic_Array;\"); throw new Error(\"failed to load module script\"); }}\n",
             escape_ts_string_literal(&wrapped)
         ));
-        out.push_str("    loadScript(\"globalThis.Array = globalThis.__thaw_intrinsic_Array;\");\n");
+        out.push_str("    if (!loadScript(\"globalThis.Array = globalThis.__thaw_intrinsic_Array;\")) throw new Error(\"failed to restore module globals\");\n");
         for (export_name, runtime_getter, _, _) in bundle.value_exports {
             let path = export_name
                 .split('.')
@@ -818,7 +818,7 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
                 escape_ts_string_literal(runtime_getter),
             );
             out.push_str(&format!(
-                "    loadScript(\"{}\");\n",
+                "    if (!loadScript(\"{}\")) throw new Error(\"failed to capture module value\");\n",
                 escape_ts_string_literal(&getter_source)
             ));
             // Also capture the *bare* name directly (not just the
@@ -846,7 +846,7 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
                 escape_ts_string_literal(export_name),
             );
             out.push_str(&format!(
-                "    loadScript(\"{}\");\n",
+                "    if (!loadScript(\"{}\")) throw new Error(\"failed to capture module export\");\n",
                 escape_ts_string_literal(&bare_capture_js)
             ));
         }
@@ -906,7 +906,7 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
                 escape_ts_string_literal(qualified_key)
             );
             out.push_str(&format!(
-                "    loadScript(\"{}\");\n",
+                "    if (!loadScript(\"{}\")) throw new Error(\"failed to capture module alias\");\n",
                 escape_ts_string_literal(&capture_js)
             ));
         }
