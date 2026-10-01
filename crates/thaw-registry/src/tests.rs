@@ -539,6 +539,51 @@ fn top_level_await_initializes_dependencies_before_export_binding() {
 }
 
 #[test]
+fn top_level_for_await_initializes_dependencies_before_export_binding() {
+    use std::ffi::{CStr, CString};
+
+    // Unrun regression: the loop has no AwaitExpr node, but its module
+    // and a static importer still require async initialization.
+    assert!(!analyze_module(
+        "export async function later() { for await (const item of values) {} }"
+    ).has_top_level_await);
+    assert!(!analyze_module(
+        "export const later = async () => { for await (const item of values) {} };"
+    ).has_top_level_await);
+    assert!(analyze_module(
+        "export const values = []; for (const item of await source()) {}"
+    ).has_top_level_await);
+    assert!(analyze_module(
+        "export let value = 0; for await (const item of values) { value = item; }"
+    ).has_top_level_await);
+    let dir = temp_registry("top_level_for_await_graph");
+    fs::write(dir.join("index.js"),
+        "import { value } from './value.js'; export default function run() { return value + 2; }"
+    ).unwrap();
+    fs::write(dir.join("value.js"),
+        "export let value = 0; for await (const item of [Promise.resolve(40)]) { value = item; }"
+    ).unwrap();
+    let empty_node_modules = temp_registry("top_level_for_await_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; \
+         globalThis.exports = globalThis.module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; \
+         {bundle} globalThis.runTopLevelForAwait = function() {{ return module.exports.default(); }};"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("runTopLevelForAwait").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn top_level_await_cycle_is_an_explicit_bundle_error() {
     let dir = temp_registry("top_level_await_cycle");
     fs::write(
