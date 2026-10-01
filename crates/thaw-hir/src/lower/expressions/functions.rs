@@ -990,7 +990,7 @@ impl<'a> FnLowerer<'a> {
                         },
                         _ => None,
                     };
-                    annotation.map_or_else(
+                    let ty = annotation.map_or_else(
                         || Ok(contextual.clone()),
                         |annotation| {
                             if matches!(
@@ -1006,7 +1006,10 @@ impl<'a> FnLowerer<'a> {
                                 self.generic_interfaces,
                             )
                         },
-                    )
+                    )?;
+                    Ok(if matches!(parameter, Pat::Ident(binding) if binding.id.optional) {
+                        optional_parameter_type(ty)
+                    } else { ty })
                 })
                 .chain(parameter_types.iter().skip(arrow.params.len()).cloned().map(Ok))
                 .collect::<Result<Vec<_>, String>>()?
