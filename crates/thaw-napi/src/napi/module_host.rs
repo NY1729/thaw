@@ -1970,6 +1970,42 @@ pub unsafe extern "C" fn thaw_napi_set_property_typed_result(
     set_property_impl(receiver, property, args, true, false)
 }
 
+#[cfg(feature = "quickjs")]
+unsafe fn callback_native_handle_paths(args: &[NapiValue]) -> Result<Vec<JsonValue>, String> {
+    unsafe fn collect(value: NapiValue, path: &mut Vec<JsonValue>, paths: &mut Vec<JsonValue>) -> Result<(), String> {
+        match value_ref(value).map_err(|_| "invalid napi_value")? {
+            Value::Object(_) if is_native_instance(value as usize) => {
+                paths.push(serde_json::json!([path, (value as u64).to_string()]));
+            }
+            Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    if let Some(value) = value {
+                        path.push(JsonValue::from(index));
+                        collect(*value, path, paths)?;
+                        path.pop();
+                    }
+                }
+            }
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if let PropertyKey::String(key) = key {
+                        path.push(JsonValue::String(key.clone()));
+                        collect(*value, path, paths)?;
+                        path.pop();
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut paths = Vec::new();
+    for (index, value) in args.iter().enumerate() {
+        collect(*value, &mut vec![JsonValue::from(index)], &mut paths)?;
+    }
+    Ok(paths)
+}
+
 unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let Some(info) = info.as_ref() else {
         return ptr::null_mut();
@@ -1991,16 +2027,22 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
             .collect::<Result<Vec<_>, _>>();
         #[cfg(feature = "quickjs")]
         let args = if _is_quickjs {
-            args.map(|mut args| {
-                let receiver = value_ref(info.this_arg)
+            args.and_then(|mut args| {
+                let paths = callback_native_handle_paths(&info.args)?;
+                let mut meta = value_ref(info.this_arg)
                     .ok()
                     .filter(|value| is_object_value(value))
                     .map(|_| serde_json::json!({
                         "__thaw_napi_this_handle__": (info.this_arg as u64).to_string()
                     }))
                     .unwrap_or(JsonValue::Null);
-                args.insert(0, receiver);
-                args
+                if !paths.is_empty() {
+                    if meta.is_null() { meta = serde_json::json!({}); }
+                    meta.as_object_mut().unwrap().insert(
+                        "__thaw_napi_argument_handles__".into(), JsonValue::Array(paths));
+                }
+                args.insert(0, meta);
+                Ok(args)
             })
         } else {
             args

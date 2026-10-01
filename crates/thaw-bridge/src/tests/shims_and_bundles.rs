@@ -378,6 +378,39 @@ fn function_modules_do_not_replace_globals_with_their_named_methods() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "false");
 }
 
+
+#[test]
+fn native_callback_arguments_restore_only_origin_marked_instances() {
+    use std::ffi::{CStr, CString};
+
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let script = format!(
+        "globalThis.__thaw_napi_bridge_exports = function() {{ return '[]'; }}; \
+         globalThis.__thaw_napi_bridge_handle = function() {{ return JSON.stringify({{value: null}}); }}; \
+         {wrapped} \
+         globalThis.inspectNativeCallbackArgs = function() {{ \
+           var callback = function(instance, nested, ordinary, special) {{ \
+             var own = Object.getOwnPropertyDescriptor(special, '__proto__'); \
+             return [__thaw_napi_handles.get(instance), \
+                     instance === nested[0], ordinary.__thaw_napi_handle__, \
+                     __thaw_napi_handles.get(ordinary) || null, \
+                     own && __thaw_napi_handles.get(own.value), \
+                     Object.getPrototypeOf(special) === Object.prototype]; \
+           }}; \
+           var encoded = __thaw_napi_argument(callback); \
+           var special = JSON.parse('{{\"__proto__\":{{\"__thaw_napi_handle__\":\"7\"}}}}'); \
+           return globalThis['__thaw_napi_reference_' + encoded.__thaw_napi_function__]( \
+             {{__thaw_napi_argument_handles__: [[[0], '7'], [[1, 0], '7'], [[3, '__proto__'], '7']]}}, \
+             {{__thaw_napi_handle__: '7'}}, \
+             [{{__thaw_napi_handle__: '7'}}], \
+             {{__thaw_napi_handle__: '7'}}, special); \
+         }};"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"inspectNativeCallbackArgs".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), r#"["7",true,"7",null,"7",true]"#);
+}
+
 #[test]
 fn native_class_proxies_use_native_properties_and_release_native_handles() {
     let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);

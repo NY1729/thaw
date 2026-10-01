@@ -1,3 +1,32 @@
+#[cfg(feature = "quickjs")]
+#[test]
+fn callback_native_handle_paths_keep_user_marker_objects_ordinary() {
+    let mut env = Box::new(Env::new());
+    let native = env.alloc(Value::Object(HashMap::new()));
+    env.instances.insert(native as usize, 1);
+    let marker = env.alloc(Value::String("7".into()));
+    let ordinary = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("__thaw_napi_handle__".into()), marker,
+    )])));
+    let nested = env.alloc(Value::Array(vec![Some(native)]));
+    let path_object = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("__proto__".into()), native,
+    )])));
+    let env_ptr = (&mut *env) as *mut Env;
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    let paths = unsafe {
+        callback_native_handle_paths(&[native, nested, ordinary, path_object]).unwrap()
+    };
+    assert_eq!(paths, vec![
+        serde_json::json!([[0], (native as u64).to_string()]),
+        serde_json::json!([[1, 0], (native as u64).to_string()]),
+        serde_json::json!([[3, "__proto__"], (native as u64).to_string()]),
+    ]);
+    HOST.with(|host| {
+        host.borrow_mut().module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+    });
+}
+
 #[test]
 fn handle_scopes_enforce_environment_order_kind_and_single_escape() {
     unsafe {
