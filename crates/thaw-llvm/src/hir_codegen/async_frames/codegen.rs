@@ -137,6 +137,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_load(self.context.i64_type(), state_slot, "async_state")
             .map_err(|e| e.to_string())?
             .into_int_value();
+        let resume_ok = self.context.append_basic_block(resume, "resume_fulfilled");
+        let inspect_waiting = self.context.append_basic_block(resume, "inspect_waiting");
+        let synchronous = self.builder.build_is_null(waiting, "synchronous_transition")
+            .map_err(|e| e.to_string())?;
+        self.builder.build_conditional_branch(synchronous, resume_ok, inspect_waiting)
+            .map_err(|e| e.to_string())?;
+        self.builder.position_at_end(inspect_waiting);
         let promise_state = self
             .builder
             .build_call(
@@ -159,7 +166,6 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|e| e.to_string())?;
         let rejected = self.context.append_basic_block(resume, "handle_rejection");
-        let resume_ok = self.context.append_basic_block(resume, "resume_fulfilled");
         self.builder
             .build_conditional_branch(is_rejected, rejected, resume_ok)
             .map_err(|e| e.to_string())?;
@@ -587,6 +593,26 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_return(None).map_err(|e| e.to_string())?;
             }
         } else {
+            if let Some(state) = segment.await_next {
+                if !plan.segments.get(state).is_some_and(|next| next.resume_target.is_none()) {
+                    return Err("synchronous frame transition needs a state without an await result".into());
+                }
+                // The resume entry treats a null waiting handle as a direct
+                // state transition; no promise or scheduler tick is created.
+                let state_slot = self.async_frame_field(frame, ASYNC_STATE_OFFSET, "state_slot")?;
+                self.builder.build_store(
+                    state_slot, self.context.i64_type().const_int(state as u64, false),
+                ).map_err(|e| e.to_string())?;
+                self.builder.build_call(
+                    resume, &[frame.into(), frame.into()], "resume_without_await",
+                ).map_err(|e| e.to_string())?;
+                if ramp {
+                    self.builder.build_return(Some(&completion)).map_err(|e| e.to_string())?;
+                } else {
+                    self.builder.build_return(None).map_err(|e| e.to_string())?;
+                }
+                return Ok(());
+            }
             if plan.ret != HirType::Void {
                 if plan.returns_on_all_paths {
                     self.builder
