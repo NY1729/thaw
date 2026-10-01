@@ -292,19 +292,11 @@ fn large_module_init_compresses_embedded_javascript() {
     assert!(!init.contains(&source));
 }
 
-/// thaw-cli's `source_uses_intl` (build.rs) decides whether to link
-/// `__thaw_intl_locale_parse` (gating `Intl.Segmenter` et al. in
-/// `platform_globals/intl.js`) with a substring scan over the
-/// generated shim text -- invisible once a real dependency's own
-/// bundled source (not the user's typed source) is gzip+base64'd past
-/// the 1KB threshold above. Real trigger: yargs -> cliui ->
-/// string-width's own `new Intl.Segmenter()`, which crashed at runtime
-/// ("not a function") since the feature never got linked. Mirrors the
-/// existing tls/wasm/brotli marker re-emission below.
+/// Host requirements are computed from raw bundles, independently of compression.
 #[test]
-fn large_module_init_reemits_an_intl_marker_from_a_compressed_bundle() {
+fn large_module_init_preserves_intl_requirements_as_metadata() {
     let source = format!(
-        "{}\nconst segmenter = new Intl.Segmenter();\n",
+        "{}\nnew Intl.Segmenter(); new Intl.NumberFormat('de'); new Intl.DateTimeFormat('ja');\n",
         "module.exports.value = 1;\n".repeat(200)
     );
     let init = generate_module_init(&[ModuleBundle {
@@ -318,7 +310,12 @@ fn large_module_init_reemits_an_intl_marker_from_a_compressed_bundle() {
     }]);
 
     assert!(init.contains("loadScript(\"gz:"));
-    assert!(init.contains("// uses Intl.Segmenter"));
+    assert!(required_runtime_features(&source).contains("intl"));
+    assert!(!init.contains("// uses Intl."));
+    for constructor in ["NumberFormat", "DateTimeFormat", "Segmenter"] {
+        let source = format!("new Intl.{constructor}('de')");
+        assert!(required_runtime_features(&source).contains("intl"));
+    }
 }
 
 /// `p-queue`'s actual published shape: `module.exports = PQueue;

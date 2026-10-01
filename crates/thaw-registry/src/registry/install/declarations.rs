@@ -50,7 +50,7 @@ fn inline_triple_slash_references(
             )
         })?;
         let (referenced_module, source_map) =
-            thaw_parser::parse_typescript_with_source_map(&referenced_source)?;
+            thaw_parser::parse_declarations_with_source_map(&referenced_source)?;
         let canonical_entry = entry_path
             .canonicalize()
             .unwrap_or_else(|_| entry_path.to_path_buf());
@@ -139,7 +139,7 @@ fn triple_slash_reference_paths(source: &str) -> Vec<String> {
 fn export_as_namespace_name(source: &str) -> Result<Option<String>, String> {
     use thaw_parser::ast::{ModuleDecl, ModuleItem};
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_declarations(source)?;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsNamespaceExport(export)) => {
             Some(export.id.sym.to_string())
@@ -181,7 +181,7 @@ fn hoisted_export_equals_namespace_members(
     };
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(entry_source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(entry_source)?;
     let Some(exported_name) = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref()
         {
@@ -363,7 +363,7 @@ fn exported_const_object_type_member_names(flattened_source: &str) -> Vec<(Strin
         Decl, Expr, ModuleDecl, ModuleItem, Pat, Stmt, TsEntityName, TsType, TsTypeElement,
     };
 
-    let Ok(module) = thaw_parser::parse_typescript(flattened_source) else {
+    let Ok(module) = thaw_parser::parse_declarations(flattened_source) else {
         return Vec::new();
     };
     let Some(exported) = module.body.iter().find_map(|item| match item {
@@ -455,7 +455,7 @@ fn dts_delegation_target(entry_path: &Path, entry_source: &str) -> Option<(PathB
         Decl, Expr, ModuleDecl, ModuleItem, Pat, Stmt, TsEntityName, TsType, TsTypeQueryExpr,
     };
 
-    let module = thaw_parser::parse_typescript(entry_source).ok()?;
+    let module = thaw_parser::parse_declarations(entry_source).ok()?;
     let exported = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref()
         {
@@ -544,7 +544,7 @@ fn unwrap_self_ambient_module(entry_path: &Path, entry_source: &str) -> Result<S
     use thaw_parser::ast::{Decl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(entry_source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(entry_source)?;
     let canonical_entry = entry_path
         .canonicalize()
         .unwrap_or_else(|_| entry_path.to_path_buf());
@@ -608,7 +608,7 @@ fn dts_source_with_reexported_functions_inner(
 
     let unwrapped = unwrap_self_ambient_module(entry_path, entry_source)?;
     let entry_source: &str = &unwrapped;
-    let module = thaw_parser::parse_typescript(entry_source)?;
+    let module = thaw_parser::parse_declarations(entry_source)?;
     let mut output = entry_source.to_string();
     output.push_str(&hoisted_export_equals_namespace_members(
         entry_path,
@@ -1017,7 +1017,7 @@ fn builtin_class_and_ancestor_declarations(
     if !visited.insert(name.to_string()) {
         return Ok(Vec::new());
     }
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(dts_source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(dts_source)?;
     let mut declarations = Vec::new();
     let mut superclass = None;
     for item in &module.body {
@@ -1066,7 +1066,7 @@ fn all_reexported_type_declarations(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
     let mut declarations = Vec::new();
     for item in &module.body {
         match item {
@@ -1135,7 +1135,7 @@ fn self_referential_namespace_alias_snippets(
             entry_path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
 
     let mut namespace_imports: std::collections::HashMap<String, (Span, Vec<Span>)> =
         std::collections::HashMap::new();
@@ -1259,7 +1259,7 @@ fn collect_namespace_reexports(
                         target_path.display()
                     )
                 })?;
-                let target_module = thaw_parser::parse_typescript(&target_source)?;
+                let target_module = thaw_parser::parse_declarations(&target_source)?;
                 found.extend(collect_namespace_reexports(
                     &target_path,
                     &target_module,
@@ -1402,7 +1402,7 @@ fn callable_const_declaration_snippet(
                 path.display()
             )
         })?;
-        let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+        let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
         let mut declarations = module
             .body
             .iter()
@@ -1693,7 +1693,7 @@ fn all_reexported_function_declarations(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
     let mut declarations = Vec::new();
     for item in &module.body {
         if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = item {
@@ -1915,7 +1915,7 @@ fn reexported_function_declarations(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
     let mut declarations = Vec::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = item else {
@@ -2143,7 +2143,7 @@ fn export_assignment_function_declarations(path: &Path) -> Result<Vec<String>, S
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
     let Some(target) = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref() {
             Expr::Ident(ident) => Some(ident.sym.to_string()),
@@ -2193,7 +2193,7 @@ fn export_assignment_class_or_interface_declarations(path: &Path) -> Result<Vec<
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
     let Some(target) = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref() {
             Expr::Ident(ident) => Some(ident.sym.to_string()),
@@ -2423,7 +2423,7 @@ fn reexported_class_or_interface_declarations_inner(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
     let mut local_name = name.to_string();
     if name == "default" {
         for item in &module.body {

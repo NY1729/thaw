@@ -292,27 +292,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_string_to_display returned no value")?
             .into_pointer_value();
-        let format = self
-            .builder
-            .build_global_string_ptr(if newline { "%s\n" } else { "%s" }, &format!("{name}_fmt"))
-            .map_err(|error| error.to_string())?;
-        let (function, arguments) = if descriptor == 1 {
-            (
-                self.module.get_function("printf").unwrap(),
-                vec![format.as_pointer_value().into(), value.into()],
-            )
-        } else {
-            (
-                self.module.get_function("dprintf").unwrap(),
-                vec![
-                    self.context.i32_type().const_int(descriptor, false).into(),
-                    format.as_pointer_value().into(),
-                    value.into(),
-                ],
-            )
-        };
         self.builder
-            .build_call(function, &arguments, name)
+            .build_call(self.module.get_function("thaw_console_write").unwrap(), &[
+                value.into(), self.context.i32_type().const_int(descriptor, false).into(),
+                self.context.bool_type().const_int(newline as u64, false).into(),
+            ], name)
             .map_err(|error| error.to_string())?;
         Ok(())
     }

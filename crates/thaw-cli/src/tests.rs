@@ -34,6 +34,22 @@ fn compatibility_commands_are_bounded_by_a_timeout() {
     )
     .unwrap();
     assert_eq!(output.stdout, b"ok");
+    let output = command_output_with_timeout(
+        Command::new("sh").args(["-c", "yes x | head -c 100000; yes y | head -c 100000 >&2"]),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 100000);
+    assert_eq!(output.stderr.len(), 100000);
+    let start = Instant::now();
+    assert!(command_output_with_timeout(
+        Command::new("sh").args(["-c", "sleep 5 & exit 0"]),
+        Duration::from_millis(50),
+    )
+    .unwrap_err()
+    .contains("timed out"));
+    assert!(start.elapsed() < Duration::from_secs(2));
     assert!(command_output_with_timeout(
         Command::new("sh").args(["-c", "sleep 1"]),
         Duration::from_millis(10),

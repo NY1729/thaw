@@ -9,7 +9,7 @@
 /// skipped: this is a function-signature extractor, not a full `.d.ts`
 /// model.
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_declarations(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let mut functions = module
         .body
@@ -75,7 +75,7 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
 /// Extracts typed, non-callable top-level value declarations. Callable
 /// `const`s are already returned by [`parse_dts`] and are excluded here.
 pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_declarations(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let interface_declarations = all_interface_decls_by_name(&module);
     let callable_objects = module
@@ -1012,7 +1012,7 @@ fn lower_dts_fn_type(
 /// shape -- its members are declared *inside* it, not a star-import of
 /// an already-flattened sibling module -- and isn't recognized here.
 pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
-    let Ok(module) = thaw_parser::parse_typescript(source) else {
+    let Ok(module) = thaw_parser::parse_declarations(source) else {
         return HashSet::new();
     };
     let namespace_imports: HashSet<String> = module
@@ -1087,7 +1087,7 @@ pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
 /// Names explicitly exported only as TypeScript types. Registry imports of
 /// these names are erased at runtime but still need a local type binding.
 pub fn exported_type_names(source: &str) -> HashSet<String> {
-    let Ok(module) = thaw_parser::parse_typescript(source) else {
+    let Ok(module) = thaw_parser::parse_declarations(source) else {
         return HashSet::new();
     };
     module
@@ -1142,7 +1142,7 @@ pub fn exported_type_names(source: &str) -> HashSet<String> {
 pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String, String>> {
     use thaw_parser::ast::{ExportSpecifier, ModuleExportName, Stmt, TsModuleName};
 
-    let Ok(module) = thaw_parser::parse_typescript(source) else {
+    let Ok(module) = thaw_parser::parse_declarations(source) else {
         return HashMap::new();
     };
     let mut namespaces: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -1257,7 +1257,7 @@ fn resolve_bare_type_alias_chain(
 }
 
 pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
-    let Ok(module) = thaw_parser::parse_typescript(source) else {
+    let Ok(module) = thaw_parser::parse_declarations(source) else {
         return HashMap::new();
     };
     // `type Alias<T, ...> = Target<...>;` -> `Alias -> Target`, bare

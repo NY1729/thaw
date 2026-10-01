@@ -44,10 +44,10 @@
 
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::rc::Rc;
-
+use thaw_arena::NativeStr as CStr;
 
 /// A live-shared native array -- `Rc` gives every read of the same
 /// logical array (via `Value::clone`) a handle to the *same* underlying
@@ -978,7 +978,7 @@ pub unsafe extern "C" fn thaw_json_destroy(value: *mut Value) {
 #[no_mangle]
 pub unsafe extern "C" fn thaw_cstring_destroy(value: *mut c_char) {
     if !value.is_null() {
-        drop(unsafe { CString::from_raw(value) });
+        unsafe { thaw_arena::destroy_string(value) };
     }
 }
 
@@ -1286,7 +1286,10 @@ fn wtf8_decode_utf16(bytes: &[u8]) -> Vec<u16> {
             && index + 1 < bytes.len()
             && continuation(bytes[index + 1])
         {
-            (2, ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F))
+            (
+                2,
+                ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F),
+            )
         } else if (0xE0..=0xEF).contains(&first)
             && index + 2 < bytes.len()
             && continuation(bytes[index + 1])
@@ -1355,7 +1358,9 @@ fn write_json_string(bytes: &[u8], out: &mut Vec<u8>) {
                     + ((u32::from(unit) - 0xD800) << 10)
                     + (u32::from(units[index + 1]) - 0xDC00);
                 let mut buffer = [0u8; 4];
-                let text = char::from_u32(code).expect("astral code point").encode_utf8(&mut buffer);
+                let text = char::from_u32(code)
+                    .expect("astral code point")
+                    .encode_utf8(&mut buffer);
                 out.extend_from_slice(text.as_bytes());
                 index += 2;
                 continue;
@@ -1457,7 +1462,11 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
 fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
     // Serialized directly rather than through `serde_json`, so a
     // `Value::Wtf8` string keeps its lone surrogate as a `\uXXXX` escape.
-    let indent = if indent.is_empty() { None } else { Some(indent) };
+    let indent = if indent.is_empty() {
+        None
+    } else {
+        Some(indent)
+    };
     let mut output = Vec::new();
     write_json_value(value, &mut output, indent, 0);
     CString::new(output).unwrap_or_default().into_raw()
@@ -1913,7 +1922,7 @@ pub unsafe extern "C" fn thaw_json_array_join(
             }
         }
     }
-    CString::new(joined).unwrap_or_default().into_raw()
+    thaw_arena::owned_string(joined)
 }
 
 #[no_mangle]
@@ -1922,7 +1931,7 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
     // A lone-surrogate string keeps its raw WTF-8 bytes (a `String`
     // couldn't hold them).
     if let Value::Wtf8(bytes) = value {
-        return CString::new(bytes.clone()).unwrap_or_default().into_raw();
+        return thaw_arena::owned_string(bytes);
     }
     let text = match value {
         Value::String(s) => s.clone(),
@@ -1941,7 +1950,7 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
         }
         other => other.to_string(),
     };
-    CString::new(text).unwrap_or_default().into_raw() as *const c_char
+    thaw_arena::owned_string(text)
 }
 
 #[no_mangle]
@@ -2247,9 +2256,7 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
             let Some((key, _)) = ordered_object_fields_shared(fields).into_iter().nth(index) else {
                 return 0.0;
             };
-            f64::from_bits(
-                CString::new(key.as_str()).unwrap_or_default().into_raw() as usize as u64,
-            )
+            f64::from_bits(thaw_arena::owned_string(key.as_str()) as usize as u64)
         }
         // Set composition/predicates (15-21): `object` is the receiver and
         // `key` carries the *other* object pointer. Only the key sets
@@ -2345,7 +2352,7 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
                 let key = if pointer.is_null() {
                     String::new()
                 } else {
-                    unsafe { std::ffi::CStr::from_ptr(pointer) }
+                    unsafe { CStr::from_ptr(pointer) }
                         .to_string_lossy()
                         .into_owned()
                 };
@@ -2565,7 +2572,7 @@ pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
     };
     alloc_pointer_array(
         keys.into_iter()
-            .map(|key| CString::new(key).unwrap_or_default().into_raw().cast())
+            .map(|key| thaw_arena::owned_string(key).cast())
             .collect(),
     )
 }
@@ -2581,7 +2588,7 @@ pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
         (0..shared_array_ref(items).len())
             .map(|index| index.to_string())
             .chain(std::iter::once("length".to_string()))
-            .map(|key| CString::new(key).unwrap_or_default().into_raw().cast())
+            .map(|key| thaw_arena::owned_string(key).cast())
             .collect(),
     )
 }
@@ -2650,12 +2657,8 @@ pub unsafe extern "C" fn thaw_json_number_values(value: *const Value) -> *mut u8
 /// `value` must be null or point to a valid JSON object containing strings.
 pub unsafe extern "C" fn thaw_json_string_values(value: *const Value) -> *mut u8 {
     alloc_scalar_array(&object_values(value), 8, |slot, value| unsafe {
-        (slot as *mut *mut u8).write(
-            CString::new(value.as_str().unwrap_or_default())
-                .unwrap_or_default()
-                .into_raw()
-                .cast(),
-        );
+        (slot as *mut *mut u8)
+            .write(thaw_arena::owned_string(value.as_str().unwrap_or_default()).cast());
     })
 }
 
@@ -2691,7 +2694,7 @@ pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
             .into_iter()
             .map(|(key, value)| {
                 wrap_array_handle(alloc_pointer_array(vec![
-                    CString::new(key).unwrap_or_default().into_raw().cast(),
+                    thaw_arena::owned_string(key).cast(),
                     Box::into_raw(Box::new(value)).cast(),
                 ]))
             })
@@ -2714,12 +2717,8 @@ fn alloc_typed_entries(value: *const Value, write: impl Fn(*mut u8, &Value)) -> 
                 }
                 unsafe {
                     (entry as *mut i64).write(2);
-                    (entry.add(8) as *mut *mut u8).write(
-                        CString::new(key.as_str())
-                            .unwrap_or_default()
-                            .into_raw()
-                            .cast(),
-                    );
+                    (entry.add(8) as *mut *mut u8)
+                        .write(thaw_arena::owned_string(key.as_str()).cast());
                 }
                 write(unsafe { entry.add(16) }, value);
                 wrap_array_handle(entry)
@@ -2744,12 +2743,8 @@ pub unsafe extern "C" fn thaw_json_number_entries(value: *const Value) -> *mut u
 /// `value` must be null or point to a valid JSON object containing strings.
 pub unsafe extern "C" fn thaw_json_string_entries(value: *const Value) -> *mut u8 {
     alloc_typed_entries(value, |slot, value| unsafe {
-        (slot as *mut *mut u8).write(
-            CString::new(value.as_str().unwrap_or_default())
-                .unwrap_or_default()
-                .into_raw()
-                .cast(),
-        );
+        (slot as *mut *mut u8)
+            .write(thaw_arena::owned_string(value.as_str().unwrap_or_default()).cast());
     })
 }
 

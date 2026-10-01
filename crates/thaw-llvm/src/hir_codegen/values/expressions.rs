@@ -1,4 +1,25 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn register_string_literal(&self, pointer: PointerValue<'ctx>, bytes: &[u8]) -> Result<BasicValueEnum<'ctx>, String> {
+        if !bytes.contains(&0) { return Ok(pointer.into()); }
+        self.builder.build_call(
+            self.module.get_function("thaw_string_register_literal").unwrap(),
+            &[pointer.into(), self.context.i64_type().const_int(bytes.len() as u64, false).into()],
+            "native_string_literal",
+        ).map_err(|error| error.to_string())?;
+        Ok(pointer.into())
+    }
+
+    fn compile_raw_string_literal(&self, bytes: &[u8]) -> Result<BasicValueEnum<'ctx>, String> {
+        let array = self.context.const_string(bytes, true);
+        let global = self.module.add_global(array.get_type(), None, "strlit_bytes");
+        global.set_initializer(&array);
+        global.set_constant(true);
+        let zero = self.context.i32_type().const_zero();
+        let pointer = unsafe {
+            self.builder.build_in_bounds_gep(array.get_type(), global.as_pointer_value(), &[zero, zero], "strlit_bytes_ptr")
+        }.map_err(|error| error.to_string())?;
+        self.register_string_literal(pointer, bytes)
+    }
     fn current_function(&self) -> FunctionValue<'ctx> {
         self.builder
             .get_insert_block()
@@ -46,32 +67,19 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::Lit(HirLit::Null) => Ok(self.context.bool_type().const_int(1, false).into()),
             HirExpr::Lit(HirLit::Str(s)) => {
+                if s.as_bytes().contains(&0) { return self.compile_raw_string_literal(s.as_bytes()); }
                 let global = self
                     .builder
                     .build_global_string_ptr(s, "strlit")
                     .map_err(|e| e.to_string())?;
-                Ok(global.as_pointer_value().into())
+                self.register_string_literal(global.as_pointer_value(), s.as_bytes())
             }
             HirExpr::Lit(HirLit::Wtf8(bytes)) => {
                 // WTF-8 bytes may be invalid UTF-8 (a lone surrogate), so
                 // `build_global_string_ptr(&str)` can't be used -- build the
                 // NUL-terminated `[N x i8]` global directly and GEP to its
                 // first byte.
-                let array = self.context.const_string(bytes, true);
-                let global = self.module.add_global(array.get_type(), None, "strlit_wtf8");
-                global.set_initializer(&array);
-                global.set_constant(true);
-                let zero = self.context.i32_type().const_zero();
-                let ptr = unsafe {
-                    self.builder.build_in_bounds_gep(
-                        array.get_type(),
-                        global.as_pointer_value(),
-                        &[zero, zero],
-                        "strlit_wtf8_ptr",
-                    )
-                }
-                .map_err(|e| e.to_string())?;
-                Ok(ptr.into())
+                self.compile_raw_string_literal(bytes)
             }
 
             HirExpr::Var(name) => {
@@ -650,7 +658,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let comparison = self
                 .builder
                 .build_call(
-                    self.module.get_function("strcmp").unwrap(),
+                    self.module.get_function("thaw_string_compare").unwrap(),
                     &[key.into(), expected.into()],
                     "dynamic_property_compare",
                 )

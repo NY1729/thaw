@@ -1,5 +1,5 @@
 pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_declarations(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let mut classes = module
         .body

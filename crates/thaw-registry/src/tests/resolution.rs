@@ -2434,7 +2434,7 @@ fn parser_collects_esm_reexports_and_dynamic_imports_without_false_positives() {
                 import main from './main.js';
                 export { value } from "./value.js";
                 export * from './all.js';
-                const package = import(`external-package`);
+                const externalPackage = import(`external-package`);
                 const feature = import(("external-" + "feature"));
                 const later = import('./later.js');
                 const text = "require('./not-real.js')";

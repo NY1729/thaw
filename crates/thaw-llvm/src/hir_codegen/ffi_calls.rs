@@ -33,7 +33,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(copy_bb);
-        let strlen = self.module.get_function("strlen").unwrap();
+        let strlen = self.module.get_function("thaw_string_byte_length").unwrap();
         let length = self
             .builder
             .build_call(strlen, &[source.into()], &format!("{name}_length"))
@@ -74,6 +74,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 &format!("{name}_memcpy"),
             )
             .map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_string_register").unwrap(),
+            &[copied.into(), length.into()], "register_owned_string_length").map_err(|error| error.to_string())?;
         let destroy = match ownership {
             FfiOwnership::Owned { destroy } => Some(destroy),
             FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
@@ -467,6 +469,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(terminator, self.context.i8_type().const_zero())
                     .map_err(|error| error.to_string())?;
+                self.builder.build_call(self.module.get_function("thaw_string_register").unwrap(),
+                    &[result.into(), length.into()], "register_ffi_string_length").map_err(|error| error.to_string())?;
                 let destroy = match ownership {
                     FfiOwnership::Owned { destroy } => Some(destroy),
                     FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
@@ -1272,7 +1276,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     if sig.param_string_abis.get(index) == Some(&FfiStringAbi::PointerLength) =>
                 {
                     let pointer = value.into_pointer_value();
-                    let strlen = self.module.get_function("strlen").unwrap();
+                    let strlen = self.module.get_function("thaw_string_byte_length").unwrap();
                     let length = self
                         .builder
                         .build_call(strlen, &[pointer.into()], "ffi_string_length")

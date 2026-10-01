@@ -913,6 +913,7 @@ fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) 
         return 0;
     }
     promise.result = Some(result);
+    thaw_arena::replace_reference(promise as *mut ThawPromise as usize, 0, result as usize);
     promise.rejected = rejected;
     let subscribers = std::mem::take(&mut promise.subscribers);
     for subscriber in subscribers {
@@ -934,6 +935,7 @@ pub unsafe extern "C" fn thaw_promise_destroy(promise: *mut ThawPromise) {
         ACTIVE_PROMISES.with(|active| active.borrow_mut().retain(|current| *current != promise));
         TIMERS.with(|timers| timers.borrow_mut().retain(|timer| timer.promise != promise));
         FD_WAITS.with(|waits| waits.borrow_mut().retain(|wait| wait.promise != promise));
+        thaw_arena::forget_references(promise as usize);
         drop(Box::from_raw(promise));
     }
 }

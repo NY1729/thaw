@@ -3,33 +3,11 @@
 //! `lexer`/`ast`/`parser`/`codegen` modules at the crate root, which are the
 //! Kaleidoscope tutorial scaffold used to learn inkwell in the first place.
 //!
-//! Phase 0 scope: numbers (f64), strings (`i8*`, C-string style), booleans
-//! (`i1`), and functions, plus a `console.log` builtin bridged to libc
-//! `puts`/`printf` as a bootstrap (the real `console.log`/std implementation
-//! lands in Phase 2).
-//!
-//! Phase 1 adds: `if`/`while` (classic `for` is already desugared to these
-//! by thaw-hir's lowering), `throw`/`try`/`catch`, mutable local variables (`let`,
-//! assignment, `++`/`--`), and number arrays (`number[]`), heap-allocated
-//! from `thaw-arena`'s bump allocator (linked in by thaw-cli as a static
-//! archive) rather than `malloc` -- this is the design doc's "no GC, arena
-//! allocation" decision actually landing in generated code, not just a
-//! standalone crate. Local variables are now alloca'd (loaded/stored on
-//! every read/write) instead of tracked as raw SSA values, since mutation
-//! needs a memory slot; nothing runs LLVM's mem2reg pass yet; correctness
-//! doesn't depend on it, so the extra loads/stores are left for a later
-//! optimization pass.
-//!
-//! Phase 2 additionally adds `handler(event: string): string` and
-//! `handler(event: Json): Json` as alternate process entry points (see
-//! `emit_lambda_entry`), `process.env`,
-//! and object types: `{ x: number; y: number }`-style records, `f64`
-//! fields only, arena-allocated as a flat `[f64 field0]...[f64 fieldN-1]`
-//! buffer with no length header (field order is static, part of the type
-//! -- see `thaw_hir::HirExpr::PropAccess`, which bakes in the resolved
-//! field layout so codegen never needs its own type inference pass).
-//! async/await is designed but not implemented yet -- see
-//! `docs/design/async-await.md`.
+//! Generates native functions, closures, collections, tagged values, exception
+//! propagation, and resumable async frames from typed HIR. Runtime calls provide
+//! strings, promises, platform APIs, and dynamic QuickJS/N-API interoperation.
+//! Entrypoints support both `main` programs and Lambda `handler` programs.
+//! Generated globals are registered as arena roots before Lambda initialization.
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;

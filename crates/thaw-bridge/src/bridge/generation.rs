@@ -750,6 +750,20 @@ fn wrap_as_commonjs_module(
 /// rely on earlier ones already being loaded into the shared QuickJS-NG
 /// global scope). Returns an empty string -- no function emitted at all
 /// -- when `bundles` is empty, since there would be nothing for it to do.
+/// Optional host features required by uncompressed source. Keep this metadata
+/// separate from generated scripts so compression cannot hide a requirement.
+pub fn required_runtime_features(source: &str) -> std::collections::BTreeSet<&'static str> {
+    [
+        ("tls", &["__thaw_tls_"][..]),
+        ("wasm", &["WebAssembly", "node:wasi", "require('wasi')", "require(\"wasi\")"][..]),
+        ("brotli", &["brotli", "Brotli"][..]),
+        ("intl", &["Intl.Locale", "Intl.PluralRules", "Intl.Collator", "Intl.Segmenter",
+            "Intl.RelativeTimeFormat", "Intl.NumberFormat", "Intl.DateTimeFormat"][..]),
+    ].into_iter().filter_map(|(feature, markers)| {
+        markers.iter().any(|marker| source.contains(marker)).then_some(feature)
+    }).collect()
+}
+
 pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
     if bundles.is_empty() {
         return String::new();
@@ -757,51 +771,6 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
     let mut out = String::from("function __thaw_module_init(): void {\n");
     for bundle in bundles {
         out.push_str(&format!("    // {}\n", bundle.package_name));
-        // thaw-cli's `source_uses_tls`/`source_uses_wasm`/
-        // `source_uses_brotli` (build.rs) decide which optional
-        // thaw-quickjs features to compile in with a blind substring
-        // scan over this generated shim text -- but a bundle at or
-        // above `encode_embedded_script`'s 1KB threshold below gets
-        // gzip+base64'd into an opaque blob first, hiding any of those
-        // literal markers inside a real package's own (usually much
-        // larger than 1KB) source. Found via ky: it never itself
-        // requires `node:tls`, but its bundled `globalThis.fetch`
-        // fallback (added below by `wrap_as_commonjs_module`'s caller
-        // whenever `uses_global_fetch` fires) needs `node:https`, whose
-        // *own* builtin source is what actually contains `__thaw_tls_`
-        // -- entirely inside the compressed blob, so TLS silently
-        // never got linked and every `https://` fetch failed at
-        // runtime with an opaque "TLS support is not linked" instead of
-        // a build-time signal. Re-emitting whichever markers the raw
-        // (pre-compression) source contains, in plain uncompressed
-        // text that never executes, keeps that scan working regardless
-        // of bundle size.
-        // `Intl.Locale`/`Intl.PluralRules`/`Intl.Collator`/`Intl.
-        // Segmenter`/`Intl.RelativeTimeFormat` markers mirror thaw-cli's
-        // own `source_uses_intl` (`build.rs`) for the same reason as
-        // the tls/wasm/brotli markers above: a real dependency's own
-        // bundled use (not the user's own typed source) is otherwise
-        // invisible to that scan once compressed, silently leaving
-        // `__thaw_intl_locale_parse` unlinked -- `Intl.Segmenter` (and
-        // its siblings) then stay ungated-false in `platform_globals/
-        // intl.js`, so `new Intl.Segmenter()` fails "not a function"
-        // for any package that uses it internally (real trigger:
-        // yargs -> cliui -> string-width).
-        for marker in [
-            "__thaw_tls_",
-            "WebAssembly",
-            "brotli",
-            "Brotli",
-            "Intl.Locale",
-            "Intl.PluralRules",
-            "Intl.Collator",
-            "Intl.Segmenter",
-            "Intl.RelativeTimeFormat",
-        ] {
-            if bundle.js_source.contains(marker) {
-                out.push_str(&format!("    // uses {marker}\n"));
-            }
-        }
         let wrapped = wrap_as_commonjs_module(
             bundle.js_source,
             bundle.fallback_names,

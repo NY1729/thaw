@@ -13,8 +13,11 @@ quickjs = ["dep:thaw-quickjs"]
 quickjs-brotli = ["quickjs", "thaw-quickjs/brotli"]
 quickjs-tls = ["quickjs", "thaw-quickjs/tls"]
 quickjs-wasm = ["quickjs", "thaw-quickjs/wasm"]
+quickjs-intl = ["quickjs", "thaw-quickjs/intl"]
+quickjs-icu4c = ["quickjs", "thaw-quickjs/icu4c"]
 
 [dependencies]
+thaw-arena = { path = "../thaw-arena" }
 base64 = "0.22"
 flate2 = "1"
 libc = "0.2"

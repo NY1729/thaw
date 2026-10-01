@@ -393,7 +393,7 @@ pub extern "C" fn thaw_js_call_result(
     let args_json = to_str(args_json);
     match with_active_or_context(|ctx| call_impl(ctx, &func_name, &args_json)) {
         Ok(text) => ThawResult {
-            value: CString::new(text).unwrap_or_default().into_raw(),
+            value: thaw_arena::owned_string(text),
             error: std::ptr::null(),
         },
         Err(reason) => ThawResult {
@@ -895,7 +895,7 @@ pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
         js_handle_string_wtf8(&ctx, value)
     })
     .unwrap_or_else(|_| b"[invalid JsValue]".to_vec());
-    CString::new(bytes).unwrap_or_default().into_raw()
+    thaw_arena::owned_string(bytes)
 }
 
 /// Like `thaw_js_handle_to_string`, but for `console.log` specifically --
@@ -927,7 +927,7 @@ pub extern "C" fn thaw_js_handle_to_console_string(handle: u64) -> *const c_char
         Ok(wtf8_from_units(&units))
     })
     .unwrap_or_else(|_| b"[invalid JsValue]".to_vec());
-    CString::new(bytes).unwrap_or_default().into_raw()
+    thaw_arena::owned_string(bytes)
 }
 
 /// The residual JIT's `dynamic_object_query` host ABI: operation `0`
@@ -1253,7 +1253,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_result(
     });
     match result {
         Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
+            value: thaw_arena::owned_string(value),
             error: std::ptr::null(),
         },
         Err(error) => ThawResult {
@@ -1400,9 +1400,9 @@ unsafe fn take_owned_string(value: *const c_char) -> String {
     if value.is_null() {
         String::new()
     } else {
-        unsafe { CString::from_raw(value.cast_mut()) }
-            .to_string_lossy()
-            .into_owned()
+        let text = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
+        unsafe { thaw_arena::destroy_string(value.cast_mut()) };
+        text
     }
 }
 
@@ -1451,7 +1451,9 @@ pub extern "C" fn thaw_js_register_native_callback(
         static NEXT_NATIVE_CALLBACK_ID: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_NATIVE_CALLBACK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = thaw_arena::ArenaRoot::new(closure);
         let raw = Function::new(ctx.clone(), move |ctx: Ctx<'_>, args_json: String| -> String {
+            let _keep_alive = &root;
             let args_json = CString::new(args_json).unwrap_or_default();
             // Enters the same "currently active `Ctx`" guard `install_
             // napi_bridge`'s own `call`/`handle` closures already use --
@@ -1676,7 +1678,7 @@ pub extern "C" fn thaw_js_call_handle_value_result(handle: u64, argument: u64) -
     });
     match result {
         Ok(text) => ThawResult {
-            value: CString::new(text).unwrap_or_default().into_raw(),
+            value: thaw_arena::owned_string(text),
             error: std::ptr::null(),
         },
         Err(error) => ThawResult {
@@ -1891,7 +1893,7 @@ pub extern "C" fn thaw_js_set_property_json_result(
     });
     match result {
         Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
+            value: thaw_arena::owned_string(value),
             error: std::ptr::null(),
         },
         Err(error) => ThawResult {
@@ -2020,7 +2022,7 @@ pub extern "C" fn thaw_js_call_method_result(
     });
     match result {
         Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
+            value: thaw_arena::owned_string(value),
             error: std::ptr::null(),
         },
         Err(error) => ThawResult {
@@ -2090,7 +2092,7 @@ pub extern "C" fn thaw_js_resolve_handle_result(handle: u64) -> ThawResult {
     });
     match result {
         Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
+            value: thaw_arena::owned_string(value),
             error: std::ptr::null(),
         },
         Err(error) => ThawResult {
@@ -2143,7 +2145,7 @@ pub extern "C" fn thaw_js_call_handle_result(handle: u64, args_json: *const c_ch
     });
     match result {
         Ok(text) => ThawResult {
-            value: CString::new(text).unwrap_or_default().into_raw(),
+            value: thaw_arena::owned_string(text),
             error: std::ptr::null(),
         },
         Err(reason) => ThawResult {

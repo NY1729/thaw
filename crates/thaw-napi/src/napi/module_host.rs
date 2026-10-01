@@ -956,7 +956,7 @@ unsafe fn call_impl(
 fn text_result(result: Result<String, String>) -> ThawResult {
     match result {
         Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
+            value: thaw_arena::owned_string(value),
             error: ptr::null_mut(),
         },
         Err(error) => ThawResult {

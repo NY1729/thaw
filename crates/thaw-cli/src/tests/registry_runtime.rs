@@ -1532,8 +1532,7 @@ function main(): void {
 }
 
 /// `request.bodyHex()` returns the request body's raw bytes as a hex
-/// string -- the escape hatch for a body that `request.body()` /
-/// `on("data")` would mangle, since a thaw string is NUL-terminated. A
+/// string -- the byte-exact alternative to lossy UTF-8 `request.body()`. A
 /// four-byte body `00 ff 41 80` (NUL, non-UTF-8) round-trips exactly.
 #[test]
 fn node_http_exposes_the_raw_request_body_as_hex() {
@@ -1581,14 +1580,14 @@ function main(): void {
     keep.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
     // 00 ff 41 80: NUL, a non-UTF-8 lead byte, 'A', a bare continuation
-    // byte. `request.body()` sees a truncated / U+FFFD-mangled version;
+    // byte. `request.body()` preserves NUL and replaces invalid UTF-8;
     // `bodyHex()` sees all four bytes.
     keep.write_all(b"POST /raw HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n\x00\xff\x41\x80")
         .unwrap();
-    // `body`: NUL and each invalid byte become U+FFFD.
+    // `body`: NUL is preserved; each invalid byte becomes U+FFFD.
     assert_eq!(
         read_one_response_body_any(&mut keep),
-        "POST /raw hex=00ff4180 body=[\u{fffd}\u{fffd}A\u{fffd}]"
+        "POST /raw hex=00ff4180 body=[\0\u{fffd}A\u{fffd}]"
     );
     // A bodyless request: empty hex, empty body.
     assert_eq!(
