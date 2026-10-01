@@ -655,6 +655,7 @@ fn dts_source_with_reexported_functions_inner(
     let entry_source: &str = &unwrapped;
     let module = thaw_parser::parse_declarations(entry_source)?;
     let mut output = entry_source.to_string();
+    let mut materialized_class_imports = std::collections::BTreeSet::new();
     output.push_str(&hoisted_export_equals_namespace_members(
         entry_path,
         entry_source,
@@ -806,8 +807,12 @@ fn dts_source_with_reexported_functions_inner(
                 seen.insert(exported.clone());
             }
             for snippet in reexported_declarations_as(declarations, &exported, entry_path, false) {
-                output.push('\n');
-                output.push_str(&snippet);
+                if is_type_declaration_snippet(&snippet) {
+                    append_flattened_type(&mut output, snippet);
+                } else {
+                    output.push('\n');
+                    output.push_str(&snippet);
+                }
             }
         }
     }
@@ -1072,12 +1077,11 @@ fn dts_source_with_reexported_functions_inner(
                 else {
                     continue;
                 };
-                let mut declarations =
+                let declarations =
                     reexported_class_or_interface_declarations(target_path, target_name)?;
-                if let Some(first) = declarations.first_mut() {
-                    *first = rename_declared_function(std::mem::take(first), base.sym.as_ref());
-                }
-                for snippet in declarations {
+                if declarations.is_empty() { continue }
+                if !materialized_class_imports.insert(base.sym.to_string()) { continue }
+                for snippet in imported_class_as_local_binding(declarations, base.sym.as_ref(), true) {
                     output.push('\n');
                     output.push_str(&snippet);
                 }
@@ -1125,6 +1129,8 @@ fn dts_source_with_reexported_functions_inner(
             _ => continue,
         }
     }
+    let retained_entry = without_materialized_class_imports(entry_source, &materialized_class_imports)?;
+    output.replace_range(..entry_source.len(), &retained_entry);
     Ok(output)
 }
 
@@ -2040,7 +2046,7 @@ fn callable_const_declarations(
 /// an inline `export default function <ident>(...) {}`) and keeps that
 /// real `<ident>`, which need not equal the literal string `"default"`.
 fn declared_function_name_range(snippet: &str) -> Option<(usize, usize)> {
-    use thaw_parser::ast::{Decl, DefaultDecl, ModuleDecl, ModuleItem, Pat, Stmt};
+    use thaw_parser::ast::{Decl, DefaultDecl, ModuleDecl, ModuleItem, Pat, Stmt, TsModuleName};
     use thaw_parser::common::Spanned;
 
     let (module, source_map) = thaw_parser::parse_declarations_with_source_map(snippet).ok()?;
@@ -2064,6 +2070,10 @@ fn declared_function_name_range(snippet: &str) -> Option<(usize, usize)> {
             Decl::Fn(function) => Some(function.ident.span()),
             Decl::Class(class) => Some(class.ident.span()),
             Decl::TsInterface(interface) => Some(interface.id.span()),
+            Decl::TsModule(namespace) => match &namespace.id {
+                TsModuleName::Ident(ident) => Some(ident.span()),
+                TsModuleName::Str(_) => None,
+            },
             Decl::Var(variable) => variable.decls.first().and_then(|declarator| {
                 if let Pat::Ident(binding) = &declarator.name {
                     Some(binding.id.span())
@@ -3030,6 +3040,213 @@ fn reexported_class_or_interface_declarations(
     reexported_class_or_interface_declarations_inner(path, name, &mut visited)
 }
 
+/// An imported class is flattened without its import statement. Give its
+/// declaration and merged namespace the local binding used by `extends`,
+/// while leaving supporting ancestor declarations under their own names.
+/// AST spans limit self-type changes to references, never method/property
+/// names or coincidental text in comments.
+fn imported_class_as_local_binding(declarations: Vec<String>, local: &str, type_only: bool) -> Vec<String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{
+        Class, Function, TsCallSignatureDecl, TsConditionalType, TsConstructorType,
+        TsConstructSignatureDecl, TsEntityName, TsFnType, TsInferType, TsInterfaceDecl,
+        TsMappedType, TsMethodSignature,
+        TsTypeAliasDecl, TsTypeParamDecl,
+    };
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    struct SelfReferences<'a> {
+        original: &'a str,
+        spans: Vec<thaw_parser::common::Span>,
+        shadows: Vec<thaw_parser::common::Span>,
+    }
+    impl SelfReferences<'_> {
+        fn shadow(&mut self, span: thaw_parser::common::Span, params: Option<&TsTypeParamDecl>) {
+            if params.is_some_and(|params| params.params.iter().any(|param| param.name.sym == self.original)) {
+                self.shadows.push(span);
+            }
+        }
+    }
+    impl Visit for SelfReferences<'_> {
+        fn visit_class(&mut self, class: &Class) {
+            self.shadow(class.span, class.type_params.as_deref());
+            class.visit_children_with(self);
+        }
+        fn visit_function(&mut self, function: &Function) {
+            self.shadow(function.span, function.type_params.as_deref());
+            function.visit_children_with(self);
+        }
+        fn visit_ts_interface_decl(&mut self, interface: &TsInterfaceDecl) {
+            self.shadow(interface.span, interface.type_params.as_deref());
+            interface.visit_children_with(self);
+        }
+        fn visit_ts_type_alias_decl(&mut self, alias: &TsTypeAliasDecl) {
+            self.shadow(alias.span, alias.type_params.as_deref());
+            alias.visit_children_with(self);
+        }
+        fn visit_ts_method_signature(&mut self, method: &TsMethodSignature) {
+            self.shadow(method.span, method.type_params.as_deref());
+            method.visit_children_with(self);
+        }
+        fn visit_ts_call_signature_decl(&mut self, call: &TsCallSignatureDecl) {
+            self.shadow(call.span, call.type_params.as_deref());
+            call.visit_children_with(self);
+        }
+        fn visit_ts_construct_signature_decl(&mut self, construct: &TsConstructSignatureDecl) {
+            self.shadow(construct.span, construct.type_params.as_deref());
+            construct.visit_children_with(self);
+        }
+        fn visit_ts_fn_type(&mut self, function: &TsFnType) {
+            self.shadow(function.span, function.type_params.as_deref());
+            function.visit_children_with(self);
+        }
+        fn visit_ts_constructor_type(&mut self, constructor: &TsConstructorType) {
+            self.shadow(constructor.span, constructor.type_params.as_deref());
+            constructor.visit_children_with(self);
+        }
+        fn visit_ts_mapped_type(&mut self, mapped: &TsMappedType) {
+            if mapped.type_param.name.sym == self.original {
+                // The constraint is evaluated before the mapped key is
+                // bound; only the key remapping and value body are shadowed.
+                if let Some(name_type) = &mapped.name_type { self.shadows.push(name_type.span()); }
+                if let Some(type_ann) = &mapped.type_ann { self.shadows.push(type_ann.span()); }
+            }
+            mapped.visit_children_with(self);
+        }
+        fn visit_ts_conditional_type(&mut self, conditional: &TsConditionalType) {
+            struct InferNames<'a>(&'a str, bool);
+            impl Visit for InferNames<'_> {
+                fn visit_ts_infer_type(&mut self, infer: &TsInferType) {
+                    if infer.type_param.name.sym == self.0 { self.1 = true; }
+                }
+                fn visit_ts_conditional_type(&mut self, _: &TsConditionalType) {
+                    // A nested conditional's infer binding stays nested.
+                }
+            }
+            let mut inferred = InferNames(self.original, false);
+            conditional.extends_type.visit_with(&mut inferred);
+            if inferred.1 { self.shadows.push(conditional.true_type.span()); }
+            conditional.visit_children_with(self);
+        }
+        fn visit_ts_entity_name(&mut self, name: &TsEntityName) {
+            let root = match name {
+                TsEntityName::Ident(ident) => ident,
+                TsEntityName::TsQualifiedName(qualified) => {
+                    let mut left = qualified.left.as_ref();
+                    while let TsEntityName::TsQualifiedName(qualified) = left {
+                        left = qualified.left.as_ref();
+                    }
+                    let TsEntityName::Ident(ident) = left else { return };
+                    ident
+                }
+            };
+            if root.sym == self.original && !self.shadows.iter().any(|scope| {
+                scope.lo <= root.span.lo && root.span.hi <= scope.hi
+            }) {
+                self.spans.push(root.span());
+            }
+        }
+    }
+
+    let selected = declarations.first().and_then(|snippet| declaration_identity(snippet));
+    let Some(selected) = selected else {
+        return declarations.into_iter().map(|snippet| {
+            if type_only { type_only_declaration(snippet, None) } else { snippet }
+        }).collect()
+    };
+    declarations.into_iter().map(|snippet| {
+        let is_selected = declaration_identity(&snippet).as_deref() == Some(selected.as_str());
+        if !is_selected || selected == local {
+            return if type_only { type_only_declaration(snippet, None) } else { snippet };
+        }
+        let Ok((module, source_map)) = thaw_parser::parse_declarations_with_source_map(&snippet)
+        else { return if type_only { type_only_declaration(snippet, None) } else { snippet } };
+        let Some((start, end)) = declared_function_name_range(&snippet) else {
+            return if type_only { type_only_declaration(snippet, None) } else { snippet }
+        };
+        let mut references = SelfReferences { original: &selected, spans: Vec::new(), shadows: Vec::new() };
+        module.visit_with(&mut references);
+        let mut edits = references.spans.into_iter().filter_map(|span| {
+            let start = source_map.lookup_byte_offset(span.lo).pos.0 as usize;
+            let end = source_map.lookup_byte_offset(span.hi).pos.0 as usize;
+            (snippet.get(start..end) == Some(selected.as_str())).then_some((start, end))
+        }).collect::<Vec<_>>();
+        edits.push((start, end));
+        edits.sort_unstable();
+        edits.dedup();
+        let mut renamed = snippet;
+        for (start, end) in edits.into_iter().rev() {
+            renamed.replace_range(start..end, local);
+        }
+        if type_only {
+            // A transitive import may already carry the source binding's
+            // type marker. Its old name is gone after this local rename.
+            renamed = renamed.replace(&format!("\nexport type {{ {selected} }};"), "");
+            type_only_declaration(renamed, None)
+        } else {
+            renamed
+        }
+    }).collect()
+}
+
+/// A materialized local class replaces its declaration import binding.
+/// Retain other specifiers from the same import, including their original
+/// `type` modifiers and any import attributes after the source literal.
+fn without_materialized_class_imports(source: &str, locals: &std::collections::BTreeSet<String>) -> Result<String, String> {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleItem};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    if locals.is_empty() { return Ok(source.to_string()) }
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(source)?;
+    let offset = |position| source_map.lookup_byte_offset(position).pos.0 as usize;
+    let mut edits = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue };
+        let kept = import.specifiers.iter().filter(|specifier| {
+            let local = match specifier {
+                ImportSpecifier::Named(named) => named.local.sym.as_ref(),
+                ImportSpecifier::Default(default) => default.local.sym.as_ref(),
+                ImportSpecifier::Namespace(namespace) => namespace.local.sym.as_ref(),
+            };
+            !locals.contains(local)
+        }).collect::<Vec<_>>();
+        if kept.len() == import.specifiers.len() { continue }
+        let start = offset(import.span.lo);
+        let end = offset(import.span.hi);
+        let replacement = if kept.is_empty() {
+            String::new()
+        } else {
+            let mut default = None;
+            let mut namespace = None;
+            let mut named = Vec::new();
+            for specifier in kept {
+                let snippet = source_map.span_to_snippet(specifier.span())
+                    .map_err(|error| format!("failed to retain declaration import: {error:?}"))?;
+                match specifier {
+                    ImportSpecifier::Default(_) => default = Some(snippet),
+                    ImportSpecifier::Namespace(_) => namespace = Some(snippet),
+                    ImportSpecifier::Named(_) => named.push(snippet),
+                }
+            }
+            let mut clauses = Vec::new();
+            if let Some(default) = default { clauses.push(default) }
+            if let Some(namespace) = namespace { clauses.push(namespace) }
+            if !named.is_empty() { clauses.push(format!("{{ {} }}", named.join(", "))) }
+            let source_end = offset(import.src.span.hi);
+            let literal = source_map.span_to_snippet(import.src.span())
+                .map_err(|error| format!("failed to retain declaration import source: {error:?}"))?;
+            let keyword = if import.type_only { "import type" } else { "import" };
+            format!("{keyword} {} from {}{}", clauses.join(", "), literal, &source[source_end..end])
+        };
+        edits.push((start, end, replacement));
+    }
+    let mut result = source.to_string();
+    for (start, end, replacement) in edits.into_iter().rev() {
+        result.replace_range(start..end, &replacement);
+    }
+    Ok(result)
+}
+
 fn reexported_class_or_interface_declarations_inner(
     path: &Path,
     name: &str,
@@ -3130,11 +3347,11 @@ fn reexported_class_or_interface_declarations_inner(
             if let Some((target_path, target_name)) =
                 named_import_targets(path, &module).get(&superclass)
             {
-                declarations.extend(reexported_class_or_interface_declarations_inner(
-                    target_path,
-                    target_name,
-                    visited,
-                )?);
+                declarations.extend(imported_class_as_local_binding(
+                    reexported_class_or_interface_declarations_inner(
+                        target_path, target_name, visited,
+                    )?, &superclass, true,
+                ));
             } else {
                 declarations.extend(reexported_class_or_interface_declarations_inner(
                     path, &superclass, visited,
@@ -3207,7 +3424,8 @@ fn reexported_class_or_interface_declarations_inner(
                     .span_to_snippet(declaration.span())
                     .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?;
             if name != "default" && local_name != name {
-                snippet = rename_declared_function(snippet, name);
+                snippet = imported_class_as_local_binding(vec![snippet], name, false)
+                    .into_iter().next().unwrap();
             }
             if !snippet.trim_start().starts_with("export ") {
                 snippet = format!("export {snippet}");
@@ -3218,11 +3436,11 @@ fn reexported_class_or_interface_declarations_inner(
     if let Some(superclass) = superclass {
         if let Some((target_path, target_name)) = named_import_targets(path, &module).get(&superclass)
         {
-            declarations.extend(reexported_class_or_interface_declarations_inner(
-                target_path,
-                target_name,
-                visited,
-            )?);
+            declarations.extend(imported_class_as_local_binding(
+                reexported_class_or_interface_declarations_inner(
+                    target_path, target_name, visited,
+                )?, &superclass, true,
+            ));
         } else {
             // `Base` may be declared beside the selected class rather than
             // imported. Follow that local binding through the same visited

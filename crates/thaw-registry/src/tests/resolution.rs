@@ -1244,26 +1244,61 @@ fn named_class_alias_keeps_imported_superclass_name() {
     fs::write(package.join("package.json"),
         r#"{"name":"derived-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
     fs::write(package.join("index.d.ts"),
-        "export { Derived as PublicDerived } from './derived';\nexport type { Derived as TypeDerived } from './derived';\n").unwrap();
+        "export { Derived as PublicDerived, Derived as OtherDerived } from './derived';\nexport type { Derived as TypeDerived } from './derived';\n").unwrap();
     fs::write(package.join("derived.d.ts"),
-        "import { Base } from './base';\nexport declare class Derived extends Base { self(): Derived; }\n").unwrap();
+        "import { Base as Parent } from './base';\nexport declare class Derived extends Parent { self(): Derived; }\n").unwrap();
     fs::write(package.join("base.d.ts"),
-        "export declare class Base { base(): string; }\n").unwrap();
+        "import { Grand as Super } from './grand';\nexport declare class Base extends Super { base(): string; self(): Base; key(): Base.Key; generic<Base>(value: Base): Base; }\nexport declare namespace Base { type Key = string; type Own = Base; type Wrap<Base> = Base; type Mapped = { [Base in keyof Base]: Base }; type Inferred = Base extends infer Base ? Base : Base; }\n").unwrap();
+    fs::write(package.join("grand.d.ts"),
+        "export declare class Grand { grand(): number; self(): Grand; }\n").unwrap();
     fs::write(package.join("index.js"), "module.exports = { PublicDerived: class {} };\n").unwrap();
     add_installed(&registry, &scratch.join("node_modules"), "derived-alias").unwrap();
     let declarations = resolve(&registry, "derived-alias").unwrap().dts_source;
-    assert!(declarations.contains("class Base"), "{declarations}");
-    assert!(declarations.contains("export type { Base }"), "{declarations}");
-    assert!(declarations.contains("extends Base"), "{declarations}");
+    assert!(declarations.contains("class Parent"), "{declarations}");
+    assert!(declarations.contains("export type { Parent };"), "{declarations}");
+    assert!(!declarations.contains("export declare class Parent"), "{declarations}");
+    assert!(declarations.contains("namespace Parent"), "{declarations}");
+    assert!(declarations.contains("self(): Parent"), "{declarations}");
+    assert!(declarations.contains("key(): Parent.Key"), "{declarations}");
+    assert!(declarations.contains("generic<Base>(value: Base): Base"), "{declarations}");
+    assert!(declarations.contains("type Own = Parent"), "{declarations}");
+    assert!(declarations.contains("type Wrap<Base> = Base"), "{declarations}");
+    assert!(declarations.contains("[Base in keyof Parent]: Base"), "{declarations}");
+    assert!(declarations.contains("Parent extends infer Base ? Base : Parent"), "{declarations}");
+    assert!(declarations.contains("extends Parent"), "{declarations}");
+    assert!(declarations.contains("class Parent extends Super"), "{declarations}");
+    assert!(declarations.contains("class Super"), "{declarations}");
+    assert!(declarations.contains("self(): Super"), "{declarations}");
     assert!(declarations.contains("self(): Derived"), "{declarations}");
     assert!(declarations.contains("class Derived"), "{declarations}");
     assert!(declarations.contains("export { Derived as PublicDerived }"), "{declarations}");
+    assert!(declarations.contains("export { Derived as OtherDerived }"), "{declarations}");
     assert!(declarations.contains("export type { Derived as TypeDerived }"), "{declarations}");
+    assert_eq!(declarations.matches("class Parent").count(), 1, "{declarations}");
+    assert_eq!(declarations.matches("class Derived").count(), 1, "{declarations}");
+    assert!(!declarations.contains("class Base"), "{declarations}");
     assert!(!declarations.contains("class PublicDerived { base()"), "{declarations}");
     assert!(!declarations.contains("class TypeDerived { base()"), "{declarations}");
     assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn materialized_base_import_retains_other_specifiers() {
+    // Unrun regression: materializing Core removes its import binding,
+    // while the unrelated type and value imports keep their syntax.
+    let source = "import Core, { type Shape, Value as Other } from './core';\nexport class Child extends Core { method(x: Shape): Other; }";
+    let locals = std::collections::BTreeSet::from(["Core".to_string()]);
+    let flattened = without_materialized_class_imports(source, &locals).unwrap();
+    assert!(flattened.contains("import { type Shape, Value as Other } from './core'"), "{flattened}");
+    assert!(!flattened.contains("import Core"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let source = "import type { Base as Parent, Shape } from './core';";
+    let locals = std::collections::BTreeSet::from(["Parent".to_string()]);
+    let retained = without_materialized_class_imports(source, &locals).unwrap();
+    assert!(retained.contains("import type { Shape } from './core'"), "{retained}");
+    assert!(thaw_parser::parse_declarations(&retained).is_ok(), "{retained}");
 }
 
 #[test]
@@ -1692,13 +1727,15 @@ fn installed_package_inlines_a_default_imported_class_used_as_an_extends_base() 
          export declare class Thing extends CoreThing {\n\
          \x20\x20extra(): string;\n\
          }\n\
+         export declare class Sibling extends CoreThing { sibling(): boolean; }\n\
          export default Thing;\n",
     )
     .unwrap();
     fs::write(
         package.join("core.d.ts"),
-        "export default class Thing {\n\
+         "export default class Thing {\n\
          \x20\x20base(): string;\n\
+         \x20\x20self(): Thing;\n\
          }\n",
     )
     .unwrap();
@@ -1721,6 +1758,12 @@ fn installed_package_inlines_a_default_imported_class_used_as_an_extends_base() 
         declarations.contains("class CoreThing") && declarations.contains("base(): string;"),
         "{declarations}"
     );
+    assert!(declarations.contains("self(): CoreThing"), "{declarations}");
+    assert!(declarations.contains("class Sibling extends CoreThing"), "{declarations}");
+    assert_eq!(declarations.matches("class CoreThing").count(), 1, "{declarations}");
+    assert!(declarations.contains("export type { CoreThing };"), "{declarations}");
+    assert!(!declarations.contains("export declare class CoreThing"), "{declarations}");
+    assert!(!declarations.contains("class Thing {"), "{declarations}");
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
