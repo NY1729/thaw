@@ -246,15 +246,231 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_return(Some(&promise))
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(parent_block);
-        let this_adapter = self.compile_ignored_this_adapter(
-            adapter,
-            &param_types,
-            &promise_type,
-            &format!("{adapter_name}__thaw_this_adapter"),
-        )?;
-        Ok(self
-            .allocate_lambda_environment(adapter, this_adapter, captures)?
-            .into())
+        let (entry, this_adapter) = if params.first().is_some_and(|param| param.name == "__thaw_this") {
+            self.compile_non_arrow_entries(adapter, params, &promise_type, &adapter_name)?
+        } else {
+            (adapter, self.compile_ignored_this_adapter(adapter, &param_types, &promise_type,
+                &format!("{adapter_name}__thaw_this_adapter"))?)
+        };
+        Ok(self.allocate_lambda_environment(entry, this_adapter, captures)?.into())
+    }
+
+    // A non-arrow closure keeps its typed `this` parameter in the body ABI,
+    // but neither public closure entry exposes it as a positional JS argument.
+    fn compile_non_arrow_entries(
+        &mut self,
+        target: FunctionValue<'ctx>,
+        params: &[HirParam],
+        ret: &HirType,
+        name: &str,
+    ) -> Result<(FunctionValue<'ctx>, FunctionValue<'ctx>), String> {
+        let receiver = &params[0].ty;
+        let visible = params[1..].iter().map(|param| param.ty.clone()).collect::<Vec<_>>();
+        let parent = self.builder.get_insert_block().ok_or("non-arrow closure needs a parent block")?;
+        let ordinary = self.module.add_function(
+            &format!("{name}__ordinary"), self.function_type(&visible, ret)?, Some(Linkage::Internal));
+        let entry = self.context.append_basic_block(ordinary, "entry");
+        self.builder.position_at_end(entry);
+        let undefined = match receiver {
+            HirType::Undefined => self.context.bool_type().const_zero().into(),
+            HirType::Json | HirType::Dictionary(_) => self.builder.build_call(
+                self.module.get_function("thaw_json_undefined").unwrap(), &[], "ordinary_this_undefined")
+                .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("undefined Json returned no value")?,
+            HirType::JsValue => {
+                let name = self.builder.build_global_string_ptr("undefined", "ordinary_this_name")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_call(self.module.get_function("thaw_js_get_global").unwrap(),
+                    &[name.as_pointer_value().into()], "ordinary_this_handle")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("undefined JsValue returned no value")?
+            }
+            _ => {
+                let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+                let saved_async_completion = self.active_async_completion.take();
+                self.compile_throw_type_error("Incompatible function receiver")?;
+                self.catch_stack = saved_catch_stack;
+                self.active_async_completion = saved_async_completion;
+                self.builder.position_at_end(parent);
+                let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name)?;
+                return Ok((ordinary, explicit));
+            }
+        };
+        let mut args = vec![ordinary.get_nth_param(0).unwrap().into(), undefined.into()];
+        args.extend(ordinary.get_param_iter().skip(1).map(BasicMetadataValueEnum::from));
+        let call = self.builder.build_call(target, &args, "invoke_non_arrow_ordinary")
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
+        else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
+            .ok_or("non-arrow ordinary entry returned no value")?)).map_err(|error| error.to_string())?; }
+        self.builder.position_at_end(parent);
+        let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name)?;
+        Ok((ordinary, explicit))
+    }
+
+    fn compile_non_arrow_this_entry(
+        &mut self,
+        target: FunctionValue<'ctx>,
+        visible: &[HirType],
+        receiver: &HirType,
+        ret: &HirType,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, String> {
+        let parent = self.builder.get_insert_block().ok_or("this entry needs a parent block")?;
+        let entry_fn = self.module.add_function(&format!("{name}__thaw_this_adapter"),
+            self.this_entry_function_type(visible, ret)?, Some(Linkage::Internal));
+        let entry = self.context.append_basic_block(entry_fn, "entry");
+        self.builder.position_at_end(entry);
+        let tagged = entry_fn.get_nth_param(1).unwrap().into_struct_value();
+        let kind = self.builder.build_extract_value(tagged, 0, "receiver_kind")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let word = self.builder.build_extract_value(tagged, 1, "receiver_word")
+            .map_err(|error| error.to_string())?.into_int_value();
+        if *receiver == HirType::Json {
+            self.compile_non_arrow_json_this_entry(entry_fn, target, ret, kind, word)?;
+            self.builder.position_at_end(parent);
+            return Ok(entry_fn);
+        }
+        let (expected, value): (u64, BasicValueEnum<'ctx>) = match receiver {
+            HirType::Undefined => (0, self.context.bool_type().const_zero().into()),
+            HirType::Null => (1, self.context.bool_type().const_int(1, false).into()),
+            HirType::Json | HirType::Dictionary(_) => (7, self.builder.build_int_to_ptr(word,
+                self.context.ptr_type(AddressSpace::default()), "receiver_json")
+                .map_err(|error| error.to_string())?.into()),
+            HirType::JsValue => (8, word.into()),
+            HirType::Bool => (2, self.builder.build_int_truncate(word, self.context.bool_type(), "receiver_bool")
+                .map_err(|error| error.to_string())?.into()),
+            HirType::F64 => (3, self.builder.build_bit_cast(word, self.context.f64_type(), "receiver_number")
+                .map_err(|error| error.to_string())?),
+            HirType::I64 => (4, word.into()),
+            HirType::Str | HirType::Symbol => {
+                let expected = if matches!(receiver, HirType::Symbol) { 6 } else { 5 };
+                (expected, self.builder.build_int_to_ptr(word,
+                    self.context.ptr_type(AddressSpace::default()), "receiver_string")
+                    .map_err(|error| error.to_string())?.into())
+            }
+            HirType::Object(fields) if fields.first().is_some_and(|(name, _)|
+                    name.starts_with("__thaw_class_identity_\u{1e}")) => (9,
+                self.builder.build_int_to_ptr(word, self.context.ptr_type(AddressSpace::default()),
+                    "receiver_native_class").map_err(|error| error.to_string())?.into()),
+            other => return Err(format!("unsupported non-arrow this type {other:?}")),
+        };
+        let kind_matches = self.builder.build_int_compare(IntPredicate::EQ, kind,
+            self.context.i8_type().const_int(expected, false), "receiver_kind_matches")
+            .map_err(|error| error.to_string())?;
+        let valid = if let HirType::Object(fields) = receiver {
+            let marker = fields[0].0.strip_prefix("__thaw_class_identity_\u{1e}").unwrap();
+            let class = marker.split('\u{1f}').next().unwrap();
+            let expected_class = self.builder.build_global_string_ptr(class, "receiver_expected_class")
+                .map_err(|error| error.to_string())?;
+            let identity = self.builder.build_call(self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                &[value.into_pointer_value().into(), expected_class.as_pointer_value().into()],
+                "receiver_class_identity").map_err(|error| error.to_string())?
+                .try_as_basic_value().basic().ok_or("class identity returned no value")?.into_int_value();
+            self.builder.build_and(kind_matches, identity, "receiver_valid_class")
+                .map_err(|error| error.to_string())?
+        } else { kind_matches };
+        let accepted = self.context.append_basic_block(entry_fn, "receiver_accepted");
+        let rejected = self.context.append_basic_block(entry_fn, "receiver_rejected");
+        self.builder.build_conditional_branch(valid, accepted, rejected)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(rejected);
+        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+        let saved_async_completion = self.active_async_completion.take();
+        self.compile_throw_type_error("Incompatible function receiver")?;
+        self.catch_stack = saved_catch_stack;
+        self.active_async_completion = saved_async_completion;
+        self.builder.position_at_end(accepted);
+        let mut args = vec![entry_fn.get_nth_param(0).unwrap().into(), value.into()];
+        args.extend(entry_fn.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
+        let call = self.builder.build_call(target, &args, "invoke_non_arrow_with_this")
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
+        else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
+            .ok_or("non-arrow this entry returned no value")?)).map_err(|error| error.to_string())?; }
+        self.builder.position_at_end(parent);
+        Ok(entry_fn)
+    }
+
+    // All scalar cases create an owned Json root, just like other Json
+    // constructors. A lambda parameter is borrowed for its invocation and
+    // may return or capture the root, so the adapter cannot destroy it here.
+    fn compile_non_arrow_json_this_entry(
+        &mut self,
+        entry_fn: FunctionValue<'ctx>,
+        target: FunctionValue<'ctx>,
+        ret: &HirType,
+        kind: IntValue<'ctx>,
+        word: IntValue<'ctx>,
+    ) -> Result<(), String> {
+        let join = self.context.append_basic_block(entry_fn, "receiver_json_ready");
+        let rejected = self.context.append_basic_block(entry_fn, "receiver_json_rejected");
+        let cases = [0_u64, 1, 2, 3, 5, 7]
+            .map(|tag| (tag, self.context.append_basic_block(entry_fn, &format!("receiver_json_{tag}"))));
+        let branches = cases.iter().map(|(tag, block)|
+            (self.context.i8_type().const_int(*tag, false), *block)).collect::<Vec<_>>();
+        self.builder.build_switch(kind, rejected, &branches)
+            .map_err(|error| error.to_string())?;
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let mut incoming = Vec::with_capacity(cases.len());
+        for (tag, block) in cases {
+            self.builder.position_at_end(block);
+            let value = match tag {
+                0 | 1 => self.builder.build_call(
+                    self.module.get_function(if tag == 0 { "thaw_json_undefined" } else { "thaw_json_null" }).unwrap(),
+                    &[], "receiver_json_nullish")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("nullish receiver constructor returned no value")?.into_pointer_value(),
+                2 => {
+                    let value = self.builder.build_int_truncate(word, self.context.i8_type(), "receiver_json_bool")
+                        .map_err(|error| error.to_string())?;
+                    self.builder.build_call(self.module.get_function("thaw_json_receiver_bool").unwrap(),
+                        &[value.into()], "receiver_json_bool_root")
+                        .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("bool receiver constructor returned no value")?.into_pointer_value()
+                }
+                3 => {
+                    let value = self.builder.build_bit_cast(word, self.context.f64_type(), "receiver_json_number")
+                        .map_err(|error| error.to_string())?;
+                    self.builder.build_call(self.module.get_function("thaw_json_receiver_number").unwrap(),
+                        &[value.into()], "receiver_json_number_root")
+                        .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("number receiver constructor returned no value")?.into_pointer_value()
+                }
+                5 => {
+                    let value = self.builder.build_int_to_ptr(word, pointer, "receiver_json_string")
+                        .map_err(|error| error.to_string())?;
+                    self.builder.build_call(self.module.get_function("thaw_json_receiver_string").unwrap(),
+                        &[value.into()], "receiver_json_string_root")
+                        .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("string receiver constructor returned no value")?.into_pointer_value()
+                }
+                7 => self.builder.build_int_to_ptr(word, pointer, "receiver_json_existing")
+                    .map_err(|error| error.to_string())?,
+                _ => unreachable!(),
+            };
+            self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+            incoming.push((value, block));
+        }
+        self.builder.position_at_end(rejected);
+        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+        let saved_async_completion = self.active_async_completion.take();
+        self.compile_throw_type_error("Incompatible function receiver")?;
+        self.catch_stack = saved_catch_stack;
+        self.active_async_completion = saved_async_completion;
+        self.builder.position_at_end(join);
+        let selected = self.builder.build_phi(pointer, "receiver_json_value")
+            .map_err(|error| error.to_string())?;
+        selected.add_incoming(&incoming.iter().map(|(value, block)|
+            (value as &dyn inkwell::values::BasicValue<'ctx>, *block)).collect::<Vec<_>>());
+        let mut args = vec![entry_fn.get_nth_param(0).unwrap().into(), selected.as_basic_value().into()];
+        args.extend(entry_fn.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
+        let call = self.builder.build_call(target, &args, "invoke_non_arrow_json_this")
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
+        else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
+            .ok_or("non-arrow Json entry returned no value")?)).map_err(|error| error.to_string())?; }
+        Ok(())
     }
 
     fn compile_lambda(
@@ -294,12 +510,12 @@ impl<'ctx> HirCompiler<'ctx> {
         let function = self
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
-        let this_adapter = self.compile_ignored_this_adapter(
-            function,
-            &param_types,
-            ret,
-            &format!("{name}__thaw_this_adapter"),
-        )?;
+        let (entry, this_adapter) = if params.first().is_some_and(|param| param.name == "__thaw_this") {
+            self.compile_non_arrow_entries(function, params, ret, &name)?
+        } else {
+            (function, self.compile_ignored_this_adapter(function, &param_types, ret,
+                &format!("{name}__thaw_this_adapter"))?)
+        };
 
         let i64_type = self.context.i64_type();
         let frame_captures = captures
@@ -313,7 +529,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .collect::<HashSet<_>>();
         // Closure captures retain their variable cells so mutations remain
         // visible when the function value is invoked later.
-        let closure = self.allocate_lambda_environment(function, this_adapter, captures)?;
+        let closure = self.allocate_lambda_environment(entry, this_adapter, captures)?;
         let arena_captures = captures
             .iter()
             .filter(|capture| self.arena_variables.contains(&capture.name))

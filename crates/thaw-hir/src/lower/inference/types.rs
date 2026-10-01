@@ -2473,6 +2473,11 @@ impl<'a> FnLowerer<'a> {
             // instead of discarding or pretending to know that ABI.
             HirExpr::RecursiveClosure(_, ty, _) => Ok(ty.clone()),
             HirExpr::TypedClosure(ty, _) => Ok(ty.clone()),
+            HirExpr::NonArrowFunction(closure) => match closure.as_ref() {
+                HirExpr::Lambda(_, params, ret, _) if params.first().is_some_and(|param| param.name == "__thaw_this") =>
+                    Ok(HirType::Function(params[1..].iter().map(|param| param.ty.clone()).collect(), Box::new(ret.clone()))),
+                _ => self.infer_expr_type(closure),
+            },
             HirExpr::Lambda(_, params, ret, _) => Ok(HirType::Function(
                 params.iter().map(|param| param.ty.clone()).collect(),
                 Box::new(ret.clone()),

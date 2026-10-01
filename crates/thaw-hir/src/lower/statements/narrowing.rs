@@ -34,6 +34,10 @@ impl<'a> FnLowerer<'a> {
         let saved_json_narrowings = self.json_narrowings.clone();
         let saved_union_narrowings = self.union_narrowings.clone();
         let saved_generic_arrows = self.generic_arrows.clone();
+        let saved_generic_non_arrow_names = self.generic_non_arrow_names.clone();
+        let saved_generic_non_arrow_receivers = self.generic_non_arrow_receivers.clone();
+        let saved_generic_non_arrow_receiver_templates =
+            self.generic_non_arrow_receiver_templates.clone();
         let saved_generic_arrow_self_names = self.generic_arrow_self_names.clone();
         let saved_generic_named_templates = self.generic_named_templates.clone();
         let saved_native_method_values = self.native_method_values.clone();
@@ -45,6 +49,9 @@ impl<'a> FnLowerer<'a> {
         self.json_narrowings = saved_json_narrowings;
         self.union_narrowings = saved_union_narrowings;
         self.generic_arrows = saved_generic_arrows;
+        self.generic_non_arrow_names = saved_generic_non_arrow_names;
+        self.generic_non_arrow_receivers = saved_generic_non_arrow_receivers;
+        self.generic_non_arrow_receiver_templates = saved_generic_non_arrow_receiver_templates;
         self.generic_arrow_self_names = saved_generic_arrow_self_names;
         self.generic_named_templates = saved_generic_named_templates;
         self.native_method_values = saved_native_method_values;

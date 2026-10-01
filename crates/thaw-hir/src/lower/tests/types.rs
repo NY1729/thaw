@@ -1578,6 +1578,34 @@ fn explicit_this_parameters_are_forwarded_by_function_call() {
 }
 
 #[test]
+fn function_expression_receiver_provenance_survives_contextual_lowering() {
+    let program = lower(
+        r#"function main(): void {
+            const ordinary: (value: number) => number = function(value) { return value; };
+            const lexical: (value: number) => number = value => value;
+            console.log(ordinary(1), lexical(2));
+        }"#,
+    );
+    let body = &program.functions[0].body;
+    assert!(matches!(
+        &body[0],
+        HirStmt::Let(_, _, HirExpr::NonArrowFunction(_))
+    ));
+    assert!(matches!(&body[1], HirStmt::Let(_, _, HirExpr::Lambda(..))));
+}
+
+#[test]
+fn generic_function_expression_keeps_receiver_provenance_after_specialization() {
+    let program = lower(
+        r#"function main(): void {
+            const identity = function<T>(value: T): T { return value; };
+            console.log(identity(7));
+        }"#,
+    );
+    assert!(format!("{:?}", program.functions[0].body).contains("NonArrowFunction"));
+}
+
+#[test]
 fn merges_compatible_interface_declarations() {
     lower(
         r#"interface User { name: string }
@@ -1678,4 +1706,82 @@ fn unannotated_buffer_binding_still_dispatches_byte_specific_methods() {
         !format!("{program:?}").contains("Bytes"),
         "a `Bytes` marker survived the erase pass into the lowered program"
     );
+}
+
+#[test]
+fn function_expression_this_is_hidden_from_public_signature() {
+    let program = lower(
+        r#"function main(): void {
+            const add: (delta: number) => number = function(this: Json, delta: number): number {
+                return Number(this["base"]) + delta;
+            };
+            const holder: Json = { base: 7 };
+            console.log(add.call(holder, 3));
+        }"#,
+    );
+    let HirStmt::Let(_, HirType::Function(visible, _), HirExpr::NonArrowFunction(closure)) =
+        &program.functions[0].body[0] else { panic!("expected typed non-arrow function expression"); };
+    assert_eq!(visible, &[HirType::F64]);
+    let HirExpr::Lambda(_, params, _, _) = closure.as_ref() else { panic!("expected lambda body"); };
+    assert_eq!(params[0].name, "__thaw_this");
+    assert_eq!(params[0].ty, HirType::Json);
+    assert_eq!(params.len(), 2);
+}
+
+#[test]
+fn unused_function_expression_this_keeps_visible_arity() {
+    let program = lower(
+        r#"function main(): void {
+            const add = function(delta: number): number { return delta + 1; };
+            console.log(add(2));
+        }"#,
+    );
+    let HirStmt::Let(_, _, HirExpr::NonArrowFunction(closure)) = &program.functions[0].body[0]
+        else { panic!("expected non-arrow function expression"); };
+    let HirExpr::Lambda(_, params, _, _) = closure.as_ref() else { panic!("expected lambda body"); };
+    assert_eq!(params.len(), 1);
+}
+
+#[test]
+fn generic_non_arrow_this_annotation_is_retained_until_specialization() {
+    lower(r#"function main(): void {
+        const choose = function<T>(this: T, value: T): T { return this; };
+        const alias = choose;
+        console.log(alias.call(7, 7));
+        console.log(alias.apply(8, [8] as [number]));
+        const bound = alias.bind(9);
+        console.log(bound(9));
+    }"#);
+}
+
+#[test]
+fn generic_non_arrow_this_scope_and_empty_operations_lower() {
+    lower(r#"function main(): void {
+        const choose = function<T>(this: T): T { return this; };
+        {
+            const choose = function<T>(this: T, value: T): T { return value; };
+            console.log(choose.call(3, 4));
+        }
+        console.log(choose.call(5));
+        console.log(typeof choose.call());
+        console.log(typeof choose.apply());
+        console.log(typeof choose.bind()());
+        console.log(choose.apply(6));
+        console.log(choose.apply(7, null));
+        console.log(choose.apply(8, undefined));
+        let effects = 0;
+        function missing(): null { effects++; return null; }
+        console.log(choose.apply(9, missing()));
+        console.log(effects);
+        const order: string[] = [];
+        function receiver(): number { order.push("receiver"); return 10; }
+        function tuple(): [] { order.push("tuple"); return []; }
+        function extra(): number { order.push("extra"); return 1; }
+        function absent(): null { order.push("null"); return null; }
+        console.log(choose.apply(receiver(), tuple(), extra()));
+        console.log(order.join(","));
+        order.length = 0;
+        console.log(choose.apply(receiver(), absent(), extra()));
+        console.log(order.join(","));
+    }"#);
 }
