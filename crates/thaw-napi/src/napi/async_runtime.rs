@@ -120,10 +120,15 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
             closing: false,
             aborting: false,
             scheduled: false,
+            callbacks_in_flight: 0,
+            finalized: false,
+            finalizer_completed: false,
+            live_released: false,
         }),
         space_available: Condvar::new(),
     });
     ACTIVE_THREADSAFE_FUNCTIONS.fetch_add(1, Ordering::AcqRel);
+    UNFINALIZED_THREADSAFE_FUNCTIONS.fetch_add(1, Ordering::AcqRel);
     LIVE_THREADSAFE_FUNCTIONS.fetch_add(1, Ordering::AcqRel);
     let threadsafe_ptr = (&mut *threadsafe) as *mut ThreadsafeFunction;
     threadsafe_functions()
@@ -167,7 +172,20 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     loop {
         if state.closing {
-            return record_threadsafe_status(function_ref, NAPI_CLOSING);
+            // A producer receiving napi_closing is done with its acquisition.
+            if state.thread_count > 0 {
+                state.thread_count -= 1;
+                if state.thread_count == 0 && !state.finalized {
+                    schedule_threadsafe(function, &mut state);
+                }
+            }
+            let retire = retire_threadsafe_if_ready(&mut state);
+            let status = record_threadsafe_status(function_ref, NAPI_CLOSING);
+            drop(state);
+            if retire {
+                LIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
+            }
+            return status;
         }
         if function_ref.max_queue_size == 0 || state.queue.len() < function_ref.max_queue_size {
             break;
@@ -203,22 +221,24 @@ pub unsafe extern "C" fn napi_release_threadsafe_function(
         .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if state.closing || state.thread_count == 0 {
+    if state.thread_count == 0 {
         return record_threadsafe_status(function_ref, NAPI_CLOSING);
     }
+    state.thread_count -= 1;
     if mode == 1 {
-        state.thread_count = 0;
         state.closing = true;
         state.aborting = true;
-    } else {
-        state.thread_count -= 1;
-        if state.thread_count == 0 {
-            state.closing = true;
-        }
+    } else if state.thread_count == 0 {
+        state.closing = true;
     }
     function_ref.space_available.notify_all();
-    if state.closing {
+    if state.closing && !state.finalized {
         schedule_threadsafe(function, &mut state);
+    }
+    let retire = retire_threadsafe_if_ready(&mut state);
+    drop(state);
+    if retire {
+        LIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
     }
     NAPI_OK
 }
@@ -544,7 +564,7 @@ pub unsafe extern "C" fn napi_delete_async_work(env: NapiEnv, work: *mut AsyncWo
 fn run_one_threadsafe_callback(address: usize) -> bool {
     let function_ptr = address as *mut ThreadsafeFunction;
     let function = unsafe { &*function_ptr };
-    let (data, aborting, finalize) = {
+    let (data, aborting) = {
         let mut state = function
             .state
             .lock()
@@ -552,13 +572,13 @@ fn run_one_threadsafe_callback(address: usize) -> bool {
         state.scheduled = false;
         let data = state.queue.pop_front();
         if data.is_some() {
+            state.callbacks_in_flight += 1;
             function.space_available.notify_one();
         }
         if !state.queue.is_empty() {
             schedule_threadsafe(function_ptr, &mut state);
         }
-        let finalize = state.closing && state.queue.is_empty();
-        (data, state.aborting, finalize)
+        (data, state.aborting)
     };
 
     if let Some(data) = data {
@@ -596,8 +616,26 @@ fn run_one_threadsafe_callback(address: usize) -> bool {
         }
     }
 
+    let finalize = {
+        let mut state = function
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if data.is_some() {
+            state.callbacks_in_flight -= 1;
+        }
+        if state.closing
+            && state.queue.is_empty()
+            && state.callbacks_in_flight == 0
+            && !state.finalized
+        {
+            state.finalized = true;
+            true
+        } else {
+            false
+        }
+    };
     if finalize {
-        LIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
         if function.referenced.swap(false, Ordering::AcqRel) {
             ACTIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
         }
@@ -609,6 +647,18 @@ fn run_one_threadsafe_callback(address: usize) -> bool {
                     function.context as *mut c_void,
                 );
             }
+        }
+        UNFINALIZED_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
+        let retire = {
+            let mut state = function
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.finalizer_completed = true;
+            retire_threadsafe_if_ready(&mut state)
+        };
+        if retire {
+            LIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
         }
     }
     data.is_some() && !aborting
