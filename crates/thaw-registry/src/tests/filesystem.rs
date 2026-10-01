@@ -31,6 +31,55 @@ fn fs_sync_and_promise_apis_operate_on_the_host_filesystem() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+#[cfg(unix)]
+#[test]
+fn fs_cp_finalizes_new_directory_modes_after_children_and_errors() {
+    // Unrun regression: read-only source directories remain readable while
+    // children are copied, then new destinations acquire the source mode.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_cp_directory_modes");
+    fs::write(dir.join("index.js"), r#"var fs = require('node:fs'), promises = require('node:fs/promises');
+        module.exports = async function(root) {
+            var source = root + '/source', nested = source + '/nested';
+            fs.mkdirSync(nested, { recursive: true });
+            fs.writeFileSync(nested + '/value.txt', 'copied');
+            fs.chmodSync(nested, 365); fs.chmodSync(source, 488);
+            fs.cpSync(source, root + '/sync', { recursive: true });
+            await promises.cp(source, root + '/promised', { recursive: true });
+            await new Promise(function(resolve, reject) { fs.cp(source, root + '/callback', { recursive: true }, function(error) { error ? reject(error) : resolve(); }); });
+            fs.mkdirSync(root + '/existing/nested', { recursive: true });
+            fs.chmodSync(root + '/existing/nested', 448);
+            fs.chmodSync(root + '/existing', 448);
+            fs.cpSync(source, root + '/existing', { recursive: true });
+            var fail = function(src) { if (src.endsWith('/value.txt')) throw new Error('child failure'); return true; };
+            var syncError, asyncError, callbackError;
+            try { fs.cpSync(source, root + '/sync-fail', { recursive: true, filter: fail }); } catch (error) { syncError = error.message; }
+            try { await promises.cp(source, root + '/async-fail', { recursive: true, filter: function(src) { return Promise.resolve().then(function() { return fail(src); }); } }); } catch (error) { asyncError = error.message; }
+            await new Promise(function(resolve) { fs.cp(source, root + '/callback-fail', { recursive: true, filter: function(src) { return Promise.resolve().then(function() { return fail(src); }); } }, function(error) { callbackError = error && error.message; resolve(); }); });
+            var mode = function(path) { return fs.statSync(path).mode & 4095; };
+            var paths = ['sync', 'promised', 'callback', 'existing', 'sync-fail', 'async-fail', 'callback-fail'];
+            var modes = paths.map(function(name) { var path = root + '/' + name; return [mode(path), mode(path + '/nested')]; });
+            var content = fs.readFileSync(root + '/sync/nested/value.txt', 'utf8');
+            [source].concat(paths.map(function(name) { return root + '/' + name; })).forEach(function(path) { fs.chmodSync(path + '/nested', 448); fs.chmodSync(path, 448); });
+            return [modes, content, syncError, asyncError, callbackError];
+        };"#).unwrap();
+    let modules = temp_registry("builtin_fs_cp_directory_modes_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCpDirectoryModes = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseCpDirectoryModes").unwrap();
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let parsed: serde_json::Value = serde_json::from_str(&unsafe { CStr::from_ptr(result) }.to_string_lossy()).unwrap();
+    assert_eq!(parsed[0], serde_json::json!([[488,365],[488,365],[488,365],[448,448],[488,365],[488,365],[488,365]]));
+    assert_eq!(parsed[1], "copied");
+    assert_eq!(parsed[2], "child failure");
+    assert_eq!(parsed[3], "child failure");
+    assert_eq!(parsed[4], "child failure");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
 #[test]
 fn fs_copy_realpath_and_mkdtemp_work_across_api_styles() {
     use std::ffi::{CStr, CString};
