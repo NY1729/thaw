@@ -2377,14 +2377,48 @@ fn napi_undefined_value() -> Value {
 }
 
 #[no_mangle]
-pub extern "C" fn thaw_jit_dictionary_get(kind: u8, object: *mut Value, key: *const c_char) -> f64 {
+const JIT_DICTIONARY_TYPE_ERROR: &[u8] = b"\x01TypeError\x01Cannot convert undefined or null to object\0";
+const JIT_DICTIONARY_DELETE_ERROR: &[u8] = b"\x01TypeError\x01Cannot delete property\0";
+const JIT_DICTIONARY_ENTRIES_ERROR: &[u8] = b"\x01TypeError\x01Iterator value is not an entry object\0";
+const JIT_DICTIONARY_ASSIGN_ERROR: &[u8] = b"\x01TypeError\x01Cannot assign to read only property\0";
+
+fn jit_dictionary_error(error: *mut *const c_char, message: &'static [u8]) {
+    if !error.is_null() {
+        unsafe { error.write(message.as_ptr().cast()) };
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_jit_dictionary_get(
+    kind: u8,
+    object: *mut Value,
+    key: *const c_char,
+    present: *mut u8,
+    error: *mut *const c_char,
+) -> f64 {
+    if object.is_null() || unsafe { thaw_json_is_nullish(object) } != 0 {
+        jit_dictionary_error(error, JIT_DICTIONARY_TYPE_ERROR);
+        return 0.0;
+    }
     let value = thaw_json_get(object, key);
-    match kind {
+    if !present.is_null() {
+        let state = if is_napi_undefined(unsafe { &*value }) {
+            0
+        } else if matches!(unsafe { &*value }, Value::Null) {
+            2
+        } else {
+            1
+        };
+        unsafe { present.write(state) };
+    }
+    let result = match kind % 3 {
         0 => thaw_json_as_number(value),
         1 => f64::from(thaw_json_as_bool(value)),
         2 => f64::from_bits(thaw_json_as_string(value) as usize as u64),
         _ => 0.0,
-    }
+    };
+    unsafe { thaw_json_destroy(value) };
+    result
 }
 
 #[no_mangle]
@@ -2393,12 +2427,27 @@ pub extern "C" fn thaw_jit_dictionary_mutate(
     object: *mut Value,
     key: *const c_char,
     value: f64,
+    error: *mut *const c_char,
 ) -> f64 {
+    if object.is_null() || unsafe { thaw_json_is_nullish(object) } != 0 {
+        jit_dictionary_error(error, JIT_DICTIONARY_TYPE_ERROR);
+        return 0.0;
+    }
+    if kind <= 2 && !object_writable(object, &to_str(key)) {
+        jit_dictionary_error(error, JIT_DICTIONARY_ASSIGN_ERROR);
+        return 0.0;
+    }
     match kind {
         0 => thaw_json_object_set_number(object, key, value),
         1 => thaw_json_object_set_bool(object, key, (value != 0.0).into()),
         2 => thaw_json_object_set_string(object, key, value.to_bits() as usize as *const c_char),
         3 => return f64::from(thaw_json_object_delete(object, key)),
+        4 => {
+            if thaw_json_object_delete(object, key) == 0 {
+                jit_dictionary_error(error, JIT_DICTIONARY_DELETE_ERROR);
+            }
+            return 1.0;
+        }
         _ => return 0.0,
     }
     value
@@ -2415,13 +2464,37 @@ pub extern "C" fn thaw_jit_dictionary_mutate(
 /// Operation `12` ignores both pointers and creates an empty object. Operation
 /// `13` returns an object's enumerable-key count. Operation `14` interprets
 /// `key` as an encoded numeric index and returns that ordered key as a string.
+/// Operation `23` implements the prototype-aware `in` predicate. Errors are
+/// returned as a tagged TypeError pointer through `error`.
 pub unsafe extern "C" fn thaw_jit_dictionary_query(
     operation: u8,
     object: *mut Value,
     key: *const c_char,
+    error: *mut *const c_char,
 ) -> f64 {
+    if (operation <= 7 || operation == 23)
+        && (object.is_null() || unsafe { thaw_json_is_nullish(object) } != 0)
+    {
+        jit_dictionary_error(error, JIT_DICTIONARY_TYPE_ERROR);
+        return 0.0;
+    }
+    if matches!(operation, 8..=11) && object.is_null() {
+        jit_dictionary_error(error, JIT_DICTIONARY_TYPE_ERROR);
+        return 0.0;
+    }
+    if operation == 11 && unsafe { thaw_json_is_nullish(object) } != 0 {
+        jit_dictionary_error(error, JIT_DICTIONARY_TYPE_ERROR);
+        return 0.0;
+    }
     match operation {
         0 => f64::from(unsafe { thaw_json_has_own(object, key) }),
+        23 => {
+            if unsafe { thaw_json_is_object_like(object) } == 0 {
+                jit_dictionary_error(error, JIT_DICTIONARY_TYPE_ERROR);
+                return 0.0;
+            }
+            f64::from(thaw_json_has(object, key))
+        },
         1 => f64::from_bits(wrap_array_handle(unsafe { thaw_json_keys(object) }) as usize as u64),
         2 => f64::from_bits(
             wrap_array_handle(unsafe { thaw_json_number_values(object) }) as usize as u64,
@@ -2441,26 +2514,54 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
         7 => f64::from_bits(
             wrap_array_handle(unsafe { thaw_json_string_entries(object) }) as usize as u64,
         ),
-        8 => f64::from_bits(unsafe {
+        8 => {
+            let result = unsafe {
             thaw_json_object_from_number_entries(
                 unwrap_array_handle(object.cast()),
                 unwrap_array_presence(object.cast()),
             )
-        } as usize as u64),
-        9 => f64::from_bits(unsafe {
+            };
+            if thaw_json_take_from_entries_error() != 0 {
+                jit_dictionary_error(error, JIT_DICTIONARY_ENTRIES_ERROR);
+                unsafe { thaw_json_destroy(result) };
+                return 0.0;
+            }
+            f64::from_bits(result as usize as u64)
+        },
+        9 => {
+            let result = unsafe {
             thaw_json_object_from_bool_entries(
                 unwrap_array_handle(object.cast()),
                 unwrap_array_presence(object.cast()),
             )
-        } as usize as u64),
-        10 => f64::from_bits(unsafe {
+            };
+            if thaw_json_take_from_entries_error() != 0 {
+                jit_dictionary_error(error, JIT_DICTIONARY_ENTRIES_ERROR);
+                unsafe { thaw_json_destroy(result) };
+                return 0.0;
+            }
+            f64::from_bits(result as usize as u64)
+        },
+        10 => {
+            let result = unsafe {
             thaw_json_object_from_string_entries(
                 unwrap_array_handle(object.cast()),
                 unwrap_array_presence(object.cast()),
             )
-        } as usize as u64),
+            };
+            if thaw_json_take_from_entries_error() != 0 {
+                jit_dictionary_error(error, JIT_DICTIONARY_ENTRIES_ERROR);
+                unsafe { thaw_json_destroy(result) };
+                return 0.0;
+            }
+            f64::from_bits(result as usize as u64)
+        },
         11 => {
-            f64::from_bits(unsafe { thaw_json_object_assign(object, key.cast()) } as usize as u64)
+            let result = unsafe { thaw_json_object_assign(object, key.cast()) };
+            if thaw_json_take_assign_error() != 0 {
+                jit_dictionary_error(error, JIT_DICTIONARY_ASSIGN_ERROR);
+            }
+            f64::from_bits(result as usize as u64)
         }
         12 => f64::from_bits(thaw_json_object_new() as usize as u64),
         13 => unsafe { object.as_ref() }.map_or(0.0, |value| match value {
@@ -4586,5 +4687,67 @@ mod tests {
         unsafe { thaw_json_destroy(alias) };
         assert!(!PROTOTYPES.with(|table| table.borrow().contains_key(&key)));
         unsafe { thaw_json_destroy(prototype) };
+    }
+
+    #[test]
+    fn jit_dictionary_callbacks_preserve_presence_and_typed_failures() {
+        unsafe extern "C" {
+            fn thaw_object_set_state(object: *const u8, operation: u8) -> bool;
+        }
+        let object = parse(r#"{"first":1}"#);
+        let mut present = 1;
+        let mut error = std::ptr::null();
+        let missing = thaw_jit_dictionary_get(
+            0, object, c"missing".as_ptr(), &mut present, &mut error,
+        );
+        assert!(missing.is_nan());
+        assert_eq!(present, 0);
+        assert!(error.is_null());
+        present = 1;
+        let null_value = parse(r#"{"x":null}"#);
+        thaw_jit_dictionary_get(0, null_value, c"x".as_ptr(), &mut present, &mut error);
+        assert_eq!(present, 2);
+
+        let sealed = parse(r#"{"first":1}"#);
+        assert!(unsafe { thaw_object_set_state(thaw_json_state_key(sealed), 2) });
+        let source = parse(r#"{"first":9,"new":10}"#);
+        unsafe { thaw_jit_dictionary_query(11, sealed, source.cast(), &mut error) };
+        assert!(read_c_string(error).starts_with("\u{1}TypeError\u{1}"));
+        assert_eq!(thaw_json_as_number(thaw_json_get(sealed, c"first".as_ptr())), 9.0);
+        assert_eq!(unsafe { thaw_json_has_own(sealed, c"new".as_ptr()) }, 0);
+
+        error = std::ptr::null();
+        assert_eq!(thaw_jit_dictionary_mutate(3, sealed, c"first".as_ptr(), 0.0, &mut error), 0.0);
+        assert!(error.is_null());
+        assert_eq!(thaw_jit_dictionary_mutate(4, sealed, c"first".as_ptr(), 0.0, &mut error), 1.0);
+        assert!(read_c_string(error).starts_with("\u{1}TypeError\u{1}"));
+
+        error = std::ptr::null();
+        let null_receiver = parse("null");
+        unsafe { thaw_jit_dictionary_query(1, null_receiver, std::ptr::null(), &mut error) };
+        assert!(read_c_string(error).starts_with("\u{1}TypeError\u{1}"));
+        for operation in [0, 23] {
+            error = std::ptr::null();
+            unsafe { thaw_jit_dictionary_query(operation, null_receiver, c"x".as_ptr(), &mut error) };
+            assert!(read_c_string(error).starts_with("\u{1}TypeError\u{1}"));
+        }
+        error = std::ptr::null();
+        thaw_jit_dictionary_mutate(4, null_receiver, c"x".as_ptr(), 0.0, &mut error);
+        assert!(read_c_string(error).starts_with("\u{1}TypeError\u{1}"));
+
+        let entries = [1_u64, 0];
+        let presence = [1_u64, 0];
+        let handle = [entries.as_ptr() as u64, presence.as_ptr() as u64];
+        error = std::ptr::null();
+        let result = unsafe {
+            thaw_jit_dictionary_query(8, handle.as_ptr().cast_mut().cast(), std::ptr::null(), &mut error)
+        };
+        assert!(read_c_string(error).starts_with("\u{1}TypeError\u{1}"));
+        unsafe { thaw_json_destroy(result.to_bits() as usize as *mut Value) };
+        unsafe { thaw_json_destroy(object) };
+        unsafe { thaw_json_destroy(null_value) };
+        unsafe { thaw_json_destroy(null_receiver) };
+        unsafe { thaw_json_destroy(sealed) };
+        unsafe { thaw_json_destroy(source) };
     }
 }

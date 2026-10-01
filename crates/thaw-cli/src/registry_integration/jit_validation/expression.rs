@@ -1252,14 +1252,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::String);
-        } else if matches!(token.as_str(), "dnget" | "dbget" | "dsget") {
+        } else if matches!(token.as_str(), "dnget" | "dbget" | "dsget" | "dngetoptional" | "dbgetoptional" | "dsgetoptional") {
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Dictionary {
                 return None;
             }
             stack.push(match token.as_str() {
-                "dnget" => JitKind::Number,
-                "dbget" => JitKind::Boolean,
-                "dsget" => JitKind::String,
+                "dnget" | "dngetoptional" => JitKind::Number,
+                "dbget" | "dbgetoptional" => JitKind::Boolean,
+                "dsget" | "dsgetoptional" => JitKind::String,
                 _ => unreachable!(),
             });
         } else if matches!(token.as_str(), "dnempty" | "dbempty" | "dsempty") {
@@ -1312,7 +1312,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(token.as_str(), "ddelete" | "dhasown" | "din") {
+        } else if matches!(token.as_str(), "ddelete" | "dstrictdelete" | "dhasown" | "din") {
             let expected = if token == "din" {
                 (JitKind::Dictionary, JitKind::String)
             } else {
