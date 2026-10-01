@@ -133,8 +133,10 @@ fn extracts_functions_from_a_nested_namespace() {
         "#;
     let funcs = parse_dts(source).unwrap();
     assert_eq!(funcs.len(), 2);
-    assert!(funcs.iter().any(|f| f.name == "deep"));
-    assert!(funcs.iter().any(|f| f.name == "shallow"));
+    assert!(funcs.iter().any(|f| f.name == "Outer.Inner.deep"));
+    assert!(funcs.iter().any(|f| f.name == "Outer.shallow"));
+    let members = nested_namespace_members(source);
+    assert_eq!(members["Outer"]["Inner.deep"], "Inner.deep");
 }
 
 /// The `export = obj` shape backed by an *interface* rather than a
@@ -366,8 +368,8 @@ fn namespaced_functions_classify_normally() {
             }
         "#;
     let funcs = parse_dts(source).unwrap();
-    let add = funcs.iter().find(|f| f.name == "add").unwrap();
-    let identity = funcs.iter().find(|f| f.name == "identity").unwrap();
+    let add = funcs.iter().find(|f| f.name == "Ns.add").unwrap();
+    let identity = funcs.iter().find(|f| f.name == "Ns.identity").unwrap();
     assert!(matches!(classify(add), Classification::FastPath(_)));
     assert!(matches!(
         classify(identity),
@@ -689,6 +691,129 @@ fn factory_return_type_resolves_through_a_generic_type_alias_to_its_real_class()
     assert_eq!(returns.get("createTransport"), Some(&"Mail".to_string()));
 }
 
+#[test]
+fn namespace_function_identity_survives_equal_bare_names() {
+    // Unrun regression: the type-only namespace must not erase either
+    // live namespace's independent signature or factory identity.
+    let source = r#"
+        declare namespace Types { function make(value: boolean): Ghost; }
+        export type { Types };
+        declare namespace Left { function make(value: string): LeftResult; }
+        declare namespace Right { function make(value: number): RightResult; }
+        export { Left, Right };
+        declare class LeftResult {}
+        declare class RightResult {}
+        declare class Ghost {}
+    "#;
+    let functions = parse_dts(source).unwrap();
+    let names = functions.iter().map(|function| function.name.as_str()).collect::<Vec<_>>();
+    assert_eq!(names, vec!["Left.make", "Right.make"]);
+    let returns = function_return_named_types(source);
+    assert_eq!(returns.get("Left.make"), Some(&"LeftResult".to_string()));
+    assert_eq!(returns.get("Right.make"), Some(&"RightResult".to_string()));
+    assert!(!returns.contains_key("Types.make"));
+    let classifications = effective_classifications(&functions, true);
+    assert!(classifications.iter().all(|(_, classification)|
+        matches!(classification, Classification::Fallback { .. })));
+    let qualified = classifications.iter().map(|(name, _)| QualifiedFallback {
+        name: name.clone(),
+        alias: format!("pkg_{}", name.replace('.', "_")),
+        qualified_key: format!("pkg::{name}"),
+        suppress_bare: false,
+    }).collect::<Vec<_>>();
+    let shim = generate_shim(&functions, true, &qualified, &HashSet::new());
+    assert!(shim.contains("pkg::Left.make"), "{shim}");
+    assert!(shim.contains("pkg::Right.make"), "{shim}");
+    assert!(!shim.contains("function Left.make"), "{shim}");
+    assert!(!shim.contains("function Right.make"), "{shim}");
+}
+
+#[test]
+fn namespace_factories_keep_lexical_class_identity_and_type_alias_provenance() {
+    // Unrun regression: equal bare class/function names in live namespaces
+    // must not share a factory result, while an aliased type export stays inert.
+    let source = r#"
+        declare namespace Types { function make(): Missing; }
+        export type { Types as TypeAlias };
+        declare namespace Left {
+            class Result { left(): string; }
+            function make(): Result;
+        }
+        declare namespace Right {
+            class Result { right(): number; }
+            function make(): Result;
+        }
+        export { Left, Right };
+    "#;
+    let functions = parse_dts(source).unwrap();
+    assert!(functions.iter().all(|function| !function.name.starts_with("Types.")));
+    assert_eq!(function_return_named_types(source).get("Left.make"), Some(&"Left.Result".to_string()));
+    assert_eq!(function_return_named_types(source).get("Right.make"), Some(&"Right.Result".to_string()));
+    assert_eq!(type_only_namespace_names(source), HashSet::from(["Types".to_string()]));
+}
+
+#[test]
+fn namespace_value_alias_keeps_runtime_when_type_alias_is_also_exported() {
+    // Unrun regression: type-only and value edges can share an original
+    // namespace under different public aliases.
+    let source = r#"
+        declare namespace Shared {
+            class Result { method(): string; }
+            function make(): Result;
+        }
+        export type { Shared as Shape };
+        export { Shared as Runtime };
+    "#;
+    assert!(!type_only_namespace_names(source).contains("Shared"));
+    assert!(nonpublic_namespace_sources(source).contains("Shared"));
+    assert!(!parse_dts(source).unwrap().iter().any(|function| function.name == "Shared.make"));
+    assert!(parse_dts(source).unwrap().iter().any(|function| function.name == "Runtime.make"));
+    assert_eq!(function_return_named_types(source).get("Runtime.make"), Some(&"Runtime.Result".to_string()));
+    assert!(!function_return_named_types(source).contains_key("Shared.make"));
+    let classes = parse_dts_classes(source).unwrap();
+    assert!(classes.iter().any(|class| class.name == "Runtime.Result" && class.methods.iter().any(|method| method.name == "method")));
+    assert!(classes.iter().any(|class| class.name == "Shared.Result"));
+    assert!(!nested_namespace_members(source).contains_key("Shared"));
+    assert_eq!(nested_namespace_members(source)["Runtime"]["make"], "make");
+}
+
+#[test]
+fn namespace_source_stays_live_when_it_is_also_value_exported() {
+    let source = r#"
+        declare namespace Shared { function make(): string; }
+        export { Shared, Shared as Runtime };
+        export type { Shared as Shape };
+    "#;
+    assert!(!nonpublic_namespace_sources(source).contains("Shared"));
+    let functions = parse_dts(source).unwrap();
+    assert!(functions.iter().any(|function| function.name == "Shared.make"));
+    assert!(functions.iter().any(|function| function.name == "Runtime.make"));
+}
+
+#[test]
+fn commonjs_export_assignment_only_removes_its_root_namespace() {
+    // Unrun regression: `export = NS` exposes direct methods as bare keys,
+    // but a deeper namespace still has its own qualified runtime path.
+    let source = r#"
+        declare namespace API {
+            function direct(): string;
+            namespace Inner { function deep(): number; }
+        }
+        export = API;
+    "#;
+    let names = parse_dts(source).unwrap().into_iter().map(|function| function.name)
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"direct".to_string()));
+    assert!(names.contains(&"Inner.deep".to_string()));
+}
+
+#[test]
+fn export_assignment_namespace_keeps_commonjs_bare_method_abi() {
+    let source = "declare namespace QueryString { function parse(input: string): string; }\nexport = QueryString;\n";
+    let functions = parse_dts(source).unwrap();
+    assert_eq!(functions[0].name, "parse");
+}
+
 /// Two same-arity overloads whose sole parameter is a real npm
 /// package's own option-bag interface, differing only by whether a
 /// `file` key is required or forced absent -- real example: `tar`'s
@@ -943,7 +1068,7 @@ fn namespace_function_signature_uses_local_type_layout() {
             function run(value: Options): void;
         }
     "#).unwrap();
-    let run = functions.iter().find(|function| function.name == "run").unwrap();
+    let run = functions.iter().find(|function| function.name == "API.run").unwrap();
     assert_eq!(run.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
 }
 

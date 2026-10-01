@@ -363,9 +363,16 @@ fn rewrite_qualified_calls(
         fn visit_call_expr(&mut self, call: &CallExpr) {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(member) = &**callee {
-                    if let (Expr::Ident(obj), MemberProp::Ident(prop)) =
-                        (&*member.obj, &member.prop)
-                    {
+                    let mut names = Vec::new();
+                    let mut base = callee.as_ref();
+                    while let Expr::Member(segment) = base {
+                        let MemberProp::Ident(property) = &segment.prop else { break };
+                        names.push(property.sym.to_string());
+                        base = segment.obj.as_ref();
+                    }
+                    if let Expr::Ident(obj) = base {
+                        names.reverse();
+                        let path = names.join(".");
                         let package = self
                             .imported_packages
                             .get(obj.sym.as_str())
@@ -373,7 +380,7 @@ fn rewrite_qualified_calls(
                             .unwrap_or(obj.sym.as_str());
                         if let Some((_, _, alias)) =
                             self.rewrites.iter().find(|(pkg, name, _)| {
-                                pkg == package && name.as_str() == &*prop.sym
+                                pkg == package && name == &path
                             })
                         {
                             let imported = self.imported_packages.contains_key(obj.sym.as_str());

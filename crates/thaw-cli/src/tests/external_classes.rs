@@ -1579,6 +1579,68 @@ fn type_only_namespace_gates_nested_class_runtime_value() {
 }
 
 #[test]
+fn qualified_namespace_functions_keep_separate_runtime_keys() {
+    // Unrun regression: two live `make` methods are distinct, while a
+    // type-only namespace contributes no captured runtime member.
+    let source = r#"
+        declare namespace Types { function make(value: boolean): string; }
+        export type { Types };
+        declare namespace Left { function make(value: string): string; }
+        declare namespace Right { function make(value: number): number; }
+        export { Left, Right };
+    "#;
+    let functions = thaw_bridge::parse_dts(source).unwrap();
+    let type_only = thaw_bridge::type_only_namespace_names(source);
+    let mut namespaces = thaw_bridge::nested_namespace_members(source);
+    namespaces.retain(|name, _| !type_only.contains(name));
+    for (namespace, members) in &mut namespaces {
+        for (member, target) in members {
+            let path = format!("{namespace}.{member}");
+            if functions.iter().any(|function| function.name == path) { *target = path; }
+        }
+    }
+    assert!(!namespaces.contains_key("Types"));
+    assert_eq!(namespaces["Left"]["make"], "Left.make");
+    assert_eq!(namespaces["Right"]["make"], "Right.make");
+    assert_ne!(function_identifier("Left.make"), function_identifier("Right.make"));
+    assert!(!function_identifier("Left.make").contains('.'));
+    let rewrites = vec![("pkg".to_string(), "Left.make".to_string(),
+        "pkg___thaw_function_4c6566742e6d616b65".to_string())];
+    let rewritten = rewrite_qualified_calls(
+        "function main(): void { pkg.Left.make('x'); }",
+        &rewrites,
+        &std::collections::HashSet::new(),
+    ).unwrap();
+    assert!(rewritten.contains("pkg___thaw_function_4c6566742e6d616b65('x')"), "{rewritten}");
+}
+
+#[test]
+fn deeply_qualified_namespace_function_keeps_its_runtime_path() {
+    // Unrun regression: the nested map and package call rewrite agree on
+    // the full path, including two namespaces with a shared bare method.
+    let source = r#"
+        declare namespace Outer {
+            namespace Left { function make(value: string): string; }
+            namespace Right { function make(value: number): number; }
+        }
+        export { Outer };
+    "#;
+    let functions = thaw_bridge::parse_dts(source).unwrap();
+    assert!(functions.iter().any(|function| function.name == "Outer.Left.make"));
+    assert!(functions.iter().any(|function| function.name == "Outer.Right.make"));
+    let nested = thaw_bridge::nested_namespace_members(source);
+    assert_eq!(nested["Outer"]["Left.make"], "Left.make");
+    assert_eq!(nested["Outer"]["Right.make"], "Right.make");
+    let alias = format!("pkg_{}", function_identifier("Outer.Left.make"));
+    let rewritten = rewrite_qualified_calls(
+        "function main(): void { pkg.Outer.Left.make('x'); }",
+        &[("pkg".to_string(), "Outer.Left.make".to_string(), alias.clone())],
+        &std::collections::HashSet::new(),
+    ).unwrap();
+    assert!(rewritten.contains(&format!("{alias}('x')")), "{rewritten}");
+}
+
+#[test]
 fn value_export_of_same_class_name_wins_over_type_only_marker() {
     let source = "export declare class Client { constructor(); static create(): Client; } export type { Client };";
     let mut classes = thaw_bridge::parse_dts_classes(source).unwrap();

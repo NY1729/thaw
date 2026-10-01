@@ -258,6 +258,25 @@ fn generates_load_script_call_per_bundle() {
 }
 
 #[test]
+fn nested_namespace_capture_keeps_deep_path_and_receiver() {
+    // Unrun regression: the callable's receiver is the immediate namespace
+    // object, not the package root or an unrelated same-bare function.
+    let nested = vec![("Outer.Inner.make".to_string(), "pkg::Outer.Inner.make".to_string())];
+    let init = generate_module_init(&[ModuleBundle {
+        package_name: "pkg",
+        js_source: "module.exports.Outer = { Inner: { make: function() { return this.tag; }, tag: 'inner' } };",
+        fallback_names: &[],
+        class_names: &[],
+        qualified_aliases: &[],
+        nested_namespace_aliases: &nested,
+        value_exports: &[],
+    }]);
+    assert!(init.contains("module.exports?.Outer?.Inner"), "{init}");
+    assert!(init.contains("__thaw_bind_preserving_statics(__thaw_nested_value, __thaw_nested_receiver)"), "{init}");
+    assert!(init.contains("pkg::Outer.Inner.make"), "{init}");
+}
+
+#[test]
 fn escapes_quotes_and_newlines_in_bundled_source() {
     let bundles = [ModuleBundle {
         package_name: "pkg",
