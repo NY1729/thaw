@@ -432,6 +432,10 @@ impl<'ctx> HirCompiler<'ctx> {
         for (slot, ty, _) in self.global_variables.values().cloned().collect::<Vec<_>>() {
             self.register_arena_root_slots(register, slot, ty)?;
         }
+        for slot in &self.module_exception_roots {
+            self.builder.build_call(register, &[(*slot).into()], "register_module_exception_root")
+                .map_err(|error| error.to_string())?;
+        }
         self.call_module_init_if_present(cleanup);
         self.configure_unhandled_rejection_reporter();
         let handler_ptr = handler_fn.as_global_value().as_pointer_value();

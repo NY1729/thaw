@@ -658,23 +658,9 @@ fn top_level_error_throw_reports_name_and_message() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// `await import("./literal-path")` used to fail to compile entirely
-/// ("unsupported callee (super/import calls not supported)") --
-/// thaw-hir rejected every `Callee::Import` outright, with no path at
-/// all for even the most common real-world shape (a literal string
-/// specifier naming a local project file). No runtime module loader
-/// exists in this ahead-of-time-compiled model to build a real
-/// namespace object when the call actually executes, but the target's
-/// exports are already fully known at compile time (the same
-/// information a static `import * as ns from "./other"` already
-/// resolves) -- so `module_graph.rs`'s AST-flattening pass now
-/// recognizes a literal-specifier `import(...)` as a real dependency
-/// edge and rewrites the call itself into the equivalent
-/// `Promise.resolve({ ...already-resolved exports })`, including a
-/// default export. A non-literal specifier (a plain variable, e.g.)
-/// isn't resolvable at compile time and correctly still hits the
-/// original rejection -- no runtime module loader was added, only
-/// this one compile-time-resolvable shape.
+/// Literal local imports resolve at build time while their module initializer
+/// runs only from the import Promise continuation. Computed specifiers remain
+/// unsupported by the ahead-of-time resolver.
 #[test]
 fn dynamic_import_of_a_literal_local_path_resolves_named_and_default_exports() {
     let dir = std::env::temp_dir().join(format!(
@@ -716,6 +702,191 @@ fn dynamic_import_of_a_literal_local_path_resolves_named_and_default_exports() {
         String::from_utf8_lossy(&result.stdout),
         "hi\nbye\ndefault export\n"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_initializes_once_and_reads_live_exports() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-local-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("later.ts"),
+        "console.log('loaded'); export let count: number = 1; export function increment(): void { count++; }").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { console.log('before'); const first = await import('./later'); first.increment(); const second = await import('./later'); console.log(first === second, first.count, second.count); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\nloaded\ntrue 2 2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_caches_initialization_failure() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-failure-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("later.ts"),
+        "console.log('attempt'); throw new Error('boom'); export const value: number = 1;").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { try { await import('./later'); } catch (error) { console.log('rejected'); } try { await import('./later'); } catch (error) { console.log('rejected'); } }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "attempt\nrejected\nrejected\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_failure_cache_survives_lambda_arena_reset() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-lambda-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("later.ts"),
+        "throw new Error('cached failure'); export const value: number = 1;").unwrap();
+    let entry = dir.join("handler.ts");
+    std::fs::write(&entry,
+        "async function handler(event: Json): Promise<Json> { try { await import('./later'); } catch (error) { console.log(error.message); } return event; }").unwrap();
+    let output = dir.join("bootstrap");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let (sender, receiver) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for index in 0..2 {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = connection.read(&mut request).unwrap();
+            let event = format!("{{\"invocation\":{index}}}");
+            connection.write_all(format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: lazy-{index}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{event}",
+                event.len(),
+            ).as_bytes()).unwrap();
+            drop(connection);
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut posted = Vec::new();
+            connection.read_to_end(&mut posted).unwrap();
+            sender.send(String::from_utf8_lossy(&posted).into_owned()).unwrap();
+            connection.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        }
+    });
+    let mut child = Command::new(&output)
+        .env("AWS_LAMBDA_RUNTIME_API", address)
+        .stdout(Stdio::piped())
+        .spawn().unwrap();
+    for index in 0..2 {
+        let posted = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(posted.starts_with(&format!(
+            "POST /2018-06-01/runtime/invocation/lazy-{index}/response"
+        )), "{posted}");
+    }
+    server.join().unwrap();
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "cached failure\ncached failure\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_external_import_defers_package_script() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-package-{}", std::process::id()));
+    let package = dir.join("registry/modules/later");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export function value(): number;").unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "globalThis.__later_count = (globalThis.__later_count || 0) + 1; module.exports.value = function() { return globalThis.__later_count; };").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { console.log('before'); const first = await import('later'); const second = await import('later'); console.log(first === second, second.value()); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\ntrue 1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_initializes_static_dependencies_only_on_first_call() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-dependency-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("base.ts"), "console.log('base'); export const value: number = 7;").unwrap();
+    std::fs::write(dir.join("later.ts"), "import { value } from './base'; console.log('later'); export const result: number = value;").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { console.log('before'); const first = await import('./later'); const second = await import('./later'); console.log(first.result, second.result); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\nbase\nlater\n7 7\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn side_effect_only_external_dynamic_import_is_deferred() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-side-effect-{}", std::process::id()));
+    let package = dir.join("registry/modules/side-effect");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export interface Marker { value: number; }").unwrap();
+    std::fs::write(package.join("bundle.js"), "console.log('package loaded');").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "async function main(): Promise<void> { console.log('before'); await import('side-effect'); await import('side-effect'); console.log('after'); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\npackage loaded\nafter\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_back_edge_to_a_static_dependency_keeps_one_initialization() {
+    let dir = std::env::temp_dir().join(format!("thaw-lazy-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("later.ts"),
+        "import { base } from './main'; console.log('later'); export const result: number = base + 1;").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "export const base: number = 7; async function main(): Promise<void> { console.log('before'); const later = await import('./later'); console.log(later.result); }").unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\nlater\n8\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn static_import_cycle_is_rejected_before_emitting_uninitialized_exports() {
+    let dir = std::env::temp_dir().join(format!("thaw-static-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("other.ts"), "import { left } from './main'; export const right: number = left + 1;").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import { right } from './other'; export const left: number = right + 1; function main(): void {}";
+    std::fs::write(&entry, source).unwrap();
+    let error = module_graph::bundle(&entry, source, &Default::default(), &Default::default(), &Default::default(), &Default::default()).unwrap_err();
+    assert!(error.contains("cyclic static user-module import"), "{error}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn type_only_cycle_keeps_both_interface_declarations_without_startup_effects() {
+    let dir = std::env::temp_dir().join(format!("thaw-type-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("other.ts"),
+        "import type { Left } from './main'; export interface Right { value: number; } export function accept(left: Left): void {} console.log('other initialized');").unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import type { Right } from './other'; export interface Left { value: number; } function accept(right: Right): void {} function main(): void { console.log('ready'); }";
+    std::fs::write(&entry, source).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ready\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -877,7 +1048,7 @@ fn rejects_relative_typescript_import_cycles_with_the_full_chain() {
         &std::collections::HashMap::new(),
     )
     .unwrap_err();
-    assert!(error.contains("cyclic user-module import"));
+    assert!(error.contains("cyclic static user-module import"));
     assert!(error.contains("b.ts"));
     assert!(error.contains("c.ts"));
     let _ = std::fs::remove_dir_all(dir);

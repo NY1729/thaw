@@ -8,6 +8,7 @@ use thaw_parser::ast::{
 };
 
 type SourceTransform<'a> = dyn Fn(&str) -> Result<String, String> + 'a;
+pub(crate) const EXTERNAL_MODULE_OFFSET: usize = 1_000_000;
 
 #[derive(Debug)]
 struct LoadedModule {
@@ -327,9 +328,6 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<(String, bool, bool)>, S
     module.visit_with(&mut dynamic_imports);
     for specifier in dynamic_imports.specs {
         runtime.insert(specifier.clone());
-        // Dynamic imports remain eager until the lazy initializer ABI is
-        // connected; type-only reachability can be fixed independently.
-        static_runtime.insert(specifier.clone());
         if !specs.contains(&specifier) {
             specs.push(specifier);
         }
@@ -347,22 +345,12 @@ fn load_module(
     transform: Option<&SourceTransform<'_>>,
     modules: &mut Vec<LoadedModule>,
     loaded: &mut HashMap<PathBuf, usize>,
-    visiting: &mut Vec<PathBuf>,
     watched: &mut HashSet<PathBuf>,
 ) -> Result<usize, String> {
     watched.insert(path.clone());
     if let Some(index) = loaded.get(&path) {
         return Ok(*index);
     }
-    if let Some(start) = visiting.iter().position(|candidate| candidate == &path) {
-        let mut cycle = visiting[start..]
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>();
-        cycle.push(path.display().to_string());
-        return Err(format!("cyclic user-module import: {}", cycle.join(" -> ")));
-    }
-    visiting.push(path.clone());
     let source = match source_override {
         Some(source) => source.to_string(),
         None => std::fs::read_to_string(&path)
@@ -377,10 +365,21 @@ fn load_module(
         .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
     let module = thaw_hir::normalize_top_level_destructuring(&module)
         .map_err(|error| format!("failed to normalize `{}`: {error}", path.display()))?;
+    let specifiers = dependency_specifiers(&module)?;
+    // Reserve identity before descending so a dynamic or type-only back edge
+    // can refer to this module. Static cycles are checked separately against
+    // the static dependency graph before emission.
+    let index = modules.len();
+    modules.push(LoadedModule {
+        path: path.clone(), source: source.clone(), module,
+        dependencies: HashMap::new(), runtime_dependencies: HashSet::new(),
+        static_dependencies: HashSet::new(),
+    });
+    loaded.insert(path.clone(), index);
     let mut dependencies = HashMap::new();
     let mut runtime_dependencies = HashSet::new();
     let mut static_dependencies = HashSet::new();
-    for (specifier, is_runtime, is_static) in dependency_specifiers(&module)? {
+    for (specifier, is_runtime, is_static) in specifiers {
         if !specifier.starts_with('.') {
             continue;
         }
@@ -388,22 +387,14 @@ fn load_module(
             watched.extend(relative_candidates(&path, &specifier));
             format!("{}: {error}", source_location(&path, &source, &specifier))
         })?;
-        let dependency = load_module(dependency_path, None, transform, modules, loaded, visiting, watched)?;
+        let dependency = load_module(dependency_path, None, transform, modules, loaded, watched)?;
         if is_runtime { runtime_dependencies.insert(dependency); }
         if is_static { static_dependencies.insert(dependency); }
         dependencies.insert(specifier, dependency);
     }
-    visiting.pop();
-    let index = modules.len();
-    modules.push(LoadedModule {
-        path: path.clone(),
-        source,
-        module,
-        dependencies,
-        runtime_dependencies,
-        static_dependencies,
-    });
-    loaded.insert(path, index);
+    modules[index].dependencies = dependencies;
+    modules[index].runtime_dependencies = runtime_dependencies;
+    modules[index].static_dependencies = static_dependencies;
     Ok(index)
 }
 
@@ -436,16 +427,10 @@ struct RenameReferences<'a> {
     /// (`z.number(...)`). See `thaw_bridge::nested_namespace_members`'s
     /// own doc comment; real example: zod's `z.coerce`, `z.core`, `z.iso`.
     nested_namespaces: &'a HashMap<String, HashMap<String, HashMap<String, String>>>,
-    /// `import("literal specifier")` -- specifier string -> that
-    /// dependency's own export map (name -> flattened qualified
-    /// symbol), the exact same shape `namespaces` already holds for a
-    /// *static* `import * as ns from "..."`. Only ever populated for a
-    /// specifier this module already depends on (relative paths this
-    /// compiler resolved ahead of time in `dependency_specifiers`); a
-    /// computed specifier, or one this pass can't resolve, is left
-    /// alone here and falls through to thaw-hir's existing "import
-    /// calls not supported" rejection.
-    dynamic_imports: &'a HashMap<String, HashMap<String, String>>,
+    /// Literal import specifier -> guarded initializer and resolved exports.
+    /// Both local modules and registry packages have compiler-owned entries.
+    /// Computed specifiers still reach HIR's unsupported-import error.
+    dynamic_imports: &'a HashMap<String, usize>,
     /// Local names bound from an *external* (npm/registry) import, which
     /// have no declaration in the compiled program under that name -- see
     /// `visit_mut_expr`'s own `InstanceOf` handling.
@@ -701,25 +686,14 @@ impl VisitMut for RenameReferences<'_> {
                         .then(|| constant_string(&argument.expr))
                         .flatten()
                 }) {
-                    if let Some(export_map) = self.dynamic_imports.get(&specifier) {
-                        // No runtime module loader exists to build a real
-                        // namespace object at the point this call actually
-                        // executes -- instead, since the target's own
-                        // exports are already fully resolved ahead of time
-                        // (same as a static `import * as ns`), synthesizes
-                        // the equivalent literal object directly and wraps
-                        // it in `Promise.resolve(...)` to keep `await
-                        // import(...)`'s own shape working. Built by
-                        // parsing a small generated snippet rather than
-                        // hand-assembling AST nodes -- every value here is
-                        // an already-qualified `__thawmodN_name` symbol, so
-                        // there's nothing user-controlled to escape.
-                        let mut fields = export_map
-                            .iter()
-                            .map(|(name, target)| format!("{:?}:{target}", name))
-                            .collect::<Vec<_>>();
-                        fields.sort();
-                        let snippet = format!("Promise.resolve({{{}}})", fields.join(","));
+                    if let Some(dependency) = self.dynamic_imports.get(&specifier) {
+                        // A Promise continuation executes the dependency's
+                        // guarded initializer, then returns the stable live
+                        // namespace. The generated identifiers come from
+                        // compiler-owned module indices.
+                        let snippet = format!(
+                            "Promise.resolve().then(() => {{ __thaw_lazy_module_{dependency}(); return __thaw_namespace_{dependency}; }})"
+                        );
                         if let Ok(mut parsed) = thaw_parser::parse_typescript(&snippet) {
                             if let Some(ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement))) =
                                 parsed.body.pop()
@@ -1029,6 +1003,41 @@ fn reachable_modules(modules: &[LoadedModule], entry: usize, static_only: bool) 
     reachable
 }
 
+fn module_emission_order(modules: &[LoadedModule]) -> Result<Vec<usize>, String> {
+    fn visit(
+        index: usize,
+        modules: &[LoadedModule],
+        states: &mut [u8],
+        stack: &mut Vec<usize>,
+        order: &mut Vec<usize>,
+    ) -> Result<(), String> {
+        if states[index] == 2 { return Ok(()); }
+        if states[index] == 1 {
+            let start = stack.iter().position(|item| *item == index).unwrap_or(0);
+            let cycle = stack[start..].iter().copied().chain(std::iter::once(index))
+                .map(|item| modules[item].path.display().to_string())
+                .collect::<Vec<_>>().join(" -> ");
+            return Err(format!("cyclic static user-module import: {cycle}"));
+        }
+        states[index] = 1;
+        stack.push(index);
+        let mut dependencies = modules[index].static_dependencies.iter().copied().collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        for dependency in dependencies { visit(dependency, modules, states, stack, order)?; }
+        stack.pop();
+        states[index] = 2;
+        order.push(index);
+        Ok(())
+    }
+    let mut states = vec![0; modules.len()];
+    let mut order = Vec::with_capacity(modules.len());
+    let mut stack = Vec::new();
+    for index in 0..modules.len() {
+        visit(index, modules, &mut states, &mut stack, &mut order)?;
+    }
+    Ok(order)
+}
+
 pub fn runtime_features(
     entry: &Path,
     source: &str,
@@ -1040,7 +1049,6 @@ pub fn runtime_features(
         None,
         &mut modules,
         &mut HashMap::new(),
-        &mut Vec::new(),
         &mut HashSet::new(),
     )?;
     Ok(modules
@@ -1061,7 +1069,8 @@ pub fn source_paths(entry: &Path) -> Result<(Vec<PathBuf>, bool), String> {
     let mut watched = HashSet::new();
     // A missing newly imported module is itself a watch target. The build
     // still reports the resolver error; `dev` keeps listening for its creation.
-    let complete = load_module(entry, None, None, &mut modules, &mut HashMap::new(), &mut Vec::new(), &mut watched).is_ok();
+    let complete = load_module(entry, None, None, &mut modules, &mut HashMap::new(), &mut watched)
+        .and_then(|_| module_emission_order(&modules).map(|_| ())).is_ok();
     let mut paths = watched.into_iter().collect::<Vec<_>>();
     paths.sort();
     Ok((paths, complete))
@@ -1081,11 +1090,11 @@ pub fn external_specifiers(
         None,
         &mut modules,
         &mut HashMap::new(),
-        &mut Vec::new(),
         &mut HashSet::new(),
     )?;
     let mut result = Vec::new();
-    for module in modules {
+    for index in module_emission_order(&modules)? {
+        let module = &modules[index];
         for (specifier, _, _) in dependency_specifiers(&module.module)? {
             if !specifier.starts_with('.')
                 && !result.iter().any(|(existing, _)| existing == &specifier)
@@ -1104,21 +1113,16 @@ pub fn external_runtime_specifiers(
     entry_source: &str,
 ) -> Result<HashSet<String>, String> {
     let mut modules = Vec::new();
-    let entry_index = load_module(
+    load_module(
         entry.canonicalize().map_err(|error| error.to_string())?,
         Some(entry_source),
         None,
         &mut modules,
         &mut HashMap::new(),
-        &mut Vec::new(),
         &mut HashSet::new(),
     )?;
-    let reachable = reachable_modules(&modules, entry_index, false);
     let mut runtime = HashSet::new();
-    for (index, module) in modules.iter().enumerate() {
-        if !reachable.contains(&index) {
-            continue;
-        }
+    for module in &modules {
         for (specifier, is_runtime, _) in dependency_specifiers(&module.module)? {
             if is_runtime && !specifier.starts_with('.') {
                 runtime.insert(specifier);
@@ -1126,6 +1130,60 @@ pub fn external_runtime_specifiers(
         }
     }
     Ok(runtime)
+}
+
+pub fn external_static_specifiers(
+    entry: &Path,
+    entry_source: &str,
+) -> Result<HashSet<String>, String> {
+    let mut modules = Vec::new();
+    let entry_index = load_module(
+        entry.canonicalize().map_err(|error| error.to_string())?,
+        Some(entry_source),
+        None,
+        &mut modules,
+        &mut HashMap::new(),
+        &mut HashSet::new(),
+    )?;
+    let reachable = reachable_modules(&modules, entry_index, true);
+    let mut static_packages = HashSet::new();
+    for (index, module) in modules.iter().enumerate() {
+        if !reachable.contains(&index) { continue; }
+        for (specifier, _, is_static) in dependency_specifiers(&module.module)? {
+            if is_static && !specifier.starts_with('.') {
+                static_packages.insert(specifier);
+            }
+        }
+    }
+    Ok(static_packages)
+}
+
+pub fn external_dynamic_specifiers(
+    entry: &Path,
+    entry_source: &str,
+) -> Result<HashSet<String>, String> {
+    struct DynamicImports { specs: HashSet<String> }
+    impl Visit for DynamicImports {
+        fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
+            if matches!(call.callee, Callee::Import(_)) {
+                if let Some(specifier) = call.args.first()
+                    .filter(|argument| argument.spread.is_none())
+                    .and_then(|argument| constant_string(&argument.expr)) {
+                    if !specifier.starts_with('.') { self.specs.insert(specifier); }
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let mut modules = Vec::new();
+    load_module(
+        entry.canonicalize().map_err(|error| error.to_string())?,
+        Some(entry_source), None, &mut modules, &mut HashMap::new(),
+        &mut HashSet::new(),
+    )?;
+    let mut found = DynamicImports { specs: HashSet::new() };
+    for module in &modules { module.module.visit_with(&mut found); }
+    Ok(found.specs)
 }
 
 /// `nested`'s members name a package's own flattened `.d.ts` function
@@ -1193,6 +1251,7 @@ pub fn bundle(
         external_nested_namespaces,
         external_resolutions,
         &HashMap::new(),
+        &HashMap::new(),
         &|source| Ok(source.to_string()),
     )
 }
@@ -1209,6 +1268,7 @@ pub fn bundle_with_source_transform(
     // bare `import * as X from "pkg"` can bind `X` to that value (real
     // esModuleInterop: `import * as Koa from "koa"` -> `new Koa()`).
     external_export_assignments: &HashMap<String, String>,
+    external_module_indices: &HashMap<String, usize>,
     transform: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<Module, String> {
     let entry = entry
@@ -1222,18 +1282,107 @@ pub fn bundle_with_source_transform(
         Some(transform),
         &mut modules,
         &mut loaded,
-        &mut Vec::new(),
         &mut HashSet::new(),
     )?;
-    let runtime_reachable = reachable_modules(&modules, entry_index, false);
     let eager_reachable = reachable_modules(&modules, entry_index, true);
+    let emission_order = module_emission_order(&modules)?;
+    if modules.len() >= EXTERNAL_MODULE_OFFSET {
+        return Err("too many local modules for the generated module index space".into());
+    }
 
     let mut exports: Vec<HashMap<String, String>> = vec![HashMap::new(); modules.len()];
+    // Direct declarations have stable qualified symbols even when a dynamic
+    // or type-only edge points back to an ancestor. Seed these before any
+    // module's imports are resolved; sourced re-exports are finalized in the
+    // static dependency order below.
+    for (index, module) in modules.iter().enumerate() {
+        let own = declared_names(&module.module).into_iter()
+            .map(|name| {
+                let symbol = if index == entry_index && matches!(name.as_str(), "main" | "handler") {
+                    name.clone()
+                } else { format!("__thawmod{index}_{name}") };
+                (name, symbol)
+            }).collect::<HashMap<_, _>>();
+        for item in &module.module.body {
+            match item {
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                    for name in declaration_names(&export.decl) {
+                        if let Some(symbol) = own.get(&name) { exports[index].insert(name, symbol.clone()); }
+                    }
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => {
+                    let name = match &export.decl {
+                        thaw_parser::ast::DefaultDecl::Fn(function) => function.ident.as_ref().map(|id| id.sym.as_ref()),
+                        thaw_parser::ast::DefaultDecl::Class(class) => class.ident.as_ref().map(|id| id.sym.as_ref()),
+                        thaw_parser::ast::DefaultDecl::TsInterfaceDecl(interface) => Some(interface.id.sym.as_ref()),
+                    };
+                    let symbol = name.and_then(|name| own.get(name)).cloned()
+                        .unwrap_or_else(|| format!("__thawmod{index}_default"));
+                    exports[index].insert("default".to_string(), symbol);
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(export)) => {
+                    let symbol = match export.expr.as_ref() {
+                        Expr::Ident(name) => own.get(name.sym.as_ref()).cloned(),
+                        _ => None,
+                    }.unwrap_or_else(|| format!("__thawmod{index}_default_value"));
+                    exports[index].insert("default".to_string(), symbol);
+                }
+                _ => {}
+            }
+        }
+    }
+    let directly_exported_names = exports.iter()
+        .map(|module| module.keys().cloned().collect::<HashSet<_>>())
+        .collect::<Vec<_>>();
+    for _ in 0..modules.len() {
+        let mut changed = false;
+        for (index, module) in modules.iter().enumerate() {
+            for item in &module.module.body {
+                match item {
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
+                        let Some(source) = &export.src else { continue; };
+                        let Some(specifier) = source.value.as_str() else { continue; };
+                        let source_exports = module.dependencies.get(specifier)
+                            .map(|dependency| &exports[*dependency])
+                            .or_else(|| external_exports.get(specifier));
+                        let Some(source_exports) = source_exports.cloned() else { continue; };
+                        for member in &export.specifiers {
+                            if let thaw_parser::ast::ExportSpecifier::Named(member) = member {
+                                let original = export_name(&member.orig)?;
+                                let public = member.exported.as_ref().map(export_name).transpose()?
+                                    .unwrap_or_else(|| original.clone());
+                                if let Some(target) = source_exports.get(&original) {
+                                    changed |= exports[index].insert(public, target.clone()).as_ref() != Some(target);
+                                }
+                            }
+                        }
+                    }
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) => {
+                        let Some(specifier) = export.src.value.as_str() else { continue; };
+                        let source_exports = module.dependencies.get(specifier)
+                            .map(|dependency| &exports[*dependency])
+                            .or_else(|| external_exports.get(specifier));
+                        let Some(source_exports) = source_exports.cloned() else { continue; };
+                        for (name, target) in source_exports {
+                            if name != "default" && !directly_exported_names[index].contains(&name) {
+                                changed |= exports[index].insert(name, target.clone()).as_ref() != Some(&target);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !changed { break; }
+    }
     let mut namespace_exports: Vec<HashMap<String, HashMap<String, String>>> =
         vec![HashMap::new(); modules.len()];
     let mut ambiguous_exports: Vec<HashSet<String>> = vec![HashSet::new(); modules.len()];
+    let mut type_only_export_names: Vec<HashSet<String>> = vec![HashSet::new(); modules.len()];
     let mut bundled_items = Vec::new();
-    for index in 0..modules.len() {
+    let mut type_only_targets = HashSet::new();
+    let mut module_ranges = Vec::new();
+    for index in emission_order {
         let is_entry = index == entry_index;
         let mut names = HashMap::new();
         let mut namespaces = HashMap::new();
@@ -1254,6 +1403,21 @@ pub fn bundle_with_source_transform(
                 format!("__thawmod{index}_{name}")
             };
             names.insert(name, replacement);
+        }
+        for item in &modules[index].module.body {
+            let declaration = match item {
+                ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(declaration)) => Some(declaration),
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+                _ => None,
+            };
+            let name = match declaration {
+                Some(Decl::TsInterface(interface)) => Some(interface.id.sym.as_ref()),
+                Some(Decl::TsTypeAlias(alias)) => Some(alias.id.sym.as_ref()),
+                _ => None,
+            };
+            if let Some(target) = name.and_then(|name| names.get(name)) {
+                type_only_targets.insert(target.clone());
+            }
         }
 
         for item in &modules[index].module.body {
@@ -1465,15 +1629,12 @@ pub fn bundle_with_source_transform(
             }
         }
 
-        // `modules[index].dependencies` only ever holds relative-path
-        // specifiers (`load_module` skips anything else outright), so
-        // this is naturally already scoped to local project files, not
-        // npm packages -- exactly `import("literal")`'s supported case.
-        let dynamic_import_exports: HashMap<String, HashMap<String, String>> = modules[index]
-            .dependencies
-            .iter()
-            .map(|(specifier, dependency)| (specifier.clone(), exports[*dependency].clone()))
-            .collect();
+        // Local paths use resolved module indices; registry packages use the
+        // separately generated initializer indices supplied by the build.
+        // Leave import() calls intact through identifier/export resolution.
+        // A cycle may point to a module whose re-export table is finalized
+        // later; the postpass below rewrites calls after all tables exist.
+        let dynamic_import_exports: HashMap<String, usize> = HashMap::new();
 
         let mut public = HashMap::new();
         let mut public_namespaces = HashMap::new();
@@ -1522,6 +1683,7 @@ pub fn bundle_with_source_transform(
                     items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(export.decl)));
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
+                    let export_type_only = export.type_only;
                     let source_exports = if let Some(source) = &export.src {
                         let specifier = source.value.as_str().ok_or("invalid re-export")?;
                         Some(
@@ -1538,6 +1700,7 @@ pub fn bundle_with_source_transform(
                     for specifier in export.specifiers {
                         match specifier {
                             thaw_parser::ast::ExportSpecifier::Named(named) => {
+                                let named_type_only = named.is_type_only;
                                 let original = export_name(&named.orig)?;
                                 let exported = named
                                     .exported
@@ -1545,6 +1708,9 @@ pub fn bundle_with_source_transform(
                                     .map(export_name)
                                     .transpose()?
                                     .unwrap_or_else(|| original.clone());
+                                if export_type_only || named_type_only {
+                                    type_only_export_names[index].insert(exported.clone());
+                                }
                                 if source_exports.is_none() {
                                     if let Some(namespace) = namespaces.get(&original) {
                                         public_namespaces.insert(exported, namespace.clone());
@@ -1709,6 +1875,7 @@ pub fn bundle_with_source_transform(
                                 function_depth: 0,
                             });
                             public.insert("default".to_string(), interface.id.sym.to_string());
+                            type_only_export_names[index].insert("default".to_string());
                             explicit_exports.insert("default".to_string());
                             items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(
                                 Decl::TsInterface(interface.clone()),
@@ -1783,6 +1950,9 @@ pub fn bundle_with_source_transform(
                             }
                         } else if !ambiguous.contains(name) {
                             public.insert(name.clone(), target.clone());
+                            if export.type_only {
+                                type_only_export_names[index].insert(name.clone());
+                            }
                         }
                     }
                     if let Some(dependency_ambiguous) = dependency_ambiguous {
@@ -1803,20 +1973,29 @@ pub fn bundle_with_source_transform(
         namespace_exports[index] = public_namespaces;
         ambiguous_exports[index] = ambiguous;
         // The marker survives HIR normalization and identifies the owner of
-        // each source-ordered initialization step. Type-only modules retain
-        // every declaration for type resolution, but their init group is
-        // never scheduled. Dynamic-only groups are invoked on first import.
+        // each source-ordered initialization step. A module reached only for
+        // types retains its declarations without startup effects; if a
+        // compiled function later imports it as a value, the guard can still
+        // initialize it. Dynamic-only groups run on first import.
         let mut static_dependencies = modules[index]
             .static_dependencies
             .iter()
             .copied()
             .collect::<Vec<_>>();
+        for (specifier, _, is_static) in dependency_specifiers(&modules[index].module)? {
+            if is_static {
+                if let Some(external) = external_module_indices.get(&specifier) {
+                    static_dependencies.push(*external);
+                }
+            }
+        }
         static_dependencies.sort_unstable();
+        static_dependencies.dedup();
         let marker = format!(
             "__thaw_internal_module:{}:{}:{}:{}",
             index,
             usize::from(eager_reachable.contains(&index)),
-            usize::from(runtime_reachable.contains(&index)),
+            1,
             static_dependencies.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
         );
         bundled_items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(
@@ -1829,7 +2008,104 @@ pub fn bundle_with_source_transform(
                 }))),
             },
         )));
+        let start = bundled_items.len();
         bundled_items.extend(items);
+        module_ranges.push((index, start, bundled_items.len()));
+    }
+
+    for (index, start, end) in module_ranges {
+        let mut targets = modules[index].dependencies.clone();
+        for (specifier, external) in external_module_indices {
+            if external_exports.contains_key(specifier) {
+                targets.insert(specifier.clone(), *external);
+            }
+        }
+        let empty_names = HashMap::new();
+        let empty_namespaces = HashMap::new();
+        let empty_nested = HashMap::new();
+        let empty_external = HashSet::new();
+        let mut rewriter = RenameReferences {
+            names: &empty_names,
+            namespaces: &empty_namespaces,
+            nested_namespaces: &empty_nested,
+            dynamic_imports: &targets,
+            external_bindings: &empty_external,
+            import_meta_url: "",
+            import_meta_main: index == entry_index,
+            module_path: &modules[index].path,
+            external_resolutions,
+            shadowed: HashSet::new(),
+            function_depth: 0,
+        };
+        for item in &mut bundled_items[start..end] {
+            item.visit_mut_with(&mut rewriter);
+        }
+    }
+
+    // Allocate namespace objects once during startup. Without their own
+    // boundary these declarations would become part of the last (possibly
+    // dynamic-only) module's initializer, leaving another import's namespace
+    // uninitialized. Promise continuations run after startup initialization.
+    let namespace_group = modules.len();
+    bundled_items.extend(thaw_parser::parse_typescript(&format!(
+        "function __thaw_lazy_module_{namespace_group}(): void {{}}"
+    ))?.body);
+    bundled_items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(
+        thaw_parser::ast::ExprStmt {
+            span: Default::default(),
+            expr: Box::new(Expr::Lit(thaw_parser::ast::Lit::Str(thaw_parser::ast::Str {
+                span: Default::default(),
+                value: format!("__thaw_internal_module:{namespace_group}:1:1:").into(),
+                raw: None,
+            }))),
+        },
+    )));
+    // Each property reads the export's current binding, preserving live
+    // namespace values across repeated imports.
+    for index in 0..modules.len() {
+        let mut getters = exports[index]
+            .iter()
+            .filter(|(name, target)| !type_only_export_names[index].contains(*name)
+                && !type_only_targets.contains(*target) && !target.starts_with("__thaw_type_"))
+            .map(|(name, target)| {
+                let key = serde_json::to_string(name).map_err(|error| error.to_string())?;
+                Ok(format!("get {key}() {{ return {target}; }}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for (name, members) in &namespace_exports[index] {
+            let key = serde_json::to_string(name).map_err(|error| error.to_string())?;
+            let mut member_getters = members.iter()
+                .filter(|(_, target)| !type_only_targets.contains(*target) && !target.starts_with("__thaw_type_"))
+                .map(|(member, target)| {
+                    let member = serde_json::to_string(member).map_err(|error| error.to_string())?;
+                    Ok(format!("get {member}() {{ return {target}; }}"))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            member_getters.sort();
+            getters.push(format!("{key}: {{{}}}", member_getters.join(",")));
+        }
+        getters.sort();
+        let snippet = format!(
+            "function __thaw_lazy_module_{index}(): void {{}}\nconst __thaw_namespace_{index} = {{{}}};",
+            getters.join(",")
+        );
+        let generated = thaw_parser::parse_typescript(&snippet)?;
+        bundled_items.extend(generated.body);
+    }
+    for (specifier, index) in external_module_indices {
+        let Some(export_map) = external_exports.get(specifier) else { continue; };
+        let mut getters = export_map.iter()
+            .filter(|(_, target)| !target.starts_with("__thaw_type_"))
+            .map(|(name, target)| {
+                let key = serde_json::to_string(name).map_err(|error| error.to_string())?;
+                Ok(format!("get {key}() {{ return {target}; }}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        getters.sort();
+        let generated = thaw_parser::parse_typescript(&format!(
+            "const __thaw_namespace_{index} = {{{}}};", getters.join(",")
+        ))?;
+        bundled_items.extend(generated.body);
     }
 
     Ok(Module {
