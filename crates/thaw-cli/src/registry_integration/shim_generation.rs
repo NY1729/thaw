@@ -1,3 +1,11 @@
+fn generated_initializer_body<'a>(source: &'a str, name: &str) -> Result<&'a str, String> {
+    if source.is_empty() { return Ok(""); }
+    source
+        .strip_prefix(&format!("function {name}(): void {{\n"))
+        .and_then(|body| body.strip_suffix("}\n"))
+        .ok_or_else(|| format!("unexpected generated initializer shape for {name}"))
+}
+
 /// Mirrors `is_error_family_name`'s exact list (thaw-hir, `lower/
 /// module/helpers.rs`) -- duplicated here rather than exposed as a
 /// shared dependency, matching this codebase's own established
@@ -112,6 +120,8 @@ fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
     runtime_packages: &std::collections::HashSet<String>,
+    static_packages: &std::collections::HashSet<String>,
+    dynamic_packages: &std::collections::HashSet<String>,
     user_source: &str,
     embed_native_addons: bool,
     output: &Path,
@@ -237,6 +247,14 @@ fn generate_registry_shims(
             nested_namespaces,
         });
     }
+    let external_module_indices = resolved.iter().enumerate()
+        .filter(|(_, package)| runtime_packages.contains(&package.name))
+        .map(|(index, package)| {
+            module_graph::EXTERNAL_MODULE_OFFSET.checked_add(index)
+                .map(|index| (package.name.clone(), index))
+                .ok_or_else(|| "too many external modules for the generated index space".to_string())
+        })
+        .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
 
     // Every generated top-level name -- FastPath ambient declaration or
     // Fallback wrapper alike -- would otherwise land in the *same* flat
@@ -1292,7 +1310,7 @@ fn generate_registry_shims(
                 )
             })?;
             let encoded = thaw_bridge::encode_embedded_native(&bytes);
-            platform_executables.push(encoded);
+            platform_executables.push((pkg.name.clone(), encoded));
         }
         if let Some(native_addon) = pkg.native_addon.as_ref()
             .filter(|_| runtime_packages.contains(&pkg.name)) {
@@ -1471,11 +1489,9 @@ fn generate_registry_shims(
                     })
                 })
                 .collect::<Vec<_>>();
-            if !runtime_package {
-                // Keep typed value bindings for retained function bodies,
-                // but do not call their package getter during startup.
-                shim.push_str("\"__thaw_internal_execution:0\";\n");
-            }
+            // Keep the declaration for type checking and compiled function
+            // bodies. The getter call moves after this package's load below.
+            shim.push_str("\"__thaw_internal_execution:0\";\n");
             let value_exports = pkg
                 .values
                 .iter()
@@ -1528,9 +1544,7 @@ fn generate_registry_shims(
                     ))
                 })
                 .collect::<Vec<_>>();
-            if !runtime_package {
-                shim.push_str("\"__thaw_internal_execution:1\";\n");
-            }
+            shim.push_str("\"__thaw_internal_execution:1\";\n");
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
@@ -1620,7 +1634,8 @@ fn generate_registry_shims(
             let class_names: Vec<String> = pkg.classes.iter()
                 .filter(|class| !class.name.contains('.'))
                 .map(|class| class.name.clone()).collect();
-            if runtime_package && (!fallback_names.is_empty()
+            if runtime_package && (dynamic_packages.contains(&pkg.name)
+                || !fallback_names.is_empty()
                 || pkg.native_addon.is_some()
                 || !pkg.classes.is_empty()
                 || !value_exports.is_empty())
@@ -1654,26 +1669,9 @@ fn generate_registry_shims(
             },
         )
         .collect();
-    let mut module_init = thaw_bridge::generate_module_init(&module_bundles);
     let runtime_features = module_bundles.iter()
         .flat_map(|bundle| thaw_bridge::required_runtime_features(bundle.js_source))
         .collect();
-    if !platform_executables.is_empty() {
-        let setup = platform_executables
-            .iter()
-            .map(|encoded| {
-                format!(
-                    "    setProcessEnv(\"ESBUILD_BINARY_PATH\", embedExecutable(\"{encoded}\"));\n"
-                )
-            })
-            .collect::<String>();
-        module_init = module_init.replacen(
-            "function __thaw_module_init(): void {\n",
-            &format!("function __thaw_module_init(): void {{\n{setup}"),
-            1,
-        );
-    }
-    shim.push_str(&module_init);
     let native_addons: Vec<thaw_bridge::NativeAddon<'_>> = native_addons
         .iter()
         .map(|(name, bytes, dependencies, root_export)| thaw_bridge::NativeAddon {
@@ -1683,7 +1681,6 @@ fn generate_registry_shims(
             root_export: root_export.as_deref(),
         })
         .collect();
-    shim.push_str(&thaw_bridge::generate_native_addon_init(&native_addons));
     let native_addon_paths: Vec<thaw_bridge::NativeAddonPath<'_>> = native_addon_paths
         .iter()
         .map(|(name, path, dependencies, root_export)| thaw_bridge::NativeAddonPath {
@@ -1693,9 +1690,94 @@ fn generate_registry_shims(
             root_export: root_export.as_deref(),
         })
         .collect();
-    shim.push_str(&thaw_bridge::generate_native_addon_path_init(
-        &native_addon_paths,
-    ));
+    // Preserve the startup ordering for statically reached packages: all
+    // native addons load before any package script, as in the original
+    // entrypoint. Only dynamic-only packages move into guarded groups.
+    let eager_addons = native_addons.iter().filter(|addon| static_packages.contains(addon.package_name))
+        .map(|addon| thaw_bridge::NativeAddon {
+            package_name: addon.package_name, bytes: addon.bytes,
+            dependencies: addon.dependencies.clone(), root_export: addon.root_export,
+        }).collect::<Vec<_>>();
+    shim.push_str(&thaw_bridge::generate_native_addon_init(&eager_addons));
+    let eager_paths = native_addon_paths.iter().filter(|addon| static_packages.contains(addon.package_name))
+        .map(|addon| thaw_bridge::NativeAddonPath {
+            package_name: addon.package_name, path: addon.path,
+            dependencies: addon.dependencies.clone(), root_export: addon.root_export,
+        }).collect::<Vec<_>>();
+    shim.push_str(&thaw_bridge::generate_native_addon_path_init(&eager_paths));
+    let eager_bundles = module_bundles.iter().filter(|bundle| static_packages.contains(bundle.package_name))
+        .map(|bundle| thaw_bridge::ModuleBundle {
+            package_name: bundle.package_name, js_source: bundle.js_source,
+            fallback_names: bundle.fallback_names, class_names: bundle.class_names,
+            qualified_aliases: bundle.qualified_aliases,
+            nested_namespace_aliases: bundle.nested_namespace_aliases,
+            value_exports: bundle.value_exports,
+        }).collect::<Vec<_>>();
+    let mut eager_scripts = thaw_bridge::generate_module_init(&eager_bundles);
+    let eager_executables = platform_executables.iter()
+        .filter(|(name, _)| static_packages.contains(name))
+        .map(|(_, encoded)| format!("    setProcessEnv(\"ESBUILD_BINARY_PATH\", embedExecutable(\"{encoded}\"));\n"))
+        .collect::<String>();
+    if !eager_executables.is_empty() {
+        if eager_scripts.is_empty() {
+            eager_scripts = "function __thaw_module_init(): void {\n}\n".to_string();
+        }
+        eager_scripts = eager_scripts.replacen(
+            "function __thaw_module_init(): void {\n",
+            &format!("function __thaw_module_init(): void {{\n{eager_executables}"), 1,
+        );
+    }
+    shim.push_str(&eager_scripts);
+    // Singleton bridge generators provide the script/addon bodies for each
+    // dynamic-only package; its shared guard also caches any failure.
+    for package in &resolved {
+        let Some(index) = external_module_indices.get(&package.name) else { continue; };
+        shim.push_str(&format!("function __thaw_lazy_module_{index}(): void {{}}\n"));
+        let eager = usize::from(static_packages.contains(&package.name));
+        shim.push_str(&format!("\"__thaw_internal_module:{index}:{eager}:1:\";\n"));
+        let bundle = module_bundles.iter().filter(|bundle| bundle.package_name == package.name)
+            .map(|bundle| thaw_bridge::ModuleBundle {
+                package_name: bundle.package_name,
+                js_source: bundle.js_source,
+                fallback_names: bundle.fallback_names,
+                class_names: bundle.class_names,
+                qualified_aliases: bundle.qualified_aliases,
+                nested_namespace_aliases: bundle.nested_namespace_aliases,
+                value_exports: bundle.value_exports,
+            }).collect::<Vec<_>>();
+        if eager == 0 {
+        for (_, encoded) in platform_executables.iter().filter(|(name, _)| name == &package.name) {
+            shim.push_str(&format!(
+                "setProcessEnv(\"ESBUILD_BINARY_PATH\", embedExecutable(\"{encoded}\"));\n"
+            ));
+        }
+        let addon = native_addons.iter().filter(|addon| addon.package_name == package.name)
+            .map(|addon| thaw_bridge::NativeAddon {
+                package_name: addon.package_name,
+                bytes: addon.bytes,
+                dependencies: addon.dependencies.clone(),
+                root_export: addon.root_export,
+            }).collect::<Vec<_>>();
+        let addon_init = thaw_bridge::generate_native_addon_init(&addon);
+        shim.push_str(generated_initializer_body(&addon_init, "__thaw_native_module_init")?);
+        let paths = native_addon_paths.iter().filter(|addon| addon.package_name == package.name)
+            .map(|addon| thaw_bridge::NativeAddonPath {
+                package_name: addon.package_name,
+                path: addon.path,
+                dependencies: addon.dependencies.clone(),
+                root_export: addon.root_export,
+            }).collect::<Vec<_>>();
+        let path_init = thaw_bridge::generate_native_addon_path_init(&paths);
+        shim.push_str(generated_initializer_body(&path_init, "__thaw_native_module_init")?);
+        let bundle_init = thaw_bridge::generate_module_init(&bundle);
+        shim.push_str(generated_initializer_body(&bundle_init, "__thaw_module_init")?);
+        }
+        for loaded in &bundle {
+            for (_, _, local, getter) in loaded.value_exports {
+                shim.push_str(&format!("{local} = {getter}();\n"));
+            }
+        }
+    }
 
     let mut external_exports = ExternalExports::new();
     let mut external_namespace_aliases: ExternalNamespaceAliases = std::collections::HashMap::new();
@@ -1835,6 +1917,7 @@ fn generate_registry_shims(
         external_namespace_aliases,
         external_nested_namespaces,
         external_export_assignments,
+        external_module_indices,
         jit_fallback_reasons,
         runtime_features,
     ))
