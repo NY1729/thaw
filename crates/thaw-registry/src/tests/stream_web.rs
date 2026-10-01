@@ -1201,3 +1201,27 @@ fn text_encoders_reject_symbols_and_use_string_conversion_hint() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn transform_stream_preserves_inherited_readable_size_strategy() {
+    // Unrun regression: inherited size counts bytes instead of chunks.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("transform_inherited_size");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var controller, stream = new TransformStream({ start(value) { controller = value; } }, {}, new ByteLengthQueuingStrategy({ highWaterMark: 4 })), writer = stream.writable.getWriter();
+      await writer.write(new Uint8Array(3)); var remaining = controller.desiredSize; await writer.close();
+      var marks = 0, sizes = 0, otherController, strategy = Object.create({ get highWaterMark() { marks++; return 4; }, get size() { sizes++; return function (chunk) { return chunk.length; }; } });
+      var other = new TransformStream({ start(value) { otherController = value; } }, {}, strategy), otherWriter = other.writable.getWriter();
+      await otherWriter.write('xx'); var otherRemaining = otherController.desiredSize; await otherWriter.close();
+      return [remaining, otherRemaining, marks, sizes];
+    };"#).unwrap();
+    let modules = temp_registry("transform_inherited_size_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseInheritedSize = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseInheritedSize").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[1,2,1,1]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
