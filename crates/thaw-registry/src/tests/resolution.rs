@@ -3002,6 +3002,107 @@ fn relative_declaration_directory_prefers_manifest_types_over_index() {
 }
 
 #[test]
+fn bare_type_reexports_use_nearest_package_subpath_exports() {
+    // Unrun regression: the nested version wins over a hoisted version;
+    // an exports map is authoritative even if a physical fallback exists.
+    let root = temp_registry("bare-type-subpath-resolution");
+    let app = root.join("node_modules/app");
+    let nested = app.join("node_modules/dependency");
+    let hoisted = root.join("node_modules/dependency");
+    let scoped = root.join("node_modules/@scope/client");
+    fs::create_dir_all(app.join("types")).unwrap();
+    fs::create_dir_all(nested.join("types")).unwrap();
+    fs::create_dir_all(hoisted.join("types")).unwrap();
+    fs::create_dir_all(scoped.join("types")).unwrap();
+    let entry = app.join("types/index.d.ts");
+    fs::write(&entry, "export * from 'dependency/feature';").unwrap();
+    fs::write(nested.join("package.json"),
+        r#"{"exports":{"./feature":{"types":"./types/nested.d.ts"},"./wild/*":{"types":"./types/*.d.ts"}}}"#,
+    ).unwrap();
+    fs::write(nested.join("types/nested.d.ts"), "export function nested(): number;").unwrap();
+    fs::write(nested.join("types/card.d.ts"), "export function card(): string;").unwrap();
+    fs::write(hoisted.join("package.json"),
+        r#"{"exports":{"./feature":{"types":"./types/hoisted.d.ts"}}}"#,
+    ).unwrap();
+    fs::write(hoisted.join("types/hoisted.d.ts"), "export function hoisted(): boolean;").unwrap();
+    fs::write(scoped.join("package.json"),
+        r#"{"exports":{"./feature":{"types":"./types/scoped.d.ts"}}}"#,
+    ).unwrap();
+    fs::write(scoped.join("types/scoped.d.ts"), "export function scoped(): string;").unwrap();
+
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"),
+        Some(nested.join("types/nested.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "dependency/wild/card"),
+        Some(nested.join("types/card.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "@scope/client/feature"),
+        Some(scoped.join("types/scoped.d.ts").canonicalize().unwrap()));
+    let flattened = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(flattened.contains("function nested(): number"), "{flattened}");
+    assert!(!flattened.contains("function hoisted()"), "{flattened}");
+
+    fs::remove_dir_all(&nested).unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"),
+        Some(hoisted.join("types/hoisted.d.ts").canonicalize().unwrap()));
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("package.json"), r#"{"exports":{"./other":{"types":"./other.d.ts"}}}"#).unwrap();
+    fs::write(nested.join("feature.d.ts"), "export function shadow(): void;").unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"), None);
+    fs::write(nested.join("package.json"),
+        r#"{"exports":{"./feature":{"types":"./types/missing.d.ts"}}}"#,
+    ).unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"), None);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bare_type_reexports_keep_nearest_manifestless_declarations() {
+    // Unrun regression: declarations can be installed without a package.json.
+    // A nearer type file wins over an ancestor package with a valid manifest.
+    let root = temp_registry("bare-manifestless-types");
+    let app = root.join("node_modules/app");
+    let nested_modules = app.join("node_modules");
+    let hoisted = root.join("node_modules/dependency");
+    let hoisted_scoped = root.join("node_modules/@scope/client");
+    fs::create_dir_all(app.join("types")).unwrap();
+    fs::create_dir_all(nested_modules.join("dependency")).unwrap();
+    fs::create_dir_all(nested_modules.join("@scope/client")).unwrap();
+    fs::create_dir_all(&hoisted).unwrap();
+    fs::create_dir_all(&hoisted_scoped).unwrap();
+    let entry = app.join("types/index.d.ts");
+    fs::write(&entry, "export * from 'dependency';").unwrap();
+    fs::write(hoisted.join("package.json"), r#"{"types":"./index.d.ts","exports":{"./feature":{"types":"./feature.d.ts"}}}"#).unwrap();
+    fs::write(hoisted.join("index.d.ts"), "export function hoisted(): void;").unwrap();
+    fs::write(hoisted.join("feature.d.ts"), "export function hoistedFeature(): void;").unwrap();
+    fs::write(hoisted_scoped.join("package.json"), r#"{"types":"./index.d.ts"}"#).unwrap();
+    fs::write(hoisted_scoped.join("index.d.ts"), "export function hoistedScoped(): void;").unwrap();
+
+    let nested = nested_modules.join("dependency");
+    fs::write(nested.join("index.d.ts"), "export function local(): void;").unwrap();
+    fs::write(nested.join("feature.d.ts"), "export function localFeature(): void;").unwrap();
+    let scoped = nested_modules.join("@scope/client");
+    fs::write(scoped.join("index.d.ts"), "export function localScoped(): void;").unwrap();
+    fs::write(scoped.join("feature.d.ts"), "export function localScopedFeature(): void;").unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency"),
+        Some(nested.join("index.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"),
+        Some(nested.join("feature.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "@scope/client"),
+        Some(scoped.join("index.d.ts").canonicalize().unwrap()));
+    assert_eq!(declaration_reexport_path(&entry, "@scope/client/feature"),
+        Some(scoped.join("feature.d.ts").canonicalize().unwrap()));
+    fs::remove_file(nested.join("feature.d.ts")).unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency/feature"), None);
+
+    fs::remove_dir_all(&nested).unwrap();
+    fs::write(nested_modules.join("dependency.d.ts"), "export function sibling(): void;").unwrap();
+    assert_eq!(declaration_reexport_path(&entry, "dependency"),
+        Some(nested_modules.join("dependency.d.ts").canonicalize().unwrap()));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn named_declaration_hop_follows_wildcard_function_and_superclass() {
     // Unrun regression: the named source is a barrel rather than the final
     // declaration file. `Base` is supporting type information, not an alias
