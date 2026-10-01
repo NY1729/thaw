@@ -926,6 +926,36 @@ fn fs_stream_positions_reject_invalid_original_values_before_open() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+#[cfg(unix)]
+#[test]
+fn fs_stat_no_entry_option_respects_sync_and_async_boundaries() {
+    // Unrun regression: sync lstat suppresses only ENOENT; async lstat never
+    // suppresses missing entries, while stat suppresses ENOENT and ENOTDIR.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_stat_no_entry");
+    fs::write(
+        dir.join("index.js"),
+        r#"var fs = require('node:fs'), promises = require('node:fs/promises'); module.exports = async function(root) { var plain = root + '/plain.txt', missing = root + '/missing.txt', link = root + '/dangling', nested = plain + '/child'; fs.writeFileSync(plain,'payload'); fs.symlinkSync('missing.txt',link); function callbackResult(method,path,options) { return new Promise(function(resolve) { method(path,options,function(error,value) { resolve([error ? error.code : null,value === undefined]); }); }); } var syncMissing = [fs.statSync(missing,{throwIfNoEntry:false}) === undefined,fs.lstatSync(missing,{throwIfNoEntry:false}) === undefined], asyncStat = [await callbackResult(fs.stat,missing,{throwIfNoEntry:false}),await promises.stat(missing,{throwIfNoEntry:false}) === undefined], asyncLstat = await callbackResult(fs.lstat,missing,{throwIfNoEntry:false}), promiseLstat; try { await promises.lstat(missing,{throwIfNoEntry:false}); } catch(error) { promiseLstat = error.code; } var nestedStat = fs.statSync(nested,{throwIfNoEntry:false}) === undefined, nestedLstat; try { fs.lstatSync(nested,{throwIfNoEntry:false}); } catch(error) { nestedLstat = error.code; } var asyncNested = [await callbackResult(fs.stat,nested,{throwIfNoEntry:false}),await promises.stat(nested,{throwIfNoEntry:false}) === undefined,await callbackResult(fs.lstat,nested,{throwIfNoEntry:false})], dangling = [fs.statSync(link,{throwIfNoEntry:false}) === undefined,fs.lstatSync(link,{throwIfNoEntry:false}).isSymbolicLink()], successful = [typeof fs.statSync(Buffer.from(plain),{bigint:true}).size,fs.statSync(new URL('file://' + plain)).size,fs.lstatSync(link,{bigint:true}).isSymbolicLink()]; var host = globalThis.__thaw_fs, otherErrors = []; try { globalThis.__thaw_fs = function(operation,path,value,recursive) { if (operation === 'stat' && path === plain) return JSON.stringify({ok:false,code:'EACCES',message:'denied'}); if (operation === 'lstat' && path === plain) return JSON.stringify({ok:false,code:'EINVAL',message:'invalid'}); return host(operation,path,value,recursive); }; try { fs.statSync(plain,{throwIfNoEntry:false}); } catch(error) { otherErrors.push(error.code); } try { fs.lstatSync(plain,{throwIfNoEntry:false}); } catch(error) { otherErrors.push(error.code); } } finally { globalThis.__thaw_fs = host; } var getterError = new Error('bigint getter'); getterError.code = 'ENOENT'; var getterOptions = {throwIfNoEntry:false}; Object.defineProperty(getterOptions,'bigint',{get:function() { throw getterError; }}); var getterChecks = []; try { fs.statSync(plain,getterOptions); } catch(error) { getterChecks.push(error === getterError); } getterChecks.push(await new Promise(function(resolve) { fs.stat(plain,getterOptions,function(error) { resolve(error === getterError); }); })); try { await promises.stat(plain,getterOptions); } catch(error) { getterChecks.push(error === getterError); } var conversionError = new Error('path conversion'); conversionError.code = 'ENOENT'; var conversionPassed = false; try { fs.statSync({toString:function() { throw conversionError; }},{throwIfNoEntry:false}); } catch(error) { conversionPassed = error === conversionError; } return [syncMissing,asyncStat,asyncLstat,promiseLstat,nestedStat,nestedLstat,asyncNested,dangling,successful,otherErrors,getterChecks,conversionPassed]; };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_stat_no_entry_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStatNoEntry = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsStatNoEntry").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,true],[[null,true],true],["ENOENT",true],"ENOENT",true,"ENOTDIR",[[null,true],true,["ENOTDIR",true]],[true,true],["bigint",7,true],["EACCES","EINVAL"],[true,true,true],true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 #[test]
 fn fs_creation_apis_honor_requested_modes() {
     use std::ffi::{CStr, CString};
