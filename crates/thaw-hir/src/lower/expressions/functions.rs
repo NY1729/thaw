@@ -24,6 +24,7 @@ impl<'a> FnLowerer<'a> {
                 .ok_or("function expression `this` needs a type annotation")?;
             lower_non_arrow_receiver_type(&annotation.type_ann, &HashMap::new(),
                 self.interfaces, self.generic_interfaces, &mut Vec::new())
+                .map(canonical_non_arrow_receiver_type)
         } else {
             Ok(HirType::Json)
         }
@@ -56,7 +57,8 @@ impl<'a> FnLowerer<'a> {
             let substitution = signature.generic_type_params.iter().cloned()
                 .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
             return lower_non_arrow_receiver_type(template, &substitution,
-                self.interfaces, self.generic_interfaces, &mut Vec::new()).map(Some);
+                self.interfaces, self.generic_interfaces, &mut Vec::new())
+                .map(canonical_non_arrow_receiver_type).map(Some);
         }
         Ok(self.generic_non_arrow_receivers.get(name).cloned())
     }

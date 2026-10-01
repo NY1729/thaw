@@ -1905,3 +1905,19 @@ fn non_arrow_string_literal_union_receiver_lowers() {
     assert!(error.contains("receiver type alias `DefaultLoop` is (indirectly) self-referential"),
         "unexpected error: {error}");
 }
+
+#[test]
+fn non_arrow_nested_receiver_wrappers_lower_to_leaf_abi() {
+    lower(r#"type Maybe<T> = T | undefined;
+        class Carrier { value: number; constructor(value: number) { this.value = value; } }
+        function main(): void {
+            const branch = function(this: Maybe<number> | string): string { return typeof this; };
+            console.log(branch(), branch.call(3), branch.call("x"));
+            const overlap = function(this: (number | undefined) | number): string { return typeof this; };
+            console.log(overlap(), overlap.call(5));
+            const nullish = function(this: (number | null) | undefined): string { return typeof this; };
+            console.log(nullish(), nullish.call(null), nullish.call(6));
+            const native = function(this: (Carrier | undefined) | string): string { return typeof this; };
+            console.log(native(), native.call(new Carrier(1)), native.call("x"));
+        }"#);
+}
