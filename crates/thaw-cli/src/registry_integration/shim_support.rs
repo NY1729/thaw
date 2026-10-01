@@ -704,6 +704,59 @@ fn is_native_builtin(package: &str) -> bool {
     package == "node:http"
 }
 
+
+/// Resolve local import spellings to the package qualifier and exported class
+/// name used by constructor helpers. Unresolved imports still reserve their
+/// local name, so they cannot fall through to a different package's bare class.
+fn constructor_imports(
+    module: &swc_ecma_ast::Module,
+    package_qualifiers: &std::collections::HashMap<String, String>,
+) -> (
+    std::collections::HashMap<String, (String, String)>,
+    std::collections::HashMap<String, String>,
+    std::collections::HashSet<String>,
+) {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+    let mut named = std::collections::HashMap::new();
+    let mut namespaces = std::collections::HashMap::new();
+    let mut imported = std::collections::HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue; };
+        let qualifier = import.src.value.as_str()
+            .and_then(|source| package_qualifiers.get(source));
+        for specifier in &import.specifiers {
+            let local = match specifier {
+                ImportSpecifier::Named(value) => value.local.sym.to_string(),
+                ImportSpecifier::Default(value) => value.local.sym.to_string(),
+                ImportSpecifier::Namespace(value) => value.local.sym.to_string(),
+            };
+            imported.insert(local.clone());
+            let Some(qualifier) = qualifier else { continue; };
+            if import.type_only { continue; }
+            match specifier {
+                ImportSpecifier::Named(value) if !value.is_type_only => {
+                    let exported = match &value.imported {
+                        Some(ModuleExportName::Ident(name)) => name.sym.to_string(),
+                        Some(ModuleExportName::Str(name)) => name.value.as_str()
+                            .unwrap_or_default().to_string(),
+                        None => value.local.sym.to_string(),
+                    };
+                    named.insert(local, (qualifier.clone(), exported));
+                }
+                ImportSpecifier::Default(_) => {
+                    named.insert(local.clone(), (qualifier.clone(), "default".to_string()));
+                    namespaces.insert(local, qualifier.clone());
+                }
+                ImportSpecifier::Namespace(_) => {
+                    namespaces.insert(local, qualifier.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    (named, namespaces, imported)
+}
+
 fn observed_constructor_arities(
     source: &str,
 ) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
@@ -883,6 +936,8 @@ fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
         }
         ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
             DefaultDecl::Fn(fn_expr) => fn_expr.ident.as_ref().map(|ident| ident.sym.to_string()),
+            DefaultDecl::Class(class_expr) => Some(class_expr.ident.as_ref()
+                .map_or_else(|| "default".to_string(), |ident| ident.sym.to_string())),
             _ => None,
         },
         // `export { helmet as default };` -- the ESM default spelled as a

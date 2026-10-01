@@ -264,6 +264,9 @@ fn generate_registry_shims(
         .collect();
     let qualifier_by_package =
         package_qualifier_identifiers(resolved.iter().map(|package| package.name.as_str()));
+    let constructor_module = thaw_parser::parse_typescript(user_source)?;
+    let (constructor_named_imports, constructor_namespace_imports, _) =
+        constructor_imports(&constructor_module, &qualifier_by_package);
 
     // Every Fallback name of every `--use`d package also gets a package-
     // qualified alias -- not just names that actually collide -- so
@@ -383,6 +386,29 @@ fn generate_registry_shims(
 
     for pkg in &resolved {
         let mut constructor_arities_for_package = observed_constructor_arities.clone();
+        let qualifier = &qualifier_by_package[&pkg.name];
+        for (local, (source_qualifier, exported)) in &constructor_named_imports {
+            if source_qualifier != qualifier { continue; }
+            let target = if exported == "default" {
+                pkg.commonjs_export_name.as_deref()
+            } else {
+                Some(exported.as_str())
+            };
+            if let (Some(target), Some(arities)) = (target, observed_constructor_arities.get(local)) {
+                constructor_arities_for_package.entry(target.to_string())
+                    .or_default().extend(arities);
+            }
+        }
+        if let Some(target) = &pkg.commonjs_export_assignment {
+            for (local, source_qualifier) in &constructor_namespace_imports {
+                if source_qualifier == qualifier {
+                    if let Some(arities) = observed_constructor_arities.get(local) {
+                        constructor_arities_for_package.entry(target.clone())
+                            .or_default().extend(arities);
+                    }
+                }
+            }
+        }
         for members in pkg.nested_namespaces.values() {
             for (alias, target) in members {
                 if let Some(arities) = observed_constructor_arities.get(alias) {
@@ -417,6 +443,20 @@ fn generate_registry_shims(
                             ));
                         }
                     }
+                }
+                if pkg.commonjs_export_name.as_deref() == Some(class.name.as_str()) {
+                    class_rewrites.push((
+                        qualifier_by_package[&pkg.name].clone(),
+                        "default".to_string(),
+                        helpers.clone(),
+                    ));
+                }
+                if pkg.commonjs_export_assignment.as_deref() == Some(class.name.as_str()) {
+                    class_rewrites.push((
+                        qualifier_by_package[&pkg.name].clone(),
+                        "__namespace_root__".to_string(),
+                        helpers.clone(),
+                    ));
                 }
                 class_rewrites.push((
                     qualifier_by_package[&pkg.name].clone(),
@@ -692,6 +732,20 @@ fn generate_registry_shims(
                     )
                     .unwrap_or_else(|| helpers[0].1.clone());
                     class_targets.insert((pkg.name.clone(), class.name.clone()), target);
+                    if pkg.commonjs_export_name.as_deref() == Some(class.name.as_str()) {
+                        class_rewrites.push((
+                            qualifier_by_package[&pkg.name].clone(),
+                            "default".to_string(),
+                            helpers.clone(),
+                        ));
+                    }
+                    if pkg.commonjs_export_assignment.as_deref() == Some(class.name.as_str()) {
+                        class_rewrites.push((
+                            qualifier_by_package[&pkg.name].clone(),
+                            "__namespace_root__".to_string(),
+                            helpers.clone(),
+                        ));
+                    }
                     class_rewrites.push((
                         qualifier_by_package[&pkg.name].clone(),
                         class.name.clone(),

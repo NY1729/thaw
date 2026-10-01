@@ -101,6 +101,7 @@ fn rewrites_external_class_constructors_without_touching_other_new_expressions()
             "Database".into(),
             vec![(1, "Database_ctor".into(), vec![])],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -191,6 +192,7 @@ fn rewrites_external_class_constructors_with_erased_type_arguments() {
             "Hono".into(),
             vec![(0, "Hono_ctor".into(), vec![])],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(rewritten, "const app = Hono_ctor();");
@@ -210,6 +212,7 @@ fn rewrites_external_class_constructors_by_argument_count() {
                 (2, "Database_ctor2".into(), vec![]),
             ],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -231,6 +234,7 @@ fn does_not_guess_between_same_arity_constructor_helpers() {
                 (1, "NativeBox_number".into(), vec![thaw_hir::HirType::F64]),
             ],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(rewritten, source);
@@ -276,6 +280,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
     let rewritten = rewrite_external_class_constructors(
         "const a = new Client(); const b = new Client('x'); const c = new Client('x', 5);",
         &[("pkg".into(), "Client".into(), helpers.clone())],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     for (_, helper, _) in helpers {
@@ -470,6 +475,7 @@ fn generates_typed_napi_tuple_class_shims() {
             false,
             vec![tuple],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert!(!rewritten.contains("new PairBox"));
@@ -628,6 +634,7 @@ fn generates_typed_napi_nullable_shims() {
             false,
             methods[0].4.clone(),
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert!(!rewritten.contains("new NullableBox"));
@@ -791,6 +798,7 @@ fn rewrites_inherited_external_class_methods() {
             inherited.3,
             inherited.4.clone(),
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert!(rewritten.contains(&format!("{}(value, 4)", inherited.1)));
@@ -814,6 +822,7 @@ fn rewrites_methods_on_values_created_from_external_classes() {
             false,
             vec![thaw_hir::HirType::Str, thaw_hir::HirType::F64],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1070,6 +1079,7 @@ fn rewrites_zero_argument_external_class_methods() {
             false,
             vec![],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1096,6 +1106,7 @@ fn tracks_external_class_instance_aliases_and_invalidates_reassignments() {
             false,
             vec![],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1122,6 +1133,7 @@ fn tracks_external_class_instances_through_object_properties() {
             false,
             vec![],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1148,6 +1160,7 @@ fn joins_object_property_instance_facts_across_branches() {
             false,
             vec![],
         )],
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1217,6 +1230,102 @@ fn constructor_rest_emits_helper_for_observed_arity() {
     let rewritten = rewrite_external_class_constructors(
         "new pkg.ns.Parts('a', 'b')",
         &[("pkg".into(), "ns.Parts".into(), helpers)],
+        &std::collections::HashMap::new(),
     ).unwrap();
     assert!(rewritten.starts_with(&two_arg_helper));
+}
+
+#[test]
+fn imported_constructor_aliases_keep_package_identity() {
+    let classes = vec![
+        ("one".into(), "Client".into(), vec![(1, "one_ctor".into(), vec![])]),
+        ("two".into(), "Client".into(), vec![(1, "two_ctor".into(), vec![])]),
+        ("one".into(), "default".into(), vec![(1, "default_ctor".into(), vec![])]),
+        ("one".into(), "nested.Client".into(), vec![(1, "nested_ctor".into(), vec![])]),
+    ];
+    let packages = std::collections::HashMap::from([
+        ("package-one".into(), "one".into()),
+        ("package-two".into(), "two".into()),
+    ]);
+    let source = "import { Client as First, nested as Nested } from 'package-one'; import { Client as Second } from 'package-two'; import DefaultClient from 'package-one'; import * as Namespace from 'package-two'; new First(1); new Second(2); new DefaultClient(3); new Namespace.Client(4); new Nested.Client(5);";
+    let rewritten = rewrite_external_class_constructors(source, &classes, &packages).unwrap();
+    assert!(rewritten.contains("one_ctor(1)"));
+    assert!(rewritten.contains("two_ctor(2)"));
+    assert!(rewritten.contains("default_ctor(3)"));
+    assert!(rewritten.contains("two_ctor(4)"));
+    assert!(rewritten.contains("nested_ctor(5)"));
+}
+
+#[test]
+fn constructor_alias_rewrite_respects_local_shadowing() {
+    let classes = vec![("pkg".into(), "Client".into(), vec![(0, "pkg_ctor".into(), vec![])])];
+    let packages = std::collections::HashMap::from([("package".into(), "pkg".into())]);
+    let source = "import { Client as Alias } from 'package'; new Alias(); { const Alias = Local; new Alias(); } new Alias(); function f(Alias: any) { new Alias(); }";
+    let rewritten = rewrite_external_class_constructors(source, &classes, &packages).unwrap();
+    assert_eq!(rewritten.matches("pkg_ctor()").count(), 2);
+    assert_eq!(rewritten.matches("new Alias()").count(), 2);
+}
+
+#[test]
+fn constructor_alias_rewrite_respects_hoisted_vars() {
+    let classes = vec![("pkg".into(), "Client".into(), vec![(0, "pkg_ctor".into(), vec![])])];
+    let packages = std::collections::HashMap::from([("package".into(), "pkg".into())]);
+    let source = "import { Client as Alias } from 'package'; function f() { new Alias(); if (false) { var Alias; } } const g = () => { new Alias(); if (false) { var Alias; } }; new Alias();";
+    let rewritten = rewrite_external_class_constructors(source, &classes, &packages).unwrap();
+    assert_eq!(rewritten.matches("pkg_ctor()").count(), 1);
+    assert_eq!(rewritten.matches("new Alias()").count(), 2);
+}
+
+#[test]
+fn default_declarations_shadow_external_constructor_names() {
+    let classes = vec![("pkg".into(), "Client".into(), vec![(0, "pkg_ctor".into(), vec![])])];
+    let class_source = "export default class Client {} new Client();";
+    let rewritten = rewrite_external_class_constructors(
+        class_source, &classes, &std::collections::HashMap::new(),
+    ).unwrap();
+    assert_eq!(rewritten, class_source);
+
+    let function_source = "export default function Client() {} new Client();";
+    let rewritten = rewrite_external_class_constructors(
+        function_source, &classes, &std::collections::HashMap::new(),
+    ).unwrap();
+    assert_eq!(rewritten, function_source);
+}
+
+#[test]
+fn switch_case_lexical_bindings_shadow_imports_across_cases() {
+    let classes = vec![("pkg".into(), "Client".into(), vec![(0, "pkg_ctor".into(), vec![])])];
+    let packages = std::collections::HashMap::from([("package".into(), "pkg".into())]);
+    let source = "import { Client as Alias } from 'package'; switch (mode) { case 0: new Alias(); break; case 1: let Alias = Local; new Alias(); } new Alias();";
+    let rewritten = rewrite_external_class_constructors(source, &classes, &packages).unwrap();
+    assert_eq!(rewritten.matches("pkg_ctor()").count(), 1);
+    assert_eq!(rewritten.matches("new Alias()").count(), 2);
+}
+
+#[test]
+fn default_exported_class_name_is_available_to_constructor_aliases() {
+    assert_eq!(
+        commonjs_export_name("export default class Client {}").unwrap(),
+        Some("Client".to_string())
+    );
+}
+
+#[test]
+fn constructor_alias_rewrite_ignores_unresolved_imports_and_shadowed_namespaces() {
+    let classes = vec![("pkg".into(), "Client".into(), vec![(0, "pkg_ctor".into(), vec![])])];
+    let packages = std::collections::HashMap::from([("package".into(), "pkg".into())]);
+    let source = "import { Client } from './local'; import * as P from 'package'; new Client(); new P.Client(); function f(P: any) { new P.Client(); }";
+    let rewritten = rewrite_external_class_constructors(source, &classes, &packages).unwrap();
+    assert_eq!(rewritten.matches("pkg_ctor()").count(), 1);
+    assert_eq!(rewritten.matches("new Client()").count(), 1);
+    assert_eq!(rewritten.matches("new P.Client()").count(), 1);
+}
+
+#[test]
+fn export_assignment_namespace_import_constructs_root_class() {
+    let classes = vec![("pkg".into(), "__namespace_root__".into(), vec![(0, "pkg_ctor".into(), vec![])])];
+    let packages = std::collections::HashMap::from([("package".into(), "pkg".into())]);
+    let source = "import * as Factory from 'package'; new Factory();";
+    let rewritten = rewrite_external_class_constructors(source, &classes, &packages).unwrap();
+    assert!(rewritten.contains("pkg_ctor()"));
 }
