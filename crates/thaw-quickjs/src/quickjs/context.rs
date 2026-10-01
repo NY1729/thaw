@@ -1222,6 +1222,12 @@ fn ensure_context() {
                     Function::new(ctx.clone(), |tag: String| intl_locale_resolve_json(&tag))
                         .expect("failed to create JavaScript Intl locale resolver");
                 #[cfg(feature = "intl")]
+                let intl_datetime_resolved_options_function = Function::new(
+                    ctx.clone(),
+                    |tag: String| intl_datetime_resolved_options_json(&tag),
+                )
+                .expect("failed to create JavaScript Intl DateTimeFormat option resolver");
+                #[cfg(feature = "intl")]
                 let intl_locale_maximize_function =
                     Function::new(ctx.clone(), |tag: String| intl_locale_maximize_json(&tag))
                         .expect("failed to create JavaScript Intl locale maximizer");
@@ -1551,6 +1557,10 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_locale_resolve", intl_locale_resolve_function)
                     .expect("failed to install JavaScript Intl locale resolver");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_datetime_resolved_options", intl_datetime_resolved_options_function)
+                    .expect("failed to install JavaScript Intl DateTimeFormat option resolver");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_locale_maximize", intl_locale_maximize_function)

@@ -56,6 +56,51 @@
     return parts.length === 2 && parts.every(part => INTL_SANCTIONED_UNITS.has(part));
   }
 
+  const INTL_LOCALE_TAGS = new WeakMap();
+
+  function intlRequestedLocale(locales, fallback = 'en-US') {
+    if (locales === undefined) return fallback;
+    if (locales === null) throw new TypeError('Invalid locales list');
+    const localeObject = typeof locales === 'string' || INTL_LOCALE_TAGS.has(locales)
+      ? [locales] : Object(locales);
+    const numericLength = +localeObject.length;
+    const length = Number.isNaN(numericLength) || numericLength <= 0 ? 0
+      : Math.min(Math.trunc(numericLength), Number.MAX_SAFE_INTEGER);
+    const canonical = [];
+    const seen = new Set();
+    for (let index = 0; index < length; index++) {
+      if (!(index in localeObject)) continue;
+      const candidate = localeObject[index];
+      if (typeof candidate !== 'string' &&
+          (candidate === null || (typeof candidate !== 'object' && typeof candidate !== 'function'))) {
+        throw new TypeError('Locale list elements must be strings or objects');
+      }
+      const tag = INTL_LOCALE_TAGS.has(candidate) ? INTL_LOCALE_TAGS.get(candidate) : `${candidate}`;
+      if (typeof __thaw_intl_locale_parse === 'function') {
+        const parsed = JSON.parse(__thaw_intl_locale_parse(tag));
+        if (!parsed.valid) throw new RangeError(`Invalid language tag: ${tag}`);
+        if (!seen.has(parsed.tag)) {
+          seen.add(parsed.tag);
+          canonical.push(parsed);
+        }
+      } else {
+        if (!seen.has(tag)) {
+          seen.add(tag);
+          canonical.push({ tag });
+        }
+      }
+    }
+    for (const parsed of canonical) {
+      if (typeof __thaw_intl_locale_resolve === 'function') {
+        const resolved = JSON.parse(__thaw_intl_locale_resolve(parsed.tag));
+        if (resolved.valid && resolved.language === parsed.language) return parsed.tag;
+      } else {
+        return parsed.tag;
+      }
+    }
+    return fallback;
+  }
+
   function intlZonedParts(timeZone, epochMs) {
     const zone = String(timeZone);
     const value = Number(epochMs);
@@ -199,10 +244,10 @@
   function intlIntegerOption(value, fallback, min, max) {
     if (value === undefined) return fallback;
     const n = Number(value);
-    if (!Number.isInteger(n) || n < min || n > max) {
+    if (!Number.isFinite(n) || n < min || n > max) {
       throw new RangeError(`Invalid value: ${String(value)}`);
     }
-    return n;
+    return Math.floor(n);
   }
 
   // Real `Intl.NumberFormat`'s `useGrouping` accepts a boolean (legacy)
@@ -316,6 +361,7 @@
       hour: ['numeric', '2-digit'],
       minute: ['numeric', '2-digit'],
       second: ['numeric', '2-digit'],
+      dayPeriod: ['narrow', 'short', 'long'],
       timeZoneName: ['long', 'short', 'shortOffset', 'longOffset', 'shortGeneric', 'longGeneric'],
     };
     for (const [key, values] of Object.entries(allowed)) {
@@ -344,7 +390,7 @@
       // carries (confirmed against real Node), the same precedence
       // `Intl.Locale`'s constructor already implements above -- reuse
       // its tag-rewriting approach rather than duplicating it.
-      const localeTag = String(locale === undefined ? 'en-US' : locale);
+      const localeTag = intlRequestedLocale(locale);
       this.locale = this._useRealLocaleData
         ? (opts.calendar !== undefined || opts.numberingSystem !== undefined
             ? new Locale(localeTag, { calendar: opts.calendar, numberingSystem: opts.numberingSystem }).toString()
@@ -367,6 +413,7 @@
       this._hour = opts.hour;
       this._minute = opts.minute;
       this._second = opts.second;
+      this._dayPeriod = opts.dayPeriod;
       this._timeZoneName = opts.timeZoneName;
       this._fractionalSecondDigits = opts.fractionalSecondDigits === undefined
         ? undefined
@@ -380,7 +427,7 @@
       this._dateStyle = opts.dateStyle;
       this._timeStyle = opts.timeStyle;
       if (this._dateStyle !== undefined || this._timeStyle !== undefined) {
-        if (['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second', 'fractionalSecondDigits'].some(key => opts[key] !== undefined)) {
+        if (['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second', 'dayPeriod', 'fractionalSecondDigits'].some(key => opts[key] !== undefined)) {
           throw new TypeError('dateStyle/timeStyle can not be used with individual field options');
         }
         for (const [key, value] of [['dateStyle', this._dateStyle], ['timeStyle', this._timeStyle]]) {
@@ -425,7 +472,8 @@
         this._weekday !== undefined || this._year !== undefined ||
         this._month !== undefined || this._day !== undefined ||
         this._hour !== undefined || this._minute !== undefined ||
-        this._second !== undefined || this._fractionalSecondDigits !== undefined;
+        this._second !== undefined || this._dayPeriod !== undefined ||
+        this._fractionalSecondDigits !== undefined;
       if (!hasAnyField) {
         this._year = 'numeric';
         this._month = 'numeric';
@@ -458,10 +506,12 @@
     }
 
     resolvedOptions() {
+      const resolvedLocale = this._useRealLocaleData && typeof __thaw_intl_datetime_resolved_options === 'function'
+        ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
       const result = {
         locale: this.locale,
-        calendar: 'gregory',
-        numberingSystem: 'latn',
+        calendar: resolvedLocale && resolvedLocale.calendar ? resolvedLocale.calendar : 'gregory',
+        numberingSystem: resolvedLocale && resolvedLocale.numberingSystem ? resolvedLocale.numberingSystem : 'latn',
         timeZone: this._timeZone,
       };
       if (this._dateStyle !== undefined || this._timeStyle !== undefined) {
@@ -485,6 +535,7 @@
       }
       if (this._minute) result.minute = this._minute;
       if (this._second) result.second = this._second;
+      if (this._dayPeriod) result.dayPeriod = this._dayPeriod;
       if (this._fractionalSecondDigits !== undefined) result.fractionalSecondDigits = this._fractionalSecondDigits;
       if (this._timeZoneName) result.timeZoneName = this._timeZoneName;
       return result;
@@ -538,6 +589,7 @@
         hour: this._hour,
         minute: this._minute,
         second: this._second,
+        dayPeriod: this._dayPeriod,
         hour12: this._explicitHour12,
         hourCycle: this._explicitHourCycle,
       };
@@ -548,7 +600,7 @@
       // path below degrades narrow to short.
       let parts = null;
       if (
-        (this._month === 'narrow' || this._weekday === 'narrow') &&
+        (this._month === 'narrow' || this._weekday === 'narrow' || this._dayPeriod !== undefined) &&
         typeof __thaw_intl_datetime_narrow_icu4c === 'function'
       ) {
         const icuParts = JSON.parse(
@@ -638,8 +690,10 @@
           : text;
         const secondIndex = parts.findIndex(part => part.type === 'second');
         if (secondIndex >= 0) {
-          const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
-          parts[secondIndex].value = render(`${whole}.${fraction}`);
+          const decimal = render('0.1').slice(render('0').length, -render('1').length);
+          parts.splice(secondIndex + 1, 0,
+            { type: 'literal', value: decimal },
+            { type: 'fractionalSecond', value: render(fraction) });
         } else {
           parts.push({ type: 'fractionalSecond', value: render(fraction) });
         }
@@ -679,13 +733,17 @@
       }
       if (this._second) {
         const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
-        fields.push(['second', render(fraction === undefined ? whole : `${whole}.${fraction}`)]);
+        fields.push(['second', render(whole)]);
+        if (fraction !== undefined) {
+          const decimal = render('0.1').slice(render('0').length, -render('1').length);
+          fields.push(['fractionalSecond', render(fraction), decimal]);
+        }
       } else if (fraction !== undefined) {
         fields.push(['fractionalSecond', render(fraction)]);
       }
       const parts = [];
-      fields.forEach(([type, value], index) => {
-        if (index > 0) parts.push({ type: 'literal', value: ':' });
+      fields.forEach(([type, value, separator], index) => {
+        if (index > 0) parts.push({ type: 'literal', value: separator || ':' });
         parts.push({ type, value });
       });
       if (this._timeZoneName) {
@@ -755,15 +813,15 @@
         if (this._minute) fields.push(['minute', this._minute === '2-digit' ? intlPad(zoned.minute, 2) : String(zoned.minute)]);
         if (this._second) {
           const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
-          const fraction = this._fractionalSecondDigits === undefined
-            ? ''
-            : `.${intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits)}`;
-          fields.push(['second', `${whole}${fraction}`]);
+          fields.push(['second', whole]);
+          if (this._fractionalSecondDigits !== undefined) {
+            fields.push(['fractionalSecond', intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits), '.']);
+          }
         } else if (this._fractionalSecondDigits !== undefined) {
           fields.push(['fractionalSecond', intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits)]);
         }
-        fields.forEach(([type, value], index) => {
-          if (index > 0) trailing.push({ type: 'literal', value: ':' });
+        fields.forEach(([type, value, separator], index) => {
+          if (index > 0) trailing.push({ type: 'literal', value: separator || ':' });
           trailing.push({ type, value });
         });
         if (dayPeriod) {
@@ -797,7 +855,8 @@
     // field options were given.
     _effectiveOptions() {
       const hasAny = this._weekday || this._era || this._year || this._month || this._day ||
-        this._hour || this._minute || this._second;
+        this._hour || this._minute || this._second || this._dayPeriod ||
+        this._fractionalSecondDigits !== undefined;
       return {
         weekday: this._weekday,
         era: this._era,
@@ -807,6 +866,9 @@
         hour: this._hour,
         minute: this._minute,
         second: this._second,
+        dayPeriod: this._dayPeriod,
+        fractionalSecondDigits: this._fractionalSecondDigits,
+        timeZoneName: this._timeZoneName,
         hour12: this._explicitHour12,
         hourCycle: this._explicitHourCycle,
       };
@@ -906,7 +968,7 @@
       // changes here -- rounding, sign, and `style: 'unit'`'s English
       // forms are locale-independent arithmetic already correct as-is.
       this._useRealLocaleData = typeof __thaw_intl_number_format === 'function';
-      const localeTag = String(locale === undefined ? 'en-US' : locale);
+      const localeTag = intlRequestedLocale(locale);
       // An explicit `numberingSystem` overrides the locale's own default,
       // exactly like `DateTimeFormat`'s `calendar`/`numberingSystem`
       // above (reusing `Intl.Locale`'s own tag rewriting).
@@ -1023,8 +1085,8 @@
         // Rounding the mantissa can carry it up a magnitude (`9.99` ->
         // `10`); pair it with the exponent that produced.
         const roundedMagnitude = Number(rounded);
-        if (roundedMagnitude >= 10) {
-          exponent += this._notation === 'engineering' && roundedMagnitude < 1000 ? 0 : 1;
+        if (roundedMagnitude >= (this._notation === 'engineering' ? 1000 : 10)) {
+          exponent += this._notation === 'engineering' ? 3 : 1;
         }
       }
       const mantissa = magnitude === 0 ? 0 : magnitude / Math.pow(10, exponent);
@@ -1038,9 +1100,11 @@
     }
 
     resolvedOptions() {
+      const resolvedLocale = this._useRealLocaleData && typeof __thaw_intl_datetime_resolved_options === 'function'
+        ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
       const result = {
         locale: this.locale,
-        numberingSystem: this._numberingSystem || 'latn',
+        numberingSystem: resolvedLocale && resolvedLocale.numberingSystem ? resolvedLocale.numberingSystem : 'latn',
         style: this._style,
         useGrouping: this._useGrouping,
         minimumIntegerDigits: this._minimumIntegerDigits,
@@ -1077,10 +1141,75 @@
     // The standard-notation digit computation (significant- or
     // fraction-digit rounding, integer zero-padding, effective grouping),
     // shared by `format` and `formatToParts`.
-    _standardDigits(number) {
+    _exactStandardDigits(value) {
+      const text = typeof value === 'bigint' ? value.toString()
+        : typeof value === 'string' ? value.trim() : null;
+      if (text === null) return null;
+      const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(text);
+      if (!match) return null;
+      const exponent = Number(match[5] || 0);
+      const fraction = match[3] === undefined ? (match[4] || '') : match[3];
+      let scale = fraction.length - exponent - (this._style === 'percent' ? 2 : 0);
+      if (!Number.isSafeInteger(scale) || Math.abs(scale) > 10000 || text.length > 10000) return null;
+      let digits = BigInt(`${match[2] || '0'}${fraction}`);
+      const cut = this._significant
+        ? Math.max(0, digits.toString().length - this._maximumSignificantDigits)
+        : Math.max(0, scale - this._maximumFractionDigits);
+      if (cut > 0) {
+        const divisor = 10n ** BigInt(cut);
+        const quotient = digits / divisor;
+        const remainder = digits % divisor;
+        const twice = remainder * 2n;
+        const negative = match[1] === '-';
+        const mode = this._roundingMode;
+        const increment = remainder !== 0n && (
+          mode === 'expand' ||
+          (mode === 'ceil' && !negative) ||
+          (mode === 'floor' && negative) ||
+          (mode === 'halfExpand' && twice >= divisor) ||
+          (mode === 'halfTrunc' && twice > divisor) ||
+          (mode === 'halfEven' && (twice > divisor || (twice === divisor && quotient % 2n !== 0n))) ||
+          (mode === 'halfCeil' && (twice > divisor || (twice === divisor && !negative))) ||
+          (mode === 'halfFloor' && (twice > divisor || (twice === divisor && negative)))
+        );
+        digits = quotient + (increment ? 1n : 0n);
+        scale -= cut;
+      }
+      if (this._significant) {
+        if (digits === 0n) {
+          scale = this._minimumSignificantDigits - 1;
+        } else if (digits.toString().length < this._minimumSignificantDigits) {
+          const padding = this._minimumSignificantDigits - digits.toString().length;
+          digits *= 10n ** BigInt(padding);
+          scale += padding;
+        }
+      }
+      let significantDigits = digits.toString().length;
+      if (scale < 0) {
+        digits *= 10n ** BigInt(-scale);
+        scale = 0;
+      }
+      const padded = digits.toString().padStart(scale + 1, '0');
+      const intPart = scale ? padded.slice(0, -scale) : padded;
+      let fracPart = scale ? padded.slice(-scale) : '';
+      while (fracPart.endsWith('0') && (this._significant
+        ? significantDigits > this._minimumSignificantDigits
+        : fracPart.length > this._minimumFractionDigits)) {
+        fracPart = fracPart.slice(0, -1);
+        significantDigits -= 1;
+      }
+      if (!this._significant) fracPart = fracPart.padEnd(this._minimumFractionDigits, '0');
+      return { intPart, fracPart };
+    }
+
+    _standardDigits(number, original) {
       let intPart;
       let fracPart;
-      if (this._significant) {
+      const exact = this._exactStandardDigits(original);
+      if (exact !== null) {
+        intPart = exact.intPart;
+        fracPart = exact.fracPart;
+      } else if (this._significant) {
         // `ToRawPrecision` -- the requested significant-digit count is
         // what governs the visible digits (and thus the trailing zeros),
         // not `toFixed`'s fraction count.
@@ -1136,6 +1265,13 @@
       return { intPart, fracPart, groupDigits };
     }
 
+    _styleGrouping(text, digits, groupDigits) {
+      if (groupDigits || typeof __thaw_intl_number_format !== 'function') return text;
+      const grouped = String(__thaw_intl_number_format(this.locale, digits, true));
+      const ungrouped = String(__thaw_intl_number_format(this.locale, digits, false));
+      return grouped === ungrouped ? text : text.replace(grouped, ungrouped);
+    }
+
     format(value) {
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
@@ -1146,17 +1282,19 @@
         // rounded digit string. A known divergence: icu4x rounds compact
         // mantissas half-to-even (real ECMA-402 default is `halfExpand`),
         // so an exact tie differs (`1650` -> `1.6K` vs Node's `1.7K`).
-        return String(__thaw_intl_compact_number(this.locale, String(number), this._compactDisplay === 'long'));
+        return String(__thaw_intl_compact_number(this.locale,
+          typeof value === 'bigint' || typeof value === 'string' ? String(value) : String(number),
+          this._compactDisplay === 'long'));
       }
       if (this._notation !== 'standard') {
         return `${sign}${this._formatScientific(number)}`;
       }
-      const { intPart, fracPart, groupDigits } = this._standardDigits(number);
+      const { intPart, fracPart, groupDigits } = this._standardDigits(number, value);
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
       const signedDigits = `${sign}${digits}`;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
         const result = __thaw_intl_percent_format(this.locale, signedDigits);
-        if (result) return result;
+        if (result) return this._styleGrouping(result, digits, groupDigits);
       }
       if (this._style === 'currency') {
         // `currencySign: 'accounting'` renders a negative amount in
@@ -1165,14 +1303,17 @@
         const value = accounting ? digits : signedDigits;
         if (typeof __thaw_intl_currency_format === 'function') {
           const result = __thaw_intl_currency_format(this.locale, value, this._currency, this._currencyDisplay);
-          if (result) return accounting ? `(${result})` : result;
+          if (result) {
+            const formatted = this._styleGrouping(result, digits, groupDigits);
+            return accounting ? `(${formatted})` : formatted;
+          }
         }
         const text = `${this._currency} ${value}`;
         return accounting ? `(${text})` : text;
       }
       if (this._style === 'unit' && typeof __thaw_intl_unit_format === 'function') {
         const result = __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay);
-        if (result) return result;
+        if (result) return this._styleGrouping(result, digits, groupDigits);
       }
       // Sign is handled here, not passed to the native call: it's
       // applied identically across every curated locale (confirmed),
@@ -1351,15 +1492,27 @@
     // `compact` parts; `scientific`/`engineering` emit mantissa +
     // `exponentSeparator`/`exponentInteger` parts.
     formatToParts(value) {
-      const input = Number(value);
+      const input = this._exactStandardDigits(value) !== null ? value : Number(value);
       const full = this.format(input);
-      const number = this._style === 'percent' ? input * 100 : input;
-      if (!Number.isFinite(number)) {
+      const number = this._style === 'percent' ? Number(input) * 100 : Number(input);
+      if (!Number.isFinite(number) && this._exactStandardDigits(input) === null) {
         const type = Number.isNaN(number) ? 'nan' : 'infinity';
         const sign = this._signFor(number);
-        return sign && full.startsWith(sign)
-          ? [{ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign }, { type, value: full.slice(sign.length) }]
-          : [{ type, value: full }];
+        const marker = type === 'nan' ? 'NaN' : 'Infinity';
+        const index = full.indexOf(marker);
+        if (index < 0) return [{ type, value: full }];
+        const prefix = full.slice(0, index);
+        const parts = [];
+        const signIndex = sign ? prefix.indexOf(sign) : -1;
+        if (signIndex < 0) parts.push(...this._affixParts(prefix));
+        else {
+          parts.push(...this._affixParts(prefix.slice(0, signIndex)));
+          parts.push({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign });
+          parts.push(...this._affixParts(prefix.slice(signIndex + sign.length)));
+        }
+        parts.push({ type, value: marker });
+        parts.push(...this._affixParts(full.slice(index + marker.length)));
+        return parts;
       }
       const sign = this._signFor(number);
       if (this._notation === 'compact') {
@@ -1378,7 +1531,7 @@
         parts.push(...this._scientificParts(number));
         return parts;
       }
-      const { intPart, fracPart, groupDigits } = this._standardDigits(number);
+      const { intPart, fracPart, groupDigits } = this._standardDigits(number, input);
       const numeric = this._numericParts(intPart, fracPart, groupDigits);
       const core = numeric.map(part => part.value).join('');
       const index = full.indexOf(core);
@@ -1404,6 +1557,8 @@
       const tokens = [];
       if (this._style === 'percent') {
         tokens.push('percent');
+        // The endpoint strings have already been scaled by 100.
+        tokens.push('scale/0.01');
       } else if (this._style === 'currency') {
         tokens.push(`currency/${this._currency}`);
         if (this._currencyDisplay === 'code') tokens.push('unit-width-iso-code');
@@ -1420,6 +1575,7 @@
         tokens.push(this._notation);
       }
       if (this._useGrouping === false) tokens.push('group-off');
+      if (this._minimumIntegerDigits > 1) tokens.push(`integer-width/*${'0'.repeat(this._minimumIntegerDigits)}`);
       if (this._signDisplay === 'always') tokens.push('sign-always');
       else if (this._signDisplay === 'never') tokens.push('sign-never');
       else if (this._signDisplay === 'exceptZero') tokens.push('sign-except-zero');
@@ -1461,13 +1617,15 @@
     formatRange(start, end) {
       const startNumber = this._style === 'percent' ? Number(start) * 100 : Number(start);
       const endNumber = this._style === 'percent' ? Number(end) * 100 : Number(end);
-      if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) {
+      if ((!Number.isFinite(startNumber) && this._exactStandardDigits(start) === null) ||
+          (!Number.isFinite(endNumber) && this._exactStandardDigits(end) === null)) {
         throw new RangeError('Invalid value');
       }
       if (typeof __thaw_intl_number_range_icu4c === 'function') {
-        const asText = ({ intPart, fracPart }) => (fracPart ? `${intPart}.${fracPart}` : intPart);
-        const startText = asText(this._standardDigits(startNumber));
-        const endText = asText(this._standardDigits(endNumber));
+        const asText = (number, { intPart, fracPart }) =>
+          `${number < 0 || Object.is(number, -0) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
+        const startText = asText(startNumber, this._standardDigits(startNumber, start));
+        const endText = asText(endNumber, this._standardDigits(endNumber, end));
         const formatted = __thaw_intl_number_range_icu4c(
           this.locale,
           this._rangeSkeleton(),
@@ -1476,7 +1634,13 @@
         );
         if (formatted) return formatted;
       }
-      if (startNumber === endNumber) return `~${this.format(start)}`;
+      const startExact = this._exactStandardDigits(start);
+      const endExact = this._exactStandardDigits(end);
+      const same = startExact && endExact
+        ? startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart &&
+          this._signFor(startNumber) === this._signFor(endNumber)
+        : startNumber === endNumber;
+      if (same) return `~${this.format(start)}`;
       const separator = this._numberRangeSeparator();
       if (!this._rangeSharesAffixes()) {
         return `${this.format(start)}${separator}${this.format(end)}`;
@@ -1512,22 +1676,30 @@
     formatRangeToParts(start, end) {
       const startNumber = this._style === 'percent' ? Number(start) * 100 : Number(start);
       const endNumber = this._style === 'percent' ? Number(end) * 100 : Number(end);
-      if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) {
+      if ((!Number.isFinite(startNumber) && this._exactStandardDigits(start) === null) ||
+          (!Number.isFinite(endNumber) && this._exactStandardDigits(end) === null)) {
         throw new RangeError('Invalid value');
       }
       if (typeof __thaw_intl_number_range_parts_icu4c === 'function') {
-        const asText = ({ intPart, fracPart }) => (fracPart ? `${intPart}.${fracPart}` : intPart);
+        const asText = (number, { intPart, fracPart }) =>
+          `${number < 0 || Object.is(number, -0) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
         const parts = JSON.parse(
           __thaw_intl_number_range_parts_icu4c(
             this.locale,
             this._rangeSkeleton(),
-            asText(this._standardDigits(startNumber)),
-            asText(this._standardDigits(endNumber)),
+            asText(startNumber, this._standardDigits(startNumber, start)),
+            asText(endNumber, this._standardDigits(endNumber, end)),
           ),
         );
         if (parts.length) return parts;
       }
-      if (startNumber === endNumber) {
+      const startExact = this._exactStandardDigits(start);
+      const endExact = this._exactStandardDigits(end);
+      const same = startExact && endExact
+        ? startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart &&
+          this._signFor(startNumber) === this._signFor(endNumber)
+        : startNumber === endNumber;
+      if (same) {
         return [
           { type: 'approximatelySign', value: '~', source: 'shared' },
           ...this.formatToParts(start).map(part => ({ ...part, source: 'shared' })),
@@ -1559,7 +1731,7 @@
     constructor(locale, options) {
       const opts = options || {};
       this._useRealLocaleData = typeof __thaw_intl_list_format === 'function';
-      this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
+      this.locale = this._useRealLocaleData ? intlRequestedLocale(locale) : 'en-US';
       this._type = intlEnumOption(opts.type, ['conjunction', 'disjunction', 'unit'], 'conjunction', 'type');
       this._style = intlEnumOption(opts.style, ['long', 'short', 'narrow'], 'long', 'style');
     }
@@ -1602,28 +1774,42 @@
         if (tag === undefined || tag === null) {
           throw new TypeError("First argument to Intl.Locale constructor can't be empty or missing");
         }
-        const base = tag instanceof Locale ? tag.toString() : String(tag);
+        const base = INTL_LOCALE_TAGS.has(tag) ? INTL_LOCALE_TAGS.get(tag) : String(tag);
         const opts = options || {};
-        const overrides = [];
-        if (opts.calendar !== undefined) overrides.push(`ca-${opts.calendar}`);
-        if (opts.numberingSystem !== undefined) overrides.push(`nu-${opts.numberingSystem}`);
-        if (opts.collation !== undefined) overrides.push(`co-${opts.collation}`);
-        // A `-u-` Unicode extension always starts a new subtag boundary
-        // right after language/script/region/variants and right before
-        // any `-x-` private-use section -- stripping from the first
-        // `-u-` onward and re-appending is enough for the common case
-        // (a plain tag with at most one `-u-` extension); real Node's
-        // own semantics let explicit options fully replace whatever the
-        // tag itself specified, confirmed against real Node.
-        let effectiveTag = base;
-        if (overrides.length > 0) {
-          const unicodeExtensionStart = effectiveTag.search(/-u(-|$)/);
-          const withoutExtension =
-            unicodeExtensionStart === -1 ? effectiveTag : effectiveTag.slice(0, unicodeExtensionStart);
-          effectiveTag = `${withoutExtension}-u-${overrides.join('-')}`;
+        const original = JSON.parse(__thaw_intl_locale_parse(base));
+        if (!original.valid) throw new RangeError(`Invalid language tag: ${tag}`);
+        let effectiveTag = original.tag;
+        const overrides = [['ca', opts.calendar], ['nu', opts.numberingSystem], ['co', opts.collation]]
+          .filter(([, value]) => value !== undefined);
+        if (overrides.length) {
+          const subtags = effectiveTag.split('-');
+          const unicode = subtags.findIndex(part => part === 'u');
+          const end = unicode < 0
+            ? subtags.findIndex((part, index) => index > 0 && part.length === 1 && part > 'u')
+            : subtags.findIndex((part, index) => index > unicode && part.length === 1);
+          const stop = end < 0 ? subtags.length : end;
+          const body = unicode < 0 ? [] : subtags.slice(unicode + 1, stop);
+          const attributes = [];
+          const keywords = new Map();
+          let index = 0;
+          while (index < body.length && body[index].length !== 2) attributes.push(body[index++]);
+          while (index < body.length) {
+            const key = body[index++];
+            const values = [];
+            while (index < body.length && body[index].length !== 2) values.push(body[index++]);
+            keywords.set(key, values.join('-'));
+          }
+          for (const [key, value] of overrides) keywords.set(key, String(value));
+          const updated = ['u', ...attributes, ...[...keywords].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+            .flatMap(([key, value]) => [key, ...(value ? value.split('-') : [])])];
+          subtags.splice(unicode < 0 ? stop : unicode, unicode < 0 ? 0 : stop - unicode, ...updated);
+          effectiveTag = subtags.join('-');
         }
         const parsed = JSON.parse(__thaw_intl_locale_parse(effectiveTag));
         if (!parsed.valid) throw new RangeError(`Invalid language tag: ${tag}`);
+        this._tag = parsed.tag;
+        INTL_LOCALE_TAGS.set(this, parsed.tag);
+        this._baseName = parsed.baseName;
         this._language = parsed.language;
         this._script = parsed.script;
         this._region = parsed.region;
@@ -1657,42 +1843,26 @@
       }
 
       get baseName() {
-        let name = this._language;
-        if (this._script) name += `-${this._script}`;
-        if (this._region) name += `-${this._region}`;
-        return name;
+        return this._baseName;
       }
 
       toString() {
-        let name = this.baseName;
-        const extension = [];
-        if (this._calendar) extension.push(`ca-${this._calendar}`);
-        if (this._numberingSystem) extension.push(`nu-${this._numberingSystem}`);
-        if (this._collation) extension.push(`co-${this._collation}`);
-        if (extension.length > 0) name += `-u-${extension.join('-')}`;
-        return name;
+        return this._tag;
       }
 
       // `maximize()`/`minimize()` preserve the original instance's own
       // Unicode extension keywords (confirmed against real Node) --
       // only the language/script/region subtags themselves transform.
       _withTransformedSubtags(transformed) {
-        const result = Object.create(Locale.prototype);
-        result._language = transformed.language;
-        result._script = transformed.script;
-        result._region = transformed.region;
-        result._calendar = this._calendar;
-        result._numberingSystem = this._numberingSystem;
-        result._collation = this._collation;
-        return result;
+        return new Locale(transformed.tag);
       }
 
       maximize() {
-        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_maximize(this.baseName)));
+        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_maximize(this._tag)));
       }
 
       minimize() {
-        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_minimize(this.baseName)));
+        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_minimize(this._tag)));
       }
   }
 
@@ -1707,7 +1877,7 @@
   class PluralRules {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this.locale = intlRequestedLocale(locale);
       this._type = intlEnumOption(opts.type, ['cardinal', 'ordinal'], 'cardinal', 'type');
       this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
       this._minimumIntegerDigits = intlIntegerOption(opts.minimumIntegerDigits, 1, 1, 21);
@@ -1790,7 +1960,7 @@
   class Collator {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this.locale = intlRequestedLocale(locale);
       this._sensitivity = intlEnumOption(opts.sensitivity, ['base', 'accent', 'case', 'variant'], 'variant', 'sensitivity');
       this._usage = intlEnumOption(opts.usage, ['sort', 'search'], 'sort', 'usage');
       this._ignorePunctuation = Boolean(opts.ignorePunctuation);
@@ -1844,7 +2014,7 @@
   class Segmenter {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this.locale = intlRequestedLocale(locale);
       this._granularity = intlEnumOption(opts.granularity, ['grapheme', 'word', 'sentence'], 'grapheme', 'granularity');
     }
 
@@ -1899,7 +2069,7 @@
   class RelativeTimeFormat {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this.locale = intlRequestedLocale(locale);
       this._style = opts.style === undefined ? 'long' : String(opts.style);
       this._numeric = opts.numeric === undefined ? 'always' : String(opts.numeric);
       if (!['long', 'short', 'narrow'].includes(this._style)) throw new RangeError(`Invalid style: ${this._style}`);
@@ -1992,8 +2162,7 @@
   class DisplayNames {
     constructor(locales, options) {
       const opts = options || {};
-      const list = locales === undefined ? [] : (Array.isArray(locales) ? locales : [locales]);
-      this.locale = list.length > 0 ? String(list[0]) : 'en';
+      this.locale = intlRequestedLocale(locales, 'en');
       this._language = primarylanguage(this.locale);
       this._type = opts.type === undefined ? 'language' : String(opts.type);
       this._style = opts.style === undefined ? 'long' : String(opts.style);
@@ -2073,8 +2242,7 @@
   class DurationFormat {
     constructor(locales, options) {
       const opts = options || {};
-      const list = locales === undefined ? [] : (Array.isArray(locales) ? locales : [locales]);
-      this.locale = list.length > 0 ? String(list[0]) : 'en';
+      this.locale = intlRequestedLocale(locales, 'en');
       this._language = primarylanguage(this.locale);
       this._style = opts.style === undefined ? 'short' : String(opts.style);
       if (!['long', 'short', 'narrow', 'digital'].includes(this._style)) {
@@ -2085,20 +2253,52 @@
     format(duration) {
       const table = DURATION_TABLES[this._language];
       const style = this._style === 'digital' ? 'short' : this._style;
-      const value = duration || {};
-      const parts = [];
+      if (duration === null || (typeof duration !== 'object' && typeof duration !== 'function')) {
+        if (typeof duration === 'string') throw new RangeError('Invalid duration');
+        throw new TypeError('Duration must be an object');
+      }
+      const value = duration;
+      const numbers = {};
+      let supplied = false;
+      let sign = 0;
       for (const unit of DURATION_UNITS) {
         const raw = value[unit];
-        if (raw === undefined || raw === null) continue;
+        if (raw === undefined) continue;
+        supplied = true;
         const number = Number(raw);
         if (!Number.isFinite(number) || !Number.isInteger(number)) throw new RangeError(`Invalid duration ${unit}`);
+        if (number !== 0) {
+          if (sign && Math.sign(number) !== sign) throw new RangeError('Duration fields have mixed signs');
+          sign = Math.sign(number);
+        }
+        numbers[unit] = number;
+      }
+      if (!supplied) throw new TypeError('Duration has no fields');
+      const parts = [];
+      for (const unit of DURATION_UNITS) {
+        const number = numbers[unit];
+        if (number === undefined) continue;
         if (number === 0) continue;
+        if (this._style === 'digital' && ['hours', 'minutes', 'seconds'].includes(unit)) continue;
         let name = table[style][unit];
         // English long form pluralizes a non-unit count ("30 minutes").
         if (this._language === 'en' && style === 'long' && number !== 1) {
           name += 's';
         }
         parts.push(`${number}${table.unit}${name}`);
+      }
+      if (this._style === 'digital') {
+        const hours = Math.abs(numbers.hours || 0);
+        const minutes = Math.abs(numbers.minutes || 0);
+        const seconds = Math.abs(numbers.seconds || 0);
+        if (numbers.hours !== undefined || numbers.minutes !== undefined || numbers.seconds !== undefined) {
+          const fields = numbers.hours !== undefined
+            ? [String(hours), String(minutes).padStart(2, '0'), String(seconds).padStart(2, '0')]
+            : numbers.minutes !== undefined
+              ? [String(minutes), String(seconds).padStart(2, '0')]
+              : [String(seconds)];
+          parts.push(`${sign < 0 ? '-' : ''}${fields.join(':')}`);
+        }
       }
       return parts.join(table.separator);
     }
