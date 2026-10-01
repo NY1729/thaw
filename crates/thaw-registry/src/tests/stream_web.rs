@@ -1248,3 +1248,30 @@ fn readable_stream_from_advances_only_for_read_requests() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn stream_async_iterator_releases_locks_and_forwards_return_reason() {
+    // Unrun regression for normal/error/cancel-error/preventCancel endings.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("stream_iterator_release");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var normal = new ReadableStream({ start(c) { c.enqueue(1); c.close(); } }), it = normal.values();
+      var first = await it.next(), end = await it.next(), again = await it.next();
+      var failure = new Error('read'), failed = new ReadableStream({ start(c) { c.error(failure); } }), failedIt = failed.values(), readFailure;
+      try { await failedIt.next(); } catch (error) { readFailure = error === failure; }
+      var reason = { reason: true }, seen, cancelError = new Error('cancel'), cancelled = new ReadableStream({ cancel(value) { seen = value; throw cancelError; } }), cancelIt = cancelled.values(), cancellation;
+      try { await cancelIt.return(reason); } catch (error) { cancellation = error === cancelError; }
+      var cancelledAgain = await cancelIt.next(), calls = 0, kept = new ReadableStream({ start(c) { c.enqueue(2); }, cancel() { calls++; } }), options = { preventCancel: true }, keptIt = kept.values(options); options.preventCancel = false;
+      var returned = await keptIt.return(reason), keptReader = kept.getReader(), retained = await keptReader.read(); keptReader.releaseLock();
+      return [first.value, end.done, again.done, normal.locked, readFailure, failed.locked, seen === reason, cancellation, cancelled.locked, cancelledAgain.done, returned.value === reason, returned.done, retained.value, calls];
+    };"#).unwrap();
+    let modules = temp_registry("stream_iterator_release_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIteratorRelease = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseIteratorRelease").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[1,true,true,false,true,false,true,true,false,true,true,true,2,0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
