@@ -1,5 +1,5 @@
 thread_local! {
-    static REGEX_CACHE: RefCell<std::collections::HashMap<(String, String), CompiledRegex>> =
+    static REGEX_CACHE: RefCell<std::collections::HashMap<(Vec<u16>, String), regress::Regex>> =
         RefCell::new(std::collections::HashMap::new());
     /// Match metadata (named groups, UTF-16 match index, and input string)
     /// keyed by the stable array handle. Array mutations replace the backing
@@ -11,7 +11,7 @@ thread_local! {
 struct RegexMatchMeta {
     groups: *mut u8,
     index: f64,
-    input: String,
+    input: Vec<u8>,
 }
 
 fn reset_regex_meta(tracing: bool) {
@@ -32,243 +32,129 @@ fn store_regex_meta(pointer: *mut u8, meta: RegexMatchMeta) {
     });
 }
 
-// `thaw-runtime` has no Rust-level access to thaw-std's `Json` `Value`
-// type (see `AnyKey`'s own doc comment in `maps.rs`), so the named-capture
-// object is built through thaw-std's exported JSON entry point: serialize
-// the (string-valued) groups to JSON text and parse it back as a live
-// `Json` value. `thaw_json_parse` returns a leaked, shared value, so the
-// pointer stays valid/identity-stable for the process lifetime.
+// `thaw-runtime` has no Rust-level access to thaw-std's `Json` value type.
+// Build the named-capture object through its existing exported setters so
+// nonparticipating groups are undefined and lone-surrogate captures remain
+// exact WTF-8 values.
 unsafe extern "C" {
-    fn thaw_json_parse(text: *const std::os::raw::c_char) -> *mut u8;
+    fn thaw_json_object_new() -> *mut u8;
+    fn thaw_json_object_set_string(object: *mut u8, key: *const c_char, value: *const c_char);
     fn thaw_json_undefined() -> *mut u8;
     fn thaw_json_object_set_json_owned(object: *mut u8, key: *const c_char, value: *mut u8);
 }
 
-fn groups_json_pointer(groups: serde_json::Map<String, serde_json::Value>) -> *mut u8 {
-    let text = serde_json::to_string(&serde_json::Value::Object(groups.clone())).unwrap_or_default();
-    let Ok(text) = std::ffi::CString::new(text) else {
+fn groups_json_pointer(groups: Vec<(String, Option<Vec<u16>>)>) -> *mut u8 {
+    if groups.is_empty() {
         return std::ptr::null_mut();
-    };
-    let object = unsafe { thaw_json_parse(text.as_ptr()) };
-    if !object.is_null() {
-        for (name, value) in groups {
-            if value.is_null() {
-                if let Ok(name) = std::ffi::CString::new(name) {
-                    unsafe { thaw_json_object_set_json_owned(object, name.as_ptr(), thaw_json_undefined()) };
-                }
-            }
+    }
+    let object = unsafe { thaw_json_object_new() };
+    if object.is_null() {
+        return object;
+    }
+    for (name, value) in groups {
+        let name = thaw_arena::arena_string(name.as_bytes());
+        if name.is_null() { return std::ptr::null_mut(); }
+        if let Some(value) = value {
+            let value = thaw_arena::arena_string(&wtf8_encode_utf16(&value));
+            if value.is_null() { return std::ptr::null_mut(); }
+            unsafe { thaw_json_object_set_string(object, name, value) };
+        } else {
+            unsafe { thaw_json_object_set_json_owned(object, name, thaw_json_undefined()) };
         }
     }
     object
 }
 
-/// A compiled pattern: the `regex` crate when it can compile the pattern,
-/// otherwise `fancy-regex`, which adds backreferences and lookaround. A
-/// `fancy-regex` pattern that exceeds its backtracking limit reports an
-/// error at match time; those calls degrade to "no match" at the call
-/// sites below.
-enum CompiledRegex {
-    Native(regex::Regex),
-    Fancy(fancy_regex::Regex),
+/// Decode every native string as UTF-16, retaining lone surrogate code units.
+unsafe fn regex_units(value: *const c_char) -> Vec<u16> {
+    wtf8_decode_utf16(unsafe { CStr::from_ptr(value) }.to_bytes())
 }
 
-// JavaScript's shorthand digit and word classes are ASCII even with `u`.
-// The Rust engines default to Unicode classes, so translate the shorthands
-// before either engine sees the source. Escaped backslashes remain literals.
-fn js_ascii_classes(source: &str) -> String {
-    let mut result = String::with_capacity(source.len());
-    let mut chars = source.chars();
-    let mut in_class = false;
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('d') => result.push_str(if in_class { "0-9" } else { "[0-9]" }),
-                Some('w') => result.push_str(if in_class { "A-Za-z0-9_" } else { "[A-Za-z0-9_]" }),
-                Some('D') if !in_class => result.push_str("[^0-9]"),
-                Some('W') if !in_class => result.push_str("[^A-Za-z0-9_]"),
-                Some(other) => { result.push('\\'); result.push(other); }
-                None => result.push('\\'),
-            }
+fn compiled_match(regex: &regress::Regex, text: &[u16], flags: &str, start: usize) -> Option<RegexCaptures> {
+    if start > text.len() {
+        return None;
+    }
+    let matched = if flags.contains('u') || flags.contains('v') {
+        regex.find_from_utf16(text, start).next()
+    } else {
+        regex.find_from_ucs2(text, start).next()
+    }?;
+    Some(RegexCaptures::from_match(matched, text))
+}
+
+fn advance_string_index(text: &[u16], index: usize, flags: &str) -> usize {
+    if (flags.contains('u') || flags.contains('v'))
+        && text.get(index).is_some_and(|unit| (0xD800..=0xDBFF).contains(unit))
+        && text.get(index + 1).is_some_and(|unit| (0xDC00..=0xDFFF).contains(unit))
+    {
+        index + 2
+    } else {
+        index + 1
+    }
+}
+
+/// Captures retain UTF-16 ranges so a half-surrogate match is representable.
+struct RegexCaptures {
+    start: usize,
+    end: usize,
+    groups: Vec<Option<Vec<u16>>>,
+    names: Vec<(String, Option<Vec<u16>>)>,
+}
+
+impl RegexCaptures {
+    fn from_match(matched: regress::Match, text: &[u16]) -> Self {
+        let capture = |range: Option<std::ops::Range<usize>>| range.map(|range| text[range].to_vec());
+        let groups = (0..=matched.captures.len())
+            .map(|index| capture(matched.group(index)))
+            .collect();
+        let names = matched.named_groups()
+            .map(|(name, range)| (name.to_string(), capture(range)))
+            .collect();
+        Self { start: matched.start(), end: matched.end(), groups, names }
+    }
+
+    fn into_positional(self) -> Vec<Option<Vec<u16>>> {
+        self.groups
+    }
+}
+
+fn pattern_codepoints(source: &[u16], flags: &str) -> Vec<u32> {
+    let unicode = flags.contains('u') || flags.contains('v');
+    let mut result = Vec::with_capacity(source.len());
+    let mut index = 0;
+    while index < source.len() {
+        let first = source[index];
+        if unicode && (0xD800..=0xDBFF).contains(&first)
+            && source.get(index + 1).is_some_and(|next| (0xDC00..=0xDFFF).contains(next))
+        {
+            let low = source[index + 1];
+            result.push(0x10000 + ((u32::from(first) - 0xD800) << 10) + u32::from(low) - 0xDC00);
+            index += 2;
         } else {
-            if ch == '[' { in_class = true; }
-            if ch == ']' { in_class = false; }
-            result.push(ch);
+            result.push(u32::from(first));
+            index += 1;
         }
     }
     result
 }
 
-impl CompiledRegex {
-    fn compile(source: &str, flags: &str) -> Option<Self> {
-        let source = js_ascii_classes(source);
-        if let Ok(native) = regex::RegexBuilder::new(&source)
-            .case_insensitive(flags.contains('i'))
-            .multi_line(flags.contains('m'))
-            .dot_matches_new_line(flags.contains('s'))
-            .build()
-        {
-            return Some(Self::Native(native));
-        }
-        fancy_regex::RegexBuilder::new(&source)
-            .case_insensitive(flags.contains('i'))
-            .multi_line(flags.contains('m'))
-            .dot_matches_new_line(flags.contains('s'))
-            .build()
-            .ok()
-            .map(Self::Fancy)
-    }
-
-    fn is_match(&self, text: &str) -> bool {
-        match self {
-            Self::Native(regex) => regex.is_match(text),
-            Self::Fancy(regex) => regex.is_match(text).unwrap_or(false),
-        }
-    }
-
-    fn captures(&self, text: &str) -> Option<RegexCaptures> {
-        match self {
-            Self::Native(regex) => regex.captures(text).map(RegexCaptures::from_native),
-            Self::Fancy(regex) => regex
-                .captures(text)
-                .ok()
-                .flatten()
-                .map(RegexCaptures::from_fancy),
-        }
-    }
-
-    fn captures_at(&self, text: &str, start: usize) -> Option<RegexCaptures> {
-        match self {
-            Self::Native(regex) => regex
-                .captures_at(text, start)
-                .map(RegexCaptures::from_native),
-            Self::Fancy(regex) => regex
-                .captures_from_pos(text, start)
-                .ok()
-                .flatten()
-                .map(RegexCaptures::from_fancy),
-        }
-    }
-
-    fn find_at(&self, text: &str, start: usize) -> Option<(usize, usize)> {
-        match self {
-            Self::Native(regex) => regex.find_at(text, start).map(|found| (found.start(), found.end())),
-            Self::Fancy(regex) => regex
-                .find_from_pos(text, start)
-                .ok()
-                .flatten()
-                .map(|found| (found.start(), found.end())),
-        }
-    }
-
-    fn find_iter(&self, text: &str) -> Vec<String> {
-        match self {
-            Self::Native(regex) => regex
-                .find_iter(text)
-                .map(|found| found.as_str().to_string())
-                .collect(),
-            Self::Fancy(regex) => regex
-                .find_iter(text)
-                .filter_map(|found| found.ok())
-                .map(|found| found.as_str().to_string())
-                .collect(),
-        }
-    }
-
-    fn captures_iter(&self, text: &str) -> Vec<RegexCaptures> {
-        match self {
-            Self::Native(regex) => regex
-                .captures_iter(text)
-                .map(RegexCaptures::from_native)
-                .collect(),
-            Self::Fancy(regex) => regex
-                .captures_iter(text)
-                .filter_map(|captures| captures.ok())
-                .map(RegexCaptures::from_fancy)
-                .collect(),
-        }
-    }
-
-    fn capture_names(&self) -> Vec<Option<&str>> {
-        match self {
-            Self::Native(regex) => regex.capture_names().collect(),
-            Self::Fancy(regex) => regex.capture_names().collect(),
-        }
-    }
-
-    fn split(&self, text: &str) -> Vec<Option<String>> {
-        let mut parts = Vec::new();
-        let mut cursor = 0;
-        for captures in self.captures_iter(text) {
-            let matched = captures.get(0).unwrap_or("");
-            let start = captures.start;
-            let end = start + matched.len();
-            if start == end && (start == 0 || start == text.len()) {
-                continue;
-            }
-            parts.push(Some(text[cursor..start].to_string()));
-            parts.extend(captures.groups[1..].iter().cloned());
-            cursor = end;
-        }
-        parts.push(Some(text[cursor..].to_string()));
-        parts
-    }
-}
-
-/// A match's captured groups as owned strings (index 0 is the whole match).
-/// A group that did not participate remains `None` in the optional element.
-struct RegexCaptures {
-    start: usize,
-    /// `None` for a group that did not participate in the match.
-    groups: Vec<Option<String>>,
-}
-
-impl RegexCaptures {
-    fn from_native(captures: regex::Captures<'_>) -> Self {
-        Self {
-            start: captures.get(0).map_or(0, |matched| matched.start()),
-            groups: (0..captures.len())
-                .map(|index| captures.get(index).map(|group| group.as_str().to_string()))
-                .collect(),
-        }
-    }
-
-    fn from_fancy(captures: fancy_regex::Captures<'_>) -> Self {
-        Self {
-            start: captures.get(0).map_or(0, |matched| matched.start()),
-            groups: (0..captures.len())
-                .map(|index| captures.get(index).map(|group| group.as_str().to_string()))
-                .collect(),
-        }
-    }
-
-    fn get(&self, index: usize) -> Option<&str> {
-        self.groups.get(index).and_then(|group| group.as_deref())
-    }
-
-    /// The whole match followed by each group, preserving non-participants.
-    fn into_positional(self) -> Vec<Option<String>> {
-        self.groups
-    }
-}
-
-/// Compiles (or reuses a cached compilation of) the regex named by `source`
-/// and `flags`, then calls `f` with it. Returns `None` when neither the
-/// `regex` crate nor `fancy-regex` can compile the pattern.
-///
-/// Only the `i` (case-insensitive), `m` (multiline) and `s` (dot-all) flags
-/// are honored; the `u`/`v` unicode-mode flags are not tracked. `g`/`y`
-/// `lastIndex` state is threaded through `exec`/`test`/`match`/`matchAll`;
-/// `replace`/`replaceAll` and `split` still use their own search paths.
+/// Keep compiled JavaScript syntax cached; `g` and `y` remain caller state.
 fn with_compiled_regex<T>(
-    source: &str,
+    source: &[u16],
     flags: &str,
-    f: impl FnOnce(&CompiledRegex) -> T,
+    f: impl FnOnce(&regress::Regex) -> T,
 ) -> Option<T> {
     REGEX_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let key = (source.to_string(), flags.to_string());
+        let key = (source.to_vec(), flags.to_string());
         if !cache.contains_key(&key) {
-            cache.insert(key.clone(), CompiledRegex::compile(source, flags)?);
+            let mut options = regress::Flags::from(flags);
+            // ECMAScript `v` implies Unicode code-point input as well as sets.
+            if options.unicode_sets { options.unicode = true; }
+            let compiled = regress::Regex::from_unicode(
+                pattern_codepoints(source, flags).into_iter(), options,
+            ).ok()?;
+            cache.insert(key.clone(), compiled);
         }
         cache.get(&key).map(f)
     })
@@ -296,7 +182,7 @@ fn wrap_array_handle(buffer: *mut u8) -> *mut u8 {
     handle
 }
 
-fn arena_optional_string_array(parts: Vec<Option<String>>) -> *mut u8 {
+fn arena_optional_string_array(parts: Vec<Option<Vec<u16>>>) -> *mut u8 {
     let output = thaw_arena::thaw_arena_alloc(8 + parts.len() * 16, 8);
     if output.is_null() {
         return std::ptr::null_mut();
@@ -304,212 +190,200 @@ fn arena_optional_string_array(parts: Vec<Option<String>>) -> *mut u8 {
     unsafe {
         output.write_bytes(0, 8 + parts.len() * 16);
         output.cast::<u64>().write(parts.len() as u64);
-    };
+    }
     for (index, part) in parts.into_iter().enumerate() {
         let Some(part) = part else { continue };
-        let Some(part) = arena_c_string(&part) else { return std::ptr::null_mut() };
+        let pointer = thaw_arena::arena_string(&wtf8_encode_utf16(&part));
+        if pointer.is_null() {
+            return std::ptr::null_mut();
+        }
         unsafe {
             output.add(8 + index * 16).write(1);
-            output.add(16 + index * 16).cast::<*const u8>().write_unaligned(part);
+            output.add(16 + index * 16).cast::<*const c_char>().write_unaligned(pointer);
         }
     }
     output
 }
 
 #[no_mangle]
-/// Tests whether `value` matches the regex named by `source`/`flags`,
-/// matching `RegExp.prototype.test` (without `g`/`y` `lastIndex` state).
-/// Returns `0` for a null argument or a pattern the `regex` crate cannot
-/// compile (for example one that uses backreferences or lookaround).
-///
+/// Tests a JavaScript regular expression without caller-managed lastIndex state.
 /// # Safety
-/// `source`, `flags` and `value` must be null or point to valid
-/// NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_test(
-    source: *const c_char,
-    flags: *const c_char,
-    value: *const c_char,
-) -> u8 {
-    if source.is_null() || flags.is_null() || value.is_null() {
-        return 0;
-    }
-    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_test(source: *const c_char, flags: *const c_char, value: *const c_char) -> u8 {
+    if source.is_null() || flags.is_null() || value.is_null() { return 0; }
+    let source = unsafe { regex_units(source) };
+    let text = unsafe { regex_units(value) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    with_compiled_regex(&source, &flags, |regex| regex.is_match(&value)).unwrap_or(false) as u8
+    u8::from(with_compiled_regex(&source, &flags, |regex| compiled_match(regex, &text, &flags, 0).is_some()).unwrap_or(false))
 }
 
 #[no_mangle]
-/// Returns the JavaScript UTF-16 code-unit index of the first match of the
-/// regex named by `source`/`flags` in `value`, matching
-/// `String.prototype.search`. Returns `-1` for a null argument, no match, or
-/// a pattern the `regex` crate cannot compile, the same way
-/// `RegExp.prototype.test` cannot distinguish "no match" from "failed to
-/// compile".
-///
+/// Returns the first match's UTF-16 start, respecting a sticky search at zero.
 /// # Safety
-/// `value`, `source` and `flags` must be null or point to valid
-/// NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_search(
-    value: *const c_char,
-    source: *const c_char,
-    flags: *const c_char,
-) -> f64 {
-    if value.is_null() || source.is_null() || flags.is_null() {
-        return -1.0;
-    }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_search(value: *const c_char, source: *const c_char, flags: *const c_char) -> f64 {
+    if source.is_null() || flags.is_null() || value.is_null() { return -1.0; }
+    let source = unsafe { regex_units(source) };
+    let text = unsafe { regex_units(value) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
     with_compiled_regex(&source, &flags, |regex| {
-        regex.find_at(&value, 0).and_then(|(start, _)| {
-            (!flags.contains('y') || start == 0)
-                .then(|| value[..start].encode_utf16().count() as f64)
-        })
-    })
-    .flatten()
-    .unwrap_or(-1.0)
+        compiled_match(regex, &text, &flags, 0)
+            .filter(|matched| !flags.contains('y') || matched.start == 0)
+            .map_or(-1.0, |matched| matched.start as f64)
+    }).unwrap_or(-1.0)
+}
+
+fn expand_regex_replacement(
+    replacement: &[u16], matched: &[u16], prefix: &[u16], suffix: &[u16],
+    captures: &[Option<Vec<u16>>], names: &[(String, Option<Vec<u16>>)],
+) -> Vec<u16> {
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < replacement.len() {
+        if replacement[index] != b'$' as u16 || index + 1 == replacement.len() {
+            output.push(replacement[index]);
+            index += 1;
+            continue;
+        }
+        let next = replacement[index + 1];
+        match next {
+            0x24 => output.push(0x24),
+            0x26 => output.extend_from_slice(matched),
+            0x60 => output.extend_from_slice(prefix),
+            0x27 => output.extend_from_slice(suffix),
+            0x30..=0x39 if !captures.is_empty() => {
+                let first = usize::from(next - 0x30);
+                let two = replacement.get(index + 2).copied()
+                    .filter(|unit| (0x30..=0x39).contains(unit))
+                    .map(|unit| first * 10 + usize::from(unit - 0x30));
+                let (capture, consumed) = if two.is_some_and(|value| (1..=captures.len()).contains(&value)) {
+                    (two.unwrap(), 3)
+                } else { (first, 2) };
+                if (1..=captures.len()).contains(&capture) {
+                    if let Some(value) = &captures[capture - 1] { output.extend_from_slice(value); }
+                    index += consumed;
+                    continue;
+                }
+                output.push(0x24);
+                index += 1;
+                continue;
+            }
+            0x3C if !names.is_empty() => {
+                if let Some(relative_end) = replacement[index + 2..].iter().position(|unit| *unit == 0x3E) {
+                    let end = index + 2 + relative_end;
+                    let name = String::from_utf16(&replacement[index + 2..end]).ok();
+                    if let Some((_, Some(value))) = names.iter().find(|(candidate, _)| name.as_deref() == Some(candidate.as_str())) {
+                        output.extend_from_slice(value);
+                    }
+                    index = end + 1;
+                    continue;
+                }
+                output.push(0x24);
+                index += 1;
+                continue;
+            }
+            _ => {
+                output.push(0x24);
+                index += 1;
+                continue;
+            }
+        }
+        index += 2;
+    }
+    output
 }
 
 /// # Safety
-/// `value`, `source`, `flags` and `replacement` must be null or point to
-/// valid NUL-terminated UTF-8 strings.
-unsafe fn thaw_regex_replace_impl(
-    value: *const c_char,
-    source: *const c_char,
-    flags: *const c_char,
-    replacement: *const c_char,
-    all: bool,
-) -> *const c_char {
-    if value.is_null() || source.is_null() || flags.is_null() || replacement.is_null() {
-        return std::ptr::null();
-    }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+/// Arguments must be live native strings or NUL-terminated C strings.
+unsafe fn thaw_regex_replace_impl(value: *const c_char, source: *const c_char, flags: *const c_char, replacement: *const c_char, all: bool) -> *const c_char {
+    if value.is_null() || source.is_null() || flags.is_null() || replacement.is_null() { return std::ptr::null(); }
+    let text = unsafe { regex_units(value) };
+    let source = unsafe { regex_units(source) };
+    let replacement = unsafe { regex_units(replacement) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    let replacement = unsafe { CStr::from_ptr(replacement) }.to_string_lossy();
     let global = all || flags.contains('g');
-    let Some(replaced) = with_compiled_regex(&source, &flags, |regex| {
-        let captures = if global {
-            regex.captures_iter(&value)
-        } else {
-            regex.captures(&value).into_iter().collect()
-        };
-        let mut output = String::new();
-        let mut cursor = 0;
-        for captures in captures {
-            let matched = captures.get(0).unwrap_or("");
-            let start = captures.start;
-            let end = start + matched.len();
-            let names = regex.capture_names();
-            let named_captures: Vec<_> = names
-                .into_iter()
-                .zip(captures.groups.iter())
-                .filter_map(|(name, value)| name.map(|name| (name.to_string(), value.clone())))
-                .collect();
-            output.push_str(&value[cursor..start]);
-            output.push_str(&expand_replacement(
-                &replacement,
-                matched,
-                &value[..start],
-                &value[end..],
-                &captures.groups[1..],
-                &named_captures,
+    let Some(output) = with_compiled_regex(&source, &flags, |regex| {
+        let mut output = Vec::new();
+        let mut append = 0;
+        let mut search = 0;
+        while search <= text.len() {
+            let Some(matched) = compiled_match(regex, &text, &flags, search) else { break };
+            if flags.contains('y') && matched.start != search { break; }
+            output.extend_from_slice(&text[append..matched.start]);
+            output.extend_from_slice(&expand_regex_replacement(
+                &replacement, &text[matched.start..matched.end], &text[..matched.start], &text[matched.end..],
+                &matched.groups[1..], &matched.names,
             ));
-            cursor = end;
+            append = matched.end;
+            if !global { break; }
+            search = if matched.start == matched.end {
+                advance_string_index(&text, matched.end, &flags)
+            } else { matched.end };
         }
-        output.push_str(&value[cursor..]);
+        output.extend_from_slice(&text[append..]);
         output
-    }) else {
-        return std::ptr::null();
-    };
-    arena_c_string(&replaced).map_or(std::ptr::null(), |value| value.cast())
+    }) else { return std::ptr::null(); };
+    arena_wtf8(&wtf8_encode_utf16(&output)).map_or(std::ptr::null(), |pointer| pointer.cast())
 }
 
 #[no_mangle]
-/// Replaces the first match of the regex named by `source`/`flags` in
-/// `value` with `replacement`, or every match when `flags` contains `g`,
-/// matching `String.prototype.replace` for a `RegExp` search value.
-/// Returns a null pointer for a null argument or a pattern the `regex`
-/// crate cannot compile.
-///
 /// # Safety
-/// `value`, `source`, `flags` and `replacement` must be null or point to
-/// valid NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_replace(
-    value: *const c_char,
-    source: *const c_char,
-    flags: *const c_char,
-    replacement: *const c_char,
-) -> *const c_char {
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_replace(value: *const c_char, source: *const c_char, flags: *const c_char, replacement: *const c_char) -> *const c_char {
     unsafe { thaw_regex_replace_impl(value, source, flags, replacement, false) }
 }
 
 #[no_mangle]
-/// Replaces every match of the regex named by `source`/`flags` in `value`
-/// with `replacement`, matching `String.prototype.replaceAll` for a
-/// `RegExp` search value. Returns a null pointer (to be reported as a
-/// `TypeError`, matching the specification) when `flags` does not contain
-/// `g`, and otherwise the same null-pointer failure cases as
-/// `thaw_regex_replace`.
-///
 /// # Safety
-/// `value`, `source`, `flags` and `replacement` must be null or point to
-/// valid NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_replace_all(
-    value: *const c_char,
-    source: *const c_char,
-    flags: *const c_char,
-    replacement: *const c_char,
-) -> *const c_char {
-    if flags.is_null() {
-        return std::ptr::null();
-    }
-    let flag_text = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    if !flag_text.contains('g') {
-        return std::ptr::null();
-    }
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_replace_all(value: *const c_char, source: *const c_char, flags: *const c_char, replacement: *const c_char) -> *const c_char {
     unsafe { thaw_regex_replace_impl(value, source, flags, replacement, true) }
 }
 
 #[no_mangle]
-/// Splits `value` on every match of the regex named by `source`/`flags`
-/// into the native `string[]` array layout, matching
-/// `String.prototype.split` for a `RegExp` separator. Returns a null
-/// pointer for a null argument or a pattern the `regex` crate cannot
-/// compile.
-///
+/// Regex split with captures, measured in UTF-16 code units.
 /// # Safety
-/// `value`, `source` and `flags` must be null or point to valid
-/// NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_split(
-    value: *const c_char,
-    source: *const c_char,
-    flags: *const c_char,
-    limit: f64,
-) -> *mut u8 {
-    if value.is_null() || source.is_null() || flags.is_null() {
-        return std::ptr::null_mut();
-    }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_split(value: *const c_char, source: *const c_char, flags: *const c_char, limit: f64) -> *mut u8 {
+    if value.is_null() || source.is_null() || flags.is_null() { return std::ptr::null_mut(); }
+    let text = unsafe { regex_units(value) };
+    let source = unsafe { regex_units(source) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    let Some(mut parts) = with_compiled_regex(&source, &flags, |regex| regex.split(&value)) else {
-        return std::ptr::null_mut();
-    };
-    // Truncated after computing the full split, not via the regex crate's
-    // own `splitn` (which keeps the unsplit remainder in its last piece
-    // instead) -- matching thaw_string_split's own limit handling, and
-    // JavaScript's own `String.prototype.split(separator, limit)`, which
-    // truncates the result rather than limiting how many splits happen.
-    let limit = if limit == -1.0 {
-        usize::MAX
-    } else if limit.is_finite() {
-        limit.trunc().rem_euclid(4_294_967_296.0) as usize
-    } else {
-        0
-    };
-    parts.truncate(limit);
+    let limit = if limit == -1.0 { usize::MAX }
+        else if limit.is_finite() { limit.trunc().rem_euclid(4_294_967_296.0) as usize }
+        else { 0 };
+    let Some(parts) = with_compiled_regex(&source, &flags, |regex| {
+        let mut parts = Vec::new();
+        if limit == 0 { return parts; }
+        if text.is_empty() {
+            if compiled_match(regex, &text, &flags, 0).is_none() { parts.push(Some(Vec::new())); }
+            return parts;
+        }
+        let mut previous = 0;
+        let mut search = 0;
+        while search < text.len() {
+            let Some(matched) = compiled_match(regex, &text, &flags, search) else { break };
+            if matched.start != search {
+                search = advance_string_index(&text, search, &flags);
+                continue;
+            }
+            if matched.end == previous {
+                search = advance_string_index(&text, search, &flags);
+                continue;
+            }
+            parts.push(Some(text[previous..search].to_vec()));
+            if parts.len() >= limit { return parts; }
+            for capture in matched.groups.into_iter().skip(1) {
+                parts.push(capture);
+                if parts.len() >= limit { return parts; }
+            }
+            previous = matched.end;
+            search = previous;
+        }
+        parts.push(Some(text[previous..].to_vec()));
+        parts.truncate(limit);
+        parts
+    }) else { return std::ptr::null_mut(); };
     arena_optional_string_array(parts)
 }
 
@@ -527,93 +401,25 @@ fn last_index_to_length(last_index: f64) -> usize {
     }
 }
 
-/// Converts a UTF-16 code-unit index into a byte offset into `value`'s UTF-8
-/// representation. Returns `None` when the index falls past the end of
-/// `value` or lands inside a UTF-16 surrogate pair split off by an earlier
-/// lossy conversion -- both treated as "no match" by callers, the same way
-/// an out-of-range `lastIndex` resets to `0` without matching in the
-/// specification.
-fn utf16_index_to_byte_offset(value: &str, utf16_index: usize) -> Option<usize> {
-    if utf16_index == 0 {
-        return Some(0);
-    }
-    let mut utf16_count = 0usize;
-    for (byte_index, ch) in value.char_indices() {
-        if utf16_count == utf16_index {
-            return Some(byte_index);
-        }
-        utf16_count += ch.len_utf16();
-    }
-    (utf16_count == utf16_index).then_some(value.len())
-}
-
 #[no_mangle]
-/// Matches `value` against the regex named by `source`/`flags`, starting the
-/// search at the UTF-16 code-unit index `last_index` -- `RegExp.prototype
-/// .exec`'s caller passes `0` for a non-global, non-sticky pattern (matching
-/// `RegExp.prototype.test`'s own simplification of always searching from the
-/// start), and its own `lastIndex` property otherwise. Returns the whole
-/// match followed by each capture group's text (see `capture_strings_from`),
-/// or a null pointer when nothing matches, `last_index` is out of range, or
-/// `source`/`flags` fails to compile.
-///
+/// Returns an Optional(Str) match handle, preserving captures by UTF-16 range.
 /// # Safety
-/// `source`, `flags` and `value` must be null or point to valid
-/// NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_exec(
-    source: *const c_char,
-    flags: *const c_char,
-    value: *const c_char,
-    last_index: f64,
-) -> *mut u8 {
-    if source.is_null() || flags.is_null() || value.is_null() {
-        return std::ptr::null_mut();
-    }
-    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_exec(source: *const c_char, flags: *const c_char, value: *const c_char, last_index: f64) -> *mut u8 {
+    if source.is_null() || flags.is_null() || value.is_null() { return std::ptr::null_mut(); }
+    let source = unsafe { regex_units(source) };
+    let text = unsafe { regex_units(value) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let Some(byte_start) = utf16_index_to_byte_offset(&value, last_index_to_length(last_index))
-    else {
-        return std::ptr::null_mut();
-    };
-    let Some((matches, groups, index)) = with_compiled_regex(&source, &flags, |regex| {
-        regex.captures_at(&value, byte_start).and_then(|captures| {
-            if flags.contains('y') && captures.start != byte_start {
-                return None;
-            }
-            let index = value[..captures.start].encode_utf16().count() as f64;
-            let groups = regex
-                .capture_names()
-                .into_iter()
-                .enumerate()
-                .filter_map(|(group_index, name)| {
-                    name.map(|name| (
-                        name.to_string(),
-                        captures.get(group_index)
-                            .map_or(serde_json::Value::Null, |capture| serde_json::Value::String(capture.to_string())),
-                    ))
-                })
-                .collect();
-            Some((
-                captures.into_positional(),
-                groups_json_pointer(groups),
-                index,
-            ))
-        })
-    })
-    .flatten() else {
-        return std::ptr::null_mut();
-    };
-    if matches.is_empty() {
-        return std::ptr::null_mut();
-    }
-    let result = wrap_array_handle(arena_optional_string_array(matches));
+    let start = last_index_to_length(last_index);
+    let Some(matched) = with_compiled_regex(&source, &flags, |regex| {
+        compiled_match(regex, &text, &flags, start)
+            .filter(|matched| !flags.contains('y') || matched.start == start)
+    }).flatten() else { return std::ptr::null_mut(); };
+    let index = matched.start as f64;
+    let groups = groups_json_pointer(matched.names.clone());
+    let result = wrap_array_handle(arena_optional_string_array(matched.into_positional()));
     if !result.is_null() {
-        store_regex_meta(result, RegexMatchMeta {
-            groups,
-            index,
-            input: value.to_string(),
-        });
+        store_regex_meta(result, RegexMatchMeta { groups, index, input: wtf8_encode_utf16(&text) });
     }
     result
 }
@@ -675,145 +481,69 @@ pub unsafe extern "C" fn thaw_regex_exec_input(matches: *const u8) -> *const c_c
             .map(|meta| meta.input.clone())
     });
     input
-        .and_then(|input| arena_c_string(&input))
+        .and_then(|input| arena_wtf8(&input))
         .map_or(std::ptr::null(), |pointer| pointer.cast())
 }
 
 #[no_mangle]
-/// Computes the `lastIndex` a stateful (`g` or `y` flagged) `RegExp` should
-/// hold after a successful `exec`/`test` call that searched `value` starting
-/// at the UTF-16 code-unit index `last_index`. Empty matches leave lastIndex
-/// at their end; only iterative consumers advance past an empty match.
-/// Sticky matches must start exactly at `last_index`. Returns `-1` when there is no such
-/// match, `last_index` is out of range, or `source`/`flags` fails to
-/// compile -- the caller resets `lastIndex` to `0` in that case.
-///
+/// Returns a successful stateful exec/test match end in UTF-16 code units.
 /// # Safety
-/// `value`, `source` and `flags` must be null or point to valid
-/// NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_exec_advance(
-    value: *const c_char,
-    source: *const c_char,
-    flags: *const c_char,
-    last_index: f64,
-) -> f64 {
-    if value.is_null() || source.is_null() || flags.is_null() {
-        return -1.0;
-    }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_exec_advance(value: *const c_char, source: *const c_char, flags: *const c_char, last_index: f64) -> f64 {
+    if value.is_null() || source.is_null() || flags.is_null() { return -1.0; }
+    let text = unsafe { regex_units(value) };
+    let source = unsafe { regex_units(source) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    let sticky = flags.contains('y');
-    let Some(byte_start) = utf16_index_to_byte_offset(&value, last_index_to_length(last_index))
-    else {
-        return -1.0;
-    };
+    let start = last_index_to_length(last_index);
     with_compiled_regex(&source, &flags, |regex| {
-        let Some((start, end)) = regex.find_at(&value, byte_start) else {
-            return -1.0;
-        };
-        if sticky && start != byte_start {
-            return -1.0;
-        }
-        value[..end].encode_utf16().count() as f64
-    })
-    .unwrap_or(-1.0)
+        compiled_match(regex, &text, &flags, start)
+            .filter(|matched| !flags.contains('y') || matched.start == start)
+            .map_or(-1.0, |matched| matched.end as f64)
+    }).unwrap_or(-1.0)
 }
 
 #[no_mangle]
-/// Matches `value` against the regex named by `source`/`flags`, matching
-/// `String.prototype.match`. Returns every whole match when `flags`
-/// contains `g` (capture groups are not exposed in this mode, matching
-/// `String.prototype.match`'s own behavior for a global pattern), or the
-/// whole match followed by each capture group's text when it matches
-/// otherwise -- a group that did not participate remains `undefined`.
-/// For the non-global form the result's `.index`/`.input`/`.groups`
-/// metadata is recorded with `REGEX_META`, matching `RegExpBuiltinExec`;
-/// the global form exposes none of it, matching `.match()` with `g`. Returns
-/// a null pointer both when nothing matches and when `source`/`flags` fails
-/// to compile; the generated code distinguishes these only in that both
-/// report "no match" (`undefined`), matching what a caller observes for
-/// either case.
-///
+/// String.match result, preserving UTF-16 captures and sticky state.
 /// # Safety
-/// `value`, `source` and `flags` must be null or point to valid
-/// NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_match(
-    value: *const c_char,
-    source: *const c_char,
-    flags: *const c_char,
-    last_index: f64,
-) -> *mut u8 {
-    if value.is_null() || source.is_null() || flags.is_null() {
-        return std::ptr::null_mut();
-    }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_match(value: *const c_char, source: *const c_char, flags: *const c_char, last_index: f64) -> *mut u8 {
+    if value.is_null() || source.is_null() || flags.is_null() { return std::ptr::null_mut(); }
+    let text = unsafe { regex_units(value) };
+    let source = unsafe { regex_units(source) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
     let global = flags.contains('g');
     let sticky = flags.contains('y');
-    let start = if sticky && !global {
-        let Some(start) = utf16_index_to_byte_offset(&value, last_index_to_length(last_index)) else {
-            return std::ptr::null_mut();
-        };
-        start
-    } else { 0 };
-    let mut meta = None;
-    let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
+    let start = if sticky && !global { last_index_to_length(last_index) } else { 0 };
+    let Some((matches, meta)) = with_compiled_regex(&source, &flags, |regex| {
         if global {
-            if sticky {
-                let mut matches = Vec::new();
-                let mut cursor = 0;
-                while let Some((found_start, end)) = regex.find_at(&value, cursor) {
-                    if found_start != cursor { break; }
-                    matches.push(Some(value[found_start..end].to_string()));
-                    if found_start == end {
-                        let Some(next) = value[end..].chars().next() else { break };
-                        cursor = end + next.len_utf8();
-                    } else {
-                        cursor = end;
-                    }
-                }
-                matches
-            } else {
-                regex.find_iter(&value).into_iter().map(Some).collect()
+            let mut matches = Vec::new();
+            let mut search = 0;
+            while search <= text.len() {
+                let Some(matched) = compiled_match(regex, &text, &flags, search) else { break };
+                if sticky && matched.start != search { break; }
+                matches.push(Some(text[matched.start..matched.end].to_vec()));
+                search = if matched.start == matched.end {
+                    advance_string_index(&text, matched.end, &flags)
+                } else { matched.end };
             }
+            (matches, None)
         } else {
-            match regex.captures_at(&value, start).filter(|captures| !sticky || captures.start == start) {
-                Some(captures) => {
-                    let index = value[..captures.start].encode_utf16().count() as f64;
-                    let groups = regex
-                        .capture_names()
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(group_index, name)| {
-                            name.map(|name| (
-                                name.to_string(),
-                                captures.get(group_index)
-                                    .map_or(serde_json::Value::Null, |capture| serde_json::Value::String(capture.to_string())),
-                            ))
-                        })
-                        .collect();
-                    meta = Some((groups_json_pointer(groups), index));
-                    captures.into_positional()
+            let matched = compiled_match(regex, &text, &flags, start)
+                .filter(|matched| !sticky || matched.start == start);
+            match matched {
+                Some(matched) => {
+                    let meta = (groups_json_pointer(matched.names.clone()), matched.start as f64);
+                    (matched.into_positional(), Some(meta))
                 }
-                None => Vec::new(),
+                None => (Vec::new(), None),
             }
         }
-    }) else {
-        return std::ptr::null_mut();
-    };
-    if matches.is_empty() {
-        return std::ptr::null_mut();
-    }
+    }) else { return std::ptr::null_mut(); };
+    if matches.is_empty() { return std::ptr::null_mut(); }
     let result = wrap_array_handle(arena_optional_string_array(matches));
     if !result.is_null() {
         if let Some((groups, index)) = meta {
-            store_regex_meta(result, RegexMatchMeta {
-                groups,
-                index,
-                input: value.to_string(),
-            });
+            store_regex_meta(result, RegexMatchMeta { groups, index, input: wtf8_encode_utf16(&text) });
         }
     }
     result
@@ -844,85 +574,39 @@ fn arena_pointer_array(pointers: Vec<*mut u8>) -> *mut u8 {
 }
 
 #[no_mangle]
-/// `String.prototype.matchAll`: an array of match-info arrays (the whole
-/// match followed by each capture group's text, same shape and
-/// undefined-for-non-participating-group behavior as non-global
-/// `.match()`), one per match found, in order. Unlike `.match()`, capture
-/// groups are always included here even though every match is found (that
-/// is the entire point of `matchAll` over a global `.match()`). Returns a
-/// null pointer for a null argument, a pattern the `regex` crate cannot
-/// compile, or a `flags` that lacks `g` -- the generated code always
-/// checks for `g` itself first and throws a specific message for that
-/// case, so this only needs to return *some* failure signal for it, not
-/// distinguish it from a compile failure.
-///
+/// String.matchAll from a copied lastIndex; result and capture arrays are stable handles.
 /// # Safety
-/// `value`, `source` and `flags` must be null or point to valid
-/// NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn thaw_regex_match_all(
-    value: *const c_char,
-    source: *const c_char,
-    flags: *const c_char,
-    last_index: f64,
-) -> *mut u8 {
-    if value.is_null() || source.is_null() || flags.is_null() {
-        return std::ptr::null_mut();
-    }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+/// Arguments must be live native strings or NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_regex_match_all(value: *const c_char, source: *const c_char, flags: *const c_char, last_index: f64) -> *mut u8 {
+    if value.is_null() || source.is_null() || flags.is_null() { return std::ptr::null_mut(); }
+    let text = unsafe { regex_units(value) };
+    let source = unsafe { regex_units(source) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    if !flags.contains('g') {
-        return std::ptr::null_mut();
-    }
-    let Some(start) = utf16_index_to_byte_offset(&value, last_index_to_length(last_index)) else {
-        return wrap_array_handle(arena_pointer_array(Vec::new()));
-    };
+    if !flags.contains('g') { return std::ptr::null_mut(); }
+    let start = last_index_to_length(last_index);
     let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
-        let names = regex.capture_names();
         let mut matches = Vec::new();
-        let mut cursor = start;
-        while let Some(captures) = regex.captures_at(&value, cursor) {
-            if flags.contains('y') && captures.start != cursor {
-                break;
-            }
-            let match_start = captures.start;
-            let index = value[..match_start].encode_utf16().count() as f64;
-            let end = match_start + captures.get(0).unwrap_or("").len();
-            let groups = names.iter().enumerate().filter_map(|(group_index, name)| {
-                name.map(|name| (
-                    name.to_string(),
-                    captures.get(group_index).map_or(
-                        serde_json::Value::Null,
-                        |capture| serde_json::Value::String(capture.to_string()),
-                    ),
-                ))
-            }).collect();
-            matches.push((captures.into_positional(), groups_json_pointer(groups), index));
-            if end == match_start {
-                let Some(next) = value[end..].chars().next() else { break };
-                cursor = end + next.len_utf8();
-            } else {
-                cursor = end;
-            }
+        let mut search = start;
+        while search <= text.len() {
+            let Some(matched) = compiled_match(regex, &text, &flags, search) else { break };
+            if flags.contains('y') && matched.start != search { break; }
+            let next = if matched.start == matched.end {
+                advance_string_index(&text, matched.end, &flags)
+            } else { matched.end };
+            matches.push(matched);
+            search = next;
         }
         matches
-    }) else {
-        return std::ptr::null_mut();
-    };
+    }) else { return std::ptr::null_mut(); };
     let mut inner_arrays = Vec::with_capacity(matches.len());
-    for (captures, groups, index) in matches {
-        let buffer = arena_optional_string_array(captures);
-        let inner = wrap_array_handle(buffer);
-        if inner.is_null() {
-            return std::ptr::null_mut();
-        }
-        if !buffer.is_null() {
-            store_regex_meta(inner, RegexMatchMeta {
-                groups,
-                index,
-                input: value.to_string(),
-            });
-        }
+    for matched in matches {
+        let index = matched.start as f64;
+        let groups = groups_json_pointer(matched.names.clone());
+        let inner = wrap_array_handle(arena_optional_string_array(matched.into_positional()));
+        if inner.is_null() { return std::ptr::null_mut(); }
+        store_regex_meta(inner, RegexMatchMeta {
+            groups, index, input: wtf8_encode_utf16(&text),
+        });
         inner_arrays.push(inner);
     }
     wrap_array_handle(arena_pointer_array(inner_arrays))
@@ -933,14 +617,184 @@ mod reset_tests {
     use super::*;
 
     #[test]
+    fn regress_pattern_and_search_keep_utf16_surrogate_semantics() {
+        let astral = [0xD83D, 0xDE00];
+        assert_eq!(pattern_codepoints(&astral, "u"), vec![0x1F600]);
+        assert_eq!(pattern_codepoints(&astral, ""), vec![0xD83D, 0xDE00]);
+        for flags in ["", "u"] {
+            let expected = (0, 2);
+            let found = with_compiled_regex(&astral, flags, |regex| {
+                compiled_match(regex, &astral, flags, 0).map(|matched| (matched.start, matched.end))
+            }).flatten();
+            assert_eq!(found, Some(expected));
+        }
+        let high_pattern = [0xD83D];
+        let high_only = with_compiled_regex(&high_pattern, "", |regex| {
+            compiled_match(regex, &astral, "", 0).map(|matched| (matched.start, matched.end))
+        }).flatten();
+        assert_eq!(high_only, Some((0, 1)));
+        let high_unicode = with_compiled_regex(&high_pattern, "u", |regex| {
+            compiled_match(regex, &astral, "u", 0).map(|matched| (matched.start, matched.end))
+        }).flatten();
+        assert_eq!(high_unicode, None);
+        let source = wtf8_decode_utf16(b".");
+        let inside = with_compiled_regex(&source, "", |regex| {
+            compiled_match(regex, &astral, "", 1)
+                .map(|matched| (matched.start, matched.end, matched.groups[0].clone()))
+        }).flatten();
+        assert_eq!(inside, Some((1, 2, Some(vec![0xDE00]))));
+    }
+
+    #[test]
+    fn regress_empty_iteration_advances_one_nonunicode_code_unit() {
+        let text = [0xD83D, 0xDE00];
+        let source = wtf8_decode_utf16(b"(?:)");
+        for (flags, expected) in [("g", vec![0, 1, 2]), ("gu", vec![0, 2])] {
+            let positions = with_compiled_regex(&source, flags, |regex| {
+                let mut positions = Vec::new();
+                let mut search = 0;
+                while search <= text.len() {
+                    let Some(matched) = compiled_match(regex, &text, flags, search) else { break };
+                    positions.push(matched.start);
+                    search = advance_string_index(&text, matched.end, flags);
+                }
+                positions
+            }).unwrap();
+            assert_eq!(positions, expected);
+        }
+    }
+
+    #[test]
+    fn regress_js_shorthand_classes_and_named_utf16_captures() {
+        let arabic_digit = wtf8_decode_utf16("١".as_bytes());
+        let latin_letter = wtf8_decode_utf16("é".as_bytes());
+        let nbsp = [0x00A0];
+        for (pattern, text, expected) in [
+            (r"^\d$", arabic_digit.as_slice(), false),
+            (r"^[\D]$", arabic_digit.as_slice(), true),
+            (r"^\w$", latin_letter.as_slice(), false),
+            (r"^[\W]$", latin_letter.as_slice(), true),
+            (r"^\s$", nbsp.as_slice(), true),
+            (r"^[\S]$", nbsp.as_slice(), false),
+        ] {
+            let source = wtf8_decode_utf16(pattern.as_bytes());
+            let found = with_compiled_regex(&source, "u", |regex| {
+                compiled_match(regex, text, "u", 0).is_some()
+            }).unwrap();
+            assert_eq!(found, expected, "{pattern}");
+        }
+        let sets = wtf8_decode_utf16(br"^[\d&&\d]+$");
+        for (text, expected) in [(wtf8_decode_utf16(b"7"), true), (arabic_digit, false)] {
+            let found = with_compiled_regex(&sets, "v", |regex| {
+                compiled_match(regex, &text, "v", 0).is_some()
+            }).unwrap();
+            assert_eq!(found, expected);
+        }
+        let astral = [0xD83D, 0xDE00];
+        let named = wtf8_decode_utf16(b"(?<x>.)");
+        let capture = with_compiled_regex(&named, "", |regex| {
+            compiled_match(regex, &astral, "", 1).unwrap()
+        }).unwrap();
+        assert_eq!(capture.names, vec![("x".to_string(), Some(vec![0xDE00]))]);
+        assert_eq!(expand_regex_replacement(
+            &wtf8_decode_utf16(b"$<x>"), &astral[1..], &astral[..1], &[],
+            &capture.groups[1..], &capture.names,
+        ), vec![0xDE00]);
+    }
+
+    #[test]
+    fn nonunicode_ignore_case_keeps_ascii_word_classes_and_canonicalize() {
+        let kelvin = wtf8_decode_utf16("K".as_bytes());
+        let long_s = wtf8_decode_utf16("ſ".as_bytes());
+        for text in [&kelvin, &long_s] {
+            for pattern in [r"^\w$", r"^[\w]$", r"^[a\w]$"] {
+                let source = wtf8_decode_utf16(pattern.as_bytes());
+                let found = with_compiled_regex(&source, "i", |regex| {
+                    compiled_match(regex, text, "i", 0).is_some()
+                }).unwrap();
+                assert!(!found, "{pattern} must not match a non-ASCII word char under /i");
+                for flags in ["iu", "iv"] {
+                    let found = with_compiled_regex(&source, flags, |regex| {
+                        compiled_match(regex, text, flags, 0).is_some()
+                    }).unwrap();
+                    assert!(found, "{pattern} must match under /{flags}");
+                }
+            }
+            for pattern in [r"^\W$", r"^[^\w]$"] {
+                let source = wtf8_decode_utf16(pattern.as_bytes());
+                let found = with_compiled_regex(&source, "i", |regex| {
+                    compiled_match(regex, text, "i", 0).is_some()
+                }).unwrap();
+                assert!(found, "{pattern} must match under /i");
+            }
+        }
+        let source = wtf8_decode_utf16(br"^[s]$");
+        assert!(with_compiled_regex(&source, "i", |regex| {
+            compiled_match(regex, &long_s, "i", 0).is_none()
+        }).unwrap());
+        let literal = wtf8_decode_utf16(br"^s$");
+        let escaped = wtf8_decode_utf16(br"^\u0073$");
+        for source in [&literal, &escaped] {
+            assert!(with_compiled_regex(source, "i", |regex| {
+                compiled_match(regex, &long_s, "i", 0).is_none()
+            }).unwrap());
+            assert!(with_compiled_regex(source, "iu", |regex| {
+                compiled_match(regex, &long_s, "iu", 0).is_some()
+            }).unwrap());
+        }
+        let backref = wtf8_decode_utf16(br"^(s)\1$");
+        let pair = wtf8_decode_utf16("sſ".as_bytes());
+        assert!(with_compiled_regex(&backref, "i", |regex| {
+            compiled_match(regex, &pair, "i", 0).is_none()
+        }).unwrap());
+        assert!(with_compiled_regex(&backref, "iu", |regex| {
+            compiled_match(regex, &pair, "iu", 0).is_some()
+        }).unwrap());
+        let boundary = wtf8_decode_utf16(br"^\b\u017F$");
+        assert!(with_compiled_regex(&boundary, "i", |regex| {
+            compiled_match(regex, &long_s, "i", 0).is_none()
+        }).unwrap());
+        assert!(with_compiled_regex(&boundary, "iu", |regex| {
+            compiled_match(regex, &long_s, "iu", 0).is_some()
+        }).unwrap());
+    }
+
+    #[test]
+    fn regress_match_all_and_split_return_partial_utf16_captures() {
+        let input = thaw_arena::arena_string("😀".as_bytes());
+        let dot = thaw_arena::arena_string(b".");
+        let global = thaw_arena::arena_string(b"g");
+        let result = unsafe { thaw_regex_match_all(input, dot, global, 1.0) };
+        assert!(!result.is_null());
+        let outer = unsafe { result.cast::<*const u8>().read() };
+        assert_eq!(unsafe { outer.cast::<u64>().read() }, 1);
+        let inner = unsafe { outer.add(8).cast::<*const u8>().read() };
+        assert_eq!(unsafe { thaw_regex_exec_index(inner) }, 1.0);
+        let buffer = unsafe { inner.cast::<*const u8>().read() };
+        let capture = unsafe { buffer.add(16).cast::<*const c_char>().read() };
+        assert_eq!(unsafe { CStr::from_ptr(capture) }.to_bytes(), wtf8_encode_utf16(&[0xDE00]));
+        let split_source = thaw_arena::arena_string(b"(.)");
+        let no_flags = thaw_arena::arena_string(b"");
+        let split = unsafe { thaw_regex_split(input, split_source, no_flags, -1.0) };
+        assert_eq!(unsafe { split.cast::<u64>().read() }, 5);
+        let high = unsafe { split.add(32).cast::<*const c_char>().read() };
+        let low = unsafe { split.add(64).cast::<*const c_char>().read() };
+        assert_eq!(unsafe { CStr::from_ptr(high) }.to_bytes(), wtf8_encode_utf16(&[0xD83D]));
+        assert_eq!(unsafe { CStr::from_ptr(low) }.to_bytes(), wtf8_encode_utf16(&[0xDE00]));
+        let replacement = thaw_arena::arena_string(b"$1");
+        let replaced = unsafe { thaw_regex_replace(input, split_source, global, replacement) };
+        assert_eq!(unsafe { CStr::from_ptr(replaced) }.to_bytes(), "😀".as_bytes());
+    }
+
+    #[test]
     fn match_metadata_uses_stable_array_handle() {
-        let handle = wrap_array_handle(arena_optional_string_array(vec![Some("a".into())]));
+        let handle = wrap_array_handle(arena_optional_string_array(vec![Some(vec![b'a' as u16])]));
         store_regex_meta(handle, RegexMatchMeta {
             groups: std::ptr::null_mut(),
             index: 3.0,
-            input: "input".into(),
+            input: b"input".to_vec(),
         });
-        let replacement = arena_optional_string_array(vec![Some("a".into()), Some("x".into())]);
+        let replacement = arena_optional_string_array(vec![Some(vec![b'a' as u16]), Some(vec![b'x' as u16])]);
         unsafe { handle.cast::<*mut u8>().write_unaligned(replacement) };
         assert_eq!(unsafe { thaw_regex_exec_index(handle) }, 3.0);
         thaw_arena::thaw_arena_reset();
@@ -952,7 +806,7 @@ mod reset_tests {
         store_regex_meta(handle, RegexMatchMeta {
             groups: std::ptr::null_mut(),
             index: 3.0,
-            input: "old".into(),
+            input: b"old".to_vec(),
         });
         thaw_arena::thaw_arena_reset();
         REGEX_META.with(|stored| assert!(!stored.borrow().contains_key(&(handle as usize))));
