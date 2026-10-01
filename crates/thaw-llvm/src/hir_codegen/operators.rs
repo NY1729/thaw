@@ -599,17 +599,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_float_rem(lhs_val, rhs_val, "modtmp")
                 .map(Into::into)
                 .map_err(|e| e.to_string()),
-            BinOp::Exp => self
-                .builder
-                .build_call(
-                    self.module.get_function("pow").unwrap(),
-                    &[lhs_val.into(), rhs_val.into()],
-                    "powtmp",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| "pow returned no value".to_string()),
+            BinOp::Exp => self.compile_js_pow(lhs_val, rhs_val),
             BinOp::BitOr
             | BinOp::BitXor
             | BinOp::BitAnd
@@ -671,6 +661,64 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string()),
             BinOp::EqEqEq => unreachable!(),
         }
+    }
+
+    fn compile_js_pow(
+        &mut self,
+        base: FloatValue<'ctx>,
+        exponent: FloatValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let float = self.context.f64_type();
+        let exponent_nan = self.builder.build_float_compare(
+            FloatPredicate::UNO, exponent, exponent, "pow_exponent_nan",
+        ).map_err(|error| error.to_string())?;
+        let exponent_abs = self.builder.build_call(
+            self.module.get_function("llvm.fabs.f64").unwrap(),
+            &[exponent.into()], "pow_exponent_abs",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("fabs returned no value")?.into_float_value();
+        let exponent_infinite = self.builder.build_float_compare(
+            FloatPredicate::OEQ, exponent_abs, float.const_float(f64::INFINITY), "pow_exponent_infinite",
+        ).map_err(|error| error.to_string())?;
+        let base_abs = self.builder.build_call(
+            self.module.get_function("llvm.fabs.f64").unwrap(),
+            &[base.into()], "pow_base_abs",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("fabs returned no value")?.into_float_value();
+        let base_unit = self.builder.build_float_compare(
+            FloatPredicate::OEQ, base_abs, float.const_float(1.0), "pow_base_unit",
+        ).map_err(|error| error.to_string())?;
+        let unit_to_infinite = self.builder.build_and(
+            exponent_infinite, base_unit, "pow_unit_to_infinite",
+        ).map_err(|error| error.to_string())?;
+        let special = self.builder.build_or(
+            exponent_nan, unit_to_infinite, "pow_special",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let special_block = self.context.append_basic_block(function, "pow_nan");
+        let regular_block = self.context.append_basic_block(function, "pow_regular");
+        let merge_block = self.context.append_basic_block(function, "pow_done");
+        self.builder.build_conditional_branch(special, special_block, regular_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(special_block);
+        self.builder.build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(regular_block);
+        let regular = self.builder.build_call(
+            self.module.get_function("pow").unwrap(),
+            &[base.into(), exponent.into()], "powtmp",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("pow returned no value")?.into_float_value();
+        self.builder.build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_block);
+        let result = self.builder.build_phi(float, "pow_result")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[
+            (&float.const_float(f64::NAN), special_block),
+            (&regular, regular_block),
+        ]);
+        Ok(result.as_basic_value())
     }
 
     // ECMAScript ToUint32's bit pattern is also ToInt32's bit pattern.

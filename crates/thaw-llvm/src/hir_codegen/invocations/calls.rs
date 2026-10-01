@@ -1847,17 +1847,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let left = self.compile_expr(left)?;
                 let right = self.compile_expr(right)?;
-                return self
-                    .builder
-                    .build_call(
-                        self.module.get_function("pow").unwrap(),
-                        &[left.into(), right.into()],
-                        "math_pow",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("pow returned no value".to_string());
+                return self.compile_js_pow(left.into_float_value(), right.into_float_value());
             }
             "__thaw_math_atan2" => {
                 let [left, right] = args else {

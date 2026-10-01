@@ -669,6 +669,9 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.builder.position_at_end(present_block);
         match payload_type {
+            HirType::I64 => {
+                self.compile_console_arg(Some(HirType::I64), payload, newline, descriptor)?;
+            }
             HirType::F64 => {
                 self.compile_console_number(
                     payload.into_float_value(),
