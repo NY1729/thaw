@@ -91,12 +91,12 @@ fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
 }
 
 #[cfg(unix)]
-fn fs_symlink(target: &str, link: &str) -> io::Result<()> {
+fn fs_symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
 #[cfg(not(unix))]
-fn fs_symlink(_target: &str, _link: &str) -> io::Result<()> {
+fn fs_symlink(_target: &std::path::Path, _link: &std::path::Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "symbolic links are unsupported",
@@ -104,13 +104,13 @@ fn fs_symlink(_target: &str, _link: &str) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn fs_chmod(path: &str, mode: u32) -> io::Result<()> {
+fn fs_chmod(path: &std::path::Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn fs_chmod(_path: &str, _mode: u32) -> io::Result<()> {
+fn fs_chmod(_path: &std::path::Path, _mode: u32) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "chmod is unsupported",
@@ -118,7 +118,7 @@ fn fs_chmod(_path: &str, _mode: u32) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn fs_chown(path: &str, value: &str, follow: bool) -> io::Result<()> {
+fn fs_chown(path: &std::path::Path, value: &str, follow: bool) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let mut values = value.split(',');
     let parse_id = |value: Option<&str>| -> io::Result<libc::uid_t> {
@@ -129,7 +129,7 @@ fn fs_chown(path: &str, value: &str, follow: bool) -> io::Result<()> {
     };
     let uid = parse_id(values.next())?;
     let gid = parse_id(values.next())?;
-    let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+    let path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
     let result = unsafe {
         if follow {
@@ -146,7 +146,7 @@ fn fs_chown(path: &str, value: &str, follow: bool) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn fs_chown(_path: &str, _value: &str, _follow: bool) -> io::Result<()> {
+fn fs_chown(_path: &std::path::Path, _value: &str, _follow: bool) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "ownership changes are unsupported",
@@ -154,9 +154,9 @@ fn fs_chown(_path: &str, _value: &str, _follow: bool) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn fs_access(path: &str, mode: i32) -> io::Result<()> {
+fn fs_access(path: &std::path::Path, mode: i32) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+    let path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
     if unsafe { libc::access(path.as_ptr(), mode) } == 0 {
         Ok(())
@@ -175,9 +175,9 @@ fn fs_statfs_type(call: impl FnOnce(*mut libc::statfs) -> libc::c_int) -> io::Re
 }
 
 #[cfg(unix)]
-fn fs_statfs(path: &str) -> io::Result<serde_json::Value> {
+fn fs_statfs(path: &std::path::Path) -> io::Result<serde_json::Value> {
     use std::os::unix::ffi::OsStrExt;
-    let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+    let path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
@@ -194,7 +194,7 @@ fn fs_statfs(path: &str) -> io::Result<serde_json::Value> {
 }
 
 #[cfg(not(unix))]
-fn fs_statfs(_path: &str) -> io::Result<serde_json::Value> {
+fn fs_statfs(_path: &std::path::Path) -> io::Result<serde_json::Value> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "filesystem statistics are unsupported",
@@ -202,7 +202,7 @@ fn fs_statfs(_path: &str) -> io::Result<serde_json::Value> {
 }
 
 #[cfg(not(unix))]
-fn fs_access(path: &str, mode: i32) -> io::Result<()> {
+fn fs_access(path: &std::path::Path, mode: i32) -> io::Result<()> {
     let metadata = std::fs::metadata(path)?;
     if mode & 2 != 0 && metadata.permissions().readonly() {
         Err(io::Error::new(
@@ -292,7 +292,7 @@ fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) ->
     }
 }
 
-fn fs_create_empty(path: &str, value: &str, exclusive: bool) -> io::Result<()> {
+fn fs_create_empty(path: &std::path::Path, value: &str, exclusive: bool) -> io::Result<()> {
     let mode = fs_parse_mode(value)?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(!exclusive).create_new(exclusive);
@@ -302,7 +302,7 @@ fn fs_create_empty(path: &str, value: &str, exclusive: bool) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn fs_write_with_mode(path: &str, value: &str, append: bool, exclusive: bool) -> io::Result<()> {
+fn fs_write_with_mode(path: &std::path::Path, value: &str, append: bool, exclusive: bool) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let (mode, encoded) = value.split_once(',').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file mode"))?;
     let mode = fs_parse_mode(mode)?;
@@ -318,7 +318,7 @@ fn fs_write_with_mode(path: &str, value: &str, append: bool, exclusive: bool) ->
 }
 
 #[cfg(not(unix))]
-fn fs_write_with_mode(path: &str, value: &str, append: bool, exclusive: bool) -> io::Result<()> {
+fn fs_write_with_mode(path: &std::path::Path, value: &str, append: bool, exclusive: bool) -> io::Result<()> {
     let (mode, encoded) = value.split_once(',').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file mode"))?;
     fs_parse_mode(mode)?;
     let mut options = std::fs::OpenOptions::new();
@@ -360,14 +360,13 @@ fn fs_mkdir_recursive(path: &std::path::Path, mode: u32) -> io::Result<Option<st
     }
 }
 
-fn fs_mkdir_with_mode(path: &str, value: &str, recursive: bool) -> io::Result<Option<String>> {
+fn fs_mkdir_with_mode(path: &std::path::Path, value: &str, recursive: bool) -> io::Result<Option<std::path::PathBuf>> {
     let mode = fs_parse_mode(value)?;
     if !recursive {
-        fs_create_dir_mode(std::path::Path::new(path), mode)?;
+        fs_create_dir_mode(path, mode)?;
         return Ok(None);
     }
-    fs_mkdir_recursive(std::path::Path::new(path), mode)
-        .map(|first| first.map(|path| path.to_string_lossy().into_owned()))
+    fs_mkdir_recursive(path, mode)
 }
 
 fn system_time_millis(time: io::Result<std::time::SystemTime>) -> f64 {
@@ -405,6 +404,74 @@ fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "symlink": metadata.file_type().is_symlink(), "readonly": metadata.permissions().readonly(), "dev": metadata.dev(), "ino": metadata.ino(), "mode": metadata.mode(), "nlink": metadata.nlink(), "uid": metadata.uid(), "gid": metadata.gid(), "rdev": metadata.rdev(), "blksize": metadata.blksize(), "blocks": metadata.blocks(), "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": system_time_millis(metadata.modified()), "ctimeMs": ctime, "birthtimeMs": system_time_millis(metadata.created()), "exact": exact })
 }
 
+#[cfg(unix)]
+fn fs_name_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    name.as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn fs_name_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
+    name.to_string_lossy().as_bytes().to_vec()
+}
+
+fn fs_readdir_entries(path: &std::path::Path, typed: bool, recursive: bool) -> io::Result<serde_json::Value> {
+    fn visit(directory: &std::path::Path, prefix: &[u8], typed: bool, recursive: bool, output: &mut Vec<serde_json::Value>) -> io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name_bytes = fs_name_bytes(&entry.file_name());
+            let mut relative_bytes = prefix.to_vec();
+            if !relative_bytes.is_empty() { relative_bytes.push(b'/'); }
+            relative_bytes.extend_from_slice(&name_bytes);
+            let entry_path = entry.path();
+            let metadata = if typed || recursive { Some(std::fs::symlink_metadata(&entry_path)?) } else { None };
+            let descend = recursive && metadata.as_ref().is_some_and(|value| value.is_dir() && !value.file_type().is_symlink());
+            output.push(serde_json::json!({
+                "nameHex": hex_encode(&name_bytes),
+                "relativeHex": hex_encode(&relative_bytes),
+                "pathHex": hex_encode(&fs_name_bytes(entry_path.as_os_str())),
+                "parentPath": directory.to_string_lossy(),
+                "stat": metadata.map(fs_metadata_record),
+            }));
+            if descend { visit(&entry_path, &relative_bytes, typed, recursive, output)?; }
+        }
+        Ok(())
+    }
+    let mut entries = Vec::new();
+    visit(path, &[], typed, recursive, &mut entries)?;
+    Ok(serde_json::json!({ "ok": true, "entries": entries }))
+}
+
+fn fs_created_directory_record(created: Option<std::path::PathBuf>) -> serde_json::Value {
+    match created {
+        Some(path) => serde_json::json!({ "ok": true, "created": path.to_string_lossy(), "createdHex": hex_encode(&fs_name_bytes(path.as_os_str())) }),
+        None => serde_json::json!({ "ok": true, "created": null, "createdHex": null }),
+    }
+}
+
+fn fs_decode_raw_path(encoded: &str) -> io::Result<Vec<u8>> {
+    if encoded.len() % 2 != 0 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid encoded path"));
+    }
+    let bytes = hex_decode(encoded);
+    if bytes.contains(&0) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn fs_raw_path(encoded: &str) -> io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    Ok(std::ffi::OsString::from_vec(fs_decode_raw_path(encoded)?).into())
+}
+
+#[cfg(not(unix))]
+fn fs_raw_path(encoded: &str) -> io::Result<std::path::PathBuf> {
+    String::from_utf8(fs_decode_raw_path(encoded)?).map(std::path::PathBuf::from)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid UTF-8 path"))
+}
+
 #[cfg(not(unix))]
 fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     let modified = system_time_millis(metadata.modified());
@@ -428,12 +495,12 @@ fn parse_fs_time(value: Option<&str>) -> io::Result<f64> {
 }
 
 #[cfg(unix)]
-fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
+fn fs_utimes(path: &std::path::Path, value: &str) -> io::Result<()> {
     fs_path_utimes(path, value, 0)
 }
 
 #[cfg(not(unix))]
-fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
+fn fs_utimes(path: &std::path::Path, value: &str) -> io::Result<()> {
     let mut values = value.split(',');
     let timestamp = |seconds: f64| -> io::Result<std::time::SystemTime> {
         if seconds.abs() >= u64::MAX as f64 {
@@ -451,7 +518,7 @@ fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn fs_lutimes(path: &str, value: &str) -> io::Result<()> {
+fn fs_lutimes(path: &std::path::Path, value: &str) -> io::Result<()> {
     fs_path_utimes(path, value, libc::AT_SYMLINK_NOFOLLOW)
 }
 
@@ -478,11 +545,11 @@ fn fs_timespec(value: Option<&str>) -> io::Result<libc::timespec> {
 }
 
 #[cfg(unix)]
-fn fs_path_utimes(path: &str, value: &str, flags: libc::c_int) -> io::Result<()> {
+fn fs_path_utimes(path: &std::path::Path, value: &str, flags: libc::c_int) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let mut values = value.split(',');
     let times = [fs_timespec(values.next())?, fs_timespec(values.next())?];
-    let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+    let path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
     if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), flags) } == 0 {
         Ok(())
@@ -492,7 +559,7 @@ fn fs_path_utimes(path: &str, value: &str, flags: libc::c_int) -> io::Result<()>
 }
 
 #[cfg(not(unix))]
-fn fs_lutimes(_path: &str, _value: &str) -> io::Result<()> {
+fn fs_lutimes(_path: &std::path::Path, _value: &str) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "symbolic-link timestamps are unsupported",
@@ -527,7 +594,7 @@ fn fs_fd_time(value: &str) -> io::Result<std::fs::FileTimes> {
         .set_modified(timestamp(parse_fs_time(values.next())?)?))
 }
 
-fn fs_open_fd(path: &str, value: &str, table: &mut FsHandleTable) -> io::Result<u32> {
+fn fs_open_fd(path: &std::path::Path, value: &str, table: &mut FsHandleTable) -> io::Result<u32> {
     let (flag, mode) = value.split_once(',').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing open mode"))?;
     let mode = fs_parse_mode(mode)?;
     let fd = table.next;
@@ -537,7 +604,7 @@ fn fs_open_fd(path: &str, value: &str, table: &mut FsHandleTable) -> io::Result<
         #[cfg(unix)] {
             use std::os::fd::FromRawFd;
             use std::os::unix::ffi::OsStrExt;
-            let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+            let path = CString::new(path.as_os_str().as_bytes())
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
             let raw = unsafe { libc::open(path.as_ptr(), bits, mode as libc::mode_t) };
             if raw < 0 { return Err(io::Error::last_os_error()); }
@@ -657,41 +724,59 @@ fn fs_fd_operation(operation: &str, fd: u32, value: &str, table: &mut FsHandleTa
 }
 
 fn host_fs(operation: String, path: String, value: String, recursive: bool, table: &mut FsHandleTable) -> String {
-    if operation == "fd_open" {
-        return fs_open_fd(&path, &value, table)
+    if path.as_bytes().contains(&0) {
+        return fs_error(&operation, &path, io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"));
+    }
+    let (operation_without_value, raw_value) = operation.strip_suffix("_raw_value")
+        .map_or((operation.as_str(), false), |base| (base, true));
+    let (base_operation, raw_path) = operation_without_value.strip_suffix("_raw")
+        .map_or((operation_without_value, false), |base| (base, true));
+    let path_buf = if raw_path {
+        match fs_raw_path(&path) { Ok(path) => path, Err(error) => return fs_error(base_operation, &path, error) }
+    } else { std::path::PathBuf::from(&path) };
+    let value_path = if raw_value {
+        match fs_raw_path(&value) { Ok(path) => path, Err(error) => return fs_error(base_operation, &path, error) }
+    } else { std::path::PathBuf::from(&value) };
+    let path_ref = path_buf.as_path();
+    let value_path_ref = value_path.as_path();
+    if base_operation == "fd_open" {
+        return fs_open_fd(path_ref, &value, table)
             .map(|fd| serde_json::json!({ "ok": true, "fd": fd }).to_string())
             .unwrap_or_else(|error| fs_error(&operation, &path, error));
     }
-    if operation.starts_with("fd_") {
+    if base_operation.starts_with("fd_") {
         let result = path.parse::<u32>().map_err(|_| io::Error::from_raw_os_error(libc::EBADF))
-            .and_then(|fd| fs_fd_operation(&operation, fd, &value, table));
+            .and_then(|fd| fs_fd_operation(base_operation, fd, &value, table));
         return result.map(|value| value.to_string()).unwrap_or_else(|error| fs_error(&operation, &path, error));
     }
-    let result = match operation.as_str() {
-        "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
-        "access" => fs_access(&path, value.parse::<i32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
-        "statfs" => fs_statfs(&path),
-        "read" => std::fs::read(&path).map(|bytes| serde_json::json!({ "ok": true, "data": hex_encode(&bytes) })),
+    if matches!(base_operation, "rename" | "copy" | "copy_excl" | "cp" | "same_file" | "link" | "symlink") && value.as_bytes().contains(&0) {
+        return fs_error(&operation, &path, io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"));
+    }
+    let result = match base_operation {
+        "exists" => return serde_json::json!({ "ok": true, "exists": path_ref.exists() }).to_string(),
+        "access" => fs_access(path_ref, value.parse::<i32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
+        "statfs" => fs_statfs(path_ref),
+        "read" => std::fs::read(path_ref).map(|bytes| serde_json::json!({ "ok": true, "data": hex_encode(&bytes) })),
         "read_range" => (|| -> io::Result<serde_json::Value> {
             let (position, length) = value.split_once(',').unwrap_or(("0", "0"));
-            let mut file = std::fs::File::open(&path)?;
+            let mut file = std::fs::File::open(path_ref)?;
             file.seek(SeekFrom::Start(position.parse::<u64>().unwrap_or(0)))?;
             let mut bytes = vec![0; length.parse::<usize>().unwrap_or(0)];
             let count = file.read(&mut bytes)?;
             bytes.truncate(count);
             Ok(serde_json::json!({ "ok": true, "data": hex_encode(&bytes), "length": count }))
         })(),
-        "write" => std::fs::write(&path, hex_decode(&value)).map(|_| serde_json::json!({ "ok": true })),
-        "create_empty" => fs_create_empty(&path, &value, false).map(|_| serde_json::json!({ "ok": true })),
-        "create_empty_excl" => fs_create_empty(&path, &value, true).map(|_| serde_json::json!({ "ok": true })),
-        "write_existing" => std::fs::OpenOptions::new().write(true).open(&path)
+        "write" => std::fs::write(path_ref, hex_decode(&value)).map(|_| serde_json::json!({ "ok": true })),
+        "create_empty" => fs_create_empty(path_ref, &value, false).map(|_| serde_json::json!({ "ok": true })),
+        "create_empty_excl" => fs_create_empty(path_ref, &value, true).map(|_| serde_json::json!({ "ok": true })),
+        "write_existing" => std::fs::OpenOptions::new().write(true).open(path_ref)
             .and_then(|mut file| file.write_all(&hex_decode(&value)))
             .map(|_| serde_json::json!({ "ok": true })),
-        "write_mode" => fs_write_with_mode(&path, &value, false, false).map(|_| serde_json::json!({ "ok": true })),
-        "append_mode" => fs_write_with_mode(&path, &value, true, false).map(|_| serde_json::json!({ "ok": true })),
-        "write_mode_excl" => fs_write_with_mode(&path, &value, false, true).map(|_| serde_json::json!({ "ok": true })),
-        "append_mode_excl" => fs_write_with_mode(&path, &value, true, true).map(|_| serde_json::json!({ "ok": true })),
-        "same_file" => fs_same_file(std::path::Path::new(&path), std::path::Path::new(&value)).map(|same| serde_json::json!({ "ok": true, "same": same })),
+        "write_mode" => fs_write_with_mode(path_ref, &value, false, false).map(|_| serde_json::json!({ "ok": true })),
+        "append_mode" => fs_write_with_mode(path_ref, &value, true, false).map(|_| serde_json::json!({ "ok": true })),
+        "write_mode_excl" => fs_write_with_mode(path_ref, &value, false, true).map(|_| serde_json::json!({ "ok": true })),
+        "append_mode_excl" => fs_write_with_mode(path_ref, &value, true, true).map(|_| serde_json::json!({ "ok": true })),
+        "same_file" => fs_same_file(path_ref, value_path_ref).map(|same| serde_json::json!({ "ok": true, "same": same })),
         "write_range" => (|| -> io::Result<serde_json::Value> {
             let (position, encoded) = value.split_once(':').unwrap_or(("0", ""));
             let bytes = hex_decode(encoded);
@@ -699,37 +784,37 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool, tabl
                 .create(true)
                 .truncate(false)
                 .write(true)
-                .open(&path)?;
+                .open(path_ref)?;
             file.seek(SeekFrom::Start(position.parse::<u64>().unwrap_or(0)))?;
             file.write_all(&bytes)?;
             Ok(serde_json::json!({ "ok": true, "length": bytes.len() }))
         })(),
-        "append" => std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
-        "mkdir" => fs_mkdir_with_mode(&path, "511", recursive).map(|created| serde_json::json!({ "ok": true, "created": created })),
-        "mkdir_mode" => fs_mkdir_with_mode(&path, &value, recursive).map(|created| serde_json::json!({ "ok": true, "created": created })),
-        "readdir" => std::fs::read_dir(&path).and_then(|entries| entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<io::Result<Vec<_>>>()).map(|entries| serde_json::json!({ "ok": true, "entries": entries })),
-        "stat" => std::fs::metadata(&path).map(fs_metadata_record),
-        "lstat" => std::fs::symlink_metadata(&path).map(fs_metadata_record),
-        "unlink" => std::fs::remove_file(&path).map(|_| serde_json::json!({ "ok": true })),
-        "rmdir" => if recursive { std::fs::remove_dir_all(&path) } else { std::fs::remove_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
-        "rename" => std::fs::rename(&path, &value).map(|_| serde_json::json!({ "ok": true })),
-        "copy" => fs_copy_file(std::path::Path::new(&path), std::path::Path::new(&value)).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
-        "copy_excl" => fs_copy_exclusive(std::path::Path::new(&path), std::path::Path::new(&value)).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
-        "cp" => if recursive { fs_copy_recursive(std::path::Path::new(&path), std::path::Path::new(&value)) } else { fs_copy_file(std::path::Path::new(&path), std::path::Path::new(&value)) }.map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
-        "realpath" => std::fs::canonicalize(&path).map(|resolved| serde_json::json!({ "ok": true, "path": resolved.to_string_lossy() })),
-        "mkdtemp" => (|| -> io::Result<serde_json::Value> { let mut random = [0u8; 6]; getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?; let created = format!("{}{}", path, hex_encode(&random)); #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; std::fs::DirBuilder::new().mode(0o700).create(&created)?; } #[cfg(not(unix))] std::fs::create_dir(&created)?; Ok(serde_json::json!({ "ok": true, "path": created })) })(),
+        "append" => std::fs::OpenOptions::new().create(true).append(true).open(path_ref).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
+        "mkdir" => fs_mkdir_with_mode(path_ref, "511", recursive).map(|created| fs_created_directory_record(created)),
+        "mkdir_mode" => fs_mkdir_with_mode(path_ref, &value, recursive).map(|created| fs_created_directory_record(created)),
+        "readdir" => fs_readdir_entries(path_ref, value == "typed", recursive),
+        "stat" => std::fs::metadata(path_ref).map(fs_metadata_record),
+        "lstat" => std::fs::symlink_metadata(path_ref).map(fs_metadata_record),
+        "unlink" => std::fs::remove_file(path_ref).map(|_| serde_json::json!({ "ok": true })),
+        "rmdir" => if recursive { std::fs::remove_dir_all(path_ref) } else { std::fs::remove_dir(path_ref) }.map(|_| serde_json::json!({ "ok": true })),
+        "rename" => std::fs::rename(path_ref, value_path_ref).map(|_| serde_json::json!({ "ok": true })),
+        "copy" => fs_copy_file(path_ref, value_path_ref).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
+        "copy_excl" => fs_copy_exclusive(path_ref, value_path_ref).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
+        "cp" => if recursive { fs_copy_recursive(path_ref, value_path_ref) } else { fs_copy_file(path_ref, value_path_ref) }.map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
+        "realpath" => std::fs::canonicalize(path_ref).map(|resolved| serde_json::json!({ "ok": true, "path": resolved.to_string_lossy(), "pathHex": hex_encode(&fs_name_bytes(resolved.as_os_str())) })),
+        "mkdtemp" => (|| -> io::Result<serde_json::Value> { let mut random = [0u8; 6]; getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?; let mut name = path_ref.as_os_str().to_os_string(); name.push(hex_encode(&random)); let created = std::path::PathBuf::from(name); #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; std::fs::DirBuilder::new().mode(0o700).create(&created)?; } #[cfg(not(unix))] std::fs::create_dir(&created)?; Ok(serde_json::json!({ "ok": true, "path": created.to_string_lossy(), "pathHex": hex_encode(&fs_name_bytes(created.as_os_str())) })) })(),
         "truncate" => value.parse::<u64>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid truncate length"))
-            .and_then(|length| std::fs::OpenOptions::new().write(true).open(&path)?.set_len(length))
+            .and_then(|length| std::fs::OpenOptions::new().write(true).open(path_ref)?.set_len(length))
             .map(|_| serde_json::json!({ "ok": true })),
-        "link" => std::fs::hard_link(&path, &value).map(|_| serde_json::json!({ "ok": true })),
-        "symlink" => fs_symlink(&path, &value).map(|_| serde_json::json!({ "ok": true })),
-        "readlink" => std::fs::read_link(&path).map(|target| serde_json::json!({ "ok": true, "path": target.to_string_lossy() })),
+        "link" => std::fs::hard_link(path_ref, value_path_ref).map(|_| serde_json::json!({ "ok": true })),
+        "symlink" => fs_symlink(path_ref, value_path_ref).map(|_| serde_json::json!({ "ok": true })),
+        "readlink" => std::fs::read_link(path_ref).map(|target| serde_json::json!({ "ok": true, "path": target.to_string_lossy(), "pathHex": hex_encode(&fs_name_bytes(target.as_os_str())) })),
         "chmod" => fs_parse_mode(&value)
-            .and_then(|mode| fs_chmod(&path, mode)).map(|_| serde_json::json!({ "ok": true })),
-        "utimes" => fs_utimes(&path, &value).map(|_| serde_json::json!({ "ok": true })),
-        "lutimes" => fs_lutimes(&path, &value).map(|_| serde_json::json!({ "ok": true })),
-        "chown" => fs_chown(&path, &value, true).map(|_| serde_json::json!({ "ok": true })),
-        "lchown" => fs_chown(&path, &value, false).map(|_| serde_json::json!({ "ok": true })),
+            .and_then(|mode| fs_chmod(path_ref, mode)).map(|_| serde_json::json!({ "ok": true })),
+        "utimes" => fs_utimes(path_ref, &value).map(|_| serde_json::json!({ "ok": true })),
+        "lutimes" => fs_lutimes(path_ref, &value).map(|_| serde_json::json!({ "ok": true })),
+        "chown" => fs_chown(path_ref, &value, true).map(|_| serde_json::json!({ "ok": true })),
+        "lchown" => fs_chown(path_ref, &value, false).map(|_| serde_json::json!({ "ok": true })),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown filesystem operation")),
     };
     result
@@ -889,15 +974,25 @@ fn fs_utimes_updates_permissionless_target_and_preserves_link_behavior() {
     std::fs::write(&target, b"x").unwrap();
     symlink(&target, &link).unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
-    fs_utimes(target.to_str().unwrap(), "-0.000000001,1.234").unwrap();
+    fs_utimes(&target, "-0.000000001,1.234").unwrap();
     let target_stat = std::fs::metadata(&target).unwrap();
     assert_eq!((target_stat.atime(), target_stat.atime_nsec()), (-1, 999_999_999));
     assert_eq!((target_stat.mtime(), target_stat.mtime_nsec()), (1, 233_999_999));
-    fs_lutimes(link.to_str().unwrap(), "2.5,3.5").unwrap();
+    fs_lutimes(&link, "2.5,3.5").unwrap();
     assert_eq!(std::fs::symlink_metadata(&link).unwrap().mtime(), 3);
     assert_eq!(std::fs::metadata(&target).unwrap().mtime(), 1);
-    fs_utimes(link.to_str().unwrap(), "4,5").unwrap();
+    fs_utimes(&link, "4,5").unwrap();
     assert_eq!(std::fs::metadata(&target).unwrap().mtime(), 5);
     assert_eq!(std::fs::symlink_metadata(&link).unwrap().mtime(), 3);
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn fs_raw_path_transport_rejects_malformed_hex_and_nul() {
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(fs_raw_path("ff2ffe").unwrap().as_os_str().as_bytes(), &[0xff, b'/', 0xfe]);
+    assert_eq!(fs_raw_path("f").unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(fs_raw_path("fg").unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(fs_raw_path("610062").unwrap_err().kind(), io::ErrorKind::InvalidInput);
 }

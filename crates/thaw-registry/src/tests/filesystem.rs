@@ -1255,3 +1255,164 @@ fn fs_readdir_names_do_not_require_search_permission() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[cfg(unix)]
+#[test]
+fn fs_raw_filename_bytes_survive_readdir_and_path_consumers() {
+    use std::ffi::{CStr, CString, OsString};
+    use std::os::unix::ffi::OsStringExt;
+    let dir = temp_registry("builtin_fs_raw_names");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(root) { var base = Buffer.from(root + '/'), rawFile = Buffer.concat([base, Buffer.from([255])]), rawDir = Buffer.concat([base, Buffer.from([254])]), keep = function(values) { return values.map(function(value) { return Buffer.isBuffer(value) ? value.toString('hex') : value; }).filter(function(value) { return value === 'fe' || value === 'ff'; }).sort(); }; var plain = keep(fs.readdirSync(root, { encoding: 'buffer' })), hex = keep(fs.readdirSync(root, { encoding: 'hex' })), recursive = fs.readdirSync(root, { recursive: true, encoding: 'buffer' }).map(function(value) { return value.toString('hex'); }).filter(function(value) { return value === 'fe' || value === 'ff' || value === 'fe2ffd'; }).sort(), typed = fs.readdirSync(root, { withFileTypes: true, encoding: 'buffer' }).filter(function(entry) { return entry.name[0] >= 254; }).map(function(entry) { return [entry.name.toString('hex'), entry.isFile(), entry.isDirectory()]; }).sort(function(a,b) { return a[0].localeCompare(b[0]); }), opened = fs.opendirSync(root, { encoding: 'buffer' }), dirNames = [], entry; while ((entry = opened.readSync()) !== null) if (entry.name[0] >= 254) dirNames.push(entry.name.toString('hex')); opened.closeSync(); dirNames.sort(); var rawDirent = fs.readdirSync(root, { withFileTypes: true, encoding: 'buffer' }).find(function(entry) { return entry.name[0] === 254; }), mutableRawPath = rawDirent._rawPath; mutableRawPath.fill(0); var heldRawPath = rawDirent._rawPath.subarray(-1).toString('hex') === 'fe'; var globbed = fs.globSync('*', { cwd: Buffer.from(root), withFileTypes: true }).filter(function(entry) { return entry._rawPath && entry.name.length === 1 && entry.name.charCodeAt(0) === 65533; }).map(function(entry) { return entry._rawPath.subarray(-1).toString('hex'); }).sort(); var callback = await new Promise(function(resolve, reject) { fs.readdir(root, { encoding: 'buffer' }, function(error, names) { error ? reject(error) : resolve(keep(names)); }); }), promised = keep(await fs.promises.readdir(root, { encoding: 'buffer' })); fs.cpSync(rawDir, root + '/copied', { recursive: true }); var copied = fs.readdirSync(root + '/copied', { encoding: 'buffer' })[0].toString('hex'), streamText = await new Promise(function(resolve, reject) { var streamPath = Buffer.from(rawFile), reader = fs.createReadStream(streamPath), chunks = []; streamPath.fill(0); reader.path.fill(0); reader.on('data', function(chunk) { chunks.push(chunk); }); reader.on('error', reject); reader.on('end', function() { resolve(Buffer.concat(chunks).toString()); }); }), realLast = fs.realpathSync(rawFile, { encoding: 'buffer' }).subarray(-1).toString('hex'); fs.symlinkSync(rawFile, root + '/link'); var linkLast = fs.readlinkSync(root + '/link', { encoding: 'buffer' }).subarray(-1).toString('hex'); var prefix = Buffer.concat([base, Buffer.from('tmp-'), Buffer.from([250])]), temporary = fs.mkdtempSync(prefix, { encoding: 'buffer' }), prefixed = temporary.subarray(0, prefix.length).equals(prefix); fs.rmSync(temporary, { recursive: true }); var originalSize = fs.statSync(rawFile).size, originalText = fs.readFileSync(rawFile, 'utf8'), renamedPath = Buffer.concat([base, Buffer.from([251])]); fs.renameSync(rawFile, renamedPath); var renamed = fs.readFileSync(renamedPath, 'utf8') === 'F'; fs.renameSync(renamedPath, rawFile); var watched = await new Promise(function(resolve, reject) { var watcherPath = Buffer.from(root), watcher = fs.watch(watcherPath, { encoding: 'buffer', interval: 1 }, function(type, name) { if (name.toString('hex') !== 'ff') return; clearTimeout(timer); watcher.close(); resolve(name.toString('hex')); }), timer = setTimeout(function() { watcher.close(); reject(new Error('watch timeout')); }, 5000); watcherPath.fill(0); watcher.path.fill(0); fs.writeFileSync(rawFile, 'FF'); }); var writtenPath = Buffer.concat([base, Buffer.from([245])]), writeInput = Buffer.from(writtenPath), written = await new Promise(function(resolve, reject) { var writer = fs.createWriteStream(writeInput); writeInput.fill(0); writer.path.fill(0); writer.on('error', reject); writer.on('finish', function() { resolve(fs.readFileSync(writtenPath, 'utf8')); }); writer.end('W'); }); var mkdirSyncType = typeof fs.mkdirSync(Buffer.concat([base, Buffer.from([249]), Buffer.from('/child')]), { recursive: true }), mkdirCallbackType = await new Promise(function(resolve, reject) { fs.mkdir(Buffer.concat([base, Buffer.from([248]), Buffer.from('/child')]), { recursive: true }, function(error, created) { error ? reject(error) : resolve(typeof created); }); }), mkdirPromiseType = typeof (await fs.promises.mkdir(Buffer.concat([base, Buffer.from([247]), Buffer.from('/child')]), { recursive: true })); return [plain, hex, recursive, typed, dirNames, heldRawPath, globbed, callback, promised, originalSize, originalText, copied, streamText, realLast, linkLast, prefixed, renamed, watched, written, mkdirSyncType, mkdirCallbackType, mkdirPromiseType]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_raw_names_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let raw_file = dir.join(OsString::from_vec(vec![0xff]));
+    let raw_directory = dir.join(OsString::from_vec(vec![0xfe]));
+    fs::write(&raw_file, b"F").unwrap();
+    fs::create_dir(&raw_directory).unwrap();
+    fs::write(raw_directory.join(OsString::from_vec(vec![0xfd])), b"D").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRawNames = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(
+        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
+    )
+    .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseRawNames").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["fe","ff"],["fe","ff"],["fe","fe2ffd","ff"],[["fe",false,true],["ff",true,false]],["fe","ff"],true,["fe","ff"],["fe","ff"],["fe","ff"],1,"F","fd","F","ff","ff",true,true,"ff","W","string","string","string"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn fs_second_path_file_urls_survive_sync_callback_and_promise_routes() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_second_file_urls");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(root) { var original = root + '/original.txt', sync = root + '/sync renamed.txt', callback = root + '/callback renamed.txt', promised = root + '/promise renamed.txt', copied = root + '/sync copied.txt', callbackCopy = root + '/callback copied.txt', promiseCopy = root + '/promise copied.txt', url = function(name) { return new URL('file://' + root + '/' + name); }; fs.writeFileSync(original, 'data'); fs.renameSync(original, url('sync%20renamed.txt')); fs.copyFileSync(sync, url('sync%20copied.txt')); await new Promise(function(resolve, reject) { fs.rename(sync, url('callback%20renamed.txt'), function(error) { error ? reject(error) : resolve(); }); }); await fs.promises.rename(callback, url('promise%20renamed.txt')); await new Promise(function(resolve, reject) { fs.copyFile(promised, url('callback%20copied.txt'), function(error) { error ? reject(error) : resolve(); }); }); await fs.promises.copyFile(promised, url('promise%20copied.txt')); fs.linkSync(promised, url('linked%20file.txt')); fs.symlinkSync(promised, url('linked%20symbol.txt')); return [fs.existsSync(original), fs.existsSync(sync), fs.existsSync(callback), fs.readFileSync(promised, 'utf8'), fs.readFileSync(copied, 'utf8'), fs.readFileSync(callbackCopy, 'utf8'), fs.readFileSync(promiseCopy, 'utf8'), fs.readFileSync(root + '/linked file.txt', 'utf8'), fs.readFileSync(root + '/linked symbol.txt', 'utf8')]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_second_file_urls_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseSecondFileUrls = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(
+        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
+    )
+    .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseSecondFileUrls").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[false,false,false,"data","data","data","data","data","data"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[cfg(unix)]
+#[test]
+fn fs_invalid_byte_mkdtemp_disposables_remove_original_raw_paths() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_raw_disposable");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(root) { var base = Buffer.from(root + '/'), syncPrefix = Buffer.concat([base, Buffer.from('sync-'), Buffer.from([250])]), sync = fs.mkdtempDisposableSync(syncPrefix), syncRaw = Buffer.concat([syncPrefix, Buffer.from(sync.path.slice(-12))]), syncExists = fs.existsSync(syncRaw), syncType = typeof sync.path; sync.path = 'not the created path'; sync.remove(); sync.remove(); var syncRemoved = !fs.existsSync(syncRaw), asyncPrefix = Buffer.concat([base, Buffer.from('async-'), Buffer.from([249])]), disposable = await fs.promises.mkdtempDisposable(asyncPrefix), asyncRaw = Buffer.concat([asyncPrefix, Buffer.from(disposable.path.slice(-12))]), asyncExists = fs.existsSync(asyncRaw), asyncType = typeof disposable.path; disposable.path = 'not the created path'; var first = disposable.remove(), sameRemoval = first === disposable.remove(); await first; await disposable.remove(); return [syncType, syncExists, syncRemoved, asyncType, asyncExists, !fs.existsSync(asyncRaw), sameRemoval]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_raw_disposable_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRawDisposable = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(
+        serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap(),
+    )
+    .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseRawDisposable").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["string",true,true,"string",true,true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn fs_deferred_buffer_paths_are_snapshotted() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_deferred_buffer_paths");
+    fs::write(
+        dir.join("index.js"),
+        r#"var fs = require('node:fs'); module.exports = async function(root) {
+            var original = root + '/original.txt';
+            fs.writeFileSync(original, 'original');
+            var readPath = Buffer.from(original), promised = fs.promises.readFile(readPath, 'utf8');
+            readPath.fill(0);
+            var promisedText = await promised;
+            var callbackPath = Buffer.from(original), callbackText = new Promise(function(resolve, reject) {
+                fs.readFile(callbackPath, 'utf8', function(error, text) { error ? reject(error) : resolve(text); });
+            });
+            callbackPath.fill(0);
+            callbackText = await callbackText;
+            var source = Buffer.from(original), destination = Buffer.from(root + '/copied.txt');
+            var copied = fs.promises.cp(source, destination, { filter: function() { return Promise.resolve(true); } });
+            source.fill(0); destination.fill(0);
+            await copied;
+            var mkdirPath = Buffer.from(root + '/made/child'), created = new Promise(function(resolve, reject) {
+                fs.mkdir(mkdirPath, { recursive: true }, function(error, path) { error ? reject(error) : resolve(path); });
+            });
+            mkdirPath.fill(0);
+            created = await created;
+            var blobPath = Buffer.from(original), blob = fs.openAsBlob(blobPath);
+            blobPath.fill(0);
+            var blobText = await (await blob).text();
+            var cwd = Buffer.from(root), iterator = fs.promises.glob('*.txt', { cwd: cwd });
+            cwd.fill(0);
+            var matches = [];
+            for await (var match of iterator) matches.push(match);
+            var callbackCwd = Buffer.from(root), callbackMatches = new Promise(function(resolve, reject) {
+                fs.glob('*.txt', { cwd: callbackCwd }, function(error, values) { error ? reject(error) : resolve(values); });
+            });
+            callbackCwd.fill(0);
+            callbackMatches = await callbackMatches;
+            return [promisedText, callbackText, fs.readFileSync(root + '/copied.txt', 'utf8'), typeof created,
+                fs.existsSync(root + '/made/child'), blobText, matches.includes('original.txt'),
+                callbackMatches.includes('original.txt')];
+        };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_deferred_buffer_paths_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDeferredBufferPaths = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
+        .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseDeferredBufferPaths").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["original","original","original","string",true,"original",true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
