@@ -42,16 +42,14 @@ fn fs_chmod(_path: &str, _mode: u32) -> io::Result<()> {
 fn fs_chown(path: &str, value: &str, follow: bool) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let mut values = value.split(',');
-    let uid = values
-        .next()
-        .unwrap_or("0")
-        .parse::<libc::uid_t>()
-        .unwrap_or(0);
-    let gid = values
-        .next()
-        .unwrap_or("0")
-        .parse::<libc::gid_t>()
-        .unwrap_or(0);
+    let parse_id = |value: Option<&str>| -> io::Result<libc::uid_t> {
+        let value = value.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing owner ID"))?
+            .parse::<i64>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid owner ID"))?;
+        if value == -1 { return Ok(libc::uid_t::MAX); }
+        libc::uid_t::try_from(value).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid owner ID"))
+    };
+    let uid = parse_id(values.next())?;
+    let gid = parse_id(values.next())?;
     let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
     let result = unsafe {
@@ -124,6 +122,66 @@ fn fs_access(path: &str, mode: i32) -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
+fn fs_same_metadata(source: &std::fs::Metadata, destination: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    source.dev() == destination.dev() && source.ino() == destination.ino()
+}
+
+fn fs_same_file(source: &std::path::Path, destination: &std::path::Path) -> io::Result<bool> {
+    let source_meta = std::fs::metadata(source)?;
+    let destination_meta = match std::fs::metadata(destination) {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    #[cfg(unix)] { Ok(fs_same_metadata(&source_meta, &destination_meta)) }
+    #[cfg(not(unix))] {
+        let _ = (source_meta, destination_meta);
+        Ok(std::fs::canonicalize(source)? == std::fs::canonicalize(destination)?)
+    }
+}
+
+fn fs_copy_file(source: &std::path::Path, destination: &std::path::Path) -> io::Result<u64> {
+    let mut input = std::fs::File::open(source)?;
+    let source_meta = input.metadata()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)] { use std::os::unix::fs::{OpenOptionsExt, PermissionsExt}; options.mode(source_meta.permissions().mode() & 0o7777); }
+    let mut output = options.open(destination)?;
+    #[cfg(unix)]
+    if fs_same_metadata(&source_meta, &output.metadata()?) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "source and destination are the same file"));
+    }
+    #[cfg(not(unix))]
+    if fs_same_file(source, destination)? {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "source and destination are the same file"));
+    }
+    output.set_len(0)?;
+    let bytes = io::copy(&mut input, &mut output)?;
+    output.set_permissions(source_meta.permissions())?;
+    Ok(bytes)
+}
+
+fn fs_copy_exclusive(source: &std::path::Path, destination: &std::path::Path) -> io::Result<u64> {
+    let mut input = std::fs::File::open(source)?;
+    let source_meta = input.metadata()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] { use std::os::unix::fs::{OpenOptionsExt, PermissionsExt}; options.mode(source_meta.permissions().mode() & 0o7777); }
+    let mut output = options.open(destination)?;
+    let bytes = io::copy(&mut input, &mut output)?;
+    output.set_permissions(source_meta.permissions())?;
+    Ok(bytes)
+}
+
+fn fs_parse_mode(value: &str) -> io::Result<u32> {
+    let mode = value.parse::<u32>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid file mode"))?;
+    if mode > 0o7777 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid file mode")); }
+    Ok(mode)
+}
+
 fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) -> io::Result<u64> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.is_dir() {
@@ -138,33 +196,46 @@ fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) ->
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(source, destination)
+        fs_copy_file(source, destination)
     }
 }
 
+fn fs_create_empty(path: &str, value: &str, exclusive: bool) -> io::Result<()> {
+    let mode = fs_parse_mode(value)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(!exclusive).create_new(exclusive);
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(mode); }
+    #[cfg(not(unix))] let _ = mode;
+    options.open(path).map(|_| ())
+}
+
 #[cfg(unix)]
-fn fs_write_with_mode(path: &str, value: &str, append: bool) -> io::Result<()> {
+fn fs_write_with_mode(path: &str, value: &str, append: bool, exclusive: bool) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    let (mode, encoded) = value.split_once(',').unwrap_or(("438", value));
+    let (mode, encoded) = value.split_once(',').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file mode"))?;
+    let mode = fs_parse_mode(mode)?;
     let mut options = std::fs::OpenOptions::new();
     options
-        .create(true)
+        .create(!exclusive)
+        .create_new(exclusive)
         .write(true)
         .append(append)
-        .truncate(!append)
-        .mode(mode.parse::<u32>().unwrap_or(0o666));
+        .truncate(!append && !exclusive)
+        .mode(mode);
     options.open(path)?.write_all(&hex_decode(encoded))
 }
 
 #[cfg(not(unix))]
-fn fs_write_with_mode(path: &str, value: &str, append: bool) -> io::Result<()> {
-    let (_, encoded) = value.split_once(',').unwrap_or(("438", value));
+fn fs_write_with_mode(path: &str, value: &str, append: bool, exclusive: bool) -> io::Result<()> {
+    let (mode, encoded) = value.split_once(',').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file mode"))?;
+    fs_parse_mode(mode)?;
     let mut options = std::fs::OpenOptions::new();
     options
-        .create(true)
+        .create(!exclusive)
+        .create_new(exclusive)
         .write(true)
         .append(append)
-        .truncate(!append);
+        .truncate(!append && !exclusive);
     options.open(path)?.write_all(&hex_decode(encoded))
 }
 
@@ -174,20 +245,21 @@ fn fs_mkdir_with_mode(path: &str, value: &str, recursive: bool) -> io::Result<()
     let mut builder = std::fs::DirBuilder::new();
     builder
         .recursive(recursive)
-        .mode(value.parse::<u32>().unwrap_or(0o777))
+        .mode(fs_parse_mode(value)?)
         .create(path)
 }
 
 #[cfg(not(unix))]
-fn fs_mkdir_with_mode(path: &str, _value: &str, recursive: bool) -> io::Result<()> {
+fn fs_mkdir_with_mode(path: &str, value: &str, recursive: bool) -> io::Result<()> {
+    fs_parse_mode(value)?;
     std::fs::DirBuilder::new().recursive(recursive).create(path)
 }
 
 fn system_time_millis(time: io::Result<std::time::SystemTime>) -> f64 {
-    time.ok()
-        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs_f64() * 1000.0)
-        .unwrap_or(0.0)
+    time.ok().map(|value| match value.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs_f64() * 1000.0,
+        Err(error) => -error.duration().as_secs_f64() * 1000.0,
+    }).unwrap_or(0.0)
 }
 
 #[cfg(unix)]
@@ -203,42 +275,49 @@ fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "symlink": metadata.file_type().is_symlink(), "readonly": metadata.permissions().readonly(), "dev": 0, "ino": 0, "mode": if metadata.is_dir() { 16877 } else { 33188 }, "nlink": 1, "uid": 0, "gid": 0, "rdev": 0, "blksize": 0, "blocks": 0, "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": modified, "ctimeMs": modified, "birthtimeMs": system_time_millis(metadata.created()) })
 }
 
+fn parse_fs_time(value: Option<&str>) -> io::Result<f64> {
+    let seconds = value.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing timestamp"))?
+        .parse::<f64>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid timestamp"))?;
+    if !seconds.is_finite() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid timestamp")); }
+    Ok(seconds)
+}
+
 fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
     let mut values = value.split(',');
-    let accessed = values.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-    let modified = values.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+    let timestamp = |seconds: f64| -> io::Result<std::time::SystemTime> {
+        if seconds.abs() >= u64::MAX as f64 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "timestamp out of range"));
+        }
+        let duration = Duration::from_secs_f64(seconds.abs());
+        let time = if seconds < 0.0 { std::time::UNIX_EPOCH.checked_sub(duration) }
+            else { std::time::UNIX_EPOCH.checked_add(duration) };
+        time.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "timestamp out of range"))
+    };
     let times = std::fs::FileTimes::new()
-        .set_accessed(std::time::UNIX_EPOCH + Duration::from_secs_f64(accessed.max(0.0)))
-        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs_f64(modified.max(0.0)));
-    std::fs::OpenOptions::new()
-        .read(true)
-        .open(path)?
-        .set_times(times)
+        .set_accessed(timestamp(parse_fs_time(values.next())?)?)
+        .set_modified(timestamp(parse_fs_time(values.next())?)?);
+    std::fs::OpenOptions::new().write(true).open(path)?.set_times(times)
 }
 
 #[cfg(unix)]
 fn fs_lutimes(path: &str, value: &str) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let mut values = value.split(',');
-    let to_timespec = |value: Option<&str>| {
-        let seconds = value.unwrap_or("0").parse::<f64>().unwrap_or(0.0).max(0.0);
-        libc::timespec {
-            tv_sec: seconds.trunc() as libc::time_t,
-            tv_nsec: (seconds.fract() * 1_000_000_000.0).round() as libc::c_long,
+    let to_timespec = |value| -> io::Result<libc::timespec> {
+        let seconds = parse_fs_time(value)?;
+        let whole = seconds.floor();
+        if whole < libc::time_t::MIN as f64 || whole >= libc::time_t::MAX as f64 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "timestamp out of range"));
         }
+        Ok(libc::timespec {
+            tv_sec: whole as libc::time_t,
+            tv_nsec: ((seconds - whole) * 1_000_000_000.0).floor() as libc::c_long,
+        })
     };
-    let times = [to_timespec(values.next()), to_timespec(values.next())];
+    let times = [to_timespec(values.next())?, to_timespec(values.next())?];
     let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
-    if unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            path.as_ptr(),
-            times.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } == 0
-    {
+    if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -269,8 +348,16 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
             Ok(serde_json::json!({ "ok": true, "data": hex_encode(&bytes), "length": count }))
         })(),
         "write" => std::fs::write(&path, hex_decode(&value)).map(|_| serde_json::json!({ "ok": true })),
-        "write_mode" => fs_write_with_mode(&path, &value, false).map(|_| serde_json::json!({ "ok": true })),
-        "append_mode" => fs_write_with_mode(&path, &value, true).map(|_| serde_json::json!({ "ok": true })),
+        "create_empty" => fs_create_empty(&path, &value, false).map(|_| serde_json::json!({ "ok": true })),
+        "create_empty_excl" => fs_create_empty(&path, &value, true).map(|_| serde_json::json!({ "ok": true })),
+        "write_existing" => std::fs::OpenOptions::new().write(true).open(&path)
+            .and_then(|mut file| file.write_all(&hex_decode(&value)))
+            .map(|_| serde_json::json!({ "ok": true })),
+        "write_mode" => fs_write_with_mode(&path, &value, false, false).map(|_| serde_json::json!({ "ok": true })),
+        "append_mode" => fs_write_with_mode(&path, &value, true, false).map(|_| serde_json::json!({ "ok": true })),
+        "write_mode_excl" => fs_write_with_mode(&path, &value, false, true).map(|_| serde_json::json!({ "ok": true })),
+        "append_mode_excl" => fs_write_with_mode(&path, &value, true, true).map(|_| serde_json::json!({ "ok": true })),
+        "same_file" => fs_same_file(std::path::Path::new(&path), std::path::Path::new(&value)).map(|same| serde_json::json!({ "ok": true, "same": same })),
         "write_range" => (|| -> io::Result<serde_json::Value> {
             let (position, encoded) = value.split_once(':').unwrap_or(("0", ""));
             let bytes = hex_decode(encoded);
@@ -292,15 +379,19 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "unlink" => std::fs::remove_file(&path).map(|_| serde_json::json!({ "ok": true })),
         "rmdir" => if recursive { std::fs::remove_dir_all(&path) } else { std::fs::remove_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
         "rename" => std::fs::rename(&path, &value).map(|_| serde_json::json!({ "ok": true })),
-        "copy" => std::fs::copy(&path, &value).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
-        "cp" => if recursive { fs_copy_recursive(std::path::Path::new(&path), std::path::Path::new(&value)) } else { std::fs::copy(&path, &value) }.map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
+        "copy" => fs_copy_file(std::path::Path::new(&path), std::path::Path::new(&value)).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
+        "copy_excl" => fs_copy_exclusive(std::path::Path::new(&path), std::path::Path::new(&value)).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
+        "cp" => if recursive { fs_copy_recursive(std::path::Path::new(&path), std::path::Path::new(&value)) } else { fs_copy_file(std::path::Path::new(&path), std::path::Path::new(&value)) }.map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
         "realpath" => std::fs::canonicalize(&path).map(|resolved| serde_json::json!({ "ok": true, "path": resolved.to_string_lossy() })),
-        "mkdtemp" => (|| -> io::Result<serde_json::Value> { let mut random = [0u8; 6]; getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?; let created = format!("{}{}", path, hex_encode(&random)); std::fs::create_dir(&created)?; Ok(serde_json::json!({ "ok": true, "path": created })) })(),
-        "truncate" => std::fs::OpenOptions::new().write(true).open(&path).and_then(|file| file.set_len(value.parse::<u64>().unwrap_or(0))).map(|_| serde_json::json!({ "ok": true })),
+        "mkdtemp" => (|| -> io::Result<serde_json::Value> { let mut random = [0u8; 6]; getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?; let created = format!("{}{}", path, hex_encode(&random)); #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; std::fs::DirBuilder::new().mode(0o700).create(&created)?; } #[cfg(not(unix))] std::fs::create_dir(&created)?; Ok(serde_json::json!({ "ok": true, "path": created })) })(),
+        "truncate" => value.parse::<u64>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid truncate length"))
+            .and_then(|length| std::fs::OpenOptions::new().write(true).open(&path)?.set_len(length))
+            .map(|_| serde_json::json!({ "ok": true })),
         "link" => std::fs::hard_link(&path, &value).map(|_| serde_json::json!({ "ok": true })),
         "symlink" => fs_symlink(&path, &value).map(|_| serde_json::json!({ "ok": true })),
         "readlink" => std::fs::read_link(&path).map(|target| serde_json::json!({ "ok": true, "path": target.to_string_lossy() })),
-        "chmod" => fs_chmod(&path, value.parse::<u32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
+        "chmod" => fs_parse_mode(&value)
+            .and_then(|mode| fs_chmod(&path, mode)).map(|_| serde_json::json!({ "ok": true })),
         "utimes" => fs_utimes(&path, &value).map(|_| serde_json::json!({ "ok": true })),
         "lutimes" => fs_lutimes(&path, &value).map(|_| serde_json::json!({ "ok": true })),
         "chown" => fs_chown(&path, &value, true).map(|_| serde_json::json!({ "ok": true })),
