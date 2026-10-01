@@ -1225,3 +1225,26 @@ fn transform_stream_preserves_inherited_readable_size_strategy() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn readable_stream_from_advances_only_for_read_requests() {
+    // Unrun regression for construction and post-read prefetch.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("stream_from_demand");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var calls = 0, iterator = { next() { calls++; return { value: calls, done: false }; }, [Symbol.iterator]() { return this; } }, stream = ReadableStream.from(iterator);
+      async function drainJobs() { for (var i = 0; i < 12; i++) await Promise.resolve(); }
+      await drainJobs(); var before = calls, reader = stream.getReader(), first = await reader.read();
+      await drainJobs(); var after = calls, second = await reader.read(); await drainJobs(); var final = calls; await reader.cancel();
+      return [before, first.value, after, second.value, final];
+    };"#).unwrap();
+    let modules = temp_registry("stream_from_demand_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamDemand = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseStreamDemand").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[0,1,1,2,2]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}

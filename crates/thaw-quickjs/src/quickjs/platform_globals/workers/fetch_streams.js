@@ -185,7 +185,7 @@
               if (!result || typeof result !== 'object') throw new TypeError('iterator return result must be an object');
             }
           }
-        });
+        }, { highWaterMark: 0 });
       }
       constructor(source = {}, strategy = {}) {
         if (source.type !== undefined && source.type !== 'bytes') { const error = new TypeError('invalid source.type'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
