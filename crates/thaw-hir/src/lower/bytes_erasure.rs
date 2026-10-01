@@ -265,7 +265,8 @@ fn erase_expr(expr: &mut HirExpr) {
         | HirExpr::NullableNone(ty)
         | HirExpr::NullishNull(ty)
         | HirExpr::NullishUndefined(ty)
-        | HirExpr::ObjectAlloc(ty) => erase_ty(ty),
+        | HirExpr::ObjectAlloc(ty)
+        | HirExpr::ClassAlloc(ty) => erase_ty(ty),
 
         HirExpr::UnionInject(value, _, types) | HirExpr::UnionValue(value, _, types) => {
             erase_expr(value);
@@ -349,7 +350,7 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_ty(ty);
             erase_expr(closure);
         }
-        HirExpr::FunctionRef(_, types, ret) | HirExpr::MethodRef(_, _, types, ret, _) => {
+        HirExpr::FunctionRef(_, types, ret) | HirExpr::MethodRef(_, _, types, ret, _, _) => {
             erase_tys(types);
             erase_ty(ret);
         }

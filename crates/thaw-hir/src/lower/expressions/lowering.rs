@@ -3411,7 +3411,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let result = HirExpr::ObjectLit(vec![
                             (
-                                "__thaw_class_identity_SuppressedError$Error".to_string(),
+                                "__thaw_class_identity_\u{1e}SuppressedError\u{1f}Error".to_string(),
                                 HirExpr::Lit(HirLit::Bool(true)),
                             ),
                             ("message".to_string(), message),
@@ -3488,7 +3488,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let mut fields = vec![
                             (
-                                "__thaw_class_identity_AggregateError$Error".to_string(),
+                                "__thaw_class_identity_\u{1e}AggregateError\u{1f}Error".to_string(),
                                 HirExpr::Lit(HirLit::Bool(true)),
                             ),
                             ("message".to_string(), message),

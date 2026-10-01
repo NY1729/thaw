@@ -129,8 +129,15 @@ impl<'ctx> HirCompiler<'ctx> {
         let resolve_fn = self.compile_promise_resolver(resolved, false, assimilates, false)?;
         let reject_fn =
             self.compile_promise_resolver(resolved, true, false, typed_rejection)?;
-        let resolve = self.allocate_special_closure(resolve_fn, promise, "resolve_closure")?;
-        let reject = self.allocate_special_closure(reject_fn, promise, "reject_closure")?;
+        let resolve_params = if assimilates {
+            vec![HirType::Promise(Box::new(resolved.clone()))]
+        } else if resolved == &HirType::Void {
+            Vec::new()
+        } else {
+            vec![resolved.clone()]
+        };
+        let resolve = self.allocate_special_closure(resolve_fn, promise, &resolve_params, "resolve_closure")?;
+        let reject = self.allocate_special_closure(reject_fn, promise, &[HirType::Str], "reject_closure")?;
         let code = self
             .builder
             .build_load(
@@ -140,13 +147,6 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let resolve_params = if assimilates {
-            vec![HirType::Promise(Box::new(resolved.clone()))]
-        } else if resolved == &HirType::Void {
-            Vec::new()
-        } else {
-            vec![resolved.clone()]
-        };
         let resolve_ty = HirType::Function(resolve_params, Box::new(HirType::Void));
         let reject_ty = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
         let executor_type = self.function_type(&[resolve_ty, reject_ty], &HirType::Void)?;

@@ -216,6 +216,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishUndefined(_)
         | HirExpr::EnvVar(_)
         | HirExpr::ObjectAlloc(_)
+        | HirExpr::ClassAlloc(_)
         | HirExpr::FunctionRef(..)
         | HirExpr::MethodRef(..) => {}
     }
@@ -315,6 +316,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::Var(_)
         | HirExpr::EnvVar(_)
         | HirExpr::ObjectAlloc(_)
+        | HirExpr::ClassAlloc(_)
         | HirExpr::PostfixUpdate(_, _) => false,
     }
 }

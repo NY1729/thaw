@@ -168,6 +168,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.catch_stack = outer_catch_stack;
         self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(parent);
+        let this_adapter = self.compile_ignored_this_adapter(
+            adapter,
+            params,
+            ret,
+            &format!("{name}__thaw_this_adapter"),
+        )?;
 
         let closure = self
             .builder
@@ -206,7 +212,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
             } else {
                 self.builder
-                    .build_store(slot, adapter.as_global_value().as_pointer_value())
+                    .build_store(slot, this_adapter.as_global_value().as_pointer_value())
                     .map_err(|error| error.to_string())?;
             }
         }

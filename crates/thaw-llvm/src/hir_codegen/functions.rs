@@ -38,7 +38,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // Strings and arrays are both represented as a single opaque
             // pointer at the LLVM level; what they point to differs (a
             // C string vs. a [len][elements...] buffer).
-            HirType::Str | HirType::Symbol => {
+            HirType::Str | HirType::StrLiteral(_) | HirType::Symbol => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             HirType::Array(elem) => {
@@ -173,12 +173,9 @@ impl<'ctx> HirCompiler<'ctx> {
         ret: &HirType,
         name: &str,
     ) -> Result<FunctionValue<'ctx>, String> {
-        let mut this_params = Vec::with_capacity(params.len() + 1);
-        this_params.push(HirType::I64);
-        this_params.extend_from_slice(params);
         let adapter = self.module.add_function(
             name,
-            self.function_type(&this_params, ret)?,
+            self.this_entry_function_type(params, ret)?,
             Some(Linkage::Internal),
         );
         let parent = self
