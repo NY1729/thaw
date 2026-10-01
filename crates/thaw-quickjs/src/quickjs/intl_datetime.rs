@@ -393,6 +393,55 @@ fn skeleton_calendar_name(kind: icu_calendar::AnyCalendarKind) -> Option<&'stati
     })
 }
 
+/// Report the same calendar and digit system selected by the formatter's
+/// curated locale and requested Unicode extensions.
+fn intl_datetime_resolved_options_json(locale_tag: &str) -> String {
+    use icu_provider::{DataIdentifierBorrowed, DataMarkerAttributes, DataProvider, DataRequest};
+    use std::str::FromStr;
+
+    let resolve = || -> Option<serde_json::Value> {
+        let locale = icu_locale::Locale::from_str(locale_tag).ok()?;
+        let curated: icu_locale::Locale = resolve_curated_locale(&locale.id).parse().ok()?;
+        let mut prefs = icu_datetime::DateTimeFormatterPreferences::from(&curated);
+        let requested = icu_datetime::DateTimeFormatterPreferences::from(&locale);
+        prefs.calendar_algorithm = requested.calendar_algorithm;
+        prefs.numbering_system = requested.numbering_system;
+        let provider = &thaw_icu_data::ThawIcuDataProvider;
+        let formatter = icu_datetime::DateTimeFormatter::try_new_unstable(
+            provider, prefs, icu_datetime::fieldsets::YMD::medium(),
+        ).ok()?;
+        let calendar = match formatter.calendar().kind() {
+            icu_calendar::AnyCalendarKind::Gregorian => "gregory",
+            icu_calendar::AnyCalendarKind::HijriUmmAlQura => "islamic-umalqura",
+            icu_calendar::AnyCalendarKind::HijriTabularTypeIIFriday => "islamic-civil",
+            icu_calendar::AnyCalendarKind::HijriTabularTypeIIThursday => "islamic-tbla",
+            icu_calendar::AnyCalendarKind::HijriSimulatedMecca => "islamic",
+            icu_calendar::AnyCalendarKind::EthiopianAmeteAlem => "ethioaa",
+            kind => skeleton_calendar_name(kind)?,
+        };
+
+        let data_locale = icu_provider::DataLocale::from(curated.id);
+        let symbols = DataProvider::<icu_decimal::provider::DecimalSymbolsV1>::load(
+            provider,
+            DataRequest { id: DataIdentifierBorrowed::for_locale(&data_locale), ..Default::default() },
+        ).ok()?;
+        let default_numbering = symbols.payload.get().numsys();
+        let requested_numbering = locale.extensions.unicode.keywords
+            .get(&"nu".parse().ok()?)
+            .map(|value| value.to_string());
+        let numbering = requested_numbering.as_deref().filter(|name| {
+            DataMarkerAttributes::try_from_str(name).ok().is_some_and(|attributes| {
+                DataProvider::<icu_decimal::provider::DecimalDigitsV1>::load(
+                    provider,
+                    DataRequest { id: DataIdentifierBorrowed::for_marker_attributes(&attributes), ..Default::default() },
+                ).is_ok()
+            })
+        }).unwrap_or(default_numbering);
+        Some(serde_json::json!({ "calendar": calendar, "numberingSystem": numbering }))
+    };
+    resolve().map_or_else(|| "{}".to_string(), |value| value.to_string())
+}
+
 /// Builds the UTS-35 classical skeleton for an ECMA-402 option set --
 /// the piece icu4x's own `FieldSetBuilder` gets wrong (it derives widths
 /// from the locale's `dateFormats` length patterns instead of the

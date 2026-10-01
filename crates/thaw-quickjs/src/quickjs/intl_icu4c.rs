@@ -598,6 +598,26 @@ fn datetime_skeleton(options: &serde_json::Value) -> String {
     if let Some(second) = get("second") {
         skeleton.push_str(if second == "2-digit" { "ss" } else { "s" });
     }
+    if let Some(digits) = options.get("fractionalSecondDigits").and_then(|value| value.as_u64()) {
+        skeleton.push_str(&"S".repeat(digits.min(3) as usize));
+    }
+    if let Some(day_period) = get("dayPeriod") {
+        skeleton.push_str(match day_period {
+            "long" => "BBBB",
+            "narrow" => "BBBBB",
+            _ => "B",
+        });
+    }
+    if let Some(zone_name) = get("timeZoneName") {
+        skeleton.push_str(match zone_name {
+            "long" => "zzzz",
+            "shortOffset" => "O",
+            "longOffset" => "OOOO",
+            "shortGeneric" => "v",
+            "longGeneric" => "vvvv",
+            _ => "z",
+        });
+    }
     skeleton
 }
 
@@ -612,7 +632,8 @@ fn datetime_field_type(field: c_int) -> Option<&'static str> {
         7 => "second",
         8 => "fractionalSecond",
         9 => "weekday",
-        14 => "dayPeriod",
+        14 | 35 | 36 => "dayPeriod",
+        17 | 23 | 24 | 29 | 31 | 32 | 33 => "timeZoneName",
         _ => return None,
     })
 }
