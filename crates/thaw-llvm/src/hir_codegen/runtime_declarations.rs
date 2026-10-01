@@ -223,6 +223,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .add_function("thaw_json_parse", json_parse_type, Some(Linkage::External));
         self.module.add_function(
+            "thaw_json_take_parse_error",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_destroy",
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
@@ -2016,13 +2021,28 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_is_object_like",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_clone",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_state_key",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
             "thaw_json_set_prototype",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_take_prototype_error",
+            self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -2054,10 +2074,6 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_json_number_entries",
             "thaw_json_string_entries",
             "thaw_json_bool_entries",
-            "thaw_json_object_from_number_entries",
-            "thaw_json_object_from_string_entries",
-            "thaw_json_object_from_bool_entries",
-            "thaw_json_object_from_json_entries",
         ] {
             self.module.add_function(
                 name,
@@ -2065,6 +2081,23 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
+        for name in [
+            "thaw_json_object_from_number_entries",
+            "thaw_json_object_from_string_entries",
+            "thaw_json_object_from_bool_entries",
+            "thaw_json_object_from_json_entries",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_json_take_from_entries_error",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_json_has_own",
             self.context
@@ -2082,6 +2115,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_json_object_assign",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_take_assign_error",
+            self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(

@@ -224,10 +224,21 @@ impl<'ctx> HirCompiler<'ctx> {
         // binding stays observably frozen after crossing into its Json
         // representation, instead of the state silently vanishing because
         // `json` is a different allocation with a different identity.
+        let state_key = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_state_key").unwrap(),
+                &[json.into()],
+                "json_encoded_state_key",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("JSON state key returned no value")?;
         self.builder
             .build_call(
                 self.module.get_function("thaw_object_copy_state").unwrap(),
-                &[object.into(), json.into()],
+                &[object.into(), state_key.into()],
                 "propagate_object_state",
             )
             .map_err(|error| error.to_string())?;
