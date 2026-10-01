@@ -495,7 +495,7 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
     use std::collections::{BTreeMap, BTreeSet};
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowExpr, BlockStmt, CatchClause, Decl, Expr, Function, ImportSpecifier, ModuleDecl,
+        ArrowExpr, BlockStmt, CatchClause, Decl, Expr, FnExpr, Function, ImportSpecifier, ModuleDecl,
         ModuleExportName, ModuleItem, Pat, Prop, Stmt,
     };
     use thaw_parser::common::Spanned;
@@ -631,6 +631,16 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
         }
     }
     impl Visit for References<'_> {
+        fn visit_fn_expr(&mut self, expression: &FnExpr) {
+            let mut names = BTreeSet::new();
+            if let Some(name) = &expression.ident {
+                names.insert(name.sym.to_string());
+            }
+            self.shadowed.push(names);
+            expression.function.visit_with(self);
+            self.shadowed.pop();
+        }
+
         fn visit_function(&mut self, function: &Function) {
             self.push_function_scope(function);
         }
