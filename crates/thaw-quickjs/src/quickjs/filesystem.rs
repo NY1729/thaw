@@ -245,9 +245,58 @@ fn fs_same_file(source: &std::path::Path, destination: &std::path::Path) -> io::
     }
 }
 
+fn fs_copy_destination_resolved(destination: &std::path::Path) -> io::Result<std::path::PathBuf> {
+    use std::path::Component;
+    let absolute = if destination.is_absolute() { destination.to_path_buf() }
+        else { std::env::current_dir()?.join(destination) };
+    let mut resolved = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => resolved.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => { resolved.pop(); }
+            Component::Normal(name) => {
+                resolved.push(name);
+                match std::fs::canonicalize(&resolved) {
+                    Ok(path) => resolved = path,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        if std::fs::symlink_metadata(&resolved).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                            return Err(io::Error::new(io::ErrorKind::InvalidInput, "unresolved destination symlink"));
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn fs_copy_unsafe_relation(source: &std::path::Path, destination: &std::path::Path, dereference: bool) -> io::Result<bool> {
+    let source_link = std::fs::symlink_metadata(source)?;
+    if source_link.file_type().is_symlink() && !dereference {
+        return match std::fs::symlink_metadata(destination) {
+            Ok(destination_link) => {
+                #[cfg(unix)] { Ok(fs_same_metadata(&source_link, &destination_link)) }
+                #[cfg(not(unix))] { Ok(std::fs::canonicalize(source)? == std::fs::canonicalize(destination)?) }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        };
+    }
+    if fs_same_file(source, destination)? { return Ok(true); }
+    let canonical_source = std::fs::canonicalize(source)?;
+    let canonical_destination = fs_copy_destination_resolved(destination)?;
+    Ok(canonical_destination == canonical_source || (source_link.is_dir() || (dereference && std::fs::metadata(source)?.is_dir()))
+        && canonical_destination.starts_with(&canonical_source))
+}
+
 fn fs_copy_file(source: &std::path::Path, destination: &std::path::Path) -> io::Result<u64> {
     let mut input = std::fs::File::open(source)?;
     let source_meta = input.metadata()?;
+    if fs_same_file(source, destination)? {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "source and destination are the same file"));
+    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true);
     #[cfg(unix)] { use std::os::unix::fs::{OpenOptionsExt, PermissionsExt}; options.mode(source_meta.permissions().mode() & 0o7777); }
@@ -288,6 +337,9 @@ fn fs_parse_mode(value: &str) -> io::Result<u32> {
 fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) -> io::Result<u64> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.is_dir() {
+        if fs_copy_unsafe_relation(source, destination, false)? {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "destination is source or its descendant"));
+        }
         std::fs::create_dir_all(destination)?;
         let mut copied = 0;
         for entry in std::fs::read_dir(source)? {
@@ -760,7 +812,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool, tabl
             .and_then(|fd| fs_fd_operation(base_operation, fd, &value, table));
         return result.map(|value| value.to_string()).unwrap_or_else(|error| fs_error(&operation, &path, error));
     }
-    if matches!(base_operation, "rename" | "copy" | "copy_excl" | "cp" | "same_file" | "link" | "symlink") && value.as_bytes().contains(&0) {
+    if matches!(base_operation, "rename" | "copy" | "copy_excl" | "cp" | "same_file" | "copy_guard" | "link" | "symlink") && value.as_bytes().contains(&0) {
         return fs_error(&operation, &path, io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"));
     }
     let result = match base_operation {
@@ -788,6 +840,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool, tabl
         "write_mode_excl" => fs_write_with_mode(path_ref, &value, false, true).map(|_| serde_json::json!({ "ok": true })),
         "append_mode_excl" => fs_write_with_mode(path_ref, &value, true, true).map(|_| serde_json::json!({ "ok": true })),
         "same_file" => fs_same_file(path_ref, value_path_ref).map(|same| serde_json::json!({ "ok": true, "same": same })),
+        "copy_guard" => fs_copy_unsafe_relation(path_ref, value_path_ref, recursive).map(|unsafe_path| serde_json::json!({ "ok": true, "unsafe": unsafe_path })),
         "write_range" => (|| -> io::Result<serde_json::Value> {
             let (position, encoded) = value.split_once(':').unwrap_or(("0", ""));
             let bytes = hex_decode(encoded);
@@ -1028,4 +1081,24 @@ fn fs_statfs_record_preserves_large_counters_as_decimal_strings() {
         assert_eq!(record["exact"][key], expected);
     }
     assert!(record["blocks"].is_number());
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn fs_copy_relation_resolves_alias_parents_before_descendant_mutation() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!("thaw_fs_copy_relation_{}", std::process::id()));
+    let source = root.join("source");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(outside.join("deep")).unwrap();
+    symlink(&source, root.join("source-alias")).unwrap();
+    symlink(outside.join("deep"), root.join("outside-alias")).unwrap();
+    assert!(fs_copy_unsafe_relation(&source, &root.join("source-alias/new"), false).unwrap());
+    assert!(fs_copy_unsafe_relation(&source, &root.join("missing/../source/new"), false).unwrap());
+    assert!(!fs_copy_unsafe_relation(&source, &root.join("outside-alias/../source/new"), false).unwrap());
+    assert!(fs_copy_recursive(&source, &root.join("source-alias/new")).is_err());
+    assert!(!root.join("missing").exists());
+    assert!(!source.join("new").exists());
+    std::fs::remove_dir_all(root).unwrap();
 }
