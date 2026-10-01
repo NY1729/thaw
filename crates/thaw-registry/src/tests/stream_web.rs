@@ -1177,3 +1177,27 @@ fn binary_transform_streams_enforce_buffer_sources() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn text_encoders_reject_symbols_and_use_string_conversion_hint() {
+    // Unrun regression for all public text encoder conversion boundaries.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("text_encoder_symbol_conversion");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var encoder = new TextEncoder(), errors = [];
+      for (var invoke of [function () { encoder.encode(Symbol('x')); }, function () { encoder.encodeInto(Symbol('x'), new Uint8Array(10)); }, function () { encoder.encode(Object(Symbol('x'))); }]) { try { invoke(); } catch (error) { errors.push(error.name); } }
+      var hints = [], value = { [Symbol.toPrimitive](hint) { hints.push(hint); return 'A'; } }, bytes = encoder.encode(value), into = new Uint8Array(1); encoder.encodeInto(value, into);
+      var stream = new TextEncoderStream(), reader = stream.readable.getReader(), writer = stream.writable.getWriter(), read = reader.read();
+      var outcomes = await Promise.allSettled([writer.write(Symbol('x')), read]);
+      return [errors, hints, Array.from(bytes), Array.from(into), outcomes.map(function (outcome) { return outcome.status === 'rejected' && outcome.reason.name === 'TypeError'; })];
+    };"#).unwrap();
+    let modules = temp_registry("text_encoder_symbol_conversion_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseEncoderConversion = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseEncoderConversion").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["TypeError","TypeError","TypeError"],["string","string"],[65],[65],[true,true]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
