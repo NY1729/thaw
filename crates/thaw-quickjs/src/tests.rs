@@ -4373,6 +4373,58 @@ fn intl_followup_locale_list_boundary() {
     );
 }
 
+/// Source-level regression coverage for the four deferred Intl findings.
+/// Execution is reserved for the user-requested test phase.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_followup_exact_notation_and_style_grouping() {
+    assert_eq!(
+        load(r#"function intlDeferredNumberCases() {
+          const scientific = new Intl.NumberFormat('en-US', { notation: 'scientific', maximumFractionDigits: 15 });
+          const engineering = new Intl.NumberFormat('en-US', { notation: 'engineering', maximumFractionDigits: 18 });
+          const big = 9007199254740993n;
+          const groupedCurrency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', useGrouping: false });
+          const groupedPercent = new Intl.NumberFormat('en-US', { style: 'percent', useGrouping: false });
+          const groupedUnit = new Intl.NumberFormat('en-US', { style: 'unit', unit: 'day', useGrouping: false });
+          const wideExponent = new Intl.NumberFormat('en-US', { notation: 'scientific' });
+          const range = wideExponent.formatRange('1e20000', '2e20000');
+          return [
+            scientific.format(big),
+            scientific.format('9007199254740993'),
+            scientific.formatToParts(big).map(part => part.value).join(''),
+            engineering.format('123456789012345678901'),
+            new Intl.NumberFormat('en-US', { notation: 'engineering', maximumFractionDigits: 0 }).format(999999999999999999999n),
+            groupedCurrency.format(1234),
+            groupedPercent.format(1234.56),
+            groupedUnit.format(1234).includes(','),
+            wideExponent.formatToParts('1e20000').map(part => part.value).join('') === wideExponent.format('1e20000'),
+            wideExponent.formatToParts('1e-20000').map(part => part.value).join('') === wideExponent.format('1e-20000'),
+            wideExponent.formatRangeToParts('1e20000', '2e20000').map(part => part.value).join('') === range && !range.includes('Infinity'),
+          ];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("intlDeferredNumberCases", "[]"),
+        r#"["9.007199254740993E15","9.007199254740993E15","9.007199254740993E15","123.456789012345678901E18","1E21","$1234.00","123456%",false,true,true,true]"#
+    );
+}
+
+#[cfg(all(feature = "intl", not(feature = "icu4c")))]
+#[test]
+fn intl_followup_flexible_day_period_without_icu4c() {
+    assert_eq!(
+        load(r#"function intlFlexibleDayPeriod() {
+          const date = new Date('2024-07-04T15:00:00Z');
+          const options = { hour: 'numeric', dayPeriod: 'long', timeZone: 'UTC' };
+          return new Intl.DateTimeFormat('en-US', options).formatToParts(date)
+            .some(part => part.type === 'dayPeriod' && part.value.toLowerCase().includes('afternoon'));
+        }"#),
+        1
+    );
+    assert_eq!(call("intlFlexibleDayPeriod", "[]"), "true");
+}
+
 #[test]
 fn buffer_boundary_and_encoding_regressions() {
     assert_eq!(

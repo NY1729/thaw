@@ -57,6 +57,7 @@ struct DateTimeOptions {
     hour: Option<String>,
     minute: Option<String>,
     second: Option<String>,
+    day_period: Option<String>,
     hour12: Option<bool>,
     hour_cycle: Option<String>,
 }
@@ -167,6 +168,7 @@ impl DateTimeOptions {
             hour: field("hour"),
             minute: field("minute"),
             second: field("second"),
+            day_period: field("dayPeriod"),
             hour12: value.get("hour12").and_then(|v| v.as_bool()),
             hour_cycle: field("hourCycle"),
         }
@@ -453,7 +455,7 @@ fn skeleton_fields(
     locale_hour_cycle: Option<&str>,
 ) -> (Vec<Field>, Option<FieldSymbol>) {
     use icu_datetime::provider::fields::{
-        Day, Field, FieldLength, FieldSymbol, Hour, Month, Second, Weekday, Year,
+        Day, DayPeriod, Field, FieldLength, FieldSymbol, Hour, Month, Second, Weekday, Year,
     };
 
     fn name_length(style: &str) -> FieldLength {
@@ -493,6 +495,9 @@ fn skeleton_fields(
     }
     if let Some(style) = options.weekday.as_deref() {
         fields.push(Field { symbol: FieldSymbol::Weekday(Weekday::Format), length: name_length(style) });
+    }
+    if let Some(style) = options.day_period.as_deref() {
+        fields.push(Field { symbol: FieldSymbol::DayPeriod(DayPeriod::Flexible), length: name_length(style) });
     }
     let mut hour_symbol = None;
     if let Some(style) = options.hour.as_deref() {
