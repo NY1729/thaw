@@ -515,7 +515,7 @@ pub unsafe extern "C" fn napi_get_version(env: NapiEnv, out: *mut u32) -> NapiSt
     if env.is_null() || out.is_null() {
         record_status(env, NAPI_INVALID_ARG)
     } else {
-        *out = 10;
+        *out = napi_version::SUPPORTED_NAPI_VERSION;
         NAPI_OK
     }
 }

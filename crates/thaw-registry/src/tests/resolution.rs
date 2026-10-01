@@ -2103,6 +2103,24 @@ fn builds_prebuild_install_github_asset_for_the_current_target() {
 }
 
 #[test]
+fn selects_highest_supported_napi_prebuild_and_rejects_future_only_versions() {
+    // Unrun regression: installer and host must agree on the Node-API ceiling.
+    let mut manifest = serde_json::json!({
+        "name": "binding",
+        "version": "1.2.3",
+        "repository": "https://github.com/example/binding",
+        "binary": { "napi_versions": [3, 8, 9, 10, 11, 99] }
+    });
+    let (_, asset, _, _) = prebuild_install_asset(&manifest).unwrap();
+    assert!(asset.contains("-napi-v10-"));
+    manifest["binary"]["napi_versions"] = serde_json::json!([9, 11, 99]);
+    let (_, asset, _, _) = prebuild_install_asset(&manifest).unwrap();
+    assert!(asset.contains("-napi-v9-"));
+    manifest["binary"]["napi_versions"] = serde_json::json!([11, 99]);
+    assert!(prebuild_install_asset(&manifest).is_none());
+}
+
+#[test]
 fn reports_available_targets_when_no_prebuild_matches() {
     let package = temp_registry("mismatched_native_prebuild");
     let target = package.join("prebuilds/imaginary-other");
