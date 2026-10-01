@@ -1569,3 +1569,19 @@ fn compiles_dynamic_uniform_tagged_object_reads_without_nested_tags() {
 }
 
 
+
+#[test]
+fn non_arrow_function_expression_boxes_scalar_this_arguments() {
+    let source = r#"function main(): void {
+        const kind = function(): string { return typeof this; };
+        console.log(kind.call(undefined));
+        console.log(kind.call(null));
+        console.log(kind.call(true));
+        console.log(kind.call(3.5));
+        console.log(kind.call("hello"));
+        const echo = function(): Json { return this; };
+        console.log(typeof echo.call("retained"));
+    }"#;
+    assert_eq!(compile_and_run(source, "non_arrow_scalar_this"),
+        "undefined\nobject\nboolean\nnumber\nstring\nstring\n");
+}

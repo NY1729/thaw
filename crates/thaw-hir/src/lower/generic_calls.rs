@@ -1,18 +1,110 @@
+struct GenericArrowThisOperation {
+    receiver: (HirExpr, HirType),
+    bind: bool,
+    ignored: Vec<(HirExpr, HirType)>,
+    prelowered: Option<Vec<HirExpr>>,
+}
+
 impl<'a> FnLowerer<'a> {
+    fn lower_generic_arrow_operation(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else { return Ok(None); };
+        let Expr::Member(operation) = callee.as_ref() else { return Ok(None); };
+        let Some(method) = member_property_name(&operation.prop) else { return Ok(None); };
+        if !matches!(method.as_str(), "call" | "apply" | "bind") { return Ok(None); }
+        let Expr::Ident(target) = operation.obj.as_ref() else { return Ok(None); };
+        let name = self.resolve_binding(target.sym.as_ref());
+        if !self.generic_non_arrow_names.contains(&name) { return Ok(None); }
+        let Some(arrow) = self.generic_arrows.get(&name).cloned() else { return Ok(None); };
+        let (this_value, this_type, supplied) = if let Some((this_arg, supplied)) = call.args.split_first() {
+            if this_arg.spread.is_some() {
+                return Err(format!("generic function .{method}() cannot spread its thisArg"));
+            }
+            let value = self.lower_expr(&this_arg.expr)?;
+            let ty = self.infer_expr_type(&value)?;
+            (value, ty, supplied)
+        } else {
+            (HirExpr::Lit(HirLit::Undefined), HirType::Undefined, &[][..])
+        };
+        let mut discarded_apply_arguments = Vec::new();
+        let mut prelowered_apply_arguments = None;
+        let forwarded = if method == "apply" {
+            if let Some((values, extras)) = supplied.split_first() {
+                if values.spread.is_some() {
+                    return Err("generic function .apply() cannot spread its argument tuple".into());
+                }
+                let value = self.lower_expr(&values.expr)?;
+                let ty = self.infer_expr_type(&value)?;
+                let forwarded = if matches!(ty, HirType::Null | HirType::Undefined) {
+                    discarded_apply_arguments.push((value, ty));
+                    Vec::new()
+                } else {
+                    prelowered_apply_arguments = Some(vec![value]);
+                    vec![swc_ecma_ast::ExprOrSpread {
+                        spread: Some(call.span), expr: values.expr.clone(),
+                    }]
+                };
+                for extra in extras {
+                    if extra.spread.is_some() {
+                        return Err("generic function .apply() extra spread arguments need tuple expansion".into());
+                    }
+                    let value = self.lower_expr(&extra.expr)?;
+                    let ty = self.infer_expr_type(&value)?;
+                    discarded_apply_arguments.push((value, ty));
+                }
+                forwarded
+            } else { Vec::new() }
+        } else { supplied.to_vec() };
+        let mut invocation = call.clone();
+        invocation.args = forwarded;
+        self.lower_generic_arrow_call_with_this(&name, &arrow, &invocation,
+            Some(GenericArrowThisOperation {
+                receiver: (this_value, this_type),
+                bind: method == "bind",
+                ignored: discarded_apply_arguments,
+                prelowered: prelowered_apply_arguments,
+            })).map(Some)
+    }
+
     fn lower_generic_arrow_call(
         &mut self,
         name: &str,
         arrow: &swc_ecma_ast::ArrowExpr,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
-        let lowered = call
-            .args
-            .iter()
-            .map(|argument| self.lower_expr(&argument.expr))
-            .collect::<Result<Vec<_>, _>>()?;
+        self.lower_generic_arrow_call_with_this(name, arrow, call, None)
+    }
+
+    fn lower_generic_arrow_call_with_this(
+        &mut self,
+        name: &str,
+        arrow: &swc_ecma_ast::ArrowExpr,
+        call: &CallExpr,
+        operation: Option<GenericArrowThisOperation>,
+    ) -> Result<HirExpr, String> {
+        let (this_argument, bind, discarded_apply_arguments, prelowered_arguments) =
+            match operation {
+                Some(operation) => (Some(operation.receiver), operation.bind,
+                    operation.ignored, operation.prelowered),
+                None => (None, false, Vec::new(), None),
+            };
+        let lowered = match prelowered_arguments {
+            Some(values) => values,
+            None => call.args.iter()
+                .map(|argument| self.lower_expr(&argument.expr))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
         let preserve_order = call.args.iter().any(|argument| argument.spread.is_some())
             || lowered.iter().any(contains_await);
         let mut bindings = Vec::new();
+        let this_name = this_argument.as_ref().map(|(_, ty)| {
+            let name = format!("__thaw_generic_this_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            name
+        });
+        if let (Some((value, ty)), Some(this_name)) = (&this_argument, &this_name) {
+            bindings.push((this_name.clone(), ty.clone(), value.clone()));
+        }
         let mut arguments = Vec::new();
         for (source, value) in call.args.iter().zip(lowered) {
             if source.spread.is_none() && !preserve_order {
@@ -58,7 +150,14 @@ impl<'a> FnLowerer<'a> {
             bindings.push((temporary.clone(), ty, value));
             arguments.push(HirExpr::Var(temporary));
         }
-        if arrow.params.len() != arguments.len() {
+        for (value, ty) in discarded_apply_arguments {
+            let name = format!("__thaw_unused_apply_argument_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            bindings.push((name, ty, value));
+        }
+        if (!bind && arrow.params.len() != arguments.len())
+            || (bind && arguments.len() > arrow.params.len()) {
             return Err(format!(
                 "generic arrow `{name}` expects {} argument(s), got {} after spread expansion",
                 arrow.params.len(),
@@ -70,11 +169,24 @@ impl<'a> FnLowerer<'a> {
             .map(|argument| self.infer_expr_type(argument))
             .collect::<Result<Vec<_>, _>>()?;
         let signature = self.generic_arrow_signature(arrow)?;
+        let mut inference_signature = signature.clone();
+        let mut inference_types = parameter_types.clone();
+        if let (Some(template), Some((_, this_ty))) = (
+            self.generic_non_arrow_receiver_templates.get(name), this_argument.as_ref())
+        {
+            let variables = signature.generic_type_params.iter().cloned()
+                .map(|name| (name.clone(), GenericTypePattern::Variable(name)))
+                .collect::<HashMap<_, _>>();
+            let pattern = generic_type_pattern(template, &variables,
+                self.interfaces, self.generic_interfaces, &mut Vec::new())?;
+            inference_signature.generic_param_patterns.insert(0, pattern);
+            inference_types.insert(0, this_ty.clone());
+        }
         let concrete_types = if let Some(type_args) = &call.type_args {
             resolve_explicit_generic_type_tuple(
-                &signature,
+                &inference_signature,
                 &type_args.params,
-                &parameter_types,
+                &inference_types,
                 self.interfaces,
                 self.generic_interfaces,
             )
@@ -83,14 +195,22 @@ impl<'a> FnLowerer<'a> {
             })?
         } else {
             infer_generic_type_tuple(
-                &signature,
-                &parameter_types,
+                &inference_signature,
+                &inference_types,
                 self.interfaces,
                 self.generic_interfaces,
                 None,
             )
             .map_err(|error| format!("cannot specialize generic arrow `{name}`: {error}"))?
         };
+        let receiver = self.specialized_generic_receiver(name, &signature, &concrete_types)?;
+        let concrete = signature.generic_type_params.iter().cloned()
+            .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
+        let runtime_parameter_types = if bind {
+            signature.generic_param_patterns.iter()
+                .map(|pattern| instantiate_generic_pattern(pattern, &concrete))
+                .collect::<Result<Vec<_>, _>>()?
+        } else { parameter_types.clone() };
         let recursive = self.generic_arrow_self_names.get(name).cloned();
         let mut recursive_state = None;
         if let Some(internal) = recursive {
@@ -110,7 +230,7 @@ impl<'a> FnLowerer<'a> {
                 self.generic_interfaces,
                 &mut Vec::new(),
             )?;
-            let self_type = HirType::Function(parameter_types.clone(), Box::new(return_type));
+            let self_type = HirType::Function(runtime_parameter_types.clone(), Box::new(return_type));
             let self_name = format!("__thaw_recursive_generic_{}", self.next_binding);
             self.next_binding += 1;
             let saved_binding = self.bindings.get(&internal).cloned();
@@ -132,8 +252,13 @@ impl<'a> FnLowerer<'a> {
         specialized_arrow.visit_mut_with(&mut GenericClassTypeSubstituter {
             substitutions: &substitutions,
         });
+        let previous_receiver = std::mem::replace(
+            &mut self.non_arrow_receiver,
+            receiver,
+        );
         let lowered =
-            self.lower_contextual_arrow(&specialized_arrow, &parameter_types, None);
+            self.lower_contextual_arrow(&specialized_arrow, &runtime_parameter_types, None);
+        self.non_arrow_receiver = previous_receiver;
         if let Some((internal, self_name, _, saved_binding)) = &recursive_state {
             self.scope.remove(self_name);
             if let Some(saved) = saved_binding {
@@ -144,10 +269,30 @@ impl<'a> FnLowerer<'a> {
         }
         let mut lambda = lowered
             .map_err(|error| format!("cannot specialize generic arrow `{name}`: {error}"))?;
+        if self.generic_non_arrow_names.contains(name) {
+            lambda = HirExpr::NonArrowFunction(Box::new(lambda));
+        }
         if let Some((_, self_name, self_type, _)) = recursive_state {
             lambda = HirExpr::RecursiveClosure(self_name, self_type, Box::new(lambda));
         }
-        let result = HirExpr::Call(Box::new(lambda), arguments);
+        let result = if let Some(this_name) = this_name {
+            let result_type = self.infer_expr_type(&lambda)?;
+            let return_type = match result_type {
+                HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret) => *ret,
+                other => return Err(format!("generic function has non-callable type {other:?}")),
+            };
+            let this_arg = Box::new(HirExpr::Var(this_name));
+            if bind {
+                let bound = arguments.into_iter().zip(&runtime_parameter_types)
+                    .map(|(argument, expected)| self.coerce_to_declared(expected, argument))
+                    .collect::<Result<Vec<_>, _>>()?;
+                HirExpr::FunctionBindThis(Box::new(lambda), this_arg,
+                    bound, runtime_parameter_types, return_type)
+            } else {
+                HirExpr::FunctionCallWithThis(Box::new(lambda), this_arg,
+                    arguments, runtime_parameter_types, return_type)
+            }
+        } else { HirExpr::Call(Box::new(lambda), arguments) };
         self.wrap_call_argument_bindings(result, &bindings)
     }
 

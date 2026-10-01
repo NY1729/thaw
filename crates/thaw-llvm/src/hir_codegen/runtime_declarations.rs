@@ -2040,6 +2040,21 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_receiver_bool",
+            i8_ptr.fn_type(&[i8_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_receiver_number",
+            i8_ptr.fn_type(&[self.context.f64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_receiver_string",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_clone",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

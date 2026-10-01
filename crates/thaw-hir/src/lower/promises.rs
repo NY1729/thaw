@@ -30,8 +30,7 @@ impl<'a> FnLowerer<'a> {
                 return self.lower_contextual_arrow(arrow, parameter_types, expected_return)
             }
             Expr::Fn(function) => {
-                let arrow = function_expression_as_arrow(function)?;
-                return self.lower_contextual_arrow(&arrow, parameter_types, expected_return);
+                return self.lower_function_expression(function, Some((parameter_types, expected_return)));
             }
             Expr::Ident(ident) => {
                 let mut name = self.resolve_binding(ident.sym.as_ref());

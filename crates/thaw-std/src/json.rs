@@ -3411,6 +3411,21 @@ pub extern "C" fn thaw_json_array_push_json(array: *mut Value, value: *mut Value
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_json_receiver_bool(value: u8) -> *mut Value {
+    leak(Value::Bool(value != 0))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_receiver_number(value: f64) -> *mut Value {
+    leak(number_value(value))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_receiver_string(value: *const c_char) -> *mut Value {
+    leak(string_value(value))
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_null() -> *mut Value {
     leak(Value::Null)
 }

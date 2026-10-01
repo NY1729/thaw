@@ -428,18 +428,8 @@ impl<'ctx> HirCompiler<'ctx> {
         callback: &HirExpr,
         discard_result: bool,
     ) -> Result<StructValue<'ctx>, String> {
-        let callback_type = match callback {
-            HirExpr::Lambda(_, params, ret, _) => HirType::Function(
-                params.iter().map(|param| param.ty.clone()).collect(),
-                Box::new(ret.clone()),
-            ),
-            HirExpr::Var(name) => self
-                .variable_hir_types
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("unknown callback `{name}`"))?,
-            _ => return Err("typed N-API method callback must be a function value".into()),
-        };
+        let callback_type = self.expr_hir_type(callback)
+            .ok_or("typed N-API method callback must be a function value")?;
         let HirType::Function(params, ret) = callback_type else {
             return Err("typed N-API method callback must be a function".into());
         };
@@ -576,20 +566,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 "callNativeAddonWithCallback expects a name, Json args, and callback".into(),
             );
         };
-        let callback_type = match callback {
-            HirExpr::Lambda(_, params, ret, _) => HirType::Function(
-                params.iter().map(|param| param.ty.clone()).collect(),
-                Box::new(ret.clone()),
-            ),
-            HirExpr::Var(name) => self
-                .variable_hir_types
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("unknown callback `{name}`"))?,
-            _ => {
-                return Err("callNativeAddonWithCallback callback must be a function value".into())
-            }
-        };
+        let callback_type = self.expr_hir_type(callback)
+            .ok_or("callNativeAddonWithCallback callback must be a function value")?;
         let HirType::Function(params, ret) = callback_type else {
             return Err("callNativeAddonWithCallback third argument must be a function".into());
         };

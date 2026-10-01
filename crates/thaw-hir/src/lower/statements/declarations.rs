@@ -298,6 +298,8 @@ impl<'a> FnLowerer<'a> {
                             )?;
                             let hir_name = self.bind_local(&name, HirType::Dynamic);
                             self.generic_arrows.insert(hir_name.clone(), arrow);
+                            self.generic_non_arrow_names.insert(hir_name.clone());
+                            self.store_generic_function_expression_receiver(&hir_name, function)?;
                             if named_function_is_recursive(function) {
                                 self.generic_arrow_self_names.insert(
                                     hir_name,
@@ -345,6 +347,15 @@ impl<'a> FnLowerer<'a> {
                             )?;
                             let hir_name = self.bind_local(&name, HirType::Dynamic);
                             self.generic_arrows.insert(hir_name.clone(), arrow);
+                            if self.generic_non_arrow_names.contains(&source_name) {
+                                self.generic_non_arrow_names.insert(hir_name.clone());
+                                if let Some(receiver) = self.generic_non_arrow_receivers.get(&source_name).cloned() {
+                                    self.generic_non_arrow_receivers.insert(hir_name.clone(), receiver);
+                                }
+                                if let Some(template) = self.generic_non_arrow_receiver_templates.get(&source_name).cloned() {
+                                    self.generic_non_arrow_receiver_templates.insert(hir_name.clone(), template);
+                                }
+                            }
                             if let Some(self_name) =
                                 self.generic_arrow_self_names.get(&source_name).cloned()
                             {
@@ -375,6 +386,15 @@ impl<'a> FnLowerer<'a> {
                     if let Some(arrow) = self.generic_arrows.get(&source_name).cloned() {
                         let hir_name = self.bind_local(&name, HirType::Dynamic);
                         self.generic_arrows.insert(hir_name.clone(), arrow);
+                        if self.generic_non_arrow_names.contains(&source_name) {
+                            self.generic_non_arrow_names.insert(hir_name.clone());
+                            if let Some(receiver) = self.generic_non_arrow_receivers.get(&source_name).cloned() {
+                                self.generic_non_arrow_receivers.insert(hir_name.clone(), receiver);
+                            }
+                            if let Some(template) = self.generic_non_arrow_receiver_templates.get(&source_name).cloned() {
+                                self.generic_non_arrow_receiver_templates.insert(hir_name.clone(), template);
+                            }
+                        }
                         if let Some(self_name) =
                             self.generic_arrow_self_names.get(&source_name).cloned()
                         {
@@ -462,6 +482,10 @@ impl<'a> FnLowerer<'a> {
                     }
                     let hir_name = self.bind_local(&name, HirType::Dynamic);
                     self.generic_arrows.insert(hir_name.clone(), arrow);
+                    if let Expr::Fn(function) = init {
+                        self.generic_non_arrow_names.insert(hir_name.clone());
+                        self.store_generic_function_expression_receiver(&hir_name, function)?;
+                    }
                     if let Some(self_name) = recursive_self {
                         self.generic_arrow_self_names.insert(hir_name, self_name);
                     }
@@ -537,16 +561,14 @@ impl<'a> FnLowerer<'a> {
                         self.lower_contextual_arrow(arrow, &abi_params, Some(ret))?
                     }
                     (Expr::Fn(function), Some(HirType::Function(params, ret))) => {
-                        let arrow = function_expression_as_arrow(function)?;
-                        self.lower_contextual_arrow(&arrow, params, Some(ret))?
+                        self.lower_function_expression(function, Some((params, Some(ret))))?
                     }
                     (Expr::Fn(function), Some(HirType::CallableFunction(params, _, rest, ret))) => {
-                        let arrow = function_expression_as_arrow(function)?;
                         let mut abi_params = params.clone();
                         if let Some(rest) = rest {
                             abi_params.push(HirType::Array(rest.clone()));
                         }
-                        self.lower_contextual_arrow(&arrow, &abi_params, Some(ret))?
+                        self.lower_function_expression(function, Some((&abi_params, Some(ret))))?
                     }
                     (
                         Expr::Ident(identifier),

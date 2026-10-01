@@ -38,6 +38,9 @@ struct FnLowerer<'a> {
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     generic_call_returns: HashMap<Symbol, HirType>,
     generic_arrows: HashMap<Symbol, swc_ecma_ast::ArrowExpr>,
+    generic_non_arrow_names: HashSet<Symbol>,
+    generic_non_arrow_receivers: HashMap<Symbol, HirType>,
+    generic_non_arrow_receiver_templates: HashMap<Symbol, Box<TsType>>,
     generic_arrow_self_names: HashMap<Symbol, Symbol>,
     generic_named_templates: HashMap<Symbol, Symbol>,
     native_method_values: HashMap<Symbol, NativeMethodValue>,
@@ -57,6 +60,7 @@ struct FnLowerer<'a> {
     class_static_context: bool,
     class_context: Option<Symbol>,
     unbound_this_context: bool,
+    non_arrow_receiver: Option<HirType>,
     /// A contextual type hint for the *next* call expression `lower_call`
     /// handles, consumed (taken, not just read) as its very first action
     /// so it can never leak into a nested/argument call's own inference --

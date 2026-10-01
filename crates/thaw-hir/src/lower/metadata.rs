@@ -745,15 +745,14 @@ fn function_expression_as_arrow(
     expression: &swc_ecma_ast::FnExpr,
 ) -> Result<swc_ecma_ast::ArrowExpr, String> {
     let function = expression.function.as_ref();
-    if function.this_param.is_some()
-        || !function.decorators.is_empty()
+    if !function.decorators.is_empty()
         || function
             .params
             .iter()
             .any(|parameter| !parameter.decorators.is_empty())
     {
         return Err(
-            "function expressions with this parameters or decorators are not supported".into(),
+            "function expressions with decorators are not supported".into(),
         );
     }
     let body = function

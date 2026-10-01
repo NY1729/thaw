@@ -91,6 +91,9 @@ pub enum HirExpr {
     RecursiveClosure(Symbol, HirType, Box<HirExpr>),
     // Preserves a logical callable shape around a physically ordinary closure.
     TypedClosure(HirType, Box<HirExpr>),
+    /// A non-arrow JavaScript function expression. Preserves dynamic `this`
+    /// provenance across lowering; its enclosed closure carries the call ABI.
+    NonArrowFunction(Box<HirExpr>),
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
     /// A native method value with separate unbound and explicit-receiver entries.
