@@ -1,5 +1,5 @@
 fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
-    let code = match error.kind() {
+    let code = if error.raw_os_error() == Some(libc::EBADF) { "EBADF" } else { match error.kind() {
         io::ErrorKind::NotFound => "ENOENT",
         io::ErrorKind::PermissionDenied => "EACCES",
         io::ErrorKind::AlreadyExists => "EEXIST",
@@ -7,7 +7,7 @@ fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
         io::ErrorKind::IsADirectory => "EISDIR",
         io::ErrorKind::NotADirectory => "ENOTDIR",
         _ => "EIO",
-    };
+    } };
     serde_json::json!({ "ok": false, "code": code, "operation": operation, "path": path, "message": error.to_string() }).to_string()
 }
 
@@ -332,7 +332,170 @@ fn fs_lutimes(_path: &str, _value: &str) -> io::Result<()> {
     ))
 }
 
-fn host_fs(operation: String, path: String, value: String, recursive: bool) -> String {
+struct FsHandleTable {
+    next: u32,
+    files: HashMap<u32, std::fs::File>,
+}
+
+impl FsHandleTable {
+    fn new() -> Self { Self { next: 10, files: HashMap::new() } }
+    fn get(&mut self, fd: u32) -> io::Result<&mut std::fs::File> {
+        self.files.get_mut(&fd).ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))
+    }
+}
+
+fn fs_fd_time(value: &str) -> io::Result<std::fs::FileTimes> {
+    let mut values = value.split(',');
+    let timestamp = |seconds: f64| -> io::Result<std::time::SystemTime> {
+        if seconds.abs() >= u64::MAX as f64 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "timestamp out of range"));
+        }
+        let duration = Duration::from_secs_f64(seconds.abs());
+        let time = if seconds < 0.0 { std::time::UNIX_EPOCH.checked_sub(duration) }
+            else { std::time::UNIX_EPOCH.checked_add(duration) };
+        time.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "timestamp out of range"))
+    };
+    Ok(std::fs::FileTimes::new()
+        .set_accessed(timestamp(parse_fs_time(values.next())?)?)
+        .set_modified(timestamp(parse_fs_time(values.next())?)?))
+}
+
+fn fs_open_fd(path: &str, value: &str, table: &mut FsHandleTable) -> io::Result<u32> {
+    let (flag, mode) = value.split_once(',').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing open mode"))?;
+    let mode = fs_parse_mode(mode)?;
+    let fd = table.next;
+    if fd == u32::MAX { return Err(io::Error::new(io::ErrorKind::Other, "too many file handles")); }
+    let file = if let Some(bits) = flag.strip_prefix('#') {
+        let bits = bits.parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid open flags"))?;
+        #[cfg(unix)] {
+            use std::os::fd::FromRawFd;
+            use std::os::unix::ffi::OsStrExt;
+            let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+            let raw = unsafe { libc::open(path.as_ptr(), bits, mode as libc::mode_t) };
+            if raw < 0 { return Err(io::Error::last_os_error()); }
+            unsafe { std::fs::File::from_raw_fd(raw) }
+        }
+        #[cfg(not(unix))] {
+            let _ = bits;
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "numeric open flags are unsupported"));
+        }
+    } else {
+        let mut options = std::fs::OpenOptions::new();
+        match flag {
+            "r" | "rs" => { options.read(true); },
+            "r+" | "rs+" => { options.read(true).write(true); },
+            "w" => { options.write(true).create(true).truncate(true); },
+            "wx" | "xw" => { options.write(true).create_new(true); },
+            "w+" => { options.read(true).write(true).create(true).truncate(true); },
+            "wx+" | "xw+" => { options.read(true).write(true).create_new(true); },
+            "a" | "as" => { options.append(true).create(true); },
+            "ax" | "xa" => { options.append(true).create_new(true); },
+            "a+" | "as+" => { options.read(true).append(true).create(true); },
+            "ax+" | "xa+" => { options.read(true).append(true).create_new(true); },
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid open flags")),
+        }
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+            if flag.contains('s') { options.custom_flags(libc::O_SYNC); }
+        }
+        options.open(path)?
+    };
+    table.next += 1;
+    table.files.insert(fd, file);
+    Ok(fd)
+}
+
+fn fs_fd_operation(operation: &str, fd: u32, value: &str, table: &mut FsHandleTable) -> io::Result<serde_json::Value> {
+    if operation == "fd_close" {
+        if table.files.remove(&fd).is_none() { return Err(io::Error::from_raw_os_error(libc::EBADF)); }
+        return Ok(serde_json::json!({ "ok": true }));
+    }
+    let file = table.get(fd)?;
+    match operation {
+        "fd_read" => {
+            let (position, length) = value.split_once(',').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid read options"))?;
+            let length = length.parse::<usize>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid read length"))?;
+            let mut bytes = vec![0; length];
+            let count = if position == "-1" { file.read(&mut bytes)? } else {
+                let position = position.parse::<u64>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid read position"))?;
+                let cursor = file.stream_position()?;
+                file.seek(SeekFrom::Start(position))?;
+                let result = file.read(&mut bytes);
+                file.seek(SeekFrom::Start(cursor))?;
+                result?
+            };
+            bytes.truncate(count);
+            Ok(serde_json::json!({ "ok": true, "data": hex_encode(&bytes), "length": count }))
+        }
+        "fd_write" => {
+            let (position, encoded) = value.split_once(':').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid write options"))?;
+            let bytes = hex_decode(encoded);
+            let count = if position == "-1" { file.write(&bytes)? } else {
+                let position = position.parse::<u64>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid write position"))?;
+                let cursor = file.stream_position()?;
+                file.seek(SeekFrom::Start(position))?;
+                let result = file.write(&bytes);
+                file.seek(SeekFrom::Start(cursor))?;
+                result?
+            };
+            Ok(serde_json::json!({ "ok": true, "length": count }))
+        }
+        "fd_read_all" => { let mut bytes = Vec::new(); file.read_to_end(&mut bytes)?; Ok(serde_json::json!({ "ok": true, "data": hex_encode(&bytes) })) }
+        "fd_write_all" => { file.write_all(&hex_decode(value))?; Ok(serde_json::json!({ "ok": true })) }
+        "fd_stat" => Ok(fs_metadata_record(file.metadata()?)),
+        "fd_statfs" => {
+            #[cfg(unix)] {
+                use std::os::fd::AsRawFd;
+                let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+                if unsafe { libc::fstatvfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 { return Err(io::Error::last_os_error()); }
+                let stats = unsafe { stats.assume_init() };
+                Ok(serde_json::json!({ "ok": true, "type": 0, "bsize": stats.f_bsize, "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail, "files": stats.f_files, "ffree": stats.f_ffree }))
+            }
+            #[cfg(not(unix))] { Err(io::Error::new(io::ErrorKind::Unsupported, "filesystem statistics are unsupported")) }
+        }
+        "fd_tell" => Ok(serde_json::json!({ "ok": true, "position": file.stream_position()? })),
+        "fd_truncate" => { let length = value.parse::<u64>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid truncate length"))?; file.set_len(length)?; Ok(serde_json::json!({ "ok": true })) }
+        "fd_sync" => { file.sync_all()?; Ok(serde_json::json!({ "ok": true })) }
+        "fd_datasync" => { file.sync_data()?; Ok(serde_json::json!({ "ok": true })) }
+        "fd_chmod" => {
+            let mode = fs_parse_mode(value)?;
+            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; file.set_permissions(std::fs::Permissions::from_mode(mode))?; }
+            #[cfg(not(unix))] { let _ = mode; return Err(io::Error::new(io::ErrorKind::Unsupported, "fchmod unsupported")); }
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        "fd_utimes" => { file.set_times(fs_fd_time(value)?)?; Ok(serde_json::json!({ "ok": true })) }
+        "fd_chown" => {
+            #[cfg(unix)] {
+                use std::os::fd::AsRawFd;
+                let mut values = value.split(',');
+                let parse = |part: Option<&str>| -> io::Result<libc::uid_t> {
+                    let number = part.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing owner ID"))?.parse::<i64>()
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid owner ID"))?;
+                    if number == -1 { Ok(libc::uid_t::MAX) } else { libc::uid_t::try_from(number).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid owner ID")) }
+                };
+                let uid = parse(values.next())?; let gid = parse(values.next())?;
+                if unsafe { libc::fchown(file.as_raw_fd(), uid, gid) } != 0 { return Err(io::Error::last_os_error()); }
+            }
+            #[cfg(not(unix))] { return Err(io::Error::new(io::ErrorKind::Unsupported, "fchown unsupported")); }
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown descriptor operation")),
+    }
+}
+
+fn host_fs(operation: String, path: String, value: String, recursive: bool, table: &mut FsHandleTable) -> String {
+    if operation == "fd_open" {
+        return fs_open_fd(&path, &value, table)
+            .map(|fd| serde_json::json!({ "ok": true, "fd": fd }).to_string())
+            .unwrap_or_else(|error| fs_error(&operation, &path, error));
+    }
+    if operation.starts_with("fd_") {
+        let result = path.parse::<u32>().map_err(|_| io::Error::from_raw_os_error(libc::EBADF))
+            .and_then(|fd| fs_fd_operation(&operation, fd, &value, table));
+        return result.map(|value| value.to_string()).unwrap_or_else(|error| fs_error(&operation, &path, error));
+    }
     let result = match operation.as_str() {
         "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
         "access" => fs_access(&path, value.parse::<i32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
