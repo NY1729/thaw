@@ -20,7 +20,7 @@ struct ModuleAnalysis {
 fn analyze_module(source: &str) -> ModuleAnalysis {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, Function, Ident,
+        ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, ForOfStmt, Function, Ident,
         ImportSpecifier, Lit, MemberExpr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem,
         ObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, VarDeclarator,
     };
@@ -182,6 +182,12 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     impl Visit for TopLevelAwait {
         fn visit_await_expr(&mut self, _: &AwaitExpr) {
             self.found = true;
+        }
+        fn visit_for_of_stmt(&mut self, statement: &ForOfStmt) {
+            if statement.is_await {
+                self.found = true;
+            }
+            statement.visit_children_with(self);
         }
         fn visit_function(&mut self, _: &Function) {}
         fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
