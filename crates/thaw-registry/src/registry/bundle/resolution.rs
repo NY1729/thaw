@@ -101,16 +101,25 @@ fn resolve_bare_specifier(
     let (dep_name, subpath) = split_bare_spec(spec);
     let dep_dir = resolve_dependency_dir(node_modules_dir, requiring_pkg_dir, dep_name);
     let target = match subpath {
-        Some(sub) => read_manifest(&dep_dir)
-            .ok()
-            .and_then(|manifest| package_subpath_runtime_target(&manifest, sub, conditions))
-            .unwrap_or_else(|| sub.to_string()),
+        Some(sub) => {
+            let manifest = read_manifest(&dep_dir).ok()?;
+            if manifest.get("exports").is_some() {
+                package_subpath_runtime_target(&manifest, sub, conditions)?
+            } else {
+                sub.to_string()
+            }
+        }
         None => {
             let manifest = read_manifest(&dep_dir).ok()?;
-            package_export_target(&manifest, None, conditions)
-                .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
-                .unwrap_or("index.js")
-                .to_string()
+            if manifest.get("exports").is_some() {
+                package_export_target(&manifest, None, conditions)?.to_string()
+            } else {
+                manifest
+                    .get("main")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("index.js")
+                    .to_string()
+            }
         }
     };
     let (dep_relative, dep_abs) = resolve_module_path(&dep_dir, &target).ok()?;
@@ -122,20 +131,27 @@ fn package_subpath_runtime_target(
     subpath: &str,
     conditions: &[&str],
 ) -> Option<String> {
-    if let Some(target) = package_export_target(manifest, Some(subpath), conditions) {
-        return Some(target.to_string());
-    }
     let exports = manifest.get("exports")?.as_object()?;
-    for (key, value) in exports {
-        let Some(pattern) = key.strip_prefix("./") else {
-            continue;
-        };
-        let Some(capture) = wildcard_capture(pattern, subpath) else {
-            continue;
-        };
+    if let Some(exact) = exports.get(&format!("./{subpath}")) {
+        return select_export_condition(exact, conditions).map(str::to_string);
+    }
+    let mut matches = exports
+        .iter()
+        .filter_map(|(key, value)| {
+            let pattern = key.strip_prefix("./")?;
+            let capture = wildcard_capture(pattern, subpath)?;
+            Some((pattern, value, capture))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(pattern, _, _)| {
+        let (prefix, suffix) = pattern.split_once('*').unwrap();
+        (std::cmp::Reverse(prefix.len()), std::cmp::Reverse(suffix.len()))
+    });
+    for (_, value, capture) in matches {
         if let Some(target) = select_export_condition(value, conditions) {
             return Some(target.replace('*', capture));
         }
+        return None;
     }
     None
 }

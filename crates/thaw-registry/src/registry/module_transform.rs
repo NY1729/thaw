@@ -465,33 +465,23 @@ fn rewrite_dynamic_imports(source: &str) -> Option<String> {
     if imports.spans.is_empty() {
         return None;
     }
-    imports.spans.sort_by_key(|(lo, _, _, _)| *lo);
-    let mut output = String::with_capacity(source.len());
-    let mut cursor = 0usize;
+    // Replace only the call's wrapper. Nested import arguments remain intact
+    // until their own, disjoint wrapper edits are applied from right to left.
+    let mut edits = Vec::with_capacity(imports.spans.len() * 2);
     for (lo, hi, argument_lo, argument_hi) in imports.spans {
-        let lo = cm
-            .lookup_byte_offset(thaw_parser::common::BytePos(lo))
-            .pos
-            .0 as usize;
-        let hi = cm
-            .lookup_byte_offset(thaw_parser::common::BytePos(hi))
-            .pos
-            .0 as usize;
-        let argument_lo = cm
-            .lookup_byte_offset(thaw_parser::common::BytePos(argument_lo))
-            .pos
-            .0 as usize;
-        let argument_hi = cm
-            .lookup_byte_offset(thaw_parser::common::BytePos(argument_hi))
-            .pos
-            .0 as usize;
-        output.push_str(&source[cursor..lo]);
-        output.push_str("requireAsync(String(");
-        output.push_str(&source[argument_lo..argument_hi]);
-        output.push_str("))");
-        cursor = hi;
+        let offset = |position| {
+            cm.lookup_byte_offset(thaw_parser::common::BytePos(position))
+                .pos
+                .0 as usize
+        };
+        edits.push((offset(lo), offset(argument_lo), "requireAsync(String("));
+        edits.push((offset(argument_hi), offset(hi), "))"));
     }
-    output.push_str(&source[cursor..]);
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut output = source.to_string();
+    for (start, end, replacement) in edits {
+        output.replace_range(start..end, replacement);
+    }
     Some(output)
 }
 

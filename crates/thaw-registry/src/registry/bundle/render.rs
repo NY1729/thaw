@@ -85,12 +85,12 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
          \x20\x20\x20\x20\x20\x20if (!target) return Promise.resolve().then(function() { return require(spec); });\n\
-         \x20\x20\x20\x20\x20\x20var value = __thaw_bundle_require(target.key, target.factory);\n\
-         \x20\x20\x20\x20\x20\x20return __thaw_bundle_cache[target.key].ready.then(function() { return value; });\n\
+         \x20\x20\x20\x20\x20\x20return Promise.resolve().then(function() { var value = __thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready.then(function() { return value; }); });\n\
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20var filename = '/thaw_modules/' + factoryKey, slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash);\n\
-         \x20\x20\x20\x20var initialized = __thaw_bundle_factories[factoryKey](mod, mod.exports, localRequire, localRequireAsync, filename, dirname);\n\
-         \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; });\n\
+         \x20\x20\x20\x20var initialized;\n\
+         \x20\x20\x20\x20try { initialized = __thaw_bundle_factories[factoryKey](mod, mod.exports, localRequire, localRequireAsync, filename, dirname); } catch (error) { delete __thaw_bundle_cache[key]; throw error; }\n\
+         \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; }, function(error) { delete __thaw_bundle_cache[key]; throw error; });\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
          }\n\
@@ -105,12 +105,13 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
          }\n\
          globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\n\
-         globalThis.__thaw_worker_bundle_source =\n\
+         var __thaw_worker_bundle_source =\n\
          \x20\x20'var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_factories = {' +\n\
          \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
          \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
          \x20\x20__thaw_bundle_target.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' +\n\
-         \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\n';\n",
+         \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\n';\n\
+         globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source;\n",
     );
 
     if modules.iter().any(|module| module.key == "node:http") {
