@@ -2794,3 +2794,25 @@ fn generic_non_arrow_apply_runtime_nullish_tuple() {
     assert_eq!(compile_and_run(source, "generic_this_nullish_tuple"),
         "7\n7\n7\n7\nreceiver,tuple,extra,body,receiver,tuple,extra,body,receiver,tuple,extra,body,receiver,tuple,spread,body\n");
 }
+
+#[test]
+fn non_arrow_nullable_and_disjoint_union_receivers() {
+    let source = r#"
+        function main(): void {
+            const optional = function(this: number | undefined): string { return typeof this; };
+            const nullable = function(this: number | null): string { return typeof this; };
+            const nullish = function(this: number | null | undefined): string { return typeof this; };
+            const choice = function(this: number | string): string { return typeof this; };
+            const jsonOptional = function(this: Json | undefined): string { return typeof this; };
+            console.log(optional(), optional.call(5), optional.call(undefined));
+            try { console.log(nullable()); } catch (error) { console.log("TypeError"); }
+            console.log(nullable.call(null), nullable.call(6));
+            console.log(nullish(), nullish.call(null), nullish.call(7));
+            try { console.log(choice()); } catch (error) { console.log("TypeError"); }
+            console.log(choice.call(8), choice.call("x"));
+            console.log(jsonOptional(), jsonOptional.call({ value: 1 } as Json));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_nullable_union_receiver"),
+        "undefined number undefined\nTypeError\nobject number\nundefined object number\nTypeError\nnumber string\nundefined object\n");
+}
