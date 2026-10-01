@@ -1093,3 +1093,27 @@ fn readable_stream_from_keeps_iterator_method_and_async_chunk_identity() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+
+#[test]
+fn text_decoder_stream_exposes_the_settings_acquired_by_its_decoder() {
+    // Unrun regression: changing getters must be read once, and fatal decoding must agree.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("decoder_stream_option_getters");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var fatalReads = 0, bomReads = 0, decoder = new TextDecoderStream('utf-8', {
+        get fatal() { return ++fatalReads === 1; }, get ignoreBOM() { return ++bomReads === 1; }
+      }), reader = decoder.readable.getReader(), writer = decoder.writable.getWriter();
+      var read = reader.read(), outcomes = await Promise.allSettled([writer.write(new Uint8Array([255])), read]);
+      return [fatalReads, bomReads, decoder.fatal, decoder.ignoreBOM, outcomes.map(function (outcome) { return [outcome.status, outcome.reason && outcome.reason.name]; })];
+    };"#).unwrap();
+    let modules = temp_registry("decoder_stream_option_getters_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDecoderSettings = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseDecoderSettings").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[1,1,true,true,[["rejected","TypeError"],["rejected","TypeError"]]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
