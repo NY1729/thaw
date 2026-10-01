@@ -40,6 +40,48 @@ fn os_builtin_reports_real_host_shapes() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[test]
+fn os_priority_validates_arguments_and_reports_native_pid_errors() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_os_priority");
+    fs::write(dir.join("index.js"), r#"
+        var os = require('node:os');
+        module.exports = function () {
+            var priority = os.getPriority();
+            var error = function (call, code, syscall) {
+                try { call(); return false; } catch (failure) {
+                    return failure.code === 'ERR_SYSTEM_ERROR' && failure.name === 'SystemError' &&
+                        failure.info.code === code && failure.errno === failure.info.errno &&
+                        failure.errno < 0 && failure.syscall === syscall;
+                }
+            };
+            return [priority === os.getPriority(0),
+                Number.isInteger(priority) && priority >= -20 && priority <= 19,
+                os.constants.priority.PRIORITY_HIGHEST === -20,
+                os.constants.priority.PRIORITY_LOW === 19,
+                error(function () { os.getPriority(2147483647); }, 'ESRCH', 'uv_os_getpriority'),
+                error(function () { os.setPriority(2147483647, 0); }, 'ESRCH', 'uv_os_setpriority'),
+                (function () { try { os.setPriority(0, 20); } catch (failure) { return failure instanceof RangeError && failure.code === 'ERR_OUT_OF_RANGE'; } return false; })(),
+                (function () { try { os.getPriority(null); } catch (failure) { return failure instanceof TypeError && failure.code === 'ERR_INVALID_ARG_TYPE'; } return false; })(),
+                (function () { try { os.setPriority(1.5); } catch (failure) { return failure instanceof RangeError && failure.code === 'ERR_OUT_OF_RANGE'; } return false; })(),
+                (function () { try { os.setPriority(); } catch (failure) { return failure instanceof TypeError && failure.code === 'ERR_INVALID_ARG_TYPE'; } return false; })()
+            ];
+        };
+    "#).unwrap();
+    let empty_node_modules = temp_registry("builtin_os_priority_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseOsPriority = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseOsPriority").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[true,true,true,true,true,true,true,true,true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 /// `os.networkInterfaces()` used to be hardcoded to a loopback-only
 /// literal, regardless of the host's real interfaces -- unlike every
 /// other `os.*` accessor in the same module (`arch`/`platform`/`cpus`/
