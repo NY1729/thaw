@@ -684,6 +684,22 @@ fn duplicate_namespace_classes_keep_independent_identity_and_inheritance() {
 }
 
 #[test]
+fn imported_base_alias_preserves_inheritance_and_self_return() {
+    // Unrun regression for a flattened `import { Base as Parent }`.
+    let classes = parse_dts_classes(r#"
+        declare class Parent { base(): string; self(): Parent; }
+        declare namespace Parent { type Key = string; }
+        export type { Parent };
+        export declare class Derived extends Parent { own(): boolean; }
+    "#).unwrap();
+    let derived = classes.iter().find(|class| class.name == "Derived").unwrap();
+    assert_eq!(derived.extends.as_deref(), Some("Parent"));
+    assert!(derived.methods.iter().any(|method| method.name == "base"));
+    assert_eq!(derived.methods.iter().find(|method| method.name == "self")
+        .unwrap().return_instance_class.as_deref(), Some("Parent"));
+}
+
+#[test]
 fn type_only_class_alias_keeps_instance_shape_and_separate_value_alias() {
     // Unrun regression: the public type alias and live constructor alias
     // can name the same declaration without turning the type alias into a
