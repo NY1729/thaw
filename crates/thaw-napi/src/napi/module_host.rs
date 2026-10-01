@@ -1397,9 +1397,7 @@ unsafe fn call_value_impl(
         data: function.data,
     };
     let result = callback_result(env, (function.callback)(env, &mut info));
-    if let Some(exception) = env.exception {
-        return Err(describe_env_exception(env, exception)?);
-    }
+    take_env_exception(env)?;
     Ok(result)
 }
 
