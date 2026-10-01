@@ -333,7 +333,7 @@ impl<'a> FnLowerer<'a> {
                     // boolean. A non-global, non-sticky pattern keeps using
                     // the cheaper `thaw_regex_test` (no array allocation)
                     // and never touches `lastIndex`.
-                    let array_type = HirType::Array(Box::new(HirType::Str));
+                    let array_type = HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str))));
                     let raw_name = format!("__thaw_regex_test_raw_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(raw_name.clone(), array_type.clone());
@@ -445,7 +445,7 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(receiver_name.clone(), regex_type.clone());
                     self.scope.insert(value_name.clone(), HirType::Str);
-                    let array_type = HirType::Array(Box::new(HirType::Str));
+                    let array_type = HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str))));
                     let var = |name: &str| HirExpr::Var(name.into());
                     let source = HirExpr::PropAccess(
                         Box::new(var(&receiver_name)),
@@ -637,7 +637,7 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(receiver_name.clone(), HirType::Str);
                     self.scope.insert(pattern_name.clone(), regex_type.clone());
-                    let array_type = HirType::Array(Box::new(HirType::Str));
+                    let array_type = HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str))));
                     self.scope.insert(raw_name.clone(), array_type.clone());
                     let var = |name: &str| HirExpr::Var(name.into());
                     let source = HirExpr::PropAccess(
@@ -650,14 +650,44 @@ impl<'a> FnLowerer<'a> {
                         regex_type.clone(),
                         "flags".to_string(),
                     );
+                    let start_name = format!("__thaw_match_start_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(start_name.clone(), HirType::F64);
+                    let last_index = HirExpr::PropAccess(
+                        Box::new(var(&pattern_name)), regex_type.clone(), "lastIndex".into(),
+                    );
+                    let set_last_index = |value: HirExpr| HirStmt::Expr(HirExpr::PropAssign(
+                        Box::new(var(&pattern_name)), regex_type.clone(), "lastIndex".into(), Box::new(value),
+                    ));
+                    let has_flag = |flag: &str| HirExpr::Call(
+                        Box::new(var("__thaw_string_includes")),
+                        vec![flags.clone(), HirExpr::Lit(HirLit::Str(flag.into())), HirExpr::Lit(HirLit::F64(0.0))],
+                    );
                     let body = HirExpr::Block(vec![
+                        HirStmt::Let(start_name.clone(), HirType::F64, last_index),
                         HirStmt::Let(
                             raw_name.clone(),
                             array_type.clone(),
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_regex_match".into())),
-                                vec![var(&receiver_name), source, flags],
+                                vec![var(&receiver_name), source.clone(), flags.clone(), var(&start_name)],
                             ),
+                        ),
+                        HirStmt::If(
+                            has_flag("g"),
+                            vec![set_last_index(HirExpr::Lit(HirLit::F64(0.0)))],
+                            vec![HirStmt::If(
+                                has_flag("y"),
+                                vec![HirStmt::If(
+                                    HirExpr::Call(Box::new(var("__thaw_array_is_null")), vec![var(&raw_name)]),
+                                    vec![set_last_index(HirExpr::Lit(HirLit::F64(0.0)))],
+                                    vec![set_last_index(HirExpr::Call(
+                                        Box::new(var("__thaw_regex_exec_advance")),
+                                        vec![var(&receiver_name), source, flags, var(&start_name)],
+                                    ))],
+                                )],
+                                Vec::new(),
+                            )],
                         ),
                         HirStmt::If(
                             HirExpr::Call(
@@ -718,7 +748,7 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(receiver_name.clone(), HirType::Str);
                     self.scope.insert(pattern_name.clone(), regex_type.clone());
-                    let matches_type = HirType::Array(Box::new(HirType::Array(Box::new(HirType::Str))));
+                    let matches_type = HirType::Array(Box::new(HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str))))));
                     self.scope.insert(raw_name.clone(), matches_type.clone());
                     let var = |name: &str| HirExpr::Var(name.into());
                     let source = HirExpr::PropAccess(
@@ -737,7 +767,8 @@ impl<'a> FnLowerer<'a> {
                             matches_type.clone(),
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_regex_match_all".into())),
-                                vec![var(&receiver_name), source, flags],
+                                vec![var(&receiver_name), source, flags,
+                                    HirExpr::PropAccess(Box::new(var(&pattern_name)), regex_type.clone(), "lastIndex".into())],
                             ),
                         ),
                         HirStmt::If(

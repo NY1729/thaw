@@ -290,7 +290,7 @@ impl<'a> FnLowerer<'a> {
                             regex_type.clone(),
                             "flags".to_string(),
                         );
-                        let array_type = HirType::Array(Box::new(HirType::Str));
+                        let array_type = HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str))));
                         let raw_name = format!("__thaw_regex_split_raw_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(raw_name.clone(), array_type.clone());

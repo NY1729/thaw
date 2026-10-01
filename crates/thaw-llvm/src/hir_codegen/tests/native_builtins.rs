@@ -1487,7 +1487,7 @@ fn compiles_method_calls_chained_on_new() {
 #[test]
 fn compiles_regex_match_all() {
     let source = r#"
-        function printMatches(matches: string[][]): void {
+        function printMatches(matches: (string | undefined)[][]): void {
             console.log(matches.length);
             for (const match of matches) {
                 console.log(match.join(","));
@@ -1830,7 +1830,7 @@ fn compiles_regex_test_last_index_state() {
 #[test]
 fn compiles_regex_exec() {
     let source = r#"
-        function printMatch(result: string[] | null): void {
+        function printMatch(result: (string | undefined)[] | null): void {
             if (result !== null) {
                 for (const part of result) {
                     console.log(part);
@@ -3462,7 +3462,7 @@ fn compiles_class_generator_methods() {
 #[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
-        function printMatch(result: string[] | null): void {
+        function printMatch(result: (string | undefined)[] | null): void {
             if (result !== null) {
                 console.log(result[0]);
             } else {
@@ -3493,28 +3493,22 @@ fn compiles_regex_exec_last_index_state() {
             console.log(plain.lastIndex);
 
             const empty = /x*/g;
-            let count = 0;
-            let current = empty.exec("abc");
-            while (current !== null) {
-                count++;
-                if (count > 10) {
-                    break;
-                }
-                current = empty.exec("abc");
-            }
-            console.log(count);
+            empty.exec("abc");
+            console.log(empty.lastIndex);
+            empty.test("abc");
+            console.log(empty.lastIndex);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "regex_exec_last_index_state"),
-        "12\n34\n56\nno match\n0\ntrue\nfalse\ntrue\nfalse\n0\n5\n4\n"
+        "12\n34\n56\nno match\n0\ntrue\nfalse\ntrue\nfalse\n0\n5\n0\n0\n"
     );
 }
 
 #[test]
 fn compiles_string_match() {
     let source = r#"
-        function printMatch(result: string[] | null): void {
+        function printMatch(result: (string | undefined)[] | null): void {
             if (result !== null) {
                 for (const part of result) {
                     console.log(part);
@@ -3549,7 +3543,7 @@ fn compiles_string_match() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_match"),
-        "123\n1\n2\n3\nno match\nvalue\npattern\n1\n2\n3\nawaited value\n123\n12-34\n12\n34\na=1\na\n1\n\n\n12-34\n"
+        "123\n1\n2\n3\nno match\nvalue\npattern\n1\n2\n3\nawaited value\n123\n12-34\n12\n34\na=1\na\n1\nundefined\nundefined\n12-34\n"
     );
 }
 
@@ -4322,7 +4316,7 @@ fn compiles_instanceof_against_an_arbitrary_named_global() {
 #[test]
 fn compiles_regex_split_and_replace() {
     let source = r#"
-        function printAll(parts: string[]): void {
+        function printAll(parts: (string | undefined)[]): void {
             for (const part of parts) {
                 console.log(part);
             }
@@ -4354,7 +4348,7 @@ fn compiles_regex_split_and_replace() {
 #[test]
 fn compiles_regex_split_with_limit() {
     let source = r#"
-        function printAll(parts: string[]): void {
+        function printAll(parts: (string | undefined)[]): void {
             for (const part of parts) {
                 console.log(part);
             }
@@ -4374,7 +4368,7 @@ fn compiles_regex_split_with_limit() {
 #[test]
 fn compiles_regex_split_captures_and_named_replacements() {
     let source = r#"
-        function printAll(parts: string[]): void {
+        function printAll(parts: (string | undefined)[]): void {
             console.log(parts.length);
             for (const part of parts) {
                 console.log(part);
@@ -9562,4 +9556,65 @@ fn compiles_new_function_constructor() {
         compile_and_run(source, "new_function_constructor"),
         "3\n42\n42\n"
     );
+}
+
+#[test]
+fn regex_exec_empty_match_preserves_last_index_and_search_respects_sticky() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const r = /(?:)/g;
+            r.exec("x");
+            console.log(r.lastIndex);
+            r.test("x");
+            console.log(r.lastIndex);
+            console.log("ba".search(/a/y));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "regex_empty_and_sticky"), "0\n0\n-1\n");
+}
+
+#[test]
+fn regex_match_state_and_match_all_start_from_copied_last_index() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const sticky = /a/y;
+            sticky.lastIndex = 1;
+            console.log("ba".match(sticky)?.index);
+            console.log(sticky.lastIndex);
+            const global = /a/g;
+            global.lastIndex = 1;
+            const matches = "aa".matchAll(global);
+            console.log(matches.length, matches[0].index, global.lastIndex);
+            console.log("aa".match(global)?.length, global.lastIndex);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "regex_match_state"), "1\n2\n1 1 1\n2 0\n");
+}
+
+#[test]
+fn regex_captures_and_metadata_survive_optional_groups_and_push() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const m = /(?<x>a)|b/.exec("bb");
+            if (m) {
+                console.log(m[1] === undefined, m.groups.x === undefined);
+                m.push("extra");
+                console.log(m.index, m.input, m.groups.x === undefined);
+            }
+            const parts = "a,b".split(/(,)|(x)/);
+            console.log(parts.length, parts[2] === undefined);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "regex_optional_capture_metadata"), "true true\n0 bb true\n4 true\n");
+}
+
+#[test]
+fn regex_javascript_ascii_digit_and_word_classes() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(/^\d$/u.test("\u0661"), /^\w$/u.test("é"));
+            console.log(/^\d$/u.test("7"), /^\w$/u.test("A"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "regex_ascii_classes"), "false false\ntrue true\n");
 }

@@ -312,7 +312,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("RegExp.exec returned no value")?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap_nullable(result)?.into());
+                return Ok(result.into());
             }
             "__thaw_regex_exec_groups" => {
                 let [matches] = args else {
@@ -422,19 +422,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("RegExp.exec lastIndex advance returned no value".into());
             }
             "__thaw_regex_match" | "__thaw_regex_match_all" => {
-                let [value, source, flags] = args else {
-                    return Err(format!("{name} expects three operands"));
+                let [value, source, flags, last_index] = args else {
+                    return Err(format!("{name} expects four operands"));
                 };
                 let value = self.compile_expr(value)?;
                 let source = self.compile_expr(source)?;
                 let flags = self.compile_expr(flags)?;
+                let last_index = self.compile_expr(last_index)?;
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 let runtime = format!("thaw_{runtime}");
                 let result = self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
-                        &[value.into(), source.into(), flags.into()],
+                        &[value.into(), source.into(), flags.into(), last_index.into()],
                         "regex_call",
                     )
                     .map_err(|error| error.to_string())?
@@ -442,7 +443,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| format!("{name} returned no value"))?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap_nullable(result)?.into());
+                return Ok(result.into());
             }
             "__thaw_regex_split" => {
                 let [value, source, flags, limit] = args else {
