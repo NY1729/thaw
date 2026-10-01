@@ -1066,3 +1066,30 @@ fn stream_construct_hooks_gate_io_and_propagate_failures() {
 }
 
 
+
+
+#[test]
+fn readable_stream_from_keeps_iterator_method_and_async_chunk_identity() {
+    // Unrun: an async iterator's unresolved Promise must remain a chunk.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("stream_from_iterator_identity");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var invalid = [], syncLookups = 0;
+      for (var value of [false, 0, '']) { var bad = { [Symbol.asyncIterator]: value, get [Symbol.iterator]() { syncLookups++; return function () { return [1][Symbol.iterator](); }; } }; try { ReadableStream.from(bad); } catch (error) { invalid.push(error.name); } }
+      var pending = new Promise(function () {}), nextGets = 0, calls = 0, receiverCorrect = false;
+      var iterator = { get next() { nextGets++; return function () { receiverCorrect = this === iterator; calls++; return Promise.resolve(calls === 1 ? { value: pending, done: false } : { done: true }); }; }, [Symbol.asyncIterator]() { return this; } };
+      var stream = ReadableStream.from(iterator); Object.defineProperty(iterator, 'next', { value: function () { throw new Error('replacement next'); } });
+      var reader = stream.getReader(), first = await reader.read(), finished = await reader.read();
+      var sync = ReadableStream.from([Promise.resolve(7)]).getReader(), resolved = await sync.read();
+      return [invalid, syncLookups, nextGets, receiverCorrect, first.value === pending, finished.done, resolved.value];
+    };"#).unwrap();
+    let modules = temp_registry("stream_from_iterator_identity_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIteratorIdentity = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseIteratorIdentity").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["TypeError","TypeError","TypeError"],0,1,true,true,true,7]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
