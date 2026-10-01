@@ -552,10 +552,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_globals = JIT_GLOBALS.with(|slot| slot.replace(globals));
     let previous_dynamic_values =
         DYNAMIC_VALUES.with(|values| std::mem::take(&mut *values.borrow_mut()));
-    let mut value = function(args);
-    if program.returns_tagged_array() && value.to_bits() & ARRAY_RESULT_TAG != 0 {
-        value = f64::from_bits(value.to_bits() & !ARRAY_RESULT_TAG);
-    }
+    let value = function(args);
     let error = CALL_ERROR.with(|error| error.replace(previous_error));
     let present = CALL_PRESENT.with(|state| state.replace(previous_present));
     let absence = CALL_ABSENCE.with(|state| state.replace(previous_absence));

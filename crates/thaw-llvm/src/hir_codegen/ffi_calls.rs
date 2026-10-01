@@ -270,45 +270,58 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_extract_value(native, 0, "ffi_tagged_return_tag")
             .map_err(|error| error.to_string())?
             .into_int_value();
-        let mut value = self
+        let native_value = self
             .builder
             .build_extract_value(native, 1, "ffi_tagged_return_payload")
             .map_err(|error| error.to_string())?;
-        value = match payload {
+        let present = if matches!(ty, HirType::Nullish(_)) {
+            self.builder.build_int_compare(IntPredicate::EQ, tag, tag.get_type().const_zero(), "ffi_tagged_return_present")
+        } else {
+            self.builder.build_int_compare(IntPredicate::NE, tag, tag.get_type().const_zero(), "ffi_tagged_return_present")
+        }.map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let present_bb = self.context.append_basic_block(function, "ffi_tagged_payload_present");
+        let absent_bb = self.context.append_basic_block(function, "ffi_tagged_payload_absent");
+        let merge_bb = self.context.append_basic_block(function, "ffi_tagged_payload_merge");
+        self.builder.build_conditional_branch(present, present_bb, absent_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(present_bb);
+        let value = match payload {
             HirType::Str if *ownership != FfiOwnership::Borrowed => self
                 .apply_ffi_string_ownership(
-                    value.into_pointer_value(),
+                    native_value.into_pointer_value(),
                     ownership,
                     "ffi_tagged_return_string",
                 )?
                 .into(),
             HirType::Array(_)
+            | HirType::Tuple(_)
             | HirType::Object(_)
             | HirType::Optional(_)
             | HirType::Nullable(_)
             | HirType::Nullish(_)
-                if value.is_struct_value() => self.marshal_ffi_return(
-                value,
+                if native_value.is_struct_value() => self.marshal_ffi_return(
+                native_value,
                 payload,
                 FfiStringAbi::NullTerminated,
                 ownership,
                 aggregate_abi,
                 None,
             )?,
-            _ => value,
+            _ => native_value,
         };
+        let present_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(absent_bb);
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_bb);
+        let payload_type = self.basic_type(payload)?;
+        let merged = self.builder.build_phi(payload_type, "ffi_tagged_payload").map_err(|error| error.to_string())?;
+        let absent_value = payload_type.const_zero();
+        merged.add_incoming(&[(&value, present_end), (&absent_value, absent_bb)]);
+        let value = merged.as_basic_value();
         if matches!(ty, HirType::Nullish(_)) {
             return self.build_nullish_tagged_value(value, payload, tag);
         }
-        let present = self
-            .builder
-            .build_int_compare(
-                IntPredicate::NE,
-                tag,
-                tag.get_type().const_zero(),
-                "ffi_tagged_return_present",
-            )
-            .map_err(|error| error.to_string())?;
         let tagged_type = self.basic_type(ty)?.into_struct_type();
         let tagged = self
             .builder
@@ -557,6 +570,36 @@ impl<'ctx> HirCompiler<'ctx> {
                         "ffi_array_copy",
                     )
                     .map_err(|error| error.to_string())?;
+                if **element == HirType::Str && *ownership != FfiOwnership::Borrowed {
+                    let function = self.current_function();
+                    let entry = self.builder.get_insert_block().unwrap();
+                    let loop_bb = self.context.append_basic_block(function, "ffi_string_array_loop");
+                    let body_bb = self.context.append_basic_block(function, "ffi_string_array_body");
+                    let done_bb = self.context.append_basic_block(function, "ffi_string_array_done");
+                    self.builder.build_unconditional_branch(loop_bb).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(loop_bb);
+                    let index = self.builder.build_phi(i64_type, "ffi_string_array_index").map_err(|error| error.to_string())?;
+                    index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+                    let current = index.as_basic_value().into_int_value();
+                    let more = self.builder.build_int_compare(IntPredicate::ULT, current, length, "ffi_string_array_more").map_err(|error| error.to_string())?;
+                    self.builder.build_conditional_branch(more, body_bb, done_bb).map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(body_bb);
+                    let slot = unsafe { self.builder.build_in_bounds_gep(
+                        self.context.ptr_type(AddressSpace::default()), elements, &[current], "ffi_string_array_slot",
+                    ).map_err(|error| error.to_string())? };
+                    let source = self.builder.build_load(
+                        self.context.ptr_type(AddressSpace::default()), slot, "ffi_string_array_source",
+                    ).map_err(|error| error.to_string())?.into_pointer_value();
+                    let copied = self.apply_ffi_string_ownership(
+                        source, &FfiOwnership::ArenaCopy { destroy: None }, "ffi_string_array_element",
+                    )?;
+                    self.builder.build_store(slot, copied).map_err(|error| error.to_string())?;
+                    let next = self.builder.build_int_add(current, i64_type.const_int(1, false), "ffi_string_array_next").map_err(|error| error.to_string())?;
+                    let body_end = self.builder.get_insert_block().unwrap();
+                    self.builder.build_unconditional_branch(loop_bb).map_err(|error| error.to_string())?;
+                    index.add_incoming(&[(&next, body_end)]);
+                    self.builder.position_at_end(done_bb);
+                }
                 let destroy = match ownership {
                     FfiOwnership::Owned { destroy } => Some(destroy),
                     FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
@@ -745,6 +788,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             )?
                             .into(),
                         HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_)
+                        | HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
                             if field.is_struct_value() => self
                             .marshal_ffi_return(
                             field,
