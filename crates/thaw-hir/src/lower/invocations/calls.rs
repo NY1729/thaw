@@ -667,7 +667,21 @@ impl<'a> FnLowerer<'a> {
                         return Ok(result);
                     }
                 }
-                if Self::is_native_instance_builtin(property.sym.as_ref()) && !receiver_is_dynamic {
+                let own_callable = self
+                    .peek_type_without_lowering(&member.obj)
+                    .is_some_and(|ty| matches!(ty,
+                        HirType::Object(fields) if fields.iter().any(|(name, field)|
+                            name == property.sym.as_ref()
+                                && matches!(field, HirType::Function(..) | HirType::CallableFunction(..))
+                        )
+                    ));
+                let defer_native = self.peek_type_without_lowering(&member.obj).is_none()
+                    && matches!(member.obj.as_ref(), Expr::Call(_) | Expr::New(_));
+                if Self::is_native_instance_builtin(property.sym.as_ref())
+                    && !receiver_is_dynamic
+                    && !own_callable
+                    && !defer_native
+                {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
                 // `.get()`/`.has()` on a `Json`-typed (`any`) receiver
@@ -786,24 +800,34 @@ impl<'a> FnLowerer<'a> {
                             matches!(parameter, HirType::Object(fields)
                                 if fields.iter().any(|(name, _)| name == "__thaw_object_method_receiver"))
                         });
+                        let receiver_name = format!("__thaw_method_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), object_ty.clone());
+                        let receiver = HirExpr::Var(receiver_name.clone());
                         let callee = HirExpr::PropAccess(
-                            Box::new(object_expr.clone()),
+                            Box::new(receiver.clone()),
                             object_ty.clone(),
                             resolved_property.to_string(),
                         );
+                        let callee_type = self.infer_expr_type(&callee)?;
+                        let callee_name = format!("__thaw_method_callable_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(callee_name.clone(), callee_type.clone());
                         let label = format!("method `{object_label}.{property}`");
                         let expected = if receiver_parameter {
                             &params[1..]
                         } else {
                             &params[..]
                         };
-                        let (mut args, bindings) = self
+                        let (mut args, mut bindings) = self
                             .lower_native_spread_values_with_expected(
                                 &call.args,
                                 &label,
                                 expected,
                                 rest.as_ref(),
                             )?;
+                        bindings.insert(0, (receiver_name, object_ty.clone(), object_expr));
+                        bindings.insert(1, (callee_name.clone(), callee_type, callee));
                         if receiver_parameter {
                             let HirType::Object(receiver_fields) = &params[0] else {
                                 unreachable!()
@@ -820,7 +844,7 @@ impl<'a> FnLowerer<'a> {
                                                 (
                                                     name.clone(),
                                                     HirExpr::PropAccess(
-                                                        Box::new(object_expr.clone()),
+                                                        Box::new(receiver.clone()),
                                                         object_ty.clone(),
                                                         name.clone(),
                                                     ),
@@ -873,10 +897,23 @@ impl<'a> FnLowerer<'a> {
                             args.push(native_rest_array(values, element));
                         }
                         return self.wrap_call_argument_bindings(
-                            HirExpr::Call(Box::new(callee), args),
+                            HirExpr::Call(Box::new(HirExpr::Var(callee_name)), args),
                             &bindings,
                         );
                     }
+                }
+            }
+        }
+
+        // Call-expression receivers need their returned object type before a
+        // same-named builtin can claim the method.
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let MemberProp::Ident(property) = &member.prop {
+                if self.peek_type_without_lowering(&member.obj).is_none()
+                    && matches!(member.obj.as_ref(), Expr::Call(_) | Expr::New(_))
+                    && Self::is_native_instance_builtin(property.sym.as_ref())
+                {
+                    return self.lower_native_instance_builtin(member, property, call);
                 }
             }
         }
@@ -1225,6 +1262,11 @@ impl<'a> FnLowerer<'a> {
             }
             let value = self.lower_expr(&argument.expr)?;
             let value_type = self.infer_expr_type(&value)?;
+            let value_name = format!("__thaw_promise_argument_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(value_name.clone(), value_type.clone());
+            let binding = (value_name.clone(), value_type.clone(), value);
+            let value = HirExpr::Var(value_name);
             let (resolved, assimilates) = if is_reject {
                 let resolved = match &call.type_args {
                     Some(type_args) => {
@@ -1244,6 +1286,9 @@ impl<'a> FnLowerer<'a> {
                     other => (other.clone(), false),
                 }
             };
+            if !is_reject && assimilates {
+                return self.wrap_call_argument_bindings(value, &[binding]);
+            }
             let resolve_params = if assimilates {
                 vec![HirType::Promise(Box::new(resolved.clone()))]
             } else if resolved == HirType::Void {
@@ -1351,12 +1396,10 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Call(Box::new(HirExpr::Var(callee.to_string())), vec![value])
             };
             let executor = HirExpr::Lambda(captures, params, HirType::Void, Box::new(body));
-            return Ok(HirExpr::PromiseNew(
-                Box::new(executor),
-                resolved,
-                assimilates,
-                is_reject,
-            ));
+            return self.wrap_call_argument_bindings(
+                HirExpr::PromiseNew(Box::new(executor), resolved, assimilates, is_reject),
+                &[binding],
+            );
         }
 
         // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete

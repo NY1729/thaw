@@ -43,8 +43,7 @@ impl<'a> FnLowerer<'a> {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let preserve_order = arguments.iter().any(|argument| argument.spread.is_some())
-            || lowered.iter().any(contains_await);
+        // Every argument must be evaluated before wrappers can omit it or reuse it.
         let mut bindings = Vec::new();
         let mut values = Vec::new();
         for (argument, value) in arguments.iter().zip(lowered) {
@@ -53,10 +52,6 @@ impl<'a> FnLowerer<'a> {
             } else {
                 value
             };
-            if !preserve_order {
-                values.push(value);
-                continue;
-            }
             if argument.spread.is_none() {
                 let ty = self.infer_expr_type(&value)?;
                 let name = format!("__thaw_native_arg_{}", self.next_binding);
