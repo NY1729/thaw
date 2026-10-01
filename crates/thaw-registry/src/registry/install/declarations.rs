@@ -2123,6 +2123,42 @@ fn export_function_as(mut snippet: String, exported: &str, origin: &Path) -> Str
     snippet
 }
 
+// The function/class AST span starts at its declaration keyword, after the
+// `export default` wrapper. Build an ordinary ambient declaration from that
+// exact body; comments/line breaks around the wrapper cannot affect it.
+fn reexported_default_declaration(
+    body: &str,
+    keyword: &str,
+    origin: &Path,
+    declared_name: Option<&str>,
+    is_async: bool,
+    is_abstract: bool,
+) -> Result<String, String> {
+    let digest = format!("{:x}", Sha256::digest(origin.to_string_lossy().as_bytes()));
+    let internal = format!("__thaw_default_{keyword}_{}", &digest[..16]);
+    let expected = declared_name.unwrap_or(&internal);
+    for (offset, _) in body.match_indices(keyword) {
+        let prefix = &body[..offset];
+        let prefix = if is_async {
+            let Some(prefix) = prefix.strip_prefix("async") else { continue };
+            prefix
+        } else {
+            prefix
+        };
+        let tail = &body[offset + keyword.len()..];
+        let name = declared_name.map_or_else(|| format!(" {internal}"), |_| String::new());
+        let abstract_modifier = if is_abstract { "abstract " } else { "" };
+        let candidate = format!("export declare {abstract_modifier}{prefix}{keyword}{name}{tail}");
+        if declaration_identity(&candidate).as_deref() == Some(expected) {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "failed to normalize default {keyword} declaration in `{}`",
+        origin.display()
+    ))
+}
+
 fn all_reexported_function_declarations(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
@@ -2529,11 +2565,17 @@ fn reexported_function_declarations(
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default_decl)) => {
                     if let thaw_parser::ast::DefaultDecl::Fn(fn_expr) = &default_decl.decl {
-                        if fn_expr.ident.is_some() {
-                            declarations.push(source_map.span_to_snippet(default_decl.span()).map_err(
-                                |error| format!("failed to read default function declaration: {error:?}"),
-                            )?);
-                        }
+                        let body = source_map.span_to_snippet(fn_expr.function.span()).map_err(
+                            |error| format!("failed to read default function declaration: {error:?}"),
+                        )?;
+                        declarations.push(reexported_default_declaration(
+                            &body,
+                            "function",
+                            path,
+                            fn_expr.ident.as_ref().map(|ident| ident.sym.as_ref()),
+                            fn_expr.function.is_async,
+                            false,
+                        )?);
                     }
                 }
                 _ => {}
@@ -3068,17 +3110,21 @@ fn reexported_class_or_interface_declarations_inner(
             let thaw_parser::ast::DefaultDecl::Class(class_expr) = &default_decl.decl else {
                 continue;
             };
-            if class_expr.ident.is_none() {
-                continue;
-            }
             superclass = class_expr.class.super_class.as_deref().and_then(|expr| match expr {
                 thaw_parser::ast::Expr::Ident(ident) => Some(ident.sym.to_string()),
                 _ => None,
             });
-            let snippet = source_map.span_to_snippet(default_decl.span()).map_err(|error| {
+            let body = source_map.span_to_snippet(class_expr.class.span()).map_err(|error| {
                 format!("failed to read default class declaration in `{}`: {error:?}", path.display())
             })?;
-            declarations.push(snippet.replacen("export default ", "export declare ", 1));
+            declarations.push(reexported_default_declaration(
+                &body,
+                "class",
+                path,
+                class_expr.ident.as_ref().map(|ident| ident.sym.as_ref()),
+                false,
+                class_expr.class.is_abstract,
+            )?);
         }
         if let Some(superclass) = superclass {
             if let Some((target_path, target_name)) =
