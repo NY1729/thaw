@@ -57,7 +57,34 @@
   }
 
   function intlZonedParts(timeZone, epochMs) {
-    return JSON.parse(__thaw_intl_zoned_parts(String(timeZone), Number(epochMs)));
+    const zone = String(timeZone);
+    const value = Number(epochMs);
+    const native = JSON.parse(__thaw_intl_zoned_parts(zone, value));
+    if (native.valid || !Number.isFinite(value) || Math.abs(value) > 8640000000000000) return native;
+    const match = /^([+-])([0-9]{2}):([0-9]{2})$/.exec(zone);
+    if (zone !== 'UTC' && (!match || Number(match[2]) > 23 || Number(match[3]) > 59)) return native;
+    const offsetMinutes = match ? (match[1] === '-' ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3])) : 0;
+    const millis = Math.trunc(value);
+    const local = millis + offsetMinutes * 60000;
+    const days = Math.floor(local / 86400000);
+    const time = local - days * 86400000;
+    const z = days + 719468;
+    const era = Math.floor(z / 146097);
+    const doe = z - era * 146097;
+    const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
+    const y = yoe + era * 400;
+    const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+    const mp = Math.floor((5 * doy + 2) / 153);
+    const day = doy - Math.floor((153 * mp + 2) / 5) + 1;
+    const month = mp < 10 ? mp + 3 : mp - 9;
+    return {
+      valid: true, year: y + (month <= 2 ? 1 : 0), month, day,
+      hour: Math.floor(time / 3600000), minute: Math.floor(time / 60000) % 60,
+      second: Math.floor(time / 1000) % 60, millisecond: time % 1000,
+      weekday: ((days + 3) % 7 + 7) % 7 + 1, offsetMinutes,
+      abbreviation: zone === 'UTC' ? 'UTC' : `GMT${zone}`, dst: false,
+      timeZone: zone, timestampMs: millis, longName: null, longGenericName: null,
+    };
   }
 
   function intlPad(value, width) {
@@ -324,6 +351,7 @@
             : localeTag)
         : 'en-US';
       this._timeZone = opts.timeZone ? String(opts.timeZone) : 'UTC';
+      this.format = this.format.bind(this);
       // Eager validation -- real Intl throws a `RangeError` for an
       // unrecognized `timeZone` at construction time, which is exactly
       // what real luxon's own `IANAZone.isValidZone` relies on (a
@@ -463,6 +491,7 @@
     }
 
     formatToParts(date) {
+      if (typeof date === 'bigint') throw new TypeError('Cannot convert BigInt to number');
       const epochMs = date === undefined ? Date.now() : Number(date);
       const zoned = intlZonedParts(this._timeZone, epochMs);
       if (!zoned.valid) {
@@ -787,6 +816,7 @@
     // interval formatter under the opt-in `--icu4c`; without it, a
     // documented approximation joining the two formatted endpoints.
     formatRange(startDate, endDate) {
+      if (typeof startDate === 'bigint' || typeof endDate === 'bigint') throw new TypeError('Cannot convert BigInt to number');
       const startMs = Number(startDate);
       const endMs = Number(endDate);
       if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
@@ -809,11 +839,11 @@
         );
         if (formatted) return formatted;
       }
-      const startParts = this.formatToParts(startDate);
+      const startParts = this.formatToParts(startMs);
       if (startMs === endMs) return startParts.map(part => part.value).join('');
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         startParts,
-        this.formatToParts(endDate),
+        this.formatToParts(endMs),
       );
       const separator = '\u2009\u2013\u2009';
       return [...shared, ...startMiddle, { value: separator }, ...endMiddle, ...trailing]
@@ -825,6 +855,7 @@
     // each argument's own fields with a span, giving the real
     // shared/startRange/endRange sources.
     formatRangeToParts(startDate, endDate) {
+      if (typeof startDate === 'bigint' || typeof endDate === 'bigint') throw new TypeError('Cannot convert BigInt to number');
       const startMs = Number(startDate);
       const endMs = Number(endDate);
       if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
@@ -849,13 +880,13 @@
         );
         if (parts.length) return parts;
       }
-      const startParts = this.formatToParts(startDate);
+      const startParts = this.formatToParts(startMs);
       if (startMs === endMs) {
         return startParts.map(part => ({ ...part, source: 'shared' }));
       }
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         startParts,
-        this.formatToParts(endDate),
+        this.formatToParts(endMs),
       );
       return [
         ...shared.map(part => ({ ...part, source: 'shared' })),
@@ -904,8 +935,28 @@
       }
       this._useGrouping = intlNormalizeUseGrouping(opts.useGrouping);
       this._minimumIntegerDigits = intlIntegerOption(opts.minimumIntegerDigits, 1, 1, 21);
-      this._minimumFractionDigits = opts.minimumFractionDigits;
-      this._maximumFractionDigits = opts.maximumFractionDigits;
+      let defaultMinFraction = 0;
+      let defaultMaxFraction = this._style === 'percent' ? 0 : 3;
+      if (this._style === 'currency') {
+        let digits = 2;
+        if (typeof __thaw_intl_currency_fraction_digits === 'function') {
+          const resolved = __thaw_intl_currency_fraction_digits(this._currency);
+          if (resolved !== null && resolved !== undefined) digits = resolved;
+        }
+        defaultMinFraction = digits;
+        defaultMaxFraction = digits;
+      }
+      const minimumFraction = intlIntegerOption(opts.minimumFractionDigits, undefined, 0, 100);
+      const maximumFraction = intlIntegerOption(opts.maximumFractionDigits, undefined, 0, 100);
+      this._minimumFractionDigits = minimumFraction === undefined
+        ? Math.min(defaultMinFraction, maximumFraction === undefined ? defaultMinFraction : maximumFraction)
+        : minimumFraction;
+      this._maximumFractionDigits = maximumFraction === undefined
+        ? Math.max(defaultMaxFraction, this._minimumFractionDigits)
+        : maximumFraction;
+      if (this._maximumFractionDigits < this._minimumFractionDigits) {
+        throw new RangeError('maximumFractionDigits is less than minimumFractionDigits');
+      }
       this._significant = opts.minimumSignificantDigits !== undefined || opts.maximumSignificantDigits !== undefined;
       this._minimumSignificantDigits = intlIntegerOption(opts.minimumSignificantDigits, 1, 1, 21);
       this._maximumSignificantDigits = intlIntegerOption(opts.maximumSignificantDigits, Math.max(this._minimumSignificantDigits, 21), this._minimumSignificantDigits, 21);
@@ -931,6 +982,7 @@
       this._notation = this._style === 'decimal' && requestedNotation !== 'standard'
         ? requestedNotation
         : 'standard';
+      this.format = this.format.bind(this);
     }
 
     // Real `SetNumberFormatDigitOptions`' `signDisplay` handling: `-0`
@@ -1299,11 +1351,15 @@
     // `compact` parts; `scientific`/`engineering` emit mantissa +
     // `exponentSeparator`/`exponentInteger` parts.
     formatToParts(value) {
-      const full = this.format(value);
       const input = Number(value);
+      const full = this.format(input);
       const number = this._style === 'percent' ? input * 100 : input;
       if (!Number.isFinite(number)) {
-        return [{ type: 'nan', value: full }];
+        const type = Number.isNaN(number) ? 'nan' : 'infinity';
+        const sign = this._signFor(number);
+        return sign && full.startsWith(sign)
+          ? [{ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign }, { type, value: full.slice(sign.length) }]
+          : [{ type, value: full }];
       }
       const sign = this._signFor(number);
       if (this._notation === 'compact') {
@@ -1509,7 +1565,8 @@
     }
 
     format(list) {
-      const items = Array.from(list, String);
+      const items = Array.from(list);
+      if (items.some(item => typeof item !== 'string')) throw new TypeError('ListFormat items must be strings');
       if (this._useRealLocaleData) {
         const kind = this._type === 'disjunction' ? 'or' : this._type === 'unit' ? 'unit' : 'and';
         return __thaw_intl_list_format(this.locale, kind, this._style, JSON.stringify(items));
@@ -1676,8 +1733,9 @@
     }
 
     select(value) {
-      if (typeof __thaw_intl_plural_category !== 'function') return 'other';
-      return __thaw_intl_plural_category(this.locale, this._type, this._operandString(value));
+      const number = Number(value);
+      if (!Number.isFinite(number) || typeof __thaw_intl_plural_category !== 'function') return 'other';
+      return __thaw_intl_plural_category(this.locale, this._type, this._operandString(number));
     }
 
     // `Intl.PluralRules.prototype.selectRange` (ECMA-402) with real
@@ -1738,6 +1796,7 @@
       this._ignorePunctuation = Boolean(opts.ignorePunctuation);
       this._numeric = Boolean(opts.numeric);
       this._caseFirst = intlEnumOption(opts.caseFirst, ['upper', 'lower', 'false'], 'false', 'caseFirst');
+      this.compare = this.compare.bind(this);
     }
 
     compare(a, b) {
@@ -1804,17 +1863,18 @@
       }));
       return {
         [Symbol.iterator]() {
-          return segments[Symbol.iterator]();
+          return segments.map(entry => ({ ...entry }))[Symbol.iterator]();
         },
         // `Segments.prototype.containing(index)` -- real ECMA-402 random
         // access, previously a documented gap. Returns the segment whose
         // `[index, index + segment.length)` range contains `index`, or
         // `undefined` for an out-of-range index.
         containing(index) {
-          const i = Math.trunc(Number(index));
+          const n = Number(index);
+          const i = Number.isNaN(n) ? 0 : Math.trunc(n);
           if (!Number.isFinite(i) || i < 0 || i >= input.length) return undefined;
           for (const entry of segments) {
-            if (entry.index <= i && i < entry.index + entry.segment.length) return entry;
+            if (entry.index <= i && i < entry.index + entry.segment.length) return { ...entry };
           }
           return undefined;
         },
@@ -1945,9 +2005,13 @@
 
     of(code) {
       const table = DISPLAY_NAMES_TABLES[this._language][this._type];
-      const value = table === undefined ? undefined : table[String(code)];
+      const raw = String(code);
+      const normalized = this._type === 'region' || this._type === 'currency' ? raw.toUpperCase()
+        : this._type === 'language' ? raw.toLowerCase()
+        : this._type === 'script' ? raw[0].toUpperCase() + raw.slice(1).toLowerCase() : raw;
+      const value = table !== undefined && Object.prototype.hasOwnProperty.call(table, normalized) ? table[normalized] : undefined;
       if (value !== undefined) return value;
-      return this._fallback === 'none' ? undefined : String(code);
+      return this._fallback === 'none' ? undefined : normalized;
     }
 
     resolvedOptions() {
@@ -2027,7 +2091,8 @@
         const raw = value[unit];
         if (raw === undefined || raw === null) continue;
         const number = Number(raw);
-        if (!Number.isFinite(number) || number === 0) continue;
+        if (!Number.isFinite(number) || !Number.isInteger(number)) throw new RangeError(`Invalid duration ${unit}`);
+        if (number === 0) continue;
         let name = table[style][unit];
         // English long form pluralizes a non-unit count ("30 minutes").
         if (this._language === 'en' && style === 'long' && number !== 1) {

@@ -1302,6 +1302,8 @@ impl<'ctx> HirCompiler<'ctx> {
         for name in [
             "thaw_temporal_instant_from_string",
             "thaw_temporal_instant_nanos_from_string",
+            "thaw_temporal_plain_date_time_from_string",
+            "thaw_temporal_plain_date_time_nanos_from_string",
             "thaw_temporal_plain_time_from_string",
             "thaw_temporal_plain_time_nanos_from_string",
             "thaw_temporal_plain_month_day_from_string",
@@ -1412,7 +1414,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_temporal_with_fields",
-            f64_type.fn_type(&[f64_type.into(); 12], false),
+            f64_type.fn_type(&[f64_type.into(); 14], false),
             Some(Linkage::External),
         );
         for name in [
