@@ -3089,6 +3089,10 @@ fn reexported_class_or_interface_declarations_inner(
                     target_name,
                     visited,
                 )?);
+            } else {
+                declarations.extend(reexported_class_or_interface_declarations_inner(
+                    path, &superclass, visited,
+                )?);
             }
         }
         return Ok(declarations);
@@ -3172,6 +3176,13 @@ fn reexported_class_or_interface_declarations_inner(
                 target_path,
                 target_name,
                 visited,
+            )?);
+        } else {
+            // `Base` may be declared beside the selected class rather than
+            // imported. Follow that local binding through the same visited
+            // guard so its methods and further ancestors remain available.
+            declarations.extend(reexported_class_or_interface_declarations_inner(
+                path, &superclass, visited,
             )?);
         }
     }
