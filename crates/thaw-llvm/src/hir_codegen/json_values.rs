@@ -98,6 +98,17 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(());
         }
         let object_state = self.module.get_function("thaw_object_state").unwrap();
+        let state_key = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_state_key").unwrap(),
+                &[object.into()],
+                "json_write_state_key",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("JSON state key returned no value")?;
         let function = self.current_function();
         let check_extensible = self
             .context
@@ -115,7 +126,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 object_state,
-                &[object.into(), self.context.i8_type().const_int(2, false).into()],
+                &[state_key.into(), self.context.i8_type().const_int(2, false).into()],
                 "json_write_is_frozen",
             )
             .map_err(|error| error.to_string())?
@@ -132,7 +143,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 object_state,
-                &[object.into(), self.context.i8_type().const_zero().into()],
+                &[state_key.into(), self.context.i8_type().const_zero().into()],
                 "json_write_is_extensible",
             )
             .map_err(|error| error.to_string())?
@@ -187,6 +198,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let object = self.compile_expr(object)?;
         let key = self.compile_expr(key)?;
+        self.compile_guard_json_non_nullish(object, "Cannot convert undefined or null to object")?;
         let deleted = self
             .builder
             .build_call(
@@ -199,15 +211,23 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_object_delete did not return a value")?
             .into_int_value();
-        self.builder
+        let succeeded = self.builder
             .build_int_compare(
                 inkwell::IntPredicate::NE,
                 deleted,
                 self.context.i8_type().const_zero(),
                 "json_delete",
             )
-            .map(Into::into)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let failed = self.context.append_basic_block(function, "json_delete_failed");
+        let allowed = self.context.append_basic_block(function, "json_delete_allowed");
+        self.builder.build_conditional_branch(succeeded, allowed, failed)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        self.compile_throw_type_error("Cannot delete property")?;
+        self.builder.position_at_end(allowed);
+        Ok(succeeded.into())
     }
 
     fn compile_json_object_lit(
@@ -295,6 +315,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_number_to_string returned no value")?;
         let value = self.compile_expr(value)?;
+        self.compile_guard_json_write(object, key.into_pointer_value())?;
         self.builder
             .build_call(
                 self.module.get_function("thaw_json_index_set").unwrap(),

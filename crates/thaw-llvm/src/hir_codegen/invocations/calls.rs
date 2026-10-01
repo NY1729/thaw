@@ -55,10 +55,25 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [object, operation] = args else {
                     return Err(format!("{name} expects an object and an operation"));
                 };
+                let json_state = self.expr_hir_type(object) == Some(HirType::Json);
                 let object = self.compile_expr(object)?;
                 if !object.is_pointer_value() {
                     return Err("object integrity methods require a native object".into());
                 }
+                let state_object = if json_state {
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_json_state_key").unwrap(),
+                            &[object.into()],
+                            "json_state_key",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("JSON state key returned no value")?
+                } else {
+                    object
+                };
                 let operation = self.compile_expr(operation)?.into_float_value();
                 let operation = self
                     .builder
@@ -77,7 +92,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_call(
                         self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
-                        &[object.into(), operation.into()],
+                        &[state_object.into(), operation.into()],
                         "object_state",
                     )
                     .map_err(|error| error.to_string())?

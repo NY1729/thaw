@@ -10,6 +10,14 @@ const NON_EXTENSIBLE: u8 = 1;
 const SEALED: u8 = 2;
 const FROZEN: u8 = 4;
 
+/// A dynamic JSON object's last shared handle has been dropped.
+#[no_mangle]
+pub extern "C" fn thaw_object_clear_state(object: *const u8) {
+    let _ = OBJECT_STATES.try_with(|states| {
+        states.borrow_mut().remove(&(object as usize));
+    });
+}
+
 /// Records `preventExtensions` (1), `seal` (2), or `freeze` (3) for one
 /// native object identity. Native layouts are fixed already; this table only
 /// carries the observable integrity state across aliases and control flow.

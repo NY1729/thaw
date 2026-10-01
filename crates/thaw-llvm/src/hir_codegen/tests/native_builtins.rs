@@ -4801,6 +4801,33 @@ fn compiles_reflect_object_static_and_substr() {
     );
 }
 
+#[test]
+fn compiled_json_parse_and_reflect_errors_are_catchable() {
+    let source = r#"
+        function main(): void {
+            try {
+                JSON.parse("1 2");
+                console.log("parse accepted");
+            } catch (error) {
+                console.log(error instanceof SyntaxError);
+            }
+            try {
+                Reflect.deleteProperty(1 as any, "x");
+                console.log("delete accepted");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+            const object: any = JSON.parse("{\"x\":1}");
+            console.log(Reflect.deleteProperty(object, "x"));
+            console.log(JSON.stringify(object));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_parse_reflect_typed_errors"),
+        "true\ntrue\ntrue\n{}\n"
+    );
+}
+
 /// `Reflect.set`, `Object.isExtensible`/`isFrozen`/`isSealed`, and
 /// `Object.getOwnPropertyDescriptor`. A fresh object is extensible, not
 /// frozen, and not sealed (see `compiles_object_freeze_state` for the
@@ -7030,6 +7057,49 @@ fn object_freeze_and_seal_block_writes() {
     assert_eq!(
         compile_and_run(source, "object_freeze_and_seal_enforcement"),
         "threw true\n1\nthrew\n1 2\nthrew\n4 undefined\n"
+    );
+}
+
+#[test]
+fn json_assign_delete_and_prototype_constraints_throw() {
+    let source = r#"
+        function main(): void {
+            const frozen: any = JSON.parse("{\"keep\":1}");
+            Object.freeze(frozen);
+            try {
+                Object.assign(frozen, { keep: 2 });
+                console.log("assign accepted");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+            console.log(frozen.keep);
+
+            const sealed: any = JSON.parse("{\"keep\":1}");
+            Object.seal(sealed);
+            console.log(Reflect.deleteProperty(sealed, "keep"));
+            try {
+                delete sealed.keep;
+                console.log("delete accepted");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+            console.log(sealed.keep);
+
+            const first: any = JSON.parse("{}");
+            const second: any = JSON.parse("{}");
+            Object.setPrototypeOf(first, second);
+            try {
+                Object.setPrototypeOf(second, first);
+                console.log("cycle accepted");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
+            console.log(Object.getPrototypeOf(second) === null);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_assign_delete_prototype_constraints"),
+        "true\n1\nfalse\ntrue\n1\ntrue\ntrue\n"
     );
 }
 

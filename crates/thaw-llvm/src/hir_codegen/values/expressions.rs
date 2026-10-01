@@ -34,7 +34,11 @@ impl<'ctx> HirCompiler<'ctx> {
     /// all see it exactly as they would a real `throw`. Terminates the
     /// current block -- the caller must not fall through afterward.
     fn compile_throw_type_error(&mut self, message: &str) -> Result<(), String> {
-        let tagged = format!("\u{1}TypeError\u{1}{message}");
+        self.compile_throw_builtin_error("TypeError", message)
+    }
+
+    fn compile_throw_builtin_error(&mut self, kind: &str, message: &str) -> Result<(), String> {
+        let tagged = format!("\u{1}{kind}\u{1}{message}");
         let value = self
             .builder
             .build_global_string_ptr(&tagged, "synthetic_type_error")
