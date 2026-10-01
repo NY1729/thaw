@@ -375,6 +375,20 @@ fn live_import_rewrite_respects_function_local_shadowing() {
 }
 
 #[test]
+fn live_import_rewrite_keeps_named_function_expression_self_binding() {
+    // Unrun regression: the function-expression name exists in its
+    // parameters and body, but the same spelling outside is the import.
+    let rewritten = rewrite_esm_to_commonjs(
+        "import { x } from './dep.js'; \
+         const fn = function x(value = x) { return value === x; }; \
+         export const outside = x;",
+    )
+    .unwrap();
+    assert!(rewritten.contains("function x(value = x) { return value === x; }"), "{rewritten}");
+    assert!(rewritten.contains("const outside = __thaw_esm_import_0[\"x\"]"), "{rewritten}");
+}
+
+#[test]
 fn live_import_rewrite_updates_destructured_parameter_defaults() {
     let rewritten = rewrite_esm_to_commonjs(
         "import process from 'node:process';\n\
