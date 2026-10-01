@@ -11,25 +11,24 @@
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     let module = thaw_parser::parse_declarations(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
-    let mut functions = module
-        .body
-        .iter()
-        .flat_map(extract_fn_decls)
-        .map(|(name, func)| {
-            let name = name.rsplit('.').next().unwrap_or(name);
-            lower_dts_function(name, func, &interfaces, &generic_interfaces)
+    let mut functions = scoped_fn_decls(&module)
+        .into_iter()
+        .map(|(full_name, name, func)| {
+            let (context, generic_context) = scoped_type_context(
+                declaration_scope(&full_name), &interfaces, &generic_interfaces,
+            );
+            lower_dts_function(&name, func, &context, &generic_context)
         })
         .collect::<Vec<_>>();
     if let Some(target) = export_assignment_interface_name(&module) {
-        functions.extend(
-            module
-                .body
-                .iter()
-                .flat_map(|item| extract_interface_method_decls(item, &target))
-                .map(|(name, method)| {
-                    lower_dts_method_signature(&name, method, &interfaces, &generic_interfaces)
-                }),
-        );
+        functions.extend(export_assignment_interface_methods(&module, &target)
+            .into_iter()
+            .map(|(name, owner, method)| {
+                let (context, generic_context) = scoped_type_context(
+                    declaration_scope(&owner), &interfaces, &generic_interfaces,
+                );
+                lower_dts_method_signature(&name, method, &context, &generic_context)
+            }));
     }
     let call_signature_interfaces = all_interface_decls_by_name(&module);
     let merged_call_signature_interfaces = all_interface_decls_by_name_merged(&module);
