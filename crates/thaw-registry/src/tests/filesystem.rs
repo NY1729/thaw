@@ -309,6 +309,67 @@ fn fs_open_as_blob_exposes_blob_reads_and_detects_file_changes() {
 }
 
 #[test]
+fn blob_streams_use_readable_stream_and_keep_file_verification() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_blob_streams");
+    fs::write(
+        dir.join("index.js"),
+        r#"var fs = require('node:fs');
+module.exports = async function (root) {
+  var direct = new Blob(['abc']).stream(), reader = direct.getReader();
+  var locked = direct.locked, first = await reader.read();
+  reader.releaseLock();
+  var [left, right] = new Blob(['xy']).stream().tee();
+  var branches = [await new Response(left).text(), await new Response(right).text()];
+  var piped = [];
+  await new Blob(['zz']).stream().pipeTo(new WritableStream({
+    write(chunk) { piped.push(Buffer.from(chunk).toString()); }
+  }));
+  var empty = await new Blob([]).stream().getReader().read();
+  await new Blob(['cancel']).stream().cancel('stop');
+  var path = root + '/blob.txt';
+  fs.writeFileSync(path, 'abcdef');
+  var blob = await fs.openAsBlob(path), fileStream = blob.stream();
+  var fileText = await new Response(fileStream).text();
+  var filePiped = [];
+  await blob.stream().pipeTo(new WritableStream({
+    write(chunk) { filePiped.push(Buffer.from(chunk).toString()); }
+  }));
+  var [fileLeft, fileRight] = blob.slice(1, 4).stream().tee();
+  var sliceBranches = [await new Response(fileLeft).text(), await new Response(fileRight).text()];
+  var stale = blob.stream(), staleSlice = blob.slice(0, 2).stream();
+  fs.writeFileSync(path, 'changed-value');
+  var staleError, staleSliceError;
+  try { await stale.pipeTo(new WritableStream()); } catch (error) { staleError = error.name; }
+  try { await new Response(staleSlice).text(); } catch (error) { staleSliceError = error.name; }
+  return [direct instanceof ReadableStream, locked, first.done,
+    Buffer.from(first.value).toString(), direct.locked, branches, piped,
+    empty.done, fileStream instanceof ReadableStream, fileText, filePiped,
+    sliceBranches, staleError, staleSliceError];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_blob_streams_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseBlobStreams = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments =
+        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
+            .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseBlobStreams").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[true,true,false,"abc",false,["xy","xy"],["zz"],true,true,"abcdef",["abcdef"],["bcd","bcd"],"NotReadableError","NotReadableError"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn fs_cp_recursively_copies_directories_across_api_styles() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_cp");
