@@ -827,6 +827,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn compile_object_alloc(
         &mut self,
         object_type: &HirType,
+        class_constructor: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let HirType::Object(fields) = object_type else {
             return Err(format!(
@@ -871,6 +872,26 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(field_pointer, zero)
                 .map_err(|error| error.to_string())?;
             byte_offset += object_field_storage_bytes(field_type);
+        }
+        // Only a constructor's ClassAlloc may register nominal identity.
+        // Ordinary ObjectAlloc can originate from typed fallback values,
+        // even when a user supplied a marker-like field name.
+        if let Some((marker, HirType::Bool)) = fields.first().filter(|_| class_constructor) {
+            if marker.starts_with("__thaw_class_identity_\u{1e}") {
+                let marker = self
+                    .builder
+                    .build_global_string_ptr(marker, "class_identity_marker")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_object_set_class_identity")
+                            .unwrap(),
+                        &[allocation.into(), marker.as_pointer_value().into()],
+                        "register_class_identity",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
         }
         Ok(allocation.into())
     }

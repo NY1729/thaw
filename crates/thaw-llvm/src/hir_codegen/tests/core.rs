@@ -1324,6 +1324,25 @@ fn calls_function_values_with_explicit_this_across_function_boundaries() {
 }
 
 #[test]
+fn bound_tagged_receiver_preserves_partial_arguments_and_async_result() {
+    let source = r#"
+        function sum(left: number, right: number): number { return left + right; }
+        async function later(value: number): Promise<number> { return value + 1; }
+        async function main(): Promise<void> {
+            const bound = sum.bind(7, 40);
+            console.log(bound(2));
+            console.log(bound.call(null, 3));
+            const asyncBound = later.bind(0, 41);
+            console.log(await asyncBound());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "bound_tagged_receiver"), "42
+43
+42
+");
+}
+
+#[test]
 fn compiles_unary_and_extended_comparisons_without_duplicate_evaluation() {
     let source = r#"
         function left(): number {

@@ -600,7 +600,7 @@ fn class_method_bridge_expr(
     let mut post_stmts = Vec::new();
     if let HirType::Object(fields) = &receiver_type {
         for (index, (field, field_type)) in fields.iter().enumerate() {
-            if field.starts_with("__thaw_class_identity_") {
+            if field.starts_with("__thaw_class_identity_\u{1e}") {
                 continue;
             }
             let current = HirExpr::PropAccess(

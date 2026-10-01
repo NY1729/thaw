@@ -3777,9 +3777,9 @@ impl<'a> FnLowerer<'a> {
                                 if fields.first().is_some_and(|(marker, ty)| {
                                     *ty == HirType::Bool
                                         && marker
-                                            .strip_prefix("__thaw_class_identity_")
+                                            .strip_prefix("__thaw_class_identity_\u{1e}")
                                             .is_some_and(|chain| {
-                                                chain.split('$').any(|name| matches!(
+                                                chain.split('\u{1f}').any(|name| matches!(
                                                     name,
                                                     "Error"
                                                         | "TypeError"

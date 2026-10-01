@@ -175,15 +175,15 @@ fn collect_native_classes<'a>(
                 };
                 if let Some((marker, HirType::Bool)) = base_fields.first() {
                     let inherited = marker
-                        .strip_prefix("__thaw_class_identity_")
+                        .strip_prefix("__thaw_class_identity_\u{1e}")
                         .expect("base class identity marker");
-                    identities.extend(inherited.split('$').map(str::to_owned));
+                    identities.extend(inherited.split('\u{1f}').map(str::to_owned));
                 }
                 inherited_fields.extend(base_fields.iter().skip(1).cloned());
             }
         }
         let mut fields = vec![(
-            format!("__thaw_class_identity_{}", identities.join("$")),
+            format!("__thaw_class_identity_\u{1e}{}", identities.join("\u{1f}")),
             HirType::Bool,
         )];
         fields.extend(inherited_fields);

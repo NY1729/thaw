@@ -228,8 +228,8 @@ fn object_type_is_error_family(ty: &HirType) -> bool {
     fields.first().is_some_and(|(marker, ty)| {
         *ty == HirType::Bool
             && marker
-                .strip_prefix("__thaw_class_identity_")
-                .is_some_and(|chain| chain.split('$').any(is_error_family_name))
+                .strip_prefix("__thaw_class_identity_\u{1e}")
+                .is_some_and(|chain| chain.split('\u{1f}').any(is_error_family_name))
     })
 }
 
@@ -556,9 +556,9 @@ fn class_name_from_type(ty: &HirType) -> Option<&str> {
     };
     fields.first().and_then(|(name, ty)| {
         (*ty == HirType::Bool)
-            .then(|| name.strip_prefix("__thaw_class_identity_"))
+            .then(|| name.strip_prefix("__thaw_class_identity_\u{1e}"))
             .flatten()
-            .and_then(|identities| identities.split('$').next())
+            .and_then(|identities| identities.split('\u{1f}').next())
     })
 }
 
@@ -569,8 +569,8 @@ fn class_type_has_identity(ty: &HirType, expected: &str) -> bool {
     fields.first().is_some_and(|(name, ty)| {
         *ty == HirType::Bool
             && name
-                .strip_prefix("__thaw_class_identity_")
-                .is_some_and(|identities| identities.split('$').any(|name| name == expected))
+                .strip_prefix("__thaw_class_identity_\u{1e}")
+                .is_some_and(|identities| identities.split('\u{1f}').any(|name| name == expected))
     })
 }
 

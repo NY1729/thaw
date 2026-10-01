@@ -158,6 +158,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishUndefined(_)
         | HirExpr::EnvVar(_)
         | HirExpr::ObjectAlloc(_)
+        | HirExpr::ClassAlloc(_)
         | HirExpr::FunctionRef(..)
         | HirExpr::MethodRef(..) => {}
     }

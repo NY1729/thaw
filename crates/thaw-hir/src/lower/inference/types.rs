@@ -250,7 +250,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::FunctionRef(_, params, ret) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
-            HirExpr::MethodRef(_, _, params, ret, _) => {
+            HirExpr::MethodRef(_, _, params, ret, _, _) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::OptionalSome(value, payload) => {
@@ -2386,8 +2386,9 @@ impl<'a> FnLowerer<'a> {
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(HirType::Object(fields))
             }
-            HirExpr::ObjectAlloc(ty @ HirType::Object(_)) => Ok(ty.clone()),
-            HirExpr::ObjectAlloc(other) => Err(format!(
+            HirExpr::ObjectAlloc(ty @ HirType::Object(_))
+            | HirExpr::ClassAlloc(ty @ HirType::Object(_)) => Ok(ty.clone()),
+            HirExpr::ObjectAlloc(other) | HirExpr::ClassAlloc(other) => Err(format!(
                 "object allocation requires an object type, got {other:?}"
             )),
             HirExpr::PropAccess(_, object_ty, field) => match object_ty {

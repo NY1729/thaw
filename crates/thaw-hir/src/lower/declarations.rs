@@ -522,7 +522,7 @@ fn lower_class_constructor(
             HirStmt::Let(
                 this_name.clone(),
                 instance_type.clone(),
-                HirExpr::ObjectAlloc(instance_type.clone()),
+                HirExpr::ClassAlloc(instance_type.clone()),
             ),
             HirStmt::Return(Some(HirExpr::Call(
                 Box::new(HirExpr::Var(initializer_symbol.clone())),
@@ -635,7 +635,7 @@ fn lower_class_constructor(
                         HirStmt::Let(
                             wrapper_this.clone(),
                             instance_type.clone(),
-                            HirExpr::ObjectAlloc(instance_type.clone()),
+                            HirExpr::ClassAlloc(instance_type.clone()),
                         ),
                         HirStmt::Return(Some(HirExpr::Call(
                             Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
@@ -706,7 +706,7 @@ fn lower_class_constructor(
                             HirStmt::Let(
                                 wrapper_this.clone(),
                                 instance_type.clone(),
-                                HirExpr::ObjectAlloc(instance_type.clone()),
+                                HirExpr::ClassAlloc(instance_type.clone()),
                             ),
                             HirStmt::Return(Some(HirExpr::Call(
                                 Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),

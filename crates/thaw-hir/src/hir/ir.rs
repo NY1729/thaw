@@ -94,7 +94,9 @@ pub enum HirExpr {
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
     /// A native method value with separate unbound and explicit-receiver entries.
-    MethodRef(String, String, Vec<HirType>, HirType, bool),
+    /// The optional nominal receiver is the class expected by an instance
+    /// method; static methods ignore their explicit receiver.
+    MethodRef(String, String, Vec<HirType>, HirType, bool, Option<Symbol>),
     Block(Vec<HirStmt>),
     /// Raises `error` from an expression position. `fallback` supplies the
     /// unreachable native value required by the surrounding typed expression.
@@ -170,10 +172,13 @@ pub enum HirExpr {
     /// (matching what it actually, genuinely produces), so both the
     /// re-validation gap and the segfault are closed at once.
     JsValueAsJson(Box<HirExpr>),
-    /// Allocates a fixed-shape object and initializes every field to its
-    /// native zero value before the reference escapes. Constructors use this
-    /// to establish instance identity before executing `this.field = ...`.
+    /// Allocates an ordinary fixed-shape object and initializes every field
+    /// to its native zero value before the reference escapes.
     ObjectAlloc(HirType),
+    /// Native class constructor allocation. Only this trusted origin may
+    /// register nominal class ancestry; an arbitrary object with a matching
+    /// field name remains an ordinary object.
+    ClassAlloc(HirType),
     /// `object.field`. Unlike `ArrayLen`/`EnvVar`, this *is* a general
     /// member-access node -- but it still isn't resolved by a real type
     /// checker at codegen time, so lowering bakes in the object's full

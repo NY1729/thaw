@@ -517,6 +517,7 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirType],
         ret: &HirType,
         is_static: bool,
+        receiver_class: Option<&str>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let unbound_target = self
             .module
@@ -558,27 +559,54 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_return(Some(&value))
                 .map_err(|error| error.to_string())?;
         }
-        let mut this_params = Vec::with_capacity(params.len() + 1);
-        this_params.push(HirType::I64);
-        this_params.extend_from_slice(params);
         let this_entry = self.module.add_function(
             &format!("{ordinary_name}__thaw_this_adapter"),
-            self.function_type(&this_params, ret)?,
+            self.this_entry_function_type(params, ret)?,
             Some(Linkage::Internal),
         );
         let entry = self.context.append_basic_block(this_entry, "entry");
         self.builder.position_at_end(entry);
         let mut arguments = Vec::with_capacity(params.len() + usize::from(!is_static));
         if !is_static {
-            let receiver = this_entry.get_nth_param(1).unwrap().into_int_value();
+            let receiver_class = receiver_class.ok_or("instance method is missing its nominal receiver")?;
+            let tagged = this_entry.get_nth_param(1).unwrap().into_struct_value();
+            let kind = self.builder.build_extract_value(tagged, 0, "method_receiver_kind")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let word = self.builder.build_extract_value(tagged, 1, "method_receiver_word")
+                .map_err(|error| error.to_string())?.into_int_value();
             let receiver = self
                 .builder
                 .build_int_to_ptr(
-                    receiver,
+                    word,
                     self.context.ptr_type(AddressSpace::default()),
                     "method_receiver",
                 )
                 .map_err(|error| error.to_string())?;
+            let expected = self.builder.build_global_string_ptr(receiver_class, "expected_receiver_class")
+                .map_err(|error| error.to_string())?;
+            let actual_class = self.builder.build_call(
+                self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                &[receiver.into(), expected.as_pointer_value().into()],
+                "method_receiver_identity",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("class identity check returned no value")?.into_int_value();
+            let native_kind = self.builder.build_int_compare(
+                IntPredicate::EQ, kind, self.context.i8_type().const_int(9, false),
+                "method_receiver_is_native",
+            ).map_err(|error| error.to_string())?;
+            let valid = self.builder.build_and(native_kind, actual_class, "method_receiver_valid")
+                .map_err(|error| error.to_string())?;
+            let rejected = self.context.append_basic_block(this_entry, "method_receiver_rejected");
+            let accepted = self.context.append_basic_block(this_entry, "method_receiver_accepted");
+            self.builder.build_conditional_branch(valid, accepted, rejected)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(rejected);
+            let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+            let saved_async_completion = self.active_async_completion.take();
+            self.compile_throw_type_error("Incompatible method receiver")?;
+            self.catch_stack = saved_catch_stack;
+            self.active_async_completion = saved_async_completion;
+            self.builder.position_at_end(accepted);
             arguments.push(BasicMetadataValueEnum::from(receiver));
         }
         arguments.extend(

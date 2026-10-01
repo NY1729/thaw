@@ -985,6 +985,41 @@ fn allocates_object_identity_before_field_assignment() {
 }
 
 #[test]
+fn only_class_allocations_register_nominal_identity() {
+    let object_type = HirType::Object(vec![(
+        "__thaw_class_identity_\u{1e}Base".into(),
+        HirType::Bool,
+    )]);
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "main".into(),
+            params: Vec::new(),
+            ret: HirType::Void,
+            is_async: false,
+            body: vec![
+                HirStmt::Let(
+                    "user_shape".into(),
+                    object_type.clone(),
+                    HirExpr::ObjectAlloc(object_type.clone()),
+                ),
+                HirStmt::Let(
+                    "class_instance".into(),
+                    object_type.clone(),
+                    HirExpr::ClassAlloc(object_type),
+                ),
+                HirStmt::Return(None),
+            ],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "class_alloc_origin");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert_eq!(ir.matches("call i1 @thaw_object_set_class_identity").count(), 1);
+}
+
+#[test]
 fn compiles_and_runs_top_level_default_and_optional_parameters() {
     let source = r#"
         function describe(

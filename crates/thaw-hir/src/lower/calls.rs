@@ -507,6 +507,7 @@ impl<'a> FnLowerer<'a> {
                         signature.params.clone(),
                         result,
                         true,
+                        None,
                     )));
                 }
                 let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_))
@@ -551,6 +552,7 @@ impl<'a> FnLowerer<'a> {
                 signature.params[1..].to_vec(),
                 result,
                 false,
+                Some(class_name.to_string()),
             );
             return self
                 .wrap_call_argument_bindings(unbound, &[(receiver_name, receiver_type, receiver)])

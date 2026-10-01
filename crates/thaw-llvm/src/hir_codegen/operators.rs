@@ -156,7 +156,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::FunctionRef(_, params, ret) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
-            HirExpr::MethodRef(_, _, params, ret, _) => {
+            HirExpr::MethodRef(_, _, params, ret, _, _) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::Call(callee, arguments) => {
