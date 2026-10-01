@@ -347,7 +347,7 @@
           }),
           [Symbol.asyncIterator]() { return this; }
         };
-      } }
+      }
       [Symbol.asyncIterator]() { return this.values(); }
     };
     globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
