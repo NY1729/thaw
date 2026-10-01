@@ -466,7 +466,7 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { readNumber, readBool, readString, updateNumber, updateBool, updateString, removeBool, updateAndReturn, makeNumbers, makeBools, makeStrings, makeDynamic, keys, keyCount, has, numberValues, boolValues, stringValues, valueCount, numberEntries, boolEntries, stringEntries, entryCount } from 'jit-dictionary';\nfunction main(): void { console.log(readNumber({ chosen: 40, fixed: 2 }, 'chosen')); console.log(readBool({ chosen: true, enabled: true }, 'chosen')); console.log(readBool({ chosen: false, enabled: true }, 'chosen')); console.log(readString({ prefix: 'th', suffix: 'aw' }, 'suffix')); console.log(updateNumber({ chosen: 1, fixed: 2 }, 'chosen', 40)); console.log(updateBool({ chosen: false }, 'chosen', true)); console.log(updateString({ chosen: 'th' }, 'chosen', 'aw')); console.log(removeBool({ chosen: true }, 'chosen')); console.log(updateAndReturn({ chosen: 1 }, 'chosen', 42).chosen); console.log(makeNumbers(21).doubled); console.log(makeBools(false).inverse); console.log(makeStrings('aw').prefix + makeStrings('aw').suffix); const dynamic = makeDynamic('chosen', 42, { first: 9, base: 3 }); console.log(dynamic.first); console.log(dynamic.base); console.log(dynamic.chosen); console.log(keys({ zebra: 1, alpha: 2 }).join(',')); console.log(keyCount({ zebra: 1, alpha: 2 })); console.log(has({ chosen: 1 }, 'chosen')); console.log(has({ chosen: 1 }, 'missing')); console.log(numberValues({ zebra: 1, alpha: 2 }).join(',')); console.log(boolValues({ first: true, second: false }).join(',')); console.log(stringValues({ first: 'th', second: 'aw' }).join(',')); console.log(valueCount({ zebra: 1, alpha: 2 })); const numbers = numberEntries({ zebra: 1, alpha: 2 }); console.log(numbers[0][0] + ':' + numbers[0][1] + ',' + numbers[1][0] + ':' + numbers[1][1]); const bools = boolEntries({ first: true, second: false }); console.log(bools[0][0] + ':' + bools[0][1] + ',' + bools[1][0] + ':' + bools[1][1]); const strings = stringEntries({ first: 'th', second: 'aw' }); console.log(strings[0][0] + ':' + strings[0][1] + ',' + strings[1][0] + ':' + strings[1][1]); console.log(entryCount({ zebra: 1, alpha: 2 })); }\n",
+        "import { readNumber, readBool, readString, updateNumber, updateBool, updateString, removeBool, updateAndReturn, makeNumbers, makeBools, makeStrings, makeDynamic, keys, keyCount, has, numberValues, boolValues, stringValues, valueCount, numberEntries, boolEntries, stringEntries, entryCount } from 'jit-dictionary';\nfunction main(): void { console.log(readNumber({ chosen: 40, fixed: 2 }, 'chosen')); console.log(readBool({ chosen: true, enabled: true }, 'chosen')); console.log(readBool({ chosen: false, enabled: true }, 'chosen')); console.log(readString({ prefix: 'th', suffix: 'aw' }, 'suffix')); console.log(updateNumber({ chosen: 1, fixed: 2 }, 'chosen', 40)); console.log(updateBool({ chosen: false }, 'chosen', true)); console.log(updateString({ chosen: 'th' }, 'chosen', 'aw')); console.log(removeBool({ chosen: true }, 'chosen')); console.log(updateAndReturn({ chosen: 1 }, 'chosen', 42).chosen); console.log(makeNumbers(21).doubled); console.log(makeBools(false).inverse); console.log(makeStrings('aw').prefix + makeStrings('aw').suffix); const dynamic = makeDynamic('chosen', 42, { first: 9, base: 3 }); console.log(dynamic.first); console.log(dynamic.base); console.log(dynamic.chosen); console.log(keys({ zebra: 1, alpha: 2 }).join(',')); console.log(keyCount({ zebra: 1, alpha: 2 })); console.log(has({ chosen: 1 }, 'chosen')); console.log(has({ chosen: 1 }, 'missing')); console.log(numberValues({ zebra: 1, alpha: 2 }).join(',')); console.log(boolValues({ first: true, second: false }).join(',')); console.log(stringValues({ first: 'th', second: 'aw' }).join(',')); console.log(valueCount({ zebra: 1, alpha: 2 })); const numbers = numberEntries({ zebra: 1, alpha: 2 }); console.log(numbers[0][0] + ':' + numbers[0][1] + ',' + numbers[1][0] + ':' + numbers[1][1]); const bools = boolEntries({ first: true, second: false }); console.log(bools[0][0] + ':' + bools[0][1] + ',' + bools[1][0] + ':' + bools[1][1]); const strings = stringEntries({ first: 'th', second: 'aw' }); console.log(strings[0][0] + ':' + strings[0][1] + ',' + strings[1][0] + ':' + strings[1][1]); console.log(entryCount({ zebra: 1, alpha: 2 })); const sealed: Record<string, boolean> = { chosen: true }; Object.seal(sealed); try { removeBool(sealed, 'chosen'); console.log('delete accepted'); } catch (error) { console.log(error instanceof TypeError); } console.log(sealed.chosen); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -482,7 +482,7 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\ntrue\nfalse\nthaw\n43\ntrue\nthaw\ntrue\n42\n42\ntrue\nthaw\n2\n3\n42\nzebra,alpha\n2\ntrue\nfalse\n1,2\ntrue,false\nth,aw\n2\nzebra:1,alpha:2\nfirst:true,second:false\nfirst:th,second:aw\n2\n"
+        "42\ntrue\nfalse\nthaw\n43\ntrue\nthaw\ntrue\n42\n42\ntrue\nthaw\n2\n3\n42\nzebra,alpha\n2\ntrue\nfalse\n1,2\ntrue,false\nth,aw\n2\nzebra:1,alpha:2\nfirst:true,second:false\nfirst:th,second:aw\n2\ntrue\ntrue\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -518,7 +518,7 @@ fn object_from_entries_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { fromNumbers, fromBools, fromStrings, roundTrip } from 'jit-from-entries';\nfunction main(): void { const numbers = fromNumbers([['first', 1], ['first', 2], ['second', 3]]); console.log(numbers.first); console.log(numbers.second); const bools = fromBools([['ready', true]]); console.log(bools.ready); const strings = fromStrings([['left', 'th'], ['right', 'aw']]); console.log(strings.left + strings.right); const values = roundTrip({ zebra: 1, alpha: 2 }); console.log(values.zebra); console.log(values.alpha); }\n",
+        "import { fromNumbers, fromBools, fromStrings, roundTrip } from 'jit-from-entries';\nfunction main(): void { const numbers = fromNumbers([['first', 1], ['first', 2], ['second', 3]]); console.log(numbers.first); console.log(numbers.second); const bools = fromBools([['ready', true]]); console.log(bools.ready); const strings = fromStrings([['left', 'th'], ['right', 'aw']]); console.log(strings.left + strings.right); const values = roundTrip({ zebra: 1, alpha: 2 }); console.log(values.zebra); console.log(values.alpha); try { fromNumbers([, ['x', 1]]); console.log('hole accepted'); } catch (error) { console.log(error instanceof TypeError); } }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -534,8 +534,80 @@ fn object_from_entries_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "2\n3\ntrue\nthaw\n1\n2\n"
+        "2\n3\ntrue\nthaw\n1\n2\ntrue\n"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dictionary_get_nullish_fallback_preserves_missing_presence_in_jit() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-dictionary-missing-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-dictionary-missing");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numberAt(values: Record<string, number>, key: string): number;\nexport declare function boolAt(values: Record<string, boolean>, key: string): boolean;\nexport declare function stringAt(values: Record<string, string>, key: string): string;\n",
+    )
+    .unwrap();
+    let bundle = "function numberAt(values, key) { return values[key] ?? 10; } function boolAt(values, key) { return values[key] ?? true; } function stringAt(values, key) { return values[key] ?? 'fallback'; } module.exports = { numberAt, boolAt, stringAt };\n";
+    std::fs::write(package.join("bundle.js"), bundle).unwrap();
+    for function in thaw_bridge::parse_dts(&std::fs::read_to_string(package.join("package.d.ts")).unwrap()).unwrap() {
+        assert!(jit_numeric_export(bundle, &function.name, false, &function).is_some());
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numberAt, boolAt, stringAt } from 'jit-dictionary-missing';\nfunction main(): void { console.log(numberAt({}, 'missing')); console.log(numberAt({ x: 0 }, 'x')); console.log(boolAt({}, 'missing')); console.log(boolAt({ x: false }, 'x')); console.log(stringAt({}, 'missing')); console.log(stringAt({ x: '' }, 'x')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "10\n0\ntrue\nfalse\nfallback\n\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dictionary_nullish_operations_throw_catchable_type_errors_in_jit() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-dictionary-nullish-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-dictionary-nullish");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function keys(value: Record<string, number>): number;\nexport declare function values(value: Record<string, number>): number;\nexport declare function entries(value: Record<string, number>): number;\nexport declare function has(value: Record<string, number>): boolean;\nexport declare function contains(value: Record<string, number>): boolean;\nexport declare function remove(value: Record<string, number>): boolean;\n",
+    )
+    .unwrap();
+    let bundle = "function keys(value) { return Object.keys(value).length; } function values(value) { return Object.values(value).length; } function entries(value) { return Object.entries(value).length; } function has(value) { return Object.hasOwn(value, 'x'); } function contains(value) { return 'x' in value; } function remove(value) { return delete value.x; } module.exports = { keys, values, entries, has, contains, remove };\n";
+    std::fs::write(package.join("bundle.js"), bundle).unwrap();
+    for function in thaw_bridge::parse_dts(&std::fs::read_to_string(package.join("package.d.ts")).unwrap()).unwrap() {
+        assert!(jit_numeric_export(bundle, &function.name, false, &function).is_some(), "{function:?}");
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { keys, values, entries, has, contains, remove } from 'jit-dictionary-nullish';\nfunction main(): void { const absent: any = null; try { keys(absent); } catch (error) { console.log(error instanceof TypeError); } try { values(absent); } catch (error) { console.log(error instanceof TypeError); } try { entries(absent); } catch (error) { console.log(error instanceof TypeError); } try { has(absent); } catch (error) { console.log(error instanceof TypeError); } try { contains(absent); } catch (error) { console.log(error instanceof TypeError); } try { remove(absent); } catch (error) { console.log(error instanceof TypeError); } }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\ntrue\ntrue\ntrue\ntrue\ntrue\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -570,7 +642,7 @@ fn object_assign_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { assignNumbers, assignBools, assignStrings, assignAndRead, identity } from 'jit-object-assign';\nfunction main(): void { const numbers = assignNumbers({ base: 1, chosen: 0 }, { chosen: 2, first: 3 }, { chosen: 4, second: 5 }); console.log(numbers.base); console.log(numbers.chosen); console.log(numbers.first); console.log(numbers.second); console.log(assignBools({ ready: false }, { ready: true }).ready); console.log(assignStrings({ left: 'th' }, { right: 'aw' }).left + assignStrings({ left: 'th' }, { right: 'aw' }).right); console.log(assignAndRead({ chosen: 1 }, { chosen: 2 }, { chosen: 42 })); console.log(identity({ answer: 42 }).answer); }\n",
+        "import { assignNumbers, assignBools, assignStrings, assignAndRead, identity } from 'jit-object-assign';\nfunction main(): void { const numbers = assignNumbers({ base: 1, chosen: 0 }, { chosen: 2, first: 3 }, { chosen: 4, second: 5 }); console.log(numbers.base); console.log(numbers.chosen); console.log(numbers.first); console.log(numbers.second); console.log(assignBools({ ready: false }, { ready: true }).ready); console.log(assignStrings({ left: 'th' }, { right: 'aw' }).left + assignStrings({ left: 'th' }, { right: 'aw' }).right); console.log(assignAndRead({ chosen: 1 }, { chosen: 2 }, { chosen: 42 })); console.log(identity({ answer: 42 }).answer); const partial: Record<string, number> = { first: 1 }; Object.seal(partial); try { assignNumbers(partial, { first: 9, new: 10 }, { first: 99 }); console.log('assign accepted'); } catch (error) { console.log(error instanceof TypeError); } console.log(partial.first, partial.new); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -586,7 +658,7 @@ fn object_assign_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "1\n4\n3\n5\ntrue\nthaw\n42\n42\n"
+        "1\n4\n3\n5\ntrue\nthaw\n42\n42\ntrue\n9 undefined\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -40,6 +40,24 @@ extern "C" fn take_call_error() -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn has_call_error() -> u64 {
+    u64::from(!CALL_ERROR.with(Cell::get).is_null())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_return_if_call_error(code: &mut Vec<u8>, depth: u8) -> Option<()> {
+    emit_spill(code, depth);
+    code.extend_from_slice(&[0x48, 0xb8]);
+    code.extend_from_slice(&(has_call_error as *const () as u64).to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0]);
+    emit_restore(code, depth);
+    code.extend_from_slice(&[0x48, 0x85, 0xc0]);
+    let no_error = emit_near_jump(code, 0x84);
+    code.extend_from_slice(&[0x66, 0x0f, 0xef, 0xc0, 0xc3]);
+    patch_near_jump(code, no_error)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn uncaught_string_throw(value: f64) -> f64 {
     CALL_ERROR.with(|error| error.set(value.to_bits() as usize as *const c_char));
     0.0

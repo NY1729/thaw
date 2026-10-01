@@ -173,6 +173,21 @@ macro_rules! jit_control_flow {
                     | "dynarraypop"
                     | "dynarrayshift"
                     | "dkeys"
+                    | "dnget"
+                    | "dbget"
+                    | "dsget"
+                    | "dngetoptional"
+                    | "dbgetoptional"
+                    | "dsgetoptional"
+                    | "dnset"
+                    | "dbset"
+                    | "dsset"
+                    | "dnpostset"
+                    | "ddelete"
+                    | "dstrictdelete"
+                    | "dhasown"
+                    | "din"
+                    | "dassign"
                     | "dnvalues"
                     | "dbvalues"
                     | "dsvalues"
@@ -194,6 +209,13 @@ macro_rules! jit_control_flow {
                     | "callableset"
             )
                 || token.starts_with("recur")
+                || token.starts_with("dnlset")
+                || token.starts_with("dblset")
+                || token.starts_with("dslset")
+                || token.starts_with("dnput")
+                || token.starts_with("dbput")
+                || token.starts_with("dsput")
+                || matches!(token.as_str(), "dnappend" | "dbappend" | "dsappend")
                 || token.starts_with("rnreduce")
                 || token.starts_with("rnreduceright")
                 || token.starts_with("rnfilter")

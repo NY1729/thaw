@@ -332,7 +332,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_jit_dictionary_get",
-            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into()], false),
+            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -343,6 +343,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     i8_ptr.into(),
                     i8_ptr.into(),
                     f64_type.into(),
+                    i8_ptr.into(),
                 ],
                 false,
             ),
@@ -350,7 +351,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_jit_dictionary_query",
-            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into()], false),
+            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         let number_to_string_type = i8_ptr.fn_type(&[f64_type.into()], false);

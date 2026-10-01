@@ -399,6 +399,18 @@ fn normalize_callable_branches<'a>(
     Some(kind)
 }
 
+fn mark_dictionary_get_presence(operation: &mut [String]) {
+    if let Some(last) = operation.last_mut() {
+        let replacement = match last.as_str() {
+            "dnget" => "dngetoptional",
+            "dbget" => "dbgetoptional",
+            "dsget" => "dsgetoptional",
+            _ => return,
+        };
+        *last = replacement.into();
+    }
+}
+
 fn jit_operation_may_be_absent(operation: &[String]) -> bool {
     if operation.iter().any(|token| {
         matches!(
@@ -440,6 +452,12 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
     matches!(
         token,
         "at"
+            | "dnget"
+            | "dbget"
+            | "dsget"
+            | "dngetoptional"
+            | "dbgetoptional"
+            | "dsgetoptional"
             | "codepointat"
             | "rnat"
             | "rbat"
