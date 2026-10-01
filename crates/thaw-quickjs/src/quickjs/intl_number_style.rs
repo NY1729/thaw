@@ -17,7 +17,32 @@ fn intl_currency_fraction_digits(currency: &str) -> Option<u8> {
     Some(response.payload.get().resolve(currency_type).digits)
 }
 
-fn intl_percent_format(locale_tag: &str, digits: &str) -> Option<String> {
+/// Render the dimension formatter's own parts so a currency's rounded core
+/// and every affix remain intact when grouping is disabled.
+fn intl_style_output(formatted: &impl writeable::Writeable, grouping: bool) -> Option<String> {
+    struct StyleSink { output: String, grouping: bool }
+    impl std::fmt::Write for StyleSink {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.output.push_str(text);
+            Ok(())
+        }
+    }
+    impl writeable::PartsWrite for StyleSink {
+        type SubPartsWrite = Self;
+        fn with_part(
+            &mut self,
+            part: writeable::Part,
+            mut write: impl FnMut(&mut Self) -> std::fmt::Result,
+        ) -> std::fmt::Result {
+            if !self.grouping && part == icu_decimal::parts::GROUP { Ok(()) } else { write(self) }
+        }
+    }
+    let mut sink = StyleSink { output: String::new(), grouping };
+    formatted.write_to_parts(&mut sink).ok()?;
+    Some(sink.output)
+}
+
+fn intl_percent_format(locale_tag: &str, digits: &str, grouping: bool) -> Option<String> {
     use std::str::FromStr;
 
     let locale = icu_locale::Locale::from_str(locale_tag).ok()?;
@@ -34,7 +59,7 @@ fn intl_percent_format(locale_tag: &str, digits: &str) -> Option<String> {
     )
     .ok()?;
     let decimal = icu_decimal::input::Decimal::from_str(digits).ok()?;
-    Some(formatter.format(&decimal).to_string())
+    intl_style_output(&formatter.format(&decimal), grouping)
 }
 
 fn intl_currency_format(
@@ -42,6 +67,7 @@ fn intl_currency_format(
     digits: &str,
     currency: &str,
     display: &str,
+    grouping: bool,
 ) -> Option<String> {
     use icu_experimental::dimension::currency::formatter::{
         CurrencyFormatter, CurrencyFormatterPreferences,
@@ -58,33 +84,27 @@ fn intl_currency_format(
         .ok()?;
     let decimal = icu_decimal::input::Decimal::from_str(digits).ok()?;
     let provider = &thaw_icu_data::ThawIcuDataProvider;
-    let output = match display {
-        "code" => CurrencyFormatter::try_new_code_unstable(provider, prefs, currency, Default::default())
-            .ok()?
-            .format_fixed_decimal(&decimal)
-            .to_string(),
-        "name" => CurrencyFormatter::try_new_name_unstable(provider, prefs, currency)
-            .ok()?
-            .format_fixed_decimal(&decimal)
-            .to_string(),
-        "narrowSymbol" => CurrencyFormatter::try_new_symbol_narrow_unstable(
-            provider,
-            prefs,
-            currency,
-            Default::default(),
-        )
-        .ok()?
-        .format_fixed_decimal(&decimal)
-        .to_string(),
-        _ => CurrencyFormatter::try_new_symbol_unstable(provider, prefs, currency, Default::default())
-            .ok()?
-            .format_fixed_decimal(&decimal)
-            .to_string(),
-    };
-    Some(output)
+    match display {
+        "code" => {
+            let formatter = CurrencyFormatter::try_new_code_unstable(provider, prefs, currency, Default::default()).ok()?;
+            intl_style_output(&formatter.format_fixed_decimal(&decimal), grouping)
+        }
+        "name" => {
+            let formatter = CurrencyFormatter::try_new_name_unstable(provider, prefs, currency).ok()?;
+            intl_style_output(&formatter.format_fixed_decimal(&decimal), grouping)
+        }
+        "narrowSymbol" => {
+            let formatter = CurrencyFormatter::try_new_symbol_narrow_unstable(provider, prefs, currency, Default::default()).ok()?;
+            intl_style_output(&formatter.format_fixed_decimal(&decimal), grouping)
+        }
+        _ => {
+            let formatter = CurrencyFormatter::try_new_symbol_unstable(provider, prefs, currency, Default::default()).ok()?;
+            intl_style_output(&formatter.format_fixed_decimal(&decimal), grouping)
+        }
+    }
 }
 
-fn intl_unit_format(locale_tag: &str, digits: &str, unit: &str, width: &str) -> Option<String> {
+fn intl_unit_format(locale_tag: &str, digits: &str, unit: &str, width: &str, grouping: bool) -> Option<String> {
     use icu_experimental::dimension::provider::units::{
         categorized_display_names::*, display_names::UnitsDisplayNames,
     };
@@ -100,6 +120,7 @@ fn intl_unit_format(locale_tag: &str, digits: &str, unit: &str, width: &str) -> 
         decimal: &icu_decimal::input::Decimal,
         decimal_formatter: &icu_decimal::DecimalFormatter,
         plurals: &icu_plurals::PluralRules,
+        grouping: bool,
     ) -> Option<String>
     where
         M: DynamicDataMarker<DataStruct = UnitsDisplayNames<'static>> + DataMarker,
@@ -117,13 +138,9 @@ fn intl_unit_format(locale_tag: &str, digits: &str, unit: &str, width: &str) -> 
         )
         .ok()?
         .payload;
-        let output =
-            names
-                .get()
-                .get(decimal.into(), plurals)
-                .interpolate((decimal_formatter.format(decimal),))
-                .to_string();
-        Some(output)
+        let output = names.get().get(decimal.into(), plurals)
+            .interpolate((decimal_formatter.format(decimal),));
+        intl_style_output(&output, grouping)
     }
 
     let locale = icu_locale::Locale::from_str(locale_tag).ok()?;
@@ -147,7 +164,7 @@ fn intl_unit_format(locale_tag: &str, digits: &str, unit: &str, width: &str) -> 
         ($($marker:ty),+ $(,)?) => {{
             let mut output = None;
             $(if output.is_none() {
-                output = format::<$marker>(&data_locale, attributes, &decimal, &decimal_formatter, &plurals);
+                output = format::<$marker>(&data_locale, attributes, &decimal, &decimal_formatter, &plurals, grouping);
             })+
             output
         }};
