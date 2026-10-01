@@ -93,6 +93,140 @@ fn dgram_socket_exchanges_real_udp_datagrams() {
 }
 
 #[test]
+fn dgram_receives_multiple_packets_after_send_auto_bind_without_blocking_timers() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_dgram_lifecycle");
+    fs::write(dir.join("index.js"), r#"
+        var dgram = require('node:dgram');
+        module.exports = async function () {
+          var server = dgram.createSocket('udp4'), client = dgram.createSocket('udp4');
+          var invalid = dgram.createSocket('udp4');
+          var events = [], received = [], replies = 0, errors = 0, timers = [];
+          var nativeReceive = __thaw_udp_receive, injected = false;
+          function later(callback, delay) { var timer = setTimeout(callback, delay); timers.push(timer); return timer; }
+          function close(socket) { try { if (socket && !socket._closed) socket.close(); } catch (_) {} }
+          try {
+            __thaw_udp_receive = function(handle) {
+              if (handle === server._handle && !injected) { injected = true; return 'err|EIO|injected read error'; }
+              return nativeReceive(handle);
+            };
+            await new Promise(function(resolve, reject) {
+              later(function() { reject(new Error('UDP receive stalled')); }, 2000);
+              server.on('error', function(error) { if (++errors !== 1 || error.code !== 'EIO') reject(error); });
+              client.on('error', reject);
+              server.on('message', function(message, remote) {
+                received.push(message.toString());
+                server.send('reply' + received.length, remote.port, remote.address);
+                if (received.length === 1) later(function() { client.send('second', server.address().port); }, 5);
+              });
+              client.on('message', function(message) {
+                events.push(message.toString()); replies++;
+                if (replies === 2) { close(client); close(server); resolve(); }
+              });
+              server.bind(0, '127.0.0.1', function() {
+                later(function() { events.push('timer'); client.send('first', server.address().port); }, 5);
+              });
+            });
+            var closed = false;
+            try { client.send('late', 1234); } catch (error) { closed = true; }
+            var invalidPort = false;
+            try { invalid.send('bad', 65537); } catch (error) { invalidPort = error instanceof RangeError; }
+            return [received, events, errors, closed, invalidPort];
+          } finally {
+            __thaw_udp_receive = nativeReceive;
+            timers.forEach(clearTimeout);
+            close(client); close(server); close(invalid);
+          }
+        };
+    "#).unwrap();
+    let empty_node_modules = temp_registry("builtin_dgram_lifecycle_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDgramLifecycle = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseDgramLifecycle").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["first","second"],["timer","reply1","reply2"],1,true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn dgram_bind_retry_and_connect_errors_settle_once_with_native_codes() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_dgram_errors");
+    fs::write(dir.join("index.js"), r#"
+        var dgram = require('node:dgram');
+        module.exports = async function () {
+          var holder = dgram.createSocket('udp4'), socket = dgram.createSocket('udp4');
+          var connector, unavailable, deadline, bindDeadline;
+          var nativeConnect = __thaw_udp_connect, nativeBind = __thaw_udp_bind;
+          var first = 0, second = 0, connectCallbacks = 0, connectEvents = 0, codes = [];
+          function close(value) { try { if (value && !value._closed) value.close(); } catch (_) {} }
+          try {
+            await new Promise(function(resolve, reject) {
+              deadline = setTimeout(function() { reject(new Error('UDP callback stalled')); }, 2000);
+              holder.on('error', reject);
+              socket.on('error', function(error) {
+                codes.push(error.code);
+                socket.bind(0, '127.0.0.1', function() {
+                  second++;
+                  connector = dgram.createSocket('udp4');
+                  connector.on('error', reject);
+                  connector.on('connect', function() { connectEvents++; });
+                  __thaw_udp_connect = function() { return 'err|EAFNOSUPPORT|injected connect error'; };
+                  connector.connect(1234, '127.0.0.1', function(error) {
+                    connectCallbacks++;
+                    codes.push(error.code);
+                    resolve();
+                  });
+                });
+              });
+              holder.bind(0, '127.0.0.1', function() {
+                socket.bind(holder.address().port, '127.0.0.1', function() { first++; });
+              });
+            });
+            clearTimeout(deadline);
+            close(connector); close(socket); close(holder);
+            unavailable = dgram.createSocket('udp4');
+            __thaw_udp_bind = function() { return 'err|EADDRNOTAVAIL|injected bind error'; };
+            var unavailableCode = await new Promise(function(resolve, reject) {
+              bindDeadline = setTimeout(function() { reject(new Error('UDP bind error stalled')); }, 2000);
+              unavailable.on('error', function(error) { resolve(error.code); });
+              unavailable.bind(0, '127.0.0.1');
+            });
+            return [first, second, connectCallbacks, connectEvents, codes, unavailableCode];
+          } finally {
+            __thaw_udp_connect = nativeConnect;
+            __thaw_udp_bind = nativeBind;
+            clearTimeout(deadline); clearTimeout(bindDeadline);
+            close(connector); close(unavailable); close(socket); close(holder);
+          }
+        };
+    "#).unwrap();
+    let empty_node_modules = temp_registry("builtin_dgram_errors_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDgramErrors = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseDgramErrors").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[0,1,1,0,["EADDRINUSE","EAFNOSUPPORT"],"EADDRNOTAVAIL"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn stream_consumers_collect_streams_and_async_iterables() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_stream_consumers");
