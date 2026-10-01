@@ -23,8 +23,14 @@
         return new Blob([this.__thawBytes.slice(from, Math.max(from, to))], { type });
       }
       stream() {
-        const bytes = this.__thawBytes.slice(); let done = false;
-        return { getReader() { return { read() { if (done) return Promise.resolve({ value: undefined, done: true }); done = true; return Promise.resolve({ value: bytes, done: false }); }, releaseLock() {} }; }, [Symbol.asyncIterator]() { return { next() { if (done) return Promise.resolve({ value: undefined, done: true }); done = true; return Promise.resolve({ value: bytes, done: false }); }, [Symbol.asyncIterator]() { return this; } }; } };
+        const bytes = this.__thawBytes.slice();
+        return new ReadableStream({
+          type: 'bytes',
+          pull(controller) {
+            if (bytes.byteLength) controller.enqueue(bytes);
+            controller.close();
+          },
+        });
       }
     };
     globalThis.File = class File extends Blob {
