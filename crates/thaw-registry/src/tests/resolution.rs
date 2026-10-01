@@ -2935,6 +2935,60 @@ fn declaration_reexport_path_is_canonicalized_for_cycle_detection() {
 }
 
 #[test]
+fn relative_declaration_directory_prefers_manifest_types_over_index() {
+    // Unrun regression: a relative directory can have both a fallback index
+    // and an explicit package type entry. An adjacent file still wins first.
+    let root = temp_registry("relative-manifest-types");
+    let entry = root.join("entry.d.ts");
+    let feature = root.join("feature");
+    fs::create_dir_all(feature.join("types")).unwrap();
+    fs::write(&entry, "export * from './feature';").unwrap();
+    fs::write(feature.join("package.json"), r#"{"types":"./types/public.d.ts"}"#).unwrap();
+    fs::write(feature.join("types/public.d.ts"), "export function chosen(): string;").unwrap();
+    fs::write(feature.join("index.d.ts"), "export function fallback(): number;").unwrap();
+    assert_eq!(
+        declaration_reexport_path(&entry, "./feature"),
+        Some(feature.join("types/public.d.ts").canonicalize().unwrap())
+    );
+    fs::write(root.join("feature.d.ts"), "export function adjacent(): boolean;").unwrap();
+    assert_eq!(
+        declaration_reexport_path(&entry, "./feature"),
+        Some(root.join("feature.d.ts").canonicalize().unwrap())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn named_declaration_hop_follows_wildcard_function_and_superclass() {
+    // Unrun regression: the named source is a barrel rather than the final
+    // declaration file. `Base` is supporting type information, not an alias
+    // of the selected `Derived` declaration.
+    let root = temp_registry("named-hop-wildcard");
+    let entry = root.join("entry.d.ts");
+    let barrel = root.join("barrel.d.ts");
+    fs::write(&entry, "export { parse } from './barrel';\nexport { Derived as PublicDerived } from './barrel';\n").unwrap();
+    fs::write(&barrel, "export * from './functions';\nexport * from './derived';\n").unwrap();
+    fs::write(root.join("functions.d.ts"), "export declare function parse(value: string): number;").unwrap();
+    fs::write(root.join("derived.d.ts"), "import { Base } from './base';\nexport declare class Derived extends Base { own(): string; }").unwrap();
+    fs::write(root.join("base.d.ts"), "export declare class Base { inherited(): number; }").unwrap();
+    let mut visited = std::collections::BTreeSet::new();
+    let functions = reexported_function_declarations(&entry, "parse", &mut visited).unwrap();
+    assert_eq!(functions.len(), 1, "{functions:?}");
+    assert!(functions[0].contains("function parse(value: string): number"), "{functions:?}");
+    let classes = reexported_class_or_interface_declarations(&entry, "PublicDerived").unwrap();
+    assert!(classes.iter().any(|item| item.contains("class Derived extends Base")), "{classes:?}");
+    assert!(classes.iter().any(|item| item.contains("class Base") && item.contains("inherited")), "{classes:?}");
+    let aliased = reexported_declarations_as(classes, "PublicDerived", &entry, false).join("\n");
+    assert!(aliased.contains("Derived as PublicDerived"), "{aliased}");
+    assert!(aliased.contains("class Base") && !aliased.contains("Base as PublicDerived"), "{aliased}");
+    let flattened = dts_source_with_reexported_functions(&entry, &fs::read_to_string(&entry).unwrap()).unwrap();
+    assert!(flattened.contains("function parse(value: string): number"), "{flattened}");
+    assert!(flattened.contains("Derived as PublicDerived"), "{flattened}");
+    assert!(flattened.contains("class Base") && !flattened.contains("Base as PublicDerived"), "{flattened}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn selects_a_single_addon_from_a_hidden_generated_package() {
     let node_modules = temp_registry("generated_native_addon");
     let addon = node_modules.join(".generated/client/engine.so.node");
