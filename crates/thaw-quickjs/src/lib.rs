@@ -618,37 +618,37 @@ fn macos_processor_ticks_map_to_node_milliseconds() {
 }
 
 #[cfg(target_os = "macos")]
+extern "C" {
+    fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sysctl_bytes(name: &std::ffi::CStr) -> Option<Vec<u8>> {
+    let mut size = 0usize;
+    if unsafe { libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    if size == 0 || size > 4096 { return None; }
+    let mut value = vec![0u8; size];
+    if unsafe { libc::sysctlbyname(name.as_ptr(), value.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    if size > value.len() { return None; }
+    value.truncate(size);
+    Some(value)
+}
+
+#[cfg(target_os = "macos")]
 fn macos_cpus() -> Vec<serde_json::Value> {
-    use std::ffi::CStr as FfiCStr;
-
-    extern "C" {
-        fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
-    }
-
-    unsafe fn sysctl_bytes(name: &FfiCStr) -> Option<Vec<u8>> {
-        let mut size = 0usize;
-        if unsafe { libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 {
-            return None;
-        }
-        if size == 0 || size > 4096 { return None; }
-        let mut value = vec![0u8; size];
-        if unsafe { libc::sysctlbyname(name.as_ptr(), value.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
-            return None;
-        }
-        if size > value.len() { return None; }
-        value.truncate(size);
-        Some(value)
-    }
-
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     let Ok(hz) = u64::try_from(hz) else { return Vec::new(); };
     if hz == 0 { return Vec::new(); }
-    let model = unsafe {
-        sysctl_bytes(c"machdep.cpu.brand_string")
-            .or_else(|| sysctl_bytes(c"hw.model"))
+    let model = {
+        macos_sysctl_bytes(c"machdep.cpu.brand_string")
+            .or_else(|| macos_sysctl_bytes(c"hw.model"))
     }.map(|bytes| String::from_utf8_lossy(bytes.split(|byte| *byte == 0).next().unwrap_or(&[])).into_owned())
         .unwrap_or_else(|| std::env::consts::ARCH.to_string());
-    let speed = unsafe { sysctl_bytes(c"hw.cpufrequency") }
+    let speed = macos_sysctl_bytes(c"hw.cpufrequency")
         .and_then(|bytes| bytes.try_into().ok().map(u64::from_ne_bytes))
         .unwrap_or(0) / 1_000_000;
     let mut count: libc::natural_t = 0;
@@ -782,16 +782,146 @@ fn windows_cpus() -> Vec<serde_json::Value> {
     }).collect()
 }
 
-fn os_info_json() -> String {
-    let platform = match std::env::consts::OS {
+#[cfg(target_os = "macos")]
+fn macos_memory_bytes(free_pages: u64, page_size: u64) -> u64 {
+    free_pages.saturating_mul(page_size)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_uptime_seconds(now: f64, boot: f64) -> f64 {
+    (now - boot).max(0.0)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn macos_dynamic_units_are_bytes_and_seconds() {
+    assert_eq!(macos_memory_bytes(25, 16_384), 409_600);
+    assert_eq!(macos_uptime_seconds(1_234.5, 1_000.0), 234.5);
+    assert_eq!(macos_uptime_seconds(900.0, 1_000.0), 0.0);
+}
+
+#[cfg(target_os = "macos")]
+fn macos_dynamic_info() -> std::io::Result<(u64, u64, f64, Vec<f64>)> {
+    let total = macos_sysctl_bytes(c"hw.memsize")
+        .and_then(|bytes| bytes.try_into().ok().map(u64::from_ne_bytes))
+        .ok_or_else(|| std::io::Error::other("cannot read hw.memsize"))?;
+    let pagesize = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let pagesize = u64::try_from(pagesize)
+        .ok().filter(|value| *value > 0)
+        .ok_or_else(|| std::io::Error::other("cannot read page size"))?;
+    let mut info: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let host = unsafe { libc::mach_host_self() };
+    let status = unsafe { libc::host_statistics64(host, libc::HOST_VM_INFO64,
+        (&mut info as *mut libc::vm_statistics64).cast(), &mut count) };
+    unsafe { mach_port_deallocate(libc::mach_task_self(), host) };
+    if status != 0 || count < libc::HOST_VM_INFO64_COUNT {
+        return Err(std::io::Error::other("cannot read host VM statistics"));
+    }
+    let free = macos_memory_bytes(info.free_count as u64, pagesize);
+    let boot = macos_sysctl_bytes(c"kern.boottime")
+        .filter(|bytes| bytes.len() == std::mem::size_of::<libc::timeval>())
+        .ok_or_else(|| std::io::Error::other("cannot read kern.boottime"))?;
+    let boot = unsafe { std::ptr::read_unaligned(boot.as_ptr().cast::<libc::timeval>()) };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| std::io::Error::other(error.to_string()))?.as_secs_f64();
+    let uptime = macos_uptime_seconds(now, boot.tv_sec as f64 + boot.tv_usec as f64 / 1_000_000.0);
+    let mut averages = [0.0f64; 3];
+    if unsafe { libc::getloadavg(averages.as_mut_ptr(), 3) } != 3 {
+        return Err(std::io::Error::other("cannot read load averages"));
+    }
+    Ok((total, free, uptime, averages.to_vec()))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn macos_dynamic_info_reads_native_current_values() {
+    let (total, free, uptime, load) = macos_dynamic_info().unwrap();
+    assert!(total > 0 && free <= total);
+    assert!(uptime > 0.0);
+    assert_eq!(load.len(), 3);
+    assert!(load.iter().all(|value| value.is_finite() && *value >= 0.0));
+}
+
+#[cfg(target_os = "windows")]
+fn windows_uptime_seconds(milliseconds: u64) -> f64 {
+    milliseconds as f64 / 1000.0
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_uptime_uses_milliseconds_and_load_is_unavailable() {
+    assert_eq!(windows_uptime_seconds(12_345), 12.345);
+}
+
+#[cfg(target_os = "windows")]
+fn windows_dynamic_info() -> std::io::Result<(u64, u64, f64, Vec<f64>)> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct MemoryStatus {
+        length: u32,
+        memory_load: u32,
+        total_physical: u64,
+        available_physical: u64,
+        total_page_file: u64,
+        available_page_file: u64,
+        total_virtual: u64,
+        available_virtual: u64,
+        available_extended_virtual: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
+        fn GetTickCount64() -> u64;
+    }
+    let mut status = MemoryStatus::default();
+    status.length = std::mem::size_of::<MemoryStatus>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // libuv reports no load averages on Windows.
+    Ok((status.total_physical, status.available_physical,
+        windows_uptime_seconds(unsafe { GetTickCount64() }), vec![0.0; 3]))
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn windows_dynamic_info_reads_memory_and_uptime_with_no_load_average() {
+    let (total, free, uptime, load) = windows_dynamic_info().unwrap();
+    assert!(total > 0 && free <= total);
+    assert!(uptime > 0.0);
+    assert_eq!(load, vec![0.0; 3]);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn os_info_json() -> rquickjs::Result<String> {
+    Err(rquickjs::Error::new_from_js_message(
+        "OS info", "supported host statistics", "unsupported operating system",
+    ))
+}
+
+fn os_platform() -> &'static str {
+    match std::env::consts::OS {
         "macos" => "darwin",
+        "windows" => "win32",
         value => value,
-    };
-    let arch = match std::env::consts::ARCH {
+    }
+}
+
+fn os_arch() -> &'static str {
+    match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",
         value => value,
-    };
+    }
+}
+
+fn os_static_info() -> serde_json::Value {
+    let platform = os_platform();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let tmp = std::env::var("TMPDIR")
+        .or_else(|_| std::env::var("TMP"))
+        .unwrap_or_else(|_| "/tmp".to_string());
     let mut hostname = std::fs::read_to_string("/etc/hostname")
         .unwrap_or_else(|_| "localhost".to_string())
         .trim()
@@ -799,16 +929,37 @@ fn os_info_json() -> String {
     if hostname.is_empty() {
         hostname = "localhost".to_string();
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let tmp = std::env::var("TMPDIR")
-        .or_else(|_| std::env::var("TMP"))
-        .unwrap_or_else(|_| "/tmp".to_string());
+    serde_json::json!({
+        "platform": platform,
+        "arch": os_arch(),
+        "type": if platform == "linux" { "Linux" } else { platform },
+        "hostname": hostname, "homedir": home, "tmpdir": tmp,
+        "release": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim(),
+        "version": std::fs::read_to_string("/proc/sys/kernel/version").unwrap_or_default().trim(),
+        "machine": std::env::consts::ARCH,
+        "endianness": if cfg!(target_endian = "little") { "LE" } else { "BE" },
+        "userInfo": { "username": std::env::var("USER").unwrap_or_default(),
+            "homedir": home, "shell": std::env::var("SHELL").unwrap_or_default(), "uid": 0, "gid": 0 },
+        "glibcVersionRuntime": glibc_version_runtime(),
+    })
+}
+
+fn os_identity_json() -> String {
+    os_static_info().to_string()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn os_info_json() -> rquickjs::Result<String> {
+    let arch = os_arch();
+    #[cfg(target_os = "linux")]
     let cpu_info = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    #[cfg(target_os = "linux")]
     let model = cpu_info
         .lines()
         .find_map(|line| line.strip_prefix("model name\t: "))
         .unwrap_or(arch)
         .to_string();
+    #[cfg(target_os = "linux")]
     let speed = cpu_info
         .lines()
         .find_map(|line| line.strip_prefix("cpu MHz\t\t: "))
@@ -837,41 +988,48 @@ fn os_info_json() -> String {
     let cpus = macos_cpus();
     #[cfg(target_os = "windows")]
     let cpus = windows_cpus();
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    let cpus = (0..std::thread::available_parallelism().map(usize::from).unwrap_or(1))
-        .map(|_| serde_json::json!({ "model": model, "speed": speed,
-            "times": { "user": 0, "nice": 0, "sys": 0, "idle": 0, "irq": 0 } }))
-        .collect::<Vec<_>>();
-    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    let memory_value = |name: &str| {
-        meminfo
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|value| value.split_whitespace().next())
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0)
-            * 1024
+    #[cfg(target_os = "linux")]
+    let (totalmem, freemem, uptime, loadavg) = {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let memory_value = |name: &str| {
+            meminfo
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                * 1024
+        };
+        let uptime = std::fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|value| value.split_whitespace().next()?.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let loadavg = std::fs::read_to_string("/proc/loadavg")
+            .unwrap_or_default()
+            .split_whitespace()
+            .take(3)
+            .filter_map(|value| value.parse::<f64>().ok())
+            .collect::<Vec<_>>();
+        (memory_value("MemTotal:"), memory_value("MemAvailable:"), uptime, loadavg)
     };
-    let uptime = std::fs::read_to_string("/proc/uptime")
-        .ok()
-        .and_then(|value| value.split_whitespace().next()?.parse::<f64>().ok())
-        .unwrap_or(0.0);
-    let loadavg = std::fs::read_to_string("/proc/loadavg")
-        .unwrap_or_default()
-        .split_whitespace()
-        .take(3)
-        .filter_map(|value| value.parse::<f64>().ok())
-        .collect::<Vec<_>>();
-    serde_json::json!({
-        "platform": platform, "arch": arch, "type": if platform == "linux" { "Linux" } else { platform },
-        "hostname": hostname, "homedir": home, "tmpdir": tmp, "release": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim(),
-        "version": std::fs::read_to_string("/proc/sys/kernel/version").unwrap_or_default().trim(), "machine": std::env::consts::ARCH,
-        "endianness": if cfg!(target_endian = "little") { "LE" } else { "BE" }, "cpus": cpus,
-        "availableParallelism": std::thread::available_parallelism().map(usize::from).unwrap_or(1),
-        "totalmem": memory_value("MemTotal:"), "freemem": memory_value("MemAvailable:"), "uptime": uptime, "loadavg": loadavg,
-        "userInfo": { "username": std::env::var("USER").unwrap_or_default(), "homedir": home, "shell": std::env::var("SHELL").unwrap_or_default(), "uid": 0, "gid": 0 },
-        "glibcVersionRuntime": glibc_version_runtime(),
-    }).to_string()
+    #[cfg(target_os = "macos")]
+    let (totalmem, freemem, uptime, loadavg) = macos_dynamic_info().map_err(|error| {
+        rquickjs::Error::new_from_js_message("OS info", "macOS host statistics", error.to_string())
+    })?;
+    #[cfg(target_os = "windows")]
+    let (totalmem, freemem, uptime, loadavg) = windows_dynamic_info().map_err(|error| {
+        rquickjs::Error::new_from_js_message("OS info", "Windows host statistics", error.to_string())
+    })?;
+    let mut info = os_static_info();
+    let fields = info.as_object_mut().expect("static OS identity is an object");
+    fields.insert("cpus".to_string(), serde_json::json!(cpus));
+    fields.insert("availableParallelism".to_string(),
+        serde_json::json!(std::thread::available_parallelism().map(usize::from).unwrap_or(1)));
+    fields.insert("totalmem".to_string(), serde_json::json!(totalmem));
+    fields.insert("freemem".to_string(), serde_json::json!(freemem));
+    fields.insert("uptime".to_string(), serde_json::json!(uptime));
+    fields.insert("loadavg".to_string(), serde_json::json!(loadavg));
+    Ok(info.to_string())
 }
 
 /// Backs `process.report.getReport().header.glibcVersionRuntime` -- real
