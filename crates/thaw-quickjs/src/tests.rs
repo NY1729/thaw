@@ -4607,6 +4607,215 @@ fn stream_start_exceptions_escape_constructors_synchronously() {
 }
 
 #[test]
+fn writable_pending_writes_skip_sink_after_error_or_abort() {
+    assert_eq!(load(r#"
+      async function writablePendingWriteStops() {
+        const events = [], error = new Error('controller');
+        let controller;
+        const writer = new WritableStream({
+          start(value) { controller = value; },
+          write(chunk) { events.push(['write', chunk]); },
+          abort(reason) { events.push(['abort', reason]); }
+        }).getWriter();
+        const pending = writer.write('skipped');
+        controller.error(error);
+        const writeError = await pending.then(() => false, reason => reason === error);
+        const closedError = await writer.closed.then(() => false, reason => reason === error);
+        const second = new WritableStream({
+          write(chunk) { events.push(['second-write', chunk]); },
+          abort(reason) { events.push(['second-abort', reason]); }
+        }).getWriter();
+        const queued = second.write('skipped');
+        const abort = second.abort('stop');
+        const queuedError = await queued.then(() => false, reason => reason === 'stop');
+        await abort;
+        const abortClosed = await second.closed.then(() => false, reason => reason === 'stop');
+        return [events, writeError, closedError, queuedError, abortClosed];
+      }
+    "#), 1);
+    assert_eq!(call("writablePendingWriteStops", "[]"),
+        r#"[[["second-abort","stop"]],true,true,true,true]"#);
+}
+
+#[test]
+fn writable_queued_writes_drain_before_close_and_reject_on_failure() {
+    assert_eq!(load(r#"
+      async function writableCloseAfterQueuedWrites() {
+        const events = [];
+        const writer = new WritableStream({
+          write(chunk) { events.push(chunk); },
+          close() { events.push('close'); }
+        }).getWriter();
+        const first = writer.write('a'), second = writer.write('b'), close = writer.close();
+        await Promise.all([first, second, close, writer.closed]);
+        const failure = new Error('write failure');
+        const failedWriter = new WritableStream({
+          write() { throw failure; },
+          close() { events.push('wrong-close'); }
+        }).getWriter();
+        const failedWrite = failedWriter.write('x'), failedClose = failedWriter.close();
+        return [events,
+          await failedWrite.then(() => false, error => error === failure),
+          await failedClose.then(() => false, error => error === failure),
+          await failedWriter.closed.then(() => false, error => error === failure)];
+      }
+    "#), 1);
+    assert_eq!(call("writableCloseAfterQueuedWrites", "[]"),
+        r#"[["a","b","close"],true,true,true]"#);
+}
+
+#[test]
+fn writable_abort_failure_settles_writer_closed_with_original_reason() {
+    assert_eq!(load(r#"
+      async function writableAbortFailureSettlement() {
+        const reason = new Error('abort reason'), failure = new Error('sink failure');
+        const events = [];
+        const writer = new WritableStream({ abort(value) { events.push(value === reason); throw failure; } }).getWriter();
+        const abortFailure = await writer.abort(reason).then(() => false, error => error === failure);
+        const closedReason = await writer.closed.then(() => false, error => error === reason);
+        const secondAbort = await writer.abort('again').then(() => true, () => false);
+        return [events, abortFailure, closedReason, secondAbort];
+      }
+    "#), 1);
+    assert_eq!(call("writableAbortFailureSettlement", "[]"),
+        "[[true],true,true,true]");
+}
+
+#[test]
+fn writable_abort_during_in_flight_close_does_not_call_sink_abort() {
+    assert_eq!(load(r#"
+      async function writableAbortDuringClose() {
+        const events = [];
+        let finish, resolveEntered;
+        const entered = new Promise(resolve => { resolveEntered = resolve; });
+        const writer = new WritableStream({
+          close() { events.push('close'); resolveEntered(); return new Promise(resolve => { finish = resolve; }); },
+          abort() { events.push('wrong-abort'); }
+        }).getWriter();
+        const closing = writer.close();
+        await entered;
+        const aborting = writer.abort('stop');
+        finish();
+        await Promise.all([closing, aborting, writer.closed]);
+        return events;
+      }
+    "#), 1);
+    assert_eq!(call("writableAbortDuringClose", "[]"), r#"["close"]"#);
+}
+
+#[test]
+fn writable_close_queued_keeps_controller_desired_size() {
+    assert_eq!(load(r#"
+      function writableDesiredSizeWhileClosing() {
+        const writer = new WritableStream({ write() {} }, { highWaterMark: 3 }).getWriter();
+        const pending = writer.write('x');
+        const before = writer.desiredSize;
+        const closing = writer.close();
+        const during = writer.desiredSize;
+        pending.catch(() => {}); closing.catch(() => {});
+        return [before, during];
+      }
+    "#), 1);
+    assert_eq!(call("writableDesiredSizeWhileClosing", "[]"), "[2,2]");
+}
+
+#[test]
+fn writable_in_flight_close_success_overrides_controller_error() {
+    assert_eq!(load(r#"
+      async function writableCloseWinsControllerError() {
+        let controller, finish, resolveEntered;
+        const entered = new Promise(resolve => { resolveEntered = resolve; });
+        const error = new Error('controller');
+        const writer = new WritableStream({
+          start(value) { controller = value; },
+          close() { resolveEntered(); return new Promise(resolve => { finish = resolve; }); }
+        }).getWriter();
+        const closing = writer.close();
+        await entered;
+        controller.error(error);
+        finish();
+        const closeResult = await closing.then(() => true, () => false);
+        const closedResult = await writer.closed.then(() => true, () => false);
+        return [closeResult, closedResult, writer.desiredSize];
+      }
+    "#), 1);
+    assert_eq!(call("writableCloseWinsControllerError", "[]"), "[true,true,0]");
+}
+
+#[test]
+fn writable_in_flight_close_failure_preserves_stored_error() {
+    assert_eq!(load(r#"
+      async function writableCloseFailsAfterAbort() {
+        let controller, fail, resolveEntered;
+        const entered = new Promise(resolve => { resolveEntered = resolve; });
+        const reason = new Error('abort'), closeError = new Error('close');
+        const writer = new WritableStream({
+          start(value) { controller = value; },
+          close() { resolveEntered(); return new Promise((resolve, reject) => { fail = reject; }); },
+          abort() { throw new Error('must not run'); }
+        }).getWriter();
+        const closing = writer.close();
+        await entered;
+        const aborting = writer.abort(reason);
+        fail(closeError);
+        return [
+          await closing.then(() => false, error => error === closeError),
+          await aborting.then(() => false, error => error === closeError),
+          await writer.closed.then(() => false, error => error === reason),
+          controller.signal.aborted
+        ];
+      }
+    "#), 1);
+    assert_eq!(call("writableCloseFailsAfterAbort", "[]"), "[true,true,true,true]");
+}
+
+#[test]
+fn writable_in_flight_close_failure_after_controller_error() {
+    assert_eq!(load(r#"
+      async function writableCloseFailsAfterControllerError() {
+        let controller, fail, resolveEntered;
+        const entered = new Promise(resolve => { resolveEntered = resolve; });
+        const primary = new Error('controller'), closeError = new Error('close');
+        const writer = new WritableStream({
+          start(value) { controller = value; },
+          close() { resolveEntered(); return new Promise((resolve, reject) => { fail = reject; }); }
+        }).getWriter();
+        const closing = writer.close();
+        await entered;
+        controller.error(primary);
+        fail(closeError);
+        return [
+          await closing.then(() => false, error => error === closeError),
+          await writer.closed.then(() => false, error => error === primary),
+          writer.desiredSize
+        ];
+      }
+    "#), 1);
+    assert_eq!(call("writableCloseFailsAfterControllerError", "[]"), "[true,true,null]");
+}
+
+#[test]
+fn writable_abort_listener_reentry_shares_pending_abort() {
+    assert_eq!(load(r#"
+      async function writableAbortListenerReentry() {
+        let controller, nested;
+        const calls = [];
+        const writer = new WritableStream({
+          start(value) { controller = value; },
+          abort(reason) { calls.push(reason); }
+        }).getWriter();
+        controller.signal.addEventListener('abort', () => { nested = writer.abort('other'); });
+        const outer = writer.abort('first');
+        const same = nested === outer;
+        await outer;
+        const closed = await writer.closed.then(() => false, reason => reason === 'first');
+        return [same, calls, closed];
+      }
+    "#), 1);
+    assert_eq!(call("writableAbortListenerReentry", "[]"), r#"[true,["first"],true]"#);
+}
+
+#[test]
 fn crypto_buffer_regressions() {
     assert_eq!(
         load(r#"async function cryptoBufferRegressions() {
