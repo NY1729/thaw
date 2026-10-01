@@ -1370,6 +1370,32 @@ fn installed_package_inlines_same_file_function_aliases() {
 }
 
 #[test]
+fn declaration_alias_uses_ast_identifier_after_comments_and_newlines() {
+    // Unrun regression: keyword text in comments and whitespace before a
+    // binding cannot select the rename range.
+    let scratch = temp_registry("installed-dts-ast-alias-scratch");
+    let registry = temp_registry("installed-dts-ast-alias-registry");
+    let package = scratch.join("node_modules/ast-alias");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"ast-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { original as renamed, tabbed as newTabbed } from './impl';\n").unwrap();
+    fs::write(package.join("impl.d.ts"),
+        "export declare function /* class Wrong */\noriginal(value: string): string;\n\
+         export declare function\ttabbed(value: number): number;\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "ast-alias").unwrap();
+    let declarations = resolve(&registry, "ast-alias").unwrap().dts_source;
+    assert!(declarations.contains("renamed(value: string): string"), "{declarations}");
+    assert!(declarations.contains("newTabbed(value: number): number"), "{declarations}");
+    assert!(!declarations.contains("Wrong(value:"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_a_callable_const_reexported_from_another_file() {
     let scratch = temp_registry("installed-dts-reexported-callable-const-scratch");
     let registry = temp_registry("installed-dts-reexported-callable-const-registry");
@@ -1986,18 +2012,26 @@ fn installed_package_inlines_triple_slash_referenced_declarations() {
     .unwrap();
     fs::write(
         package.join("index.d.ts"),
-        "/// <reference path=\"./common/array.d.ts\" />\n\
+        "// Copyright holder\n\
+         /* License notice\n\
+            continues here. */\n\
+         /// <reference path=\"./common/array.d.ts\" />\n\
          export = _;\n\
          export as namespace _;\n\
          declare const _: _.StatStatic;\n\
          declare namespace _ {\n\
-             interface StatStatic {}\n\
+             interface StatStatic { options(value: Options): Tag; }\n\
          }\n",
     )
     .unwrap();
     fs::write(
         package.join("common/array.d.ts"),
-        "declare module \"../index\" {\n\
+        "// Referenced file notice\n\
+         /// <reference path=\"./deep.d.ts\" />\n\
+         interface Options { enabled: boolean; }\n\
+         type Tag = string;\n\
+         declare namespace Extras { interface Nested { ready: boolean; } }\n\
+         declare module \"../index\" {\n\
              interface StatStatic {\n\
                  sum(values: number[]): number;\n\
              }\n\
@@ -2007,6 +2041,13 @@ fn installed_package_inlines_triple_slash_referenced_declarations() {
          }\n",
     )
     .unwrap();
+    fs::write(
+        package.join("common/deep.d.ts"),
+        "interface DeepOption { depth: number; }\n\
+         declare module '../index' {\n\
+             interface StatStatic { deep(value: DeepOption): string; }\n\
+         }\n",
+    ).unwrap();
     fs::write(
         package.join("index.js"),
         "module.exports = { sum: function(values) { return values.reduce(function(a, b) { return a + b; }, 0); } };\n",
@@ -2023,6 +2064,11 @@ fn installed_package_inlines_triple_slash_referenced_declarations() {
         declarations.contains("sum(values: number[]): number"),
         "{declarations}"
     );
+    for required in ["interface Options", "type Tag", "namespace Extras",
+        "interface DeepOption", "deep(value: DeepOption): string"] {
+        assert!(declarations.contains(required), "missing {required}: {declarations}");
+    }
+    assert!(!declarations.contains("declare module '../index'"), "{declarations}");
     assert!(
         declarations.contains("declare module \"unrelated-package\""),
         "{declarations}"
