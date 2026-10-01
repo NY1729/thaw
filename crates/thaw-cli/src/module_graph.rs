@@ -131,13 +131,7 @@ fn resolve_relative(from: &Path, specifier: &str) -> Result<PathBuf, String> {
             "user modules only support relative imports, not `{specifier}`; use `--use` for registry packages"
         ));
     }
-    let base = from.parent().unwrap_or_else(|| Path::new("."));
-    let raw = base.join(specifier);
-    let candidates = if raw.extension().is_some() {
-        vec![raw]
-    } else {
-        vec![raw.with_extension("ts"), raw.join("index.ts")]
-    };
+    let candidates = relative_candidates(from, specifier);
     for candidate in &candidates {
         if candidate.is_file() {
             return candidate
@@ -154,6 +148,17 @@ fn resolve_relative(from: &Path, specifier: &str) -> Result<PathBuf, String> {
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+fn relative_candidates(from: &Path, specifier: &str) -> Vec<PathBuf> {
+    let raw = normalize_absolute_path(
+        &from.parent().unwrap_or_else(|| Path::new(".")).join(specifier)
+    );
+    if raw.extension().is_some() {
+        vec![raw]
+    } else {
+        vec![raw.with_extension("ts"), raw.join("index.ts")]
+    }
 }
 
 fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
@@ -318,7 +323,9 @@ fn load_module(
     modules: &mut Vec<LoadedModule>,
     loaded: &mut HashMap<PathBuf, usize>,
     visiting: &mut Vec<PathBuf>,
+    watched: &mut HashSet<PathBuf>,
 ) -> Result<usize, String> {
+    watched.insert(path.clone());
     if let Some(index) = loaded.get(&path) {
         return Ok(*index);
     }
@@ -350,9 +357,11 @@ fn load_module(
         if !specifier.starts_with('.') {
             continue;
         }
-        let dependency_path = resolve_relative(&path, &specifier)
-            .map_err(|error| format!("{}: {error}", source_location(&path, &source, &specifier)))?;
-        let dependency = load_module(dependency_path, None, transform, modules, loaded, visiting)?;
+        let dependency_path = resolve_relative(&path, &specifier).map_err(|error| {
+            watched.extend(relative_candidates(&path, &specifier));
+            format!("{}: {error}", source_location(&path, &source, &specifier))
+        })?;
+        let dependency = load_module(dependency_path, None, transform, modules, loaded, visiting, watched)?;
         dependencies.insert(specifier, dependency);
     }
     visiting.pop();
@@ -957,11 +966,27 @@ pub fn runtime_features(
         &mut modules,
         &mut HashMap::new(),
         &mut Vec::new(),
+        &mut HashSet::new(),
     )?;
     Ok(modules
         .iter()
         .flat_map(|module| thaw_bridge::required_runtime_features(&module.source))
         .collect())
+}
+
+/// The same resolved user-module paths consumed by the build, for `dev`'s
+/// watch set. Re-resolving after a rebuild picks up newly imported modules.
+pub fn source_paths(entry: &Path) -> Result<(Vec<PathBuf>, bool), String> {
+    let entry = entry.canonicalize()
+        .map_err(|error| format!("failed to resolve `{}`: {error}", entry.display()))?;
+    let mut modules = Vec::new();
+    let mut watched = HashSet::new();
+    // A missing newly imported module is itself a watch target. The build
+    // still reports the resolver error; `dev` keeps listening for its creation.
+    let complete = load_module(entry, None, None, &mut modules, &mut HashMap::new(), &mut Vec::new(), &mut watched).is_ok();
+    let mut paths = watched.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    Ok((paths, complete))
 }
 
 pub fn external_specifiers(
@@ -979,6 +1004,7 @@ pub fn external_specifiers(
         &mut modules,
         &mut HashMap::new(),
         &mut Vec::new(),
+        &mut HashSet::new(),
     )?;
     let mut result = Vec::new();
     for module in modules {
@@ -1088,6 +1114,7 @@ pub fn bundle_with_source_transform(
         &mut modules,
         &mut loaded,
         &mut Vec::new(),
+        &mut HashSet::new(),
     )?;
 
     let mut exports: Vec<HashMap<String, String>> = vec![HashMap::new(); modules.len()];

@@ -603,6 +603,21 @@ fn run_registry_add(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn build_option_value(args: &[String], index: usize) -> Result<Option<&str>, String> {
+    let message = match args[index].as_str() {
+        "-o" | "--output" => "-o requires a path argument",
+        "--link" => "--link requires a path argument",
+        "--bridge" => "--bridge requires a path argument",
+        "--ffi-metadata" => "--ffi-metadata requires a path argument",
+        "--registry" => "--registry requires a path argument",
+        "--use" => "--use requires a package name argument",
+        "--assets" => "--assets requires a directory argument",
+        "--vite" => "--vite requires a directory argument",
+        _ => return Ok(None),
+    };
+    args.get(index + 1).map(|value| Some(value.as_str())).ok_or_else(|| message.to_string())
+}
+
 fn run_build(args: &[String]) -> Result<(), String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
@@ -623,50 +638,44 @@ fn run_build(args: &[String]) -> Result<(), String> {
     while i < args.len() {
         match args[i].as_str() {
             "-o" | "--output" => {
+                let value = build_option_value(args, i)?.unwrap();
                 i += 1;
-                let value = args.get(i).ok_or("-o requires a path argument")?;
                 output = Some(PathBuf::from(value));
             }
             "--link" => {
+                let value = build_option_value(args, i)?.unwrap();
                 i += 1;
-                let value = args.get(i).ok_or("--link requires a path argument")?;
                 extra_links.push(PathBuf::from(value));
             }
             "--bridge" => {
+                let value = build_option_value(args, i)?.unwrap();
                 i += 1;
-                let value = args.get(i).ok_or("--bridge requires a path argument")?;
                 bridge_dts.push(PathBuf::from(value));
             }
             "--ffi-metadata" => {
+                let value = build_option_value(args, i)?.unwrap();
                 i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or("--ffi-metadata requires a path argument")?;
                 ffi_metadata.push(PathBuf::from(value));
             }
             "--registry" => {
+                let value = build_option_value(args, i)?.unwrap();
                 i += 1;
-                let value = args.get(i).ok_or("--registry requires a path argument")?;
                 registry_dir = PathBuf::from(value);
                 registry_was_explicit = true;
             }
             "--use" => {
+                let value = build_option_value(args, i)?.unwrap();
                 i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or("--use requires a package name argument")?;
-                use_packages.push(value.clone());
+                use_packages.push(value.to_string());
             }
             "--assets" => {
+                let value = build_option_value(args, i)?.unwrap();
                 i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or("--assets requires a directory argument")?;
                 assets = Some(PathBuf::from(value));
             }
             "--vite" => {
+                let value = build_option_value(args, i)?.unwrap();
                 i += 1;
-                let value = args.get(i).ok_or("--vite requires a directory argument")?;
                 vite = Some(PathBuf::from(value));
             }
             "--static" => static_link = true,

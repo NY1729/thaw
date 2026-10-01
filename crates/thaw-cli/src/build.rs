@@ -167,7 +167,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
     }
 
     let mut source = String::from(
-        "function thawAssetPath(path: string): string {\nreturn path.split(\"?\")[0].split(\"#\")[0];\n}\nfunction thawHasAsset(path: string): boolean {\npath = thawAssetPath(path);\n",
+        "function thawAssetPath(path: string): string {\nconst raw = path.split(\"?\")[0].split(\"#\")[0];\ntry { return decodeURIComponent(raw); } catch { return \"\"; }\n}\nfunction thawHasAssetDecoded(path: string): boolean {\n",
     );
     for (path, _, _, _) in &routes {
         source.push_str(&format!(
@@ -175,7 +175,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(path).unwrap()
         ));
     }
-    source.push_str("return false;\n}\nfunction thawAsset(path: string): string {\npath = thawAssetPath(path);\n");
+    source.push_str("return false;\n}\nfunction thawHasAsset(path: string): boolean { return thawHasAssetDecoded(thawAssetPath(path)); }\nfunction thawAssetDecoded(path: string): string {\n");
     for (path, content, _, _) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
@@ -183,7 +183,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(content).unwrap()
         ));
     }
-    source.push_str("return \"\";\n}\nfunction thawAssetContentType(path: string): string {\npath = thawAssetPath(path);\n");
+    source.push_str("return \"\";\n}\nfunction thawAsset(path: string): string { return thawAssetDecoded(thawAssetPath(path)); }\nfunction thawAssetContentTypeDecoded(path: string): string {\n");
     for (path, _, content_type, _) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
@@ -191,7 +191,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(content_type).unwrap()
         ));
     }
-    source.push_str("return \"application/octet-stream\";\n}\nfunction thawAssetEncoding(path: string): string {\npath = thawAssetPath(path);\n");
+    source.push_str("return \"application/octet-stream\";\n}\nfunction thawAssetContentType(path: string): string { return thawAssetContentTypeDecoded(thawAssetPath(path)); }\nfunction thawAssetEncodingDecoded(path: string): string {\n");
     for (path, _, _, encoding) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
@@ -199,9 +199,9 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(encoding).unwrap()
         ));
     }
-    source.push_str("return \"utf8\";\n}\n");
+    source.push_str("return \"utf8\";\n}\nfunction thawAssetEncoding(path: string): string { return thawAssetEncodingDecoded(thawAssetPath(path)); }\n");
     source.push_str(
-        "function thawAssetRoute(path: string): string {\npath = thawAssetPath(path);\nif (thawHasAsset(path)) { return path; }\nif (path.indexOf(\".\") < 0 && thawHasAsset(\"/\")) { return \"/\"; }\nreturn path;\n}\nfunction thawServeAsset(response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }, path: string): boolean {\npath = thawAssetRoute(path);\nif (!thawHasAsset(path)) { return false; }\nresponse.setHeader(\"Content-Type\", thawAssetContentType(path));\nreturn response.endEncoded(thawAsset(path), thawAssetEncoding(path));\n}\n",
+        "function thawAssetRouteDecoded(path: string): string {\nif (thawHasAssetDecoded(path)) { return path; }\nif (path !== \"\" && path.indexOf(\".\") < 0 && thawHasAssetDecoded(\"/\")) { return \"/\"; }\nreturn path;\n}\nfunction thawAssetRoute(path: string): string { return thawAssetRouteDecoded(thawAssetPath(path)); }\nfunction thawServeAsset(response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }, path: string): boolean {\npath = thawAssetRouteDecoded(thawAssetPath(path));\nif (!thawHasAssetDecoded(path)) { return false; }\nresponse.setHeader(\"Content-Type\", thawAssetContentTypeDecoded(path));\nreturn response.endEncoded(thawAssetDecoded(path), thawAssetEncodingDecoded(path));\n}\n",
     );
     Ok(source)
 }
@@ -304,8 +304,9 @@ fn build_with_native_mode(
     }
     let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
+    let scratch = BuildScratch::new(output)?;
     let external_native_dirs = (!embed_native_addons)
-        .then(|| external_native_directories(output))
+        .then(|| external_native_directories(output, &scratch))
         .transpose()?;
     let external_specifiers = module_graph::external_specifiers(input, &user_source)?;
     let mut resolved_packages = use_packages.to_vec();
@@ -546,7 +547,7 @@ fn build_with_native_mode(
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
 
-    let obj_path = output.with_extension("o");
+    let obj_path = scratch.path.join("input.o");
     compiler.write_object_file(&obj_path)?;
 
     // Always link the runtime support crates: thaw-arena backs array/object allocation
@@ -658,16 +659,11 @@ fn build_with_native_mode(
     let link_output = linker
         .arg("-Wl,--strip-all")
         .arg("-o")
-        .arg(output)
+        .arg(scratch.path.join("program"))
         .output()
         .map_err(|e| format!("failed to invoke system `cc` linker: {e}"))?;
 
-    let _ = std::fs::remove_file(&obj_path);
-
     if !link_output.status.success() {
-        if let Some((staging, _)) = &external_native_dirs {
-            let _ = std::fs::remove_dir_all(staging);
-        }
         let stderr = String::from_utf8_lossy(&link_output.stderr);
         let hint = if static_link {
             "\nstatic linking requires the target's static libc/libm/libdl archives (on Fedora, install glibc-static; alternatively use a musl toolchain)"
@@ -677,68 +673,161 @@ fn build_with_native_mode(
         return Err(format!("linking failed:\n{stderr}{hint}"));
     }
 
-    if let Some((staging, destination)) = external_native_dirs {
-        promote_external_native_directory(&staging, &destination)?;
-    }
-    if static_link && elf_has_program_interpreter(output)? {
+    if static_link && elf_has_program_interpreter(&scratch.path.join("program"))? {
         return Err(format!(
             "static link produced `{}` with a dynamic ELF interpreter",
             output.display()
         ));
     }
 
+    publish_build_artifacts(&scratch, output, external_native_dirs.as_ref())?;
+
     println!("built `{}`", output.display());
     Ok(())
 }
 
-fn external_native_directories(output: &Path) -> Result<(PathBuf, PathBuf), String> {
+struct BuildScratch {
+    path: PathBuf,
+    preserve: std::cell::Cell<bool>,
+}
+
+impl BuildScratch {
+    fn new(output: &Path) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let parent = output.parent().filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        for _ in 0..100 {
+            let path = parent.join(format!(
+                ".thaw-build-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path, preserve: std::cell::Cell::new(false) }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("failed to create build directory `{}`: {error}", path.display())),
+            }
+        }
+        Err(format!("failed to reserve a build directory beside `{}`", output.display()))
+    }
+}
+
+impl Drop for BuildScratch {
+    fn drop(&mut self) {
+        if !self.preserve.get() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn external_native_directories(output: &Path, scratch: &BuildScratch) -> Result<(PathBuf, PathBuf), String> {
     let name = output
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("output path has no valid file name")?;
     let destination = output.with_file_name(format!("{name}.native"));
-    let staging = output.with_file_name(format!(".{name}.native.{}.tmp", std::process::id()));
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging)
-            .map_err(|error| format!("failed to clear `{}`: {error}", staging.display()))?;
-    }
-    std::fs::create_dir_all(&staging)
+    let staging = scratch.path.join("native");
+    std::fs::create_dir(&staging)
         .map_err(|error| format!("failed to create `{}`: {error}", staging.display()))?;
     Ok((staging, destination))
 }
 
-fn promote_external_native_directory(staging: &Path, destination: &Path) -> Result<(), String> {
-    if std::fs::read_dir(staging)
-        .map_err(|error| format!("failed to read `{}`: {error}", staging.display()))?
-        .next()
-        .is_none()
-    {
-        std::fs::remove_dir(staging)
-            .map_err(|error| format!("failed to remove `{}`: {error}", staging.display()))?;
-        if destination.exists() {
-            std::fs::remove_dir_all(destination)
-                .map_err(|error| format!("failed to remove `{}`: {error}", destination.display()))?;
+fn publish_build_artifacts(
+    scratch: &BuildScratch,
+    output: &Path,
+    external_native_dirs: Option<&(PathBuf, PathBuf)>,
+) -> Result<(), String> {
+    let staged_output = scratch.path.join("program");
+    let old_output = scratch.path.join("old-program");
+    let old_native = scratch.path.join("old-native");
+    if output.is_dir() {
+        return Err(format!("output `{}` is a directory", output.display()));
+    }
+    let has_native = if let Some((staging, destination)) = external_native_dirs {
+        if destination.symlink_metadata().is_ok() && !destination.is_dir() {
+            return Err(format!("native output `{}` is not a directory", destination.display()));
         }
-        return Ok(());
+        std::fs::read_dir(staging)
+            .map_err(|error| format!("failed to read `{}`: {error}", staging.display()))?
+            .next().transpose()
+            .map_err(|error| format!("failed to inspect `{}`: {error}", staging.display()))?
+            .is_some()
+    } else {
+        false
+    };
+    let had_output = output.symlink_metadata().is_ok();
+    if had_output {
+        std::fs::rename(output, &old_output)
+            .map_err(|error| format!("failed to save `{}`: {error}", output.display()))?;
     }
-    let backup = destination.with_extension(format!("native.{}.old", std::process::id()));
-    if destination.exists() {
-        std::fs::rename(destination, &backup).map_err(|error| {
-            format!("failed to replace `{}`: {error}", destination.display())
-        })?;
+    let mut installed_native = false;
+    let mut had_native = false;
+    if let Some((staging, destination)) = external_native_dirs {
+        had_native = destination.symlink_metadata().is_ok();
+        if had_native {
+            if let Err(error) = std::fs::rename(destination, &old_native) {
+                return Err(rollback_publish_failure(
+                    scratch, format!("failed to save `{}`: {error}", destination.display()),
+                    output, &old_output, had_output, None, &old_native, false, false,
+                ));
+            }
+        }
+        if has_native {
+            if let Err(error) = std::fs::rename(staging, destination) {
+                return Err(rollback_publish_failure(
+                    scratch, format!("failed to install `{}`: {error}", destination.display()),
+                    output, &old_output, had_output, Some(destination), &old_native, had_native, false,
+                ));
+            }
+            installed_native = true;
+        }
     }
-    if let Err(error) = std::fs::rename(staging, destination) {
-        let _ = std::fs::rename(&backup, destination);
-        return Err(format!(
-            "failed to install `{}`: {error}",
-            destination.display()
+    if let Err(error) = std::fs::rename(&staged_output, output) {
+        return Err(rollback_publish_failure(
+            scratch, format!("failed to install `{}`: {error}", output.display()),
+            output, &old_output, had_output,
+            external_native_dirs.map(|(_, destination)| destination.as_path()),
+            &old_native, had_native, installed_native,
         ));
     }
-    if backup.exists() {
-        std::fs::remove_dir_all(&backup)
-            .map_err(|error| format!("failed to remove `{}`: {error}", backup.display()))?;
-    }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rollback_publish_failure(
+    scratch: &BuildScratch,
+    cause: String,
+    output: &Path,
+    old_output: &Path,
+    had_output: bool,
+    native_destination: Option<&Path>,
+    old_native: &Path,
+    had_native: bool,
+    installed_native: bool,
+) -> String {
+    let mut failures = Vec::new();
+    if let Some(destination) = native_destination {
+        if installed_native {
+            if let Err(error) = std::fs::remove_dir_all(destination) {
+                failures.push(format!("remove new `{}`: {error}", destination.display()));
+            }
+        }
+        if had_native {
+            if let Err(error) = std::fs::rename(old_native, destination) {
+                failures.push(format!("restore `{}`: {error}", destination.display()));
+            }
+        }
+    }
+    if had_output {
+        if let Err(error) = std::fs::rename(old_output, output) {
+            failures.push(format!("restore `{}`: {error}", output.display()));
+        }
+    }
+    if failures.is_empty() {
+        cause
+    } else {
+        scratch.preserve.set(true);
+        format!("{cause}; rollback failed ({}); saved artifacts remain in `{}`", failures.join("; "), scratch.path.display())
+    }
 }
 
 fn nm_symbols(path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
@@ -1095,21 +1184,23 @@ fn elf_has_program_interpreter(path: &Path) -> Result<bool, String> {
     if bytes[4] != 2 || bytes[5] != 1 {
         return Err("static output verification currently requires little-endian ELF64".into());
     }
-    let read_u16 = |offset: usize| u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
-    let read_u64 =
-        |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-    let program_offset = read_u64(32) as usize;
-    let entry_size = read_u16(54) as usize;
-    let entry_count = read_u16(56) as usize;
+    let program_offset = usize::try_from(u64::from_le_bytes(bytes[32..40].try_into().unwrap()))
+        .map_err(|_| format!("`{}` has an invalid ELF program table offset", path.display()))?;
+    let entry_size = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
+    let entry_count = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    if entry_count != 0 && (entry_size < 56
+        || entry_count.checked_mul(entry_size)
+            .and_then(|size| program_offset.checked_add(size))
+            .is_none_or(|end| end > bytes.len()))
+    {
+        return Err(format!("`{}` has a truncated ELF program table", path.display()));
+    }
     for index in 0..entry_count {
-        let offset = program_offset + index * entry_size;
-        if offset + 4 > bytes.len() {
-            return Err(format!(
-                "`{}` has a truncated ELF program table",
-                path.display()
-            ));
-        }
-        let kind = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let offset = index.checked_mul(entry_size)
+            .and_then(|step| program_offset.checked_add(step));
+        let kind = offset.and_then(|offset| bytes.get(offset..offset.checked_add(4)?))
+            .ok_or_else(|| format!("`{}` has a truncated ELF program table", path.display()))?;
+        let kind = u32::from_le_bytes(kind.try_into().unwrap());
         if kind == 3 {
             return Ok(true);
         }
@@ -1172,21 +1263,32 @@ fn build_staticlib_with_options(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let target_name = pkg.replace('-', "_");
-    for line in stdout.lines() {
-        if !line.contains(&format!("\"name\":\"{target_name}\"")) {
-            continue;
-        }
-        if let Some(idx) = line.find("\"filenames\":[\"") {
-            let rest = &line[idx + "\"filenames\":[\"".len()..];
-            if let Some(end) = rest.find(".a\"") {
-                return Ok(PathBuf::from(&rest[..end + 2]));
-            }
-        }
-    }
-    Err(format!(
+    staticlib_artifact_path(&stdout, pkg).ok_or_else(|| format!(
         "could not find a staticlib for `{pkg}` in `cargo build` output"
     ))
+}
+
+fn staticlib_artifact_path(stdout: &str, pkg: &str) -> Option<PathBuf> {
+    let target_name = pkg.replace('-', "_");
+    for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact")
+            || message.pointer("/target/name").and_then(serde_json::Value::as_str) != Some(target_name.as_str())
+        {
+            continue;
+        }
+        if let Some(path) = message.get("filenames").and_then(serde_json::Value::as_array)
+            .into_iter().flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .find(|path| path.extension().is_some_and(|extension| extension == "a"))
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn run_prepare(args: &[String]) -> Result<(), String> {
