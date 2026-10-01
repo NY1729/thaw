@@ -178,12 +178,14 @@ impl<'ctx> HirCompiler<'ctx> {
         let saved_arena_variables = std::mem::take(&mut self.arena_variables);
         let saved_catch_stack = std::mem::take(&mut self.catch_stack);
         let saved_loop_stack = std::mem::take(&mut self.loop_stack);
+        let saved_async_completion = self.active_async_completion.take();
         let compiled = self.compile_function_body(&lifted);
         self.variables = saved_variables;
         self.variable_hir_types = saved_variable_hir_types;
         self.arena_variables = saved_arena_variables;
         self.catch_stack = saved_catch_stack;
         self.loop_stack = saved_loop_stack;
+        self.active_async_completion = saved_async_completion;
         self.builder.position_at_end(parent_block);
         compiled.map_err(|error| format!("async lambda `{name}`: {error}"))?;
 

@@ -113,8 +113,43 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
         declare function native_sum_i64(count: number, ...values: number[]): number;
         declare function native_sum_u32(count: number, ...values: number[]): number;
         declare function native_sum_u64(count: number, ...values: number[]): number;
+        declare function native_integer_call_count(): number;
 
-        function main(): void {
+        async function invalidBeforeAwait(): Promise<void> {
+            native_sum_i32(1, 0 / 0);
+            await sleep(1);
+        }
+
+        async function invalidAfterAwait(): Promise<void> {
+            await sleep(1);
+            native_sum_i32(1, 0 / 0);
+        }
+
+        async function catchBeforeAwait(): Promise<void> {
+            try {
+                native_sum_i32(1, 0 / 0);
+                console.log("unreachable-before");
+                await sleep(1);
+            } catch (error) {
+                console.log(error instanceof RangeError);
+            } finally {
+                console.log("finally-before");
+            }
+        }
+
+        async function catchAfterAwait(): Promise<void> {
+            try {
+                await sleep(1);
+                native_sum_i32(1, 0 / 0);
+                console.log("unreachable-after");
+            } catch (error) {
+                console.log(error instanceof RangeError);
+            } finally {
+                console.log("finally-after");
+            }
+        }
+
+        async function main(): Promise<void> {
             console.log(native_sum(0));
             console.log(native_sum(3, 2, 3, 5));
             console.log(native_true_count(4, true, false, true, true));
@@ -141,6 +176,23 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
             console.log(native_sum_i64(2, 0 - 4, 10));
             console.log(native_sum_u32(2, 20, 22));
             console.log(native_sum_u64(2, 40, 2));
+            try { native_sum_i32(1, 2147483648); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_i64(1, 9223372036854775808); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_u32(1, 4294967296); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_u64(1, 18446744073709551616); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_i32(1, 0 / 0); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_i64(1, 1 / 0); } catch (error) { console.log(error instanceof RangeError); }
+            try { native_sum_i32(1, -2147483649); } catch (error) { console.log(error instanceof RangeError); }
+            let laterArgument: number = 0;
+            try { native_sum_i32(2, 2147483648, laterArgument = 1); } catch (error) { console.log(error instanceof RangeError); }
+            console.log(laterArgument);
+            console.log(native_sum_u32(1, -0.5));
+            console.log(native_integer_call_count());
+            try { await invalidBeforeAwait(); } catch (error) { console.log(error instanceof RangeError); }
+            try { await invalidAfterAwait(); } catch (error) { console.log(error instanceof RangeError); }
+            await catchBeforeAwait();
+            await catchAfterAwait();
+            console.log(native_integer_call_count());
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
@@ -217,6 +269,8 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
     std::fs::write(
         &native_c_path,
         "#include <stdarg.h>\n#include <stdint.h>\n#include <string.h>\n\
+         static int integer_calls = 0;\n\
+         double native_integer_call_count(void) { return (double)integer_calls; }\n\
          double native_sum(double raw_count, ...) {\n\
            int count = (int)raw_count; double sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
@@ -328,24 +382,28 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
            va_end(args); return sum;\n\
          }\n\
          double native_sum_i32(double raw_count, ...) {\n\
+           integer_calls++;\n\
            int count = (int)raw_count; int sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
            for (int i = 0; i < count; ++i) sum += va_arg(args, int);\n\
            va_end(args); return (double)sum;\n\
          }\n\
          double native_sum_i64(double raw_count, ...) {\n\
+           integer_calls++;\n\
            int count = (int)raw_count; long long sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
            for (int i = 0; i < count; ++i) sum += va_arg(args, long long);\n\
            va_end(args); return (double)sum;\n\
          }\n\
          double native_sum_u32(double raw_count, ...) {\n\
+           integer_calls++;\n\
            int count = (int)raw_count; unsigned int sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
            for (int i = 0; i < count; ++i) sum += va_arg(args, unsigned int);\n\
            va_end(args); return (double)sum;\n\
          }\n\
          double native_sum_u64(double raw_count, ...) {\n\
+           integer_calls++;\n\
            int count = (int)raw_count; unsigned long long sum = 0; va_list args;\n\
            va_start(args, raw_count);\n\
            for (int i = 0; i < count; ++i) sum += va_arg(args, unsigned long long);\n\
@@ -381,7 +439,7 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "0\n10\n3\n9\n40\n15\n6\n3\n60\n26\n3\n4\n7\n6\n3\n6\n42\n42\n"
+        "0\n10\n3\n9\n40\n15\n6\n3\n60\n26\n3\n4\n7\n6\n3\n6\n42\n42\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n1\n0\n5\ntrue\ntrue\ntrue\nfinally-before\ntrue\nfinally-after\n5\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

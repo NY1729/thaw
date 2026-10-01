@@ -44,6 +44,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // This adapter is a separate LLVM function. Its exception branch
         // must not target a catch block in the function that creates it.
         let outer_catch_stack = std::mem::take(&mut self.catch_stack);
+        let outer_async_completion = self.active_async_completion.take();
         let entry = self.context.append_basic_block(adapter, "entry");
         self.builder.position_at_end(entry);
         let environment = adapter
@@ -165,6 +166,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
         }
         self.catch_stack = outer_catch_stack;
+        self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(parent);
 
         let closure = self
@@ -519,6 +521,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // must see an empty catch stack (propagate/default-return on
         // failure, matching a top-level function with no active catch).
         let outer_catch_stack = std::mem::take(&mut self.catch_stack);
+        let outer_async_completion = self.active_async_completion.take();
         let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
         let args_string = adapter.get_nth_param(1).unwrap();
         let args_json = self
@@ -653,6 +656,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_return(Some(&promise))
                 .map_err(|error| error.to_string())?;
             self.catch_stack = outer_catch_stack;
+            self.active_async_completion = outer_async_completion;
             self.builder.position_at_end(return_block);
             let HirType::Promise(resolved) = ret else {
                 unreachable!()
@@ -837,6 +841,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_return(Some(&result))
             .map_err(|error| error.to_string())?;
         self.catch_stack = outer_catch_stack;
+        self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(return_block);
         Ok((adapter.as_global_value().as_pointer_value(), closure, None))
     }
@@ -855,6 +860,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         let return_block = self.builder.get_insert_block().unwrap();
         let outer_catch_stack = std::mem::take(&mut self.catch_stack);
+        let outer_async_completion = self.active_async_completion.take();
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
         let promise = function.get_nth_param(0).unwrap().into_pointer_value();
@@ -1000,6 +1006,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_return(Some(&result))
             .map_err(|error| error.to_string())?;
         self.catch_stack = outer_catch_stack;
+        self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(return_block);
         Ok(function.as_global_value().as_pointer_value())
     }

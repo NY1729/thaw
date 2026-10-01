@@ -522,12 +522,6 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|e| e.to_string())?
                 .into_pointer_value();
-            self.builder
-                .build_store(
-                    self.pending_exception().as_pointer_value(),
-                    ptr_ty.const_null(),
-                )
-                .map_err(|e| e.to_string())?;
             let rejected = self
                 .builder
                 .build_call(
@@ -540,11 +534,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .ok_or("thaw_promise_new returned no value")?
                 .into_pointer_value();
+            self.reject_promise_with_pending_exception(rejected, error, "reject_await_operand")?;
             self.builder
-                .build_call(
-                    self.module.get_function("thaw_promise_reject").unwrap(),
-                    &[rejected.into(), error.into()],
-                    "reject_await_operand",
+                .build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
+                .map_err(|e| e.to_string())?;
+            self.builder
+                .build_store(self.pending_exception_object().as_pointer_value(), ptr_ty.const_null())
+                .map_err(|e| e.to_string())?;
+            self.builder
+                .build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
                 )
                 .map_err(|e| e.to_string())?;
             let rejected_block = self.builder.get_insert_block().unwrap();
@@ -701,6 +701,24 @@ impl<'ctx> HirCompiler<'ctx> {
         plan: &FrameAsyncPlan,
     ) -> Result<AsyncBlockExit, String> {
         for stmt in stmts {
+            let synchronous_catch = match stmt {
+                HirStmt::If(HirExpr::Var(guard), _, _) => plan
+                    .guarded_rethrow_handlers
+                    .get(guard)
+                    .cloned()
+                    .map(|handler| {
+                        let function = self.current_function();
+                        (
+                            self.context.append_basic_block(function, "guarded_sync_catch"),
+                            self.context.append_basic_block(function, "guarded_sync_next"),
+                            handler,
+                        )
+                    }),
+                _ => None,
+            };
+            if let Some((catch_block, _, _)) = &synchronous_catch {
+                self.catch_stack.push(*catch_block);
+            }
             if let HirStmt::If(guard, then_body, else_body) = stmt {
                 let guarded = match (then_body.as_slice(), else_body.as_slice()) {
                     ([only], []) => Some((only, true)),
@@ -738,6 +756,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .build_unconditional_branch(continue_block)
                         .map_err(|e| e.to_string())?;
                     self.builder.position_at_end(continue_block);
+                    self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                     continue;
                 }
                 if let Some((HirStmt::Return(value), expected)) = guarded {
@@ -776,6 +795,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                     .map_err(|error| error.to_string())?;
                             }
                             self.builder.position_at_end(continue_block);
+                            self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                             continue;
                         }
                         Some(expr) if plan.ret != HirType::Void => {
@@ -805,6 +825,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         function.get_type().get_return_type().is_some(),
                     )?;
                     self.builder.position_at_end(continue_block);
+                    self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                     continue;
                 }
                 if let Some((HirStmt::Throw(error), expected)) = guarded {
@@ -887,6 +908,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         }
                     }
                     self.builder.position_at_end(continue_block);
+                    self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                     continue;
                 }
             }
@@ -948,10 +970,93 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.variables
                     .insert(name.clone(), (slot, self.basic_type(ty)?));
             } else if self.compile_stmt(stmt)? {
+                self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                 return Ok(AsyncBlockExit::Returned);
             }
+            self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
         }
         Ok(AsyncBlockExit::Continue)
+    }
+
+    fn finish_async_guarded_stmt(
+        &mut self,
+        boundary: &Option<(
+            inkwell::basic_block::BasicBlock<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+            AsyncRejectionHandler,
+        )>,
+        frame: PointerValue<'ctx>,
+        plan: &FrameAsyncPlan,
+    ) -> Result<(), String> {
+        let Some((catch_block, next_block, handler)) = boundary else {
+            return Ok(());
+        };
+        self.catch_stack.pop();
+        if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            self.builder.build_unconditional_branch(*next_block).map_err(|e| e.to_string())?;
+        }
+        self.builder.position_at_end(*catch_block);
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let pending = self.builder.build_load(
+            ptr_ty,
+            self.pending_exception().as_pointer_value(),
+            "caught_sync_exception",
+        ).map_err(|e| e.to_string())?;
+        for (name, enabled) in [(&handler.try_guard, false), (&handler.catch_guard, true)]
+            .into_iter()
+            .chain(handler.disable_guards.iter().map(|name| (name, false)))
+        {
+            let index = plan.locals.iter().position(|(local, _)| local == name)
+                .ok_or_else(|| format!("missing async guard `{name}`"))?;
+            let slot = self.async_frame_field(
+                frame,
+                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                "caught_sync_guard",
+            )?;
+            self.builder.build_store(slot, self.context.bool_type().const_int(enabled as u64, false))
+                .map_err(|e| e.to_string())?;
+        }
+        let binding_index = plan.locals.iter().position(|(local, _)| local == &handler.catch_binding)
+            .ok_or_else(|| format!("missing async catch binding `{}`", handler.catch_binding))?;
+        let binding_slot = self.async_frame_field(
+            frame,
+            self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * binding_index as u64,
+            "caught_sync_binding",
+        )?;
+        self.builder.build_store(binding_slot, pending).map_err(|e| e.to_string())?;
+        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 5] = [
+            ("object", PENDING_EXCEPTION_OBJECT_SYMBOL, ptr_ty.into()),
+            ("tag", PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
+            ("f64", PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
+            ("i64", PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
+            ("bool", PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
+        ];
+        for (suffix, symbol, ty) in pending_metadata {
+            let name = format!("{}__thaw_exception_{suffix}", handler.catch_binding);
+            let index = plan.locals.iter().position(|(local, _)| local == &name)
+                .ok_or_else(|| format!("missing async catch metadata `{name}`"))?;
+            let slot = self.async_frame_field(
+                frame,
+                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                "caught_sync_metadata",
+            )?;
+            let global = self.module.get_global(symbol)
+                .ok_or_else(|| format!("missing pending exception metadata `{symbol}`"))?;
+            let value = self.builder.build_load(ty, global.as_pointer_value(), "pending_sync_metadata")
+                .map_err(|e| e.to_string())?;
+            self.builder.build_store(slot, value).map_err(|e| e.to_string())?;
+        }
+        self.builder.build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception_object().as_pointer_value(), ptr_ty.const_null())
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(
+            self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+            self.context.i64_type().const_zero(),
+        ).map_err(|e| e.to_string())?;
+        self.builder.build_unconditional_branch(*next_block).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(*next_block);
+        Ok(())
     }
 
     fn async_locals_offset(&self, plan: &FrameAsyncPlan) -> u64 {
