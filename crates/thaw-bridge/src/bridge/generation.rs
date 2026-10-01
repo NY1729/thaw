@@ -111,6 +111,13 @@ pub fn effective_classifications(
     classify_all(functions)
         .into_iter()
         .map(|(name, classification)| match classification {
+            Classification::FastPath(_) if name.contains('.') => (
+                name.clone(),
+                Classification::Fallback {
+                    function: name,
+                    reason: "namespace members use their qualified JavaScript runtime path".to_string(),
+                },
+            ),
             Classification::FastPath(_) if !native_lib_available => (
                 name.clone(),
                 Classification::Fallback {
@@ -256,7 +263,7 @@ pub fn generate_shim(
                     }
                     out.push_str("}\n");
                 }
-                if qualified_entry.is_some_and(|q| q.suppress_bare) {
+                if function.contains('.') || qualified_entry.is_some_and(|q| q.suppress_bare) {
                     continue;
                 }
                 if shadows_a_thaw_literal_identifier(&function) || is_reserved_js_identifier(&function) {
@@ -317,11 +324,11 @@ pub fn generate_native_addon_shim(
                 "    return callNativeAddon(\"{function}\", argsArray);\n"
             ));
             out.push_str("}\n");
-            if qualified.suppress_bare {
+            if function.contains('.') || qualified.suppress_bare {
                 continue;
             }
         }
-        if shadows_a_thaw_literal_identifier(&function) || is_reserved_js_identifier(&function) {
+        if function.contains('.') || shadows_a_thaw_literal_identifier(&function) || is_reserved_js_identifier(&function) {
             continue;
         }
         out.push_str("// Fallback (N-API)\n");
@@ -597,9 +604,10 @@ fn wrap_as_commonjs_module(
     let bind_nested_namespaces: String = nested_namespace_aliases
         .iter()
         .filter_map(|(bare_name, qualified_key)| {
-            let (namespace, member) = bare_name.split_once('.')?;
+            let (receiver, member) = bare_name.rsplit_once('.')?;
+            let receiver_lookup = format!("module.exports?.{}", receiver.replace('.', "?."));
             Some(format!(
-                "if (module.exports && typeof module.exports.{namespace} !== 'undefined' && module.exports.{namespace} !== null && typeof module.exports.{namespace}.{member} !== 'undefined') {{ globalThis[\"{}\"] = module.exports.{namespace}.{member}; }}\n",
+                "{{ var __thaw_nested_receiver = {receiver_lookup}; if (__thaw_nested_receiver != null) {{ var __thaw_nested_value = __thaw_nested_receiver.{member}; if (typeof __thaw_nested_value !== 'undefined') globalThis[\"{}\"] = typeof __thaw_nested_value === 'function' ? globalThis.__thaw_bind_preserving_statics(__thaw_nested_value, __thaw_nested_receiver) : __thaw_nested_value; }} }}\n",
                 escape_ts_string_literal(qualified_key)
             ))
         })

@@ -1,56 +1,6 @@
-/// A single top-level `declare function`/`export declare function`
-/// extracts one `(name, function)` pair; a `declare namespace Foo {
-/// function bar(...): ...; }` recurses into its body and extracts every
-/// function found inside (at any nesting depth -- a namespace can itself
-/// contain a nested namespace). Found necessary by a real npm package
-/// (`qs`), whose entire type surface -- including every function --
-/// lives inside `declare namespace QueryString { ... }` rather than at
-/// the top level; without this, `parse_dts` found zero functions in it.
-/// The extracted `DtsFunction.name` is the bare function name (`parse`,
-/// not `QueryString.parse`) -- that's also what `wrap_as_commonjs_module`'s
-/// object-export hoisting binds it to at runtime (`qs`'s own
-/// `module.exports = { parse, stringify, ... }`), so the two already
-/// agree without any extra namespace-qualification logic.
-///
-/// Also handles a *named* `export default function foo(...): T;` (an
-/// `ExportDefaultDecl`, a different AST shape than `ExportDecl` --
-/// found necessary by real ESM packages, whose `.d.ts` commonly uses
-/// this form, e.g. `escape-string-regexp`'s `export default function
-/// escapeStringRegexp(string: string): string;`). An *anonymous*
-/// `export default function(...): T;` has no name to extract a callable
-/// `DtsFunction` under and is silently skipped -- `.d.ts` authors
-/// essentially always name it in practice specifically so it's
-/// referenceable, so this isn't expected to matter.
-fn extract_fn_decls(item: &ModuleItem) -> Vec<(&str, &Function)> {
-    match item {
-        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => extract_fn_decls_from_decl(decl),
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
-            extract_fn_decls_from_decl(&export.decl)
-        }
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
-            DefaultDecl::Fn(fn_expr) => match &fn_expr.ident {
-                Some(ident) => vec![(ident.sym.as_str(), &fn_expr.function)],
-                None => Vec::new(),
-            },
-            _ => Vec::new(),
-        },
-        _ => Vec::new(),
-    }
-}
-
-fn extract_fn_decls_from_decl(decl: &Decl) -> Vec<(&str, &Function)> {
-    match decl {
-        Decl::Fn(fn_decl) => vec![(fn_decl.ident.sym.as_str(), &fn_decl.function)],
-        Decl::TsModule(module_decl) => {
-            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
-                return Vec::new();
-            };
-            block.body.iter().flat_map(extract_fn_decls).collect()
-        }
-        _ => Vec::new(),
-    }
-}
-
+/// Retains each declaration's full namespace path while returning its bare
+/// identifier separately. `parse_dts` keeps ordinary namespace identities
+/// distinct and preserves the bare CommonJS method ABI for `export = NS`.
 fn scoped_fn_decls<'a>(module: &'a Module) -> Vec<(String, String, &'a Function)> {
     fn walk<'a>(item: &'a ModuleItem, scope: &str, found: &mut Vec<(String, String, &'a Function)>) {
         if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) = item {

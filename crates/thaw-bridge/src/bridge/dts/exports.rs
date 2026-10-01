@@ -11,16 +11,36 @@
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     let module = thaw_parser::parse_declarations(source)?;
     let generated_internals = generated_public_alias_internals(&module);
+    let type_only_namespaces = type_only_namespace_names(source);
+    let export_assignment = export_assignment_namespace(&module);
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let mut functions = scoped_fn_decls(&module)
         .into_iter()
-        .map(|(full_name, name, func)| {
+        .filter(|(full_name, _, _)| !namespace_member_is_type_only(full_name, &type_only_namespaces))
+        .map(|(full_name, _, func)| {
             let (context, generic_context) = scoped_type_context(
                 declaration_scope(&full_name), &interfaces, &generic_interfaces,
             );
-            lower_dts_function(&name, func, &context, &generic_context)
+            let public_name = export_assignment
+                .and_then(|namespace| full_name.strip_prefix(format!("{namespace}.").as_str()))
+                .map(str::to_string)
+                .unwrap_or(full_name);
+            lower_dts_function(&public_name, func, &context, &generic_context)
         })
         .collect::<Vec<_>>();
+    for (original, public) in namespace_value_aliases(&module) {
+        let prefix = format!("{original}.");
+        let aliases = functions.iter().filter_map(|function| {
+            function.name.strip_prefix(&prefix).map(|suffix| {
+                let mut alias = function.clone();
+                alias.name = format!("{public}.{suffix}");
+                alias
+            })
+        }).collect::<Vec<_>>();
+        functions.extend(aliases);
+    }
+    let hidden_namespaces = nonpublic_namespace_sources(source);
+    functions.retain(|function| !namespace_member_is_type_only(&function.name, &hidden_namespaces));
     if let Some(target) = export_assignment_interface_name(&module) {
         functions.extend(export_assignment_interface_methods(&module, &target)
             .into_iter()
@@ -120,6 +140,117 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     }
     functions.retain(|function| !generated_internals.contains(&function.name));
     Ok(functions)
+}
+
+fn export_assignment_namespace(module: &Module) -> Option<&str> {
+    module.body.iter().find_map(|item| {
+        let ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) = item else {
+            return None;
+        };
+        match export.expr.as_ref() {
+            Expr::Ident(ident) => Some(ident.sym.as_str()),
+            _ => None,
+        }
+    })
+}
+
+fn namespace_member_is_type_only(full_name: &str, type_only: &HashSet<String>) -> bool {
+    full_name.split_once('.')
+        .is_some_and(|(namespace, _)| type_only.contains(namespace))
+}
+
+fn namespace_value_aliases(module: &Module) -> Vec<(String, String)> {
+    use swc_ecma_ast::{ExportSpecifier, ModuleExportName};
+    module.body.iter().filter_map(|item| {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { return None };
+        (!export.type_only && export.src.is_none()).then_some(export)
+    }).flat_map(|export| export.specifiers.iter().filter_map(|specifier| {
+        let ExportSpecifier::Named(named) = specifier else { return None };
+        if named.is_type_only { return None; }
+        let (ModuleExportName::Ident(original), Some(ModuleExportName::Ident(public))) =
+            (&named.orig, &named.exported) else { return None; };
+        (original.sym != public.sym).then(|| (original.sym.to_string(), public.sym.to_string()))
+    })).collect()
+}
+
+/// Original bindings that have a live namespace alias but are not themselves
+/// public runtime properties. Their declarations still supply type context.
+pub fn nonpublic_namespace_sources(source: &str) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations(source) else { return HashSet::new(); };
+    let public = exported_value_names(source);
+    let assigned = export_assignment_namespace(&module);
+    namespace_value_aliases(&module).into_iter().filter_map(|(original, _)| {
+        (!public.contains(&original) && assigned != Some(original.as_str())).then_some(original)
+    }).collect()
+}
+
+/// Namespaces with no runtime export of their original binding. A value
+/// alias (`export { Source as Live }`) keeps Source live even if another
+/// edge exports Source only as a type.
+pub fn type_only_namespace_names(source: &str) -> HashSet<String> {
+    use swc_ecma_ast::{ExportSpecifier, ModuleExportName, TsModuleName};
+
+    let Ok(module) = thaw_parser::parse_declarations(source) else {
+        return HashSet::new();
+    };
+    let mut candidates = HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let ExportSpecifier::Named(named) = specifier else { continue };
+            if !export.type_only && !named.is_type_only { continue; }
+            if let ModuleExportName::Ident(original) = &named.orig {
+                candidates.insert(original.sym.to_string());
+            }
+        }
+    }
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                match &export.decl {
+                    Decl::TsModule(namespace) => {
+                        if let TsModuleName::Ident(ident) = &namespace.id {
+                            candidates.remove(ident.sym.as_ref());
+                        }
+                    }
+                    Decl::Class(class) => { candidates.remove(class.ident.sym.as_ref()); }
+                    Decl::TsEnum(enumeration) => { candidates.remove(enumeration.id.sym.as_ref()); }
+                    _ => {}
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export))
+                if !export.type_only && export.src.is_none() => {
+                for specifier in &export.specifiers {
+                    match specifier {
+                        ExportSpecifier::Named(named) if !named.is_type_only => {
+                            if let ModuleExportName::Ident(original) = &named.orig {
+                                candidates.remove(original.sym.as_ref());
+                            }
+                        }
+                        ExportSpecifier::Namespace(namespace) => {
+                            if let ModuleExportName::Ident(name) = &namespace.name {
+                                candidates.remove(name.sym.as_ref());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+                if let Expr::Ident(ident) = export.expr.as_ref() {
+                    candidates.remove(ident.sym.as_ref());
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(export)) => {
+                if let Expr::Ident(ident) = export.expr.as_ref() {
+                    candidates.remove(ident.sym.as_ref());
+                }
+            }
+            _ => {}
+        }
+    }
+    candidates
 }
 
 fn generated_public_alias_internals(module: &Module) -> HashSet<String> {
@@ -1343,11 +1474,9 @@ pub fn exported_value_names(source: &str) -> HashSet<String> {
 ///    the exported `marked` function itself). Each value member is
 ///    already flattened under its own name, so `foo -> foo`.
 ///
-/// Either way the result maps `NAME -> { member name -> the real,
-/// already-flattened top-level name to call }`, so a caller (thaw-cli's
-/// `shims.rs`/`module_graph.rs`) can rewrite a member access
-/// (`z.coerce.number(...)`, `marked.parse(...)`) straight to the
-/// flattened binding it actually names.
+/// The result maps `NAME -> { relative member path -> runtime target }`.
+/// Paths can be nested (`Outer -> Inner.make`) and the CLI preserves each
+/// qualified function's own binding rather than collapsing equal bare names.
 pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String, String>> {
     use thaw_parser::ast::{ExportSpecifier, ModuleExportName, Stmt, TsModuleName};
 
@@ -1371,42 +1500,58 @@ pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String,
             continue;
         };
         let members = namespaces.entry(name.sym.to_string()).or_default();
-        for member in &block.body {
-            match member {
-                ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
-                    if export.type_only || export.src.is_some() {
-                        continue;
+        fn collect_members(
+            body: &[ModuleItem], scope: &str, members: &mut HashMap<String, String>,
+        ) {
+            for member in body {
+                match member {
+                    ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(nested)))
+                    | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(swc_ecma_ast::ExportDecl { decl: Decl::TsModule(nested), .. })) => {
+                        let TsModuleName::Ident(name) = &nested.id else { continue; };
+                        let Some(TsNamespaceBody::TsModuleBlock(block)) = &nested.body else { continue; };
+                        let child = if scope.is_empty() { name.sym.to_string() }
+                            else { format!("{scope}.{}", name.sym) };
+                        collect_members(&block.body, &child, members);
                     }
-                    for specifier in &export.specifiers {
-                        let ExportSpecifier::Named(named) = specifier else {
-                            continue;
-                        };
-                        if named.is_type_only {
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
+                        if export.type_only || export.src.is_some() {
                             continue;
                         }
-                        let export_name = |name: &ModuleExportName| match name {
-                            ModuleExportName::Ident(name) => Some(name.sym.to_string()),
-                            ModuleExportName::Str(_) => None,
-                        };
-                        let Some(target) = export_name(&named.orig) else {
-                            continue;
-                        };
-                        let member_name = named.exported.as_ref().and_then(export_name).unwrap_or_else(|| target.clone());
-                        members.insert(member_name, target);
+                        for specifier in &export.specifiers {
+                            let ExportSpecifier::Named(named) = specifier else { continue; };
+                            if named.is_type_only { continue; }
+                            let export_name = |name: &ModuleExportName| match name {
+                                ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                                ModuleExportName::Str(_) => None,
+                            };
+                            let Some(target) = export_name(&named.orig) else { continue; };
+                            let member_name = named.exported.as_ref().and_then(export_name)
+                                .unwrap_or_else(|| target.clone());
+                            let member_name = if scope.is_empty() { member_name }
+                                else { format!("{scope}.{member_name}") };
+                            members.insert(member_name, target);
+                        }
                     }
-                }
-                // A hand-written namespace's own value declarations
-                // (`function`, `var`/`let`/`const`, `class`) -- flattened
-                // to bare names by `parse_dts`, so the member is its own
-                // target. Types/interfaces have no runtime binding and
-                // are deliberately skipped.
-                other => {
-                    for member_name in namespace_value_member_names(other) {
-                        members.entry(member_name.clone()).or_insert(member_name);
+                    // Types/interfaces have no runtime binding.
+                    other => {
+                        for member_name in namespace_value_member_names(other) {
+                            let path = if scope.is_empty() { member_name.clone() }
+                                else { format!("{scope}.{member_name}") };
+                            members.entry(path.clone()).or_insert(path);
+                        }
                     }
                 }
             }
         }
+        collect_members(&block.body, "", members);
+    }
+    for (original, public) in namespace_value_aliases(&module) {
+        if let Some(members) = namespaces.get(&original).cloned() {
+            namespaces.entry(public).or_default().extend(members);
+        }
+    }
+    for original in nonpublic_namespace_sources(source) {
+        namespaces.remove(&original);
     }
     namespaces
 }
@@ -1467,6 +1612,10 @@ pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
     let Ok(module) = thaw_parser::parse_declarations(source) else {
         return HashMap::new();
     };
+    let type_only_namespaces = type_only_namespace_names(source);
+    let export_assignment = export_assignment_namespace(&module);
+    let class_names = scoped_class_names(&module).into_iter()
+        .map(|(qualified, _)| qualified).collect::<HashSet<_>>();
     // `type Alias<T, ...> = Target<...>;` -> `Alias -> Target`, bare
     // names only (see `resolve_bare_type_alias_chain`'s own doc comment).
     let type_aliases: HashMap<String, String> = module
@@ -1481,11 +1630,10 @@ pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
             Some((alias.id.sym.to_string(), target))
         })
         .collect();
-    module
-        .body
-        .iter()
-        .flat_map(extract_fn_decls)
-        .filter_map(|(name, function)| {
+    let mut returns = scoped_fn_decls(&module)
+        .into_iter()
+        .filter(|(full_name, _, _)| !namespace_member_is_type_only(full_name, &type_only_namespaces))
+        .filter_map(|(full_name, _, function)| {
             let ann = function.return_type.as_ref()?;
             let TsType::TsTypeRef(ty_ref) = ann.type_ann.as_ref() else {
                 return None;
@@ -1493,10 +1641,28 @@ pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
             let type_name = type_reference_name(&ty_ref.type_name);
             let type_name =
                 resolve_bare_type_alias_chain(&type_name, &type_aliases, &mut HashSet::new());
-            Some((
-                name.rsplit('.').next().unwrap_or(name).to_string(),
-                type_name,
-            ))
+            let type_name = lexical_type_key(&type_name, declaration_scope(&full_name),
+                |candidate| class_names.contains(candidate)).unwrap_or(type_name);
+            let name = export_assignment
+                .and_then(|namespace| full_name.strip_prefix(format!("{namespace}.").as_str()))
+                .map(str::to_string)
+                .unwrap_or(full_name);
+            Some((name, type_name))
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+    for (original, public) in namespace_value_aliases(&module) {
+        let prefix = format!("{original}.");
+        let aliases = returns.iter().filter_map(|(name, class)| {
+            name.strip_prefix(&prefix).map(|suffix| {
+                let class = class.strip_prefix(&prefix)
+                    .map(|class_suffix| format!("{public}.{class_suffix}"))
+                    .unwrap_or_else(|| class.clone());
+                (format!("{public}.{suffix}"), class)
+            })
+        }).collect::<Vec<_>>();
+        returns.extend(aliases);
+    }
+    let hidden = nonpublic_namespace_sources(source);
+    returns.retain(|name, _| !namespace_member_is_type_only(name, &hidden));
+    returns
 }

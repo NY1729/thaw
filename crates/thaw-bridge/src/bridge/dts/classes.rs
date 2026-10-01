@@ -140,6 +140,28 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
         }
         if !changed { break; }
     }
+    for (original, public) in namespace_value_aliases(&module) {
+        let prefix = format!("{original}.");
+        let aliases = classes.iter().filter_map(|class| {
+            let suffix = class.name.strip_prefix(&prefix)?;
+            let mut alias = class.clone();
+            alias.name = format!("{public}.{suffix}");
+            let retarget = |identity: &mut String| {
+                if let Some(suffix) = identity.strip_prefix(&prefix) {
+                    *identity = format!("{public}.{suffix}");
+                }
+            };
+            if let Some(parent) = &mut alias.extends { retarget(parent); }
+            for method in &mut alias.methods {
+                if let Some(returned) = &mut method.return_instance_class { retarget(returned); }
+                for callback in &mut method.callback_instance_classes {
+                    for identity in callback.iter_mut().flatten() { retarget(identity); }
+                }
+            }
+            Some(alias)
+        }).collect::<Vec<_>>();
+        classes.extend(aliases);
+    }
     classes.retain(|class| !generated_internals.contains(&class.name));
     // Flattened declaration files can repeat the same qualified binding.
     // Keep the first declaration for each binding without collapsing
