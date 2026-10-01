@@ -332,7 +332,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Bool => vec![2],
             HirType::F64 => vec![3],
             HirType::I64 => vec![4],
-            HirType::Str => vec![5],
+            HirType::Str | HirType::StrLiteral(_) => vec![5],
             HirType::Symbol => vec![6],
             HirType::Json => vec![0, 1, 2, 3, 5, 7],
             HirType::Dictionary(_) => vec![7],
@@ -443,10 +443,34 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Union(members) => {
                 let mut cases = Vec::new();
                 let mut claimed = HashSet::new();
+                let mut classes = Vec::new();
+                let mut json_fallback = None;
                 for (index, member) in members.iter().enumerate() {
                     if matches!(member, HirType::Optional(_) | HirType::Nullable(_)
                         | HirType::Nullish(_) | HirType::Union(_)) {
                         return Err("nested tagged receiver union member exceeds the union word ABI".into());
+                    }
+                    // The caller sends the actual HIR value kind, not every
+                    // kind a broad Json receiver can convert. Claim exact
+                    // producers first, then use Json for otherwise unclaimed
+                    // primitive kinds.
+                    if *member == HirType::Json {
+                        if json_fallback.replace(index).is_some() {
+                            return Err("ambiguous Json receiver union".into());
+                        }
+                        continue;
+                    }
+                    if let HirType::Object(fields) = member {
+                        if let Some(marker) = fields.first().and_then(|(name, _)|
+                            name.strip_prefix("__thaw_class_identity_\u{1e}")) {
+                            let class = marker.split('\u{1f}').next().unwrap().to_string();
+                            let depth = marker.split('\u{1f}').count();
+                            if classes.iter().any(|(_, existing, _): &(usize, String, usize)| existing == &class) {
+                                return Err("duplicate native class receiver union member".into());
+                            }
+                            classes.push((index, class, depth));
+                            continue;
+                        }
                     }
                     for tag in Self::non_arrow_receiver_tags(member)? {
                         if !claimed.insert(tag) {
@@ -456,10 +480,26 @@ impl<'ctx> HirCompiler<'ctx> {
                             &format!("receiver_union_{index}_{tag}"))));
                     }
                 }
+                if let Some(index) = json_fallback {
+                    if claimed.contains(&7) {
+                        return Err("Json and dictionary receiver union members share the same source tag".into());
+                    }
+                    for tag in [0_u64, 1, 2, 3, 5, 7] {
+                        if claimed.insert(tag) {
+                            cases.push((index, tag, self.context.append_basic_block(entry_fn,
+                                &format!("receiver_union_json_{tag}"))));
+                        }
+                    }
+                }
                 let rejected = self.context.append_basic_block(entry_fn, "receiver_union_rejected");
                 let join = self.context.append_basic_block(entry_fn, "receiver_union_join");
-                let switches = cases.iter().map(|(_, tag, block)|
+                let class_dispatch = (!classes.is_empty()).then(||
+                    self.context.append_basic_block(entry_fn, "receiver_union_native_classes"));
+                let mut switches = cases.iter().map(|(_, tag, block)|
                     (self.context.i8_type().const_int(*tag, false), *block)).collect::<Vec<_>>();
+                if let Some(block) = class_dispatch {
+                    switches.push((self.context.i8_type().const_int(9, false), block));
+                }
                 self.builder.build_switch(kind, rejected, &switches)
                     .map_err(|error| error.to_string())?;
                 let mut incoming = Vec::new();
@@ -470,6 +510,39 @@ impl<'ctx> HirCompiler<'ctx> {
                     let exit = self.builder.get_insert_block().unwrap();
                     self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
                     incoming.push((tagged, exit));
+                }
+                if let Some(block) = class_dispatch {
+                    self.builder.position_at_end(block);
+                    // A derived identity also matches its ancestors. Test
+                    // the deepest declared class first so Base | Derived
+                    // selects Derived for a Derived instance.
+                    classes.sort_by_key(|(_, _, depth)| *depth);
+                    for (index, class, _) in classes.into_iter().rev() {
+                        let matched = self.context.append_basic_block(entry_fn,
+                            &format!("receiver_union_class_{index}"));
+                        let next = self.context.append_basic_block(entry_fn,
+                            &format!("receiver_union_next_class_{index}"));
+                        let pointer = self.builder.build_int_to_ptr(word,
+                            self.context.ptr_type(AddressSpace::default()), "receiver_union_class_pointer")
+                            .map_err(|error| error.to_string())?;
+                        let expected = self.builder.build_global_string_ptr(&class, "receiver_union_class_name")
+                            .map_err(|error| error.to_string())?;
+                        let is_class = self.builder.build_call(
+                            self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                            &[pointer.into(), expected.as_pointer_value().into()], "receiver_union_is_class")
+                            .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                            .ok_or("class identity returned no value")?.into_int_value();
+                        self.builder.build_conditional_branch(is_class, matched, next)
+                            .map_err(|error| error.to_string())?;
+                        self.builder.position_at_end(matched);
+                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word)?;
+                        let tagged = self.build_union_value(value, index, members)?;
+                        let exit = self.builder.get_insert_block().unwrap();
+                        self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                        incoming.push((tagged, exit));
+                        self.builder.position_at_end(next);
+                    }
+                    self.builder.build_unconditional_branch(rejected).map_err(|error| error.to_string())?;
                 }
                 self.builder.position_at_end(rejected);
                 self.reject_non_arrow_receiver()?;
@@ -494,7 +567,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::F64 => (3, self.builder.build_bit_cast(word, self.context.f64_type(), "receiver_number")
                 .map_err(|error| error.to_string())?),
             HirType::I64 => (4, word.into()),
-            HirType::Str | HirType::Symbol => {
+            HirType::Str | HirType::StrLiteral(_) | HirType::Symbol => {
                 let expected = if matches!(receiver, HirType::Symbol) { 6 } else { 5 };
                 (expected, self.builder.build_int_to_ptr(word,
                     self.context.ptr_type(AddressSpace::default()), "receiver_string")
@@ -528,6 +601,22 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(rejected);
         self.reject_non_arrow_receiver()?;
         self.builder.position_at_end(accepted);
+        if let HirType::StrLiteral(literal) = receiver {
+            // A literal receiver keeps the same string ABI but must not
+            // silently accept another string passed through .call/.apply.
+            let expected = self.compile_raw_string_literal(literal.as_bytes())?.into_pointer_value();
+            let compared = self.builder.build_call(self.module.get_function("thaw_string_compare").unwrap(),
+                &[value.into_pointer_value().into(), expected.into()], "receiver_literal_compare")
+                .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("string comparison returned no value")?.into_int_value();
+            let same = self.builder.build_int_compare(IntPredicate::EQ, compared,
+                self.context.i32_type().const_zero(), "receiver_literal_matches")
+                .map_err(|error| error.to_string())?;
+            let matched = self.context.append_basic_block(entry_fn, "receiver_literal_accepted");
+            self.builder.build_conditional_branch(same, matched, rejected)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(matched);
+        }
         Ok(value)
     }
 
