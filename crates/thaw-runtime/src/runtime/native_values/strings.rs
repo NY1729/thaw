@@ -122,20 +122,16 @@ fn wtf8_encode_utf16(units: &[u16]) -> Vec<u8> {
     bytes
 }
 
-/// `true` when `bytes` contain no lone surrogate (i.e. are valid UTF-8).
+/// `true` when the UTF-16 code units contain no lone surrogate.
 fn wtf8_is_well_formed(bytes: &[u8]) -> bool {
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == 0xED
-            && index + 2 < bytes.len()
-            && (0xA0..=0xBF).contains(&bytes[index + 1])
-            && wtf8_continuation(bytes[index + 2])
-        {
-            return false;
-        }
-        index += 1;
-    }
-    true
+    let units = wtf8_decode_utf16(bytes);
+    units.iter().enumerate().all(|(index, &unit)| {
+        !(0xD800..=0xDFFF).contains(&unit)
+            || ((0xD800..=0xDBFF).contains(&unit)
+                && units.get(index + 1).is_some_and(|next| (0xDC00..=0xDFFF).contains(next)))
+            || ((0xDC00..=0xDFFF).contains(&unit)
+                && index > 0 && (0xD800..=0xDBFF).contains(&units[index - 1]))
+    })
 }
 
 /// Replaces every *lone* surrogate with U+FFFD (the `toWellFormed` result),
@@ -172,55 +168,35 @@ unsafe fn wtf8_bytes<'a>(value: *const c_char) -> &'a [u8] {
     unsafe { CStr::from_ptr(value) }.to_bytes()
 }
 
-/// `character` upper- or lower-cased (which can expand to several chars).
-fn case_map(character: char, upper: bool) -> String {
-    if upper {
-        character.to_uppercase().collect()
-    } else {
-        character.to_lowercase().collect()
-    }
-}
-
 /// Case-maps a WTF-8 string, preserving lone surrogates (which have no
 /// case mapping).
 ///
 /// # Safety
 /// `value` must be non-null and reference a NUL-terminated WTF-8 string.
-unsafe fn wtf8_case_map(value: *const c_char, upper: bool) -> *const c_char {
+unsafe fn wtf8_case_map(value: *const c_char, upper: bool, language: &icu_locale_core::LanguageIdentifier) -> *const c_char {
     let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let mut out: Vec<u16> = Vec::with_capacity(units.len());
-    let mut index = 0;
-    while index < units.len() {
-        let unit = units[index];
-        if (0xD800..=0xDBFF).contains(&unit)
-            && index + 1 < units.len()
-            && (0xDC00..=0xDFFF).contains(&units[index + 1])
-        {
-            let code = 0x10000
-                + ((u32::from(unit) - 0xD800) << 10)
-                + (u32::from(units[index + 1]) - 0xDC00);
-            let character = char::from_u32(code).unwrap_or('\u{FFFD}');
-            let mapped: String = if upper {
-                character.to_uppercase().collect()
-            } else {
-                character.to_lowercase().collect()
-            };
-            out.extend(mapped.encode_utf16());
-            index += 2;
-        } else if (0xD800..=0xDFFF).contains(&unit) {
-            out.push(unit);
-            index += 1;
+    let mapper = icu_casemap::CaseMapperBorrowed::new();
+    let mut segment = String::new();
+    let flush = |segment: &mut String, out: &mut Vec<u16>| {
+        let mapped = if upper {
+            mapper.uppercase_to_string(segment, language)
         } else {
-            let character = char::from_u32(u32::from(unit)).unwrap_or('\u{FFFD}');
-            let mapped: String = if upper {
-                character.to_uppercase().collect()
-            } else {
-                character.to_lowercase().collect()
-            };
-            out.extend(mapped.encode_utf16());
-            index += 1;
+            mapper.lowercase_to_string(segment, language)
+        };
+        out.extend(mapped.encode_utf16());
+        segment.clear();
+    };
+    for character in char::decode_utf16(units) {
+        match character {
+            Ok(character) => segment.push(character),
+            Err(error) => {
+                flush(&mut segment, &mut out);
+                out.push(error.unpaired_surrogate());
+            }
         }
     }
+    flush(&mut segment, &mut out);
     arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -273,7 +249,7 @@ pub unsafe extern "C" fn thaw_string_to_lower_case(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    unsafe { wtf8_case_map(value, false) }
+    unsafe { wtf8_case_map(value, false, &Default::default()) }
 }
 
 #[no_mangle]
@@ -283,7 +259,7 @@ pub unsafe extern "C" fn thaw_string_to_upper_case(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    unsafe { wtf8_case_map(value, true) }
+    unsafe { wtf8_case_map(value, true, &Default::default()) }
 }
 
 unsafe fn thaw_string_to_locale_case(
@@ -295,49 +271,8 @@ unsafe fn thaw_string_to_locale_case(
         return std::ptr::null();
     }
     let locale = unsafe { CStr::from_ptr(locale) }.to_string_lossy();
-    let language = locale.split('-').next().unwrap_or("").to_ascii_lowercase();
-    let turkic = matches!(language.as_str(), "tr" | "az");
-    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
-    let mut out: Vec<u16> = Vec::with_capacity(units.len());
-    let mut index = 0;
-    while index < units.len() {
-        let unit = units[index];
-        let character = if (0xD800..=0xDBFF).contains(&unit)
-            && index + 1 < units.len()
-            && (0xDC00..=0xDFFF).contains(&units[index + 1])
-        {
-            let code = 0x10000
-                + ((u32::from(unit) - 0xD800) << 10)
-                + (u32::from(units[index + 1]) - 0xDC00);
-            index += 2;
-            Some(char::from_u32(code).unwrap_or('\u{FFFD}'))
-        } else if (0xD800..=0xDFFF).contains(&unit) {
-            // A lone surrogate has no case mapping: pass it through.
-            index += 1;
-            None
-        } else {
-            index += 1;
-            Some(char::from_u32(u32::from(unit)).unwrap_or('\u{FFFD}'))
-        };
-        match character {
-            None => out.push(unit),
-            Some(character) => {
-                let mapped: String = if turkic {
-                    match (upper, character) {
-                        (false, 'I') => "ı".to_string(),
-                        (false, 'İ') => "i".to_string(),
-                        (true, 'i') => "İ".to_string(),
-                        (true, 'ı') => "I".to_string(),
-                        _ => case_map(character, upper),
-                    }
-                } else {
-                    case_map(character, upper)
-                };
-                out.extend(mapped.encode_utf16());
-            }
-        }
-    }
-    arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
+    let language = locale.split('-').next().unwrap_or("").parse().unwrap_or_default();
+    unsafe { wtf8_case_map(value, upper, &language) }
 }
 
 #[no_mangle]
@@ -375,7 +310,9 @@ pub unsafe extern "C" fn thaw_encode_uri_component(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let bytes = unsafe { wtf8_bytes(value) };
+    if !wtf8_is_well_formed(bytes) { return std::ptr::null(); }
+    let value = wtf8_encode_utf16(&wtf8_decode_utf16(bytes));
     let mut output = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -398,7 +335,9 @@ pub unsafe extern "C" fn thaw_encode_uri(value: *const c_char) -> *const c_char 
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let bytes = unsafe { wtf8_bytes(value) };
+    if !wtf8_is_well_formed(bytes) { return std::ptr::null(); }
+    let value = wtf8_encode_utf16(&wtf8_decode_utf16(bytes));
     let mut output = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -421,35 +360,7 @@ pub unsafe extern "C" fn thaw_encode_uri(value: *const c_char) -> *const c_char 
 /// # Safety
 /// `value` must reference a valid NUL-terminated UTF-8 string.
 pub unsafe extern "C" fn thaw_decode_uri_component(value: *const c_char) -> *const c_char {
-    if value.is_null() {
-        return std::ptr::null();
-    }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let Some(hex) = bytes.get(index + 1..index + 3) else {
-                return std::ptr::null();
-            };
-            let Ok(hex) = std::str::from_utf8(hex) else {
-                return std::ptr::null();
-            };
-            let Ok(byte) = u8::from_str_radix(hex, 16) else {
-                return std::ptr::null();
-            };
-            output.push(byte);
-            index += 3;
-        } else {
-            output.push(bytes[index]);
-            index += 1;
-        }
-    }
-    let Ok(text) = String::from_utf8(output) else {
-        return std::ptr::null();
-    };
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    unsafe { decode_uri(value, false) }
 }
 
 #[no_mangle]
@@ -462,31 +373,55 @@ pub unsafe extern "C" fn thaw_decode_uri_component(value: *const c_char) -> *con
 /// # Safety
 /// `value` must reference a valid NUL-terminated UTF-8 string.
 pub unsafe extern "C" fn thaw_decode_uri(value: *const c_char) -> *const c_char {
+    unsafe { decode_uri(value, true) }
+}
+
+fn percent_byte(bytes: &[u8], index: usize) -> Option<u8> {
+    let hex = bytes.get(index + 1..index + 3)?;
+    if bytes.get(index) != Some(&b'%') || !hex.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()
+}
+
+unsafe fn decode_uri(value: *const c_char, preserve_reserved: bool) -> *const c_char {
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let bytes = value.as_bytes();
+    let bytes = unsafe { wtf8_bytes(value) };
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
-            let Some(hex) = bytes.get(index + 1..index + 3) else {
+            let Some(byte) = percent_byte(bytes, index) else {
                 return std::ptr::null();
             };
-            let Ok(hex_str) = std::str::from_utf8(hex) else {
-                return std::ptr::null();
-            };
-            let Ok(byte) = u8::from_str_radix(hex_str, 16) else {
-                return std::ptr::null();
-            };
-            if matches!(
+            if preserve_reserved && matches!(
                 byte,
                 b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',' | b'#'
             ) {
                 output.extend_from_slice(&bytes[index..index + 3]);
-            } else {
+            } else if byte < 0x80 {
                 output.push(byte);
+            } else {
+                let width = match byte {
+                    0xC2..=0xDF => 2,
+                    0xE0..=0xEF => 3,
+                    0xF0..=0xF4 => 4,
+                    _ => return std::ptr::null(),
+                };
+                let mut sequence = vec![byte];
+                for offset in 1..width {
+                    let Some(next) = percent_byte(bytes, index + offset * 3) else {
+                        return std::ptr::null();
+                    };
+                    sequence.push(next);
+                }
+                if std::str::from_utf8(&sequence).is_err() {
+                    return std::ptr::null();
+                }
+                output.extend(sequence);
+                index += (width - 1) * 3;
             }
             index += 3;
         } else {
@@ -494,10 +429,7 @@ pub unsafe extern "C" fn thaw_decode_uri(value: *const c_char) -> *const c_char 
             index += 1;
         }
     }
-    let Ok(text) = String::from_utf8(output) else {
-        return std::ptr::null();
-    };
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -557,18 +489,18 @@ fn expand_replacement(
                 chars.next();
                 output.push_str(suffix);
             }
-            '1'..='9' if !captures.is_empty() => {
+            '0'..='9' if !captures.is_empty() => {
                 chars.next();
                 let first = next.to_digit(10).unwrap() as usize;
                 let mut capture = first;
                 if let Some(&(_, second @ '0'..='9')) = chars.peek() {
                     let two_digits = first * 10 + second.to_digit(10).unwrap() as usize;
-                    if two_digits <= captures.len() {
+                    if (1..=captures.len()).contains(&two_digits) {
                         chars.next();
                         capture = two_digits;
                     }
                 }
-                if capture <= captures.len() {
+                if (1..=captures.len()).contains(&capture) {
                     if let Some(value) = captures[capture - 1].as_deref() {
                         output.push_str(value);
                     }
@@ -612,29 +544,49 @@ unsafe fn thaw_string_replace_impl(
     if value.is_null() || search.is_null() || replacement.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let search = unsafe { CStr::from_ptr(search) }.to_string_lossy();
-    let replacement = unsafe { CStr::from_ptr(replacement) }.to_string_lossy();
-    let mut replaced = String::new();
+    let value = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let search = wtf8_decode_utf16(unsafe { wtf8_bytes(search) });
+    let replacement = wtf8_decode_utf16(unsafe { wtf8_bytes(replacement) });
+    let mut output = Vec::new();
     let mut cursor = 0;
-    for (start, matched) in value.match_indices(search.as_ref()) {
-        replaced.push_str(&value[cursor..start]);
-        let end = start + matched.len();
-        replaced.push_str(&expand_replacement(
-            &replacement,
-            matched,
-            &value[..start],
-            &value[end..],
-            &[],
-            &[],
-        ));
+    while cursor <= value.len() {
+        let found = if search.is_empty() {
+            Some(cursor)
+        } else {
+            value[cursor..].windows(search.len()).position(|part| part == search).map(|offset| cursor + offset)
+        };
+        let Some(start) = found else { break };
+        let end = start + search.len();
+        output.extend_from_slice(&value[cursor..start]);
+        let mut index = 0;
+        while index < replacement.len() {
+            if replacement[index] == b'$' as u16 && index + 1 < replacement.len() {
+                let fragment = match replacement[index + 1] {
+                    x if x == b'$' as u16 => Some(&replacement[index..index + 1]),
+                    x if x == b'&' as u16 => Some(&value[start..end]),
+                    x if x == b'`' as u16 => Some(&value[..start]),
+                    x if x == b'\'' as u16 => Some(&value[end..]),
+                    _ => None,
+                };
+                if let Some(fragment) = fragment {
+                    output.extend_from_slice(fragment);
+                    index += 2;
+                    continue;
+                }
+            }
+            output.push(replacement[index]);
+            index += 1;
+        }
         cursor = end;
-        if !all {
-            break;
+        if !all { break; }
+        if search.is_empty() {
+            if cursor == value.len() { break; }
+            output.push(value[cursor]);
+            cursor += 1;
         }
     }
-    replaced.push_str(&value[cursor..]);
-    arena_c_string(&replaced).map_or(std::ptr::null(), |value| value.cast())
+    output.extend_from_slice(&value[cursor..]);
+    arena_wtf8(&wtf8_encode_utf16(&output)).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -799,7 +751,7 @@ pub unsafe extern "C" fn thaw_string_last_index_of(
     let Some((value, search)) = (unsafe { utf16_strings(value, search) }) else {
         return -1.0;
     };
-    let position = clamped_string_position(position, value.len());
+    let position = clamped_string_position(if position.is_nan() { f64::INFINITY } else { position }, value.len());
     if search.is_empty() {
         return position as f64;
     }
@@ -1020,18 +972,11 @@ unsafe fn trim_javascript_string(value: *const c_char, start: bool, end: bool) -
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let value = if start {
-        value.trim_start_matches(is_javascript_whitespace)
-    } else {
-        value.as_ref()
-    };
-    let value = if end {
-        value.trim_end_matches(is_javascript_whitespace)
-    } else {
-        value
-    };
-    arena_c_string(value).map_or(std::ptr::null(), |value| value.cast())
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let first = if start { units.iter().position(|&unit| !char::from_u32(unit as u32).is_some_and(is_javascript_whitespace)).unwrap_or(units.len()) } else { 0 };
+    let last = if end { units.iter().rposition(|&unit| !char::from_u32(unit as u32).is_some_and(is_javascript_whitespace)).map_or(0, |index| index + 1) } else { units.len() };
+    arena_wtf8(&wtf8_encode_utf16(&units[first..last.max(first)]))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1152,16 +1097,10 @@ pub unsafe extern "C" fn thaw_string_code_point_at(value: *const c_char, index: 
 #[no_mangle]
 /// Converts a JS char code (per `ToUint16`: truncated toward zero, non-finite
 /// treated as zero, then reduced modulo 65536) into the UTF-16 code unit it
-/// names, decoded losslessly or replaced with U+FFFD when the unit is an
-/// unpaired surrogate, since Thaw's native strings are valid UTF-8. Matches
+/// names, including an unpaired surrogate in WTF-8. Matches
 /// one code-unit position of `String.fromCharCode`.
 pub extern "C" fn thaw_string_from_char_code(code: f64) -> *const c_char {
-    let unit = if code.is_finite() {
-        code.trunc() as i64
-    } else {
-        0
-    }
-    .rem_euclid(65536) as u16;
+    let unit = if code.is_finite() { code.trunc().rem_euclid(65536.0) as u16 } else { 0 };
     // A lone surrogate is preserved (WTF-8), not replaced with U+FFFD.
     let text = wtf8_encode_utf16(&[unit]);
     arena_wtf8(&text).map_or(std::ptr::null(), |value| value.cast())
@@ -1170,19 +1109,16 @@ pub extern "C" fn thaw_string_from_char_code(code: f64) -> *const c_char {
 #[no_mangle]
 /// Converts a full Unicode code point into its one-character string,
 /// matching one argument of `String.fromCodePoint`. Returns a null pointer
-/// for a non-integer, negative, or out-of-range/surrogate code point,
+/// for a non-integer, negative, or out-of-range code point,
 /// letting the caller detect the failure with `thaw_string_is_null` and
 /// throw a `RangeError` as the specification requires.
 pub extern "C" fn thaw_string_from_code_point(point: f64) -> *const c_char {
-    if !point.is_finite() || point.fract() != 0.0 || point < 0.0 {
+    if !point.is_finite() || point.fract() != 0.0 || !(0.0..=0x10FFFF as f64).contains(&point) {
         return std::ptr::null();
     }
-    let Some(character) = char::from_u32(point as u32) else {
-        return std::ptr::null();
-    };
-    let mut buffer = [0u8; 4];
-    let text = character.encode_utf8(&mut buffer);
-    arena_c_string(text).map_or(std::ptr::null(), |value| value.cast())
+    let mut text = Vec::with_capacity(4);
+    wtf8_push_code_point(&mut text, point as u32);
+    arena_wtf8(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1201,16 +1137,34 @@ pub unsafe extern "C" fn thaw_string_normalize(
     if value.is_null() || form.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let form = unsafe { CStr::from_ptr(form) }.to_string_lossy();
-    let normalized: std::borrow::Cow<str> = match form.as_ref() {
-        "NFC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(&value),
-        "NFD" => icu_normalizer::DecomposingNormalizerBorrowed::new_nfd().normalize(&value),
-        "NFKC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(&value),
-        "NFKD" => icu_normalizer::DecomposingNormalizerBorrowed::new_nfkd().normalize(&value),
-        _ => return std::ptr::null(),
+    if !matches!(form.as_ref(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+        return std::ptr::null();
+    }
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
+    let mut output = Vec::with_capacity(units.len());
+    let mut segment = String::new();
+    let flush = |segment: &mut String, output: &mut Vec<u16>| {
+        let normalized = match form.as_ref() {
+            "NFC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(segment),
+            "NFD" => icu_normalizer::DecomposingNormalizerBorrowed::new_nfd().normalize(segment),
+            "NFKC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(segment),
+            _ => icu_normalizer::DecomposingNormalizerBorrowed::new_nfkd().normalize(segment),
+        };
+        output.extend(normalized.encode_utf16());
+        segment.clear();
     };
-    arena_c_string(&normalized).map_or(std::ptr::null(), |value| value.cast())
+    for character in char::decode_utf16(units) {
+        match character {
+            Ok(character) => segment.push(character),
+            Err(error) => {
+                flush(&mut segment, &mut output);
+                output.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    flush(&mut segment, &mut output);
+    arena_wtf8(&wtf8_encode_utf16(&output)).map_or(std::ptr::null(), |value| value.cast())
 }
 static NEXT_SYMBOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -1221,10 +1175,11 @@ pub unsafe extern "C" fn thaw_symbol_new(description: *const c_char) -> *const c
     if description.is_null() {
         return std::ptr::null();
     }
-    let description = unsafe { CStr::from_ptr(description) }.to_string_lossy();
+    let description = unsafe { wtf8_bytes(description) };
     let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    arena_c_string(&format!("\u{3}{id}:{description}"))
-        .map_or(std::ptr::null(), |value| value.cast())
+    let mut symbol = format!("\u{3}{id}:").into_bytes();
+    symbol.extend_from_slice(description);
+    arena_wtf8(&symbol).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1234,10 +1189,12 @@ pub unsafe extern "C" fn thaw_symbol_to_string(symbol: *const c_char) -> *const 
     if symbol.is_null() {
         return std::ptr::null();
     }
-    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
-    let description = symbol.split_once(':').map_or("", |value| value.1);
-    arena_c_string(&format!("Symbol({description})"))
-        .map_or(std::ptr::null(), |value| value.cast())
+    let symbol = unsafe { wtf8_bytes(symbol) };
+    let description = symbol.splitn(2, |&byte| byte == b':').nth(1).unwrap_or_default();
+    let mut output = b"Symbol(".to_vec();
+    output.extend_from_slice(description);
+    output.push(b')');
+    arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1247,9 +1204,9 @@ pub extern "C" fn thaw_symbol_key(symbol: *const c_char) -> *const c_char {
 
 /// The process-wide `Symbol.for` registry: description -> registered symbol
 /// text, so `Symbol.for("x")` returns the *same* symbol every time.
-fn symbol_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+fn symbol_registry() -> &'static std::sync::Mutex<std::collections::HashMap<Vec<u8>, Vec<u8>>> {
     static REGISTRY: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, String>>,
+        std::sync::Mutex<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
     > = std::sync::OnceLock::new();
     REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
@@ -1265,37 +1222,35 @@ pub unsafe extern "C" fn thaw_symbol_for(description: *const c_char) -> *const c
     if description.is_null() {
         return std::ptr::null();
     }
-    let description = unsafe { CStr::from_ptr(description) }
-        .to_string_lossy()
-        .into_owned();
+    let description = unsafe { wtf8_bytes(description) }.to_vec();
     let mut registry = symbol_registry().lock().unwrap_or_else(|error| error.into_inner());
     if let Some(symbol) = registry.get(&description) {
-        return arena_c_string(symbol).map_or(std::ptr::null(), |value| value.cast());
+        return arena_wtf8(symbol).map_or(std::ptr::null(), |value| value.cast());
     }
     let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let symbol = format!("\u{3}{id}:{description}");
+    let mut symbol = format!("\u{3}{id}:").into_bytes();
+    symbol.extend_from_slice(&description);
     registry.insert(description, symbol.clone());
-    arena_c_string(&symbol).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&symbol).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
 /// # Safety
 /// `symbol` must point to a valid NUL-terminated UTF-8 string.
 ///
-/// `Symbol.keyFor(symbol)`: the registered key, or the empty string for a
-/// symbol that was not created by `Symbol.for`.
+/// `Symbol.keyFor(symbol)`: the registered key, or null for an unregistered symbol.
 pub unsafe extern "C" fn thaw_symbol_key_for(symbol: *const c_char) -> *const c_char {
     if symbol.is_null() {
         return std::ptr::null();
     }
-    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
+    let symbol = unsafe { wtf8_bytes(symbol) };
     let registry = symbol_registry().lock().unwrap_or_else(|error| error.into_inner());
     let key = registry
         .iter()
-        .find(|(_, value)| value.as_str() == symbol.as_ref())
-        .map(|(key, _)| key.clone())
-        .unwrap_or_default();
-    arena_c_string(&key).map_or(std::ptr::null(), |value| value.cast())
+        .find(|(_, value)| value.as_slice() == symbol)
+        .map(|(key, _)| key.clone());
+    key.and_then(|key| arena_wtf8(&key))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1309,9 +1264,9 @@ pub unsafe extern "C" fn thaw_symbol_description(symbol: *const c_char) -> *cons
     if symbol.is_null() {
         return std::ptr::null();
     }
-    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
-    let description = symbol.split_once(':').map_or("", |value| value.1);
-    arena_c_string(description).map_or(std::ptr::null(), |value| value.cast())
+    let symbol = unsafe { wtf8_bytes(symbol) };
+    let description = symbol.splitn(2, |&byte| byte == b':').nth(1).unwrap_or_default();
+    arena_wtf8(description).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1372,9 +1327,9 @@ pub unsafe extern "C" fn thaw_escape(value: *const c_char) -> *const c_char {
     if value.is_null() {
         return std::ptr::null();
     }
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let mut out = String::new();
-    for unit in value.encode_utf16() {
+    for unit in units {
         let keep = unit < 0x80
             && ((unit as u8).is_ascii_alphanumeric()
                 || matches!(unit as u8, b'@' | b'*' | b'_' | b'+' | b'-' | b'.' | b'/'));
@@ -1407,8 +1362,7 @@ pub unsafe extern "C" fn thaw_unescape(value: *const c_char) -> *const c_char {
         }
         Some(result)
     };
-    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let units: Vec<u16> = value.encode_utf16().collect();
+    let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let mut out: Vec<u16> = Vec::with_capacity(units.len());
     let mut index = 0;
     while index < units.len() {
@@ -1431,6 +1385,5 @@ pub unsafe extern "C" fn thaw_unescape(value: *const c_char) -> *const c_char {
         out.push(units[index]);
         index += 1;
     }
-    let text = String::from_utf16_lossy(&out);
-    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
 }
