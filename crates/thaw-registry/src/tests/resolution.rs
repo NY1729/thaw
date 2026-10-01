@@ -1070,10 +1070,8 @@ fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserve
     // `import_equals_targets` nor `named_import_targets` lookup covers
     // this: `_enum` isn't bound via any import at all, just declared
     // directly in the same file. Also covers the reserved-word alias
-    // itself (`null`) that must be *skipped*, not emitted as invalid
-    // syntax (`declare function null(...)` is a parse error, not just
-    // an unusual name) -- confirmed it doesn't poison the rest of the
-    // file's declarations.
+    // itself (`null`) that must retain a valid internal declaration and
+    // an export alias, since `declare function null(...)` is invalid.
     let scratch = temp_registry("installed-dts-local-bare-reexport-scratch");
     let registry = temp_registry("installed-dts-local-bare-reexport-registry");
     let package = scratch.join("node_modules/case-kit");
@@ -1116,8 +1114,10 @@ fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserve
     );
     assert!(
         !declarations.contains("function null("),
-        "reserved-word alias should be skipped, not emitted as invalid syntax: {declarations}"
+        "reserved-word alias must not become an invalid declaration: {declarations}"
     );
+    assert!(declarations.contains("export { __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains(" as null };"), "{declarations}");
     assert!(
         declarations.contains("function string(): string"),
         "{declarations}"
@@ -2980,6 +2980,112 @@ fn installed_package_follows_a_dcts_esm_default_delegation() {
         declarations.contains("constructor(options?: Options)"),
         "{declarations}"
     );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_declarations_resolve_multihop_function_aliases_and_explicit_module_extensions() {
+    // Unrun regression: each re-export hop must rename the signature, and
+    // .mjs/.cjs specifiers must find their .d.mts/.d.cts declarations.
+    let scratch = temp_registry("installed-dts-multihop-alias-scratch");
+    let registry = temp_registry("installed-dts-multihop-alias-registry");
+    let package = scratch.join("node_modules/alias-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"alias-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { public as api } from './middle.mjs';\n\
+         export { original as null } from './functions.cjs';\n").unwrap();
+    fs::write(package.join("middle.d.mts"),
+        "export { local as public } from './functions.cjs';\n").unwrap();
+    fs::write(package.join("functions.d.cts"),
+        "declare function local(value: string): string;\n\
+         export { local };\n\
+         export declare function original(value: number): number;\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "alias-kit").unwrap();
+    let declarations = resolve(&registry, "alias-kit").unwrap().dts_source;
+    assert!(declarations.contains("declare function api(value: string): string"), "{declarations}");
+    assert!(declarations.contains("function original(value: number): number"), "{declarations}");
+    assert!(declarations.contains("export { __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains(" as null };"), "{declarations}");
+    assert!(!declarations.contains("function null("), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn reserved_aliases_from_distinct_modules_keep_distinct_internal_signatures() {
+    // Unrun regression: both modules use internal `f`, but their public
+    // reserved names and parameter types must not be merged.
+    let scratch = temp_registry("installed-dts-reserved-collision-scratch");
+    let registry = temp_registry("installed-dts-reserved-collision-registry");
+    let package = scratch.join("node_modules/collision-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"collision-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export * from './a.js';\nexport * from './b.js';\n").unwrap();
+    fs::write(package.join("a.d.ts"),
+        "export declare function f(value: string): string;\nexport { f as null };\n").unwrap();
+    fs::write(package.join("b.d.ts"),
+        "declare function f(value: number): number;\nexport { f as void };\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "collision-kit").unwrap();
+    let declarations = resolve(&registry, "collision-kit").unwrap().dts_source;
+    let public_binding = |alias: &str| {
+        declarations.lines().find_map(|line| {
+            line.trim().strip_prefix("export { ")
+                .and_then(|line| line.strip_suffix(&format!(" as {alias} }};")))
+        }).unwrap().to_string()
+    };
+    let null_binding = public_binding("null");
+    let void_binding = public_binding("void");
+    assert!(null_binding.starts_with("__thaw_public_6e756c6c_"), "{declarations}");
+    assert!(void_binding.starts_with("__thaw_public_766f6964_"), "{declarations}");
+    assert_ne!(null_binding, void_binding);
+    assert!(declarations.contains(&format!("function {null_binding}(value: string): string")), "{declarations}");
+    assert!(declarations.contains(&format!("function {void_binding}(value: number): number")), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn callable_const_alias_extracts_only_its_own_declarator() {
+    // Unrun regression: selecting `b` must not rename the first `a` in the
+    // same statement or borrow `a`'s number-returning signature.
+    let scratch = temp_registry("installed-dts-multidecl-scratch");
+    let registry = temp_registry("installed-dts-multidecl-registry");
+    let package = scratch.join("node_modules/multidecl-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"multidecl-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { b as c, ib as ic, lb as lc, lb as void, vb as vc, vb as null } from './impl.js';\n").unwrap();
+    fs::write(package.join("impl.d.ts"),
+        "export interface NumberCall { (): number; }\n\
+         export interface StringCall { (): string; }\n\
+         export declare const a: () => number, b: () => string;\n\
+         export declare const ia: NumberCall, ib: StringCall;\n\
+         export declare let la: () => number, lb: () => string;\n\
+         export declare var va: NumberCall, vb: StringCall;\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "multidecl-kit").unwrap();
+    let declarations = resolve(&registry, "multidecl-kit").unwrap().dts_source;
+    assert!(declarations.contains("const c: () => string;"), "{declarations}");
+    assert!(declarations.contains("const ic: StringCall;"), "{declarations}");
+    assert!(declarations.contains("let lc: () => string;"), "{declarations}");
+    assert!(declarations.contains("var vc: StringCall;"), "{declarations}");
+    assert!(declarations.contains("let __thaw_public_766f6964_"), "{declarations}");
+    assert!(declarations.contains(" as void };"), "{declarations}");
+    assert!(declarations.contains("var __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains(" as null };"), "{declarations}");
+    assert!(!declarations.contains("const a: () => number, c:"), "{declarations}");
+    assert!(!declarations.contains("const ia: NumberCall, ic:"), "{declarations}");
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
