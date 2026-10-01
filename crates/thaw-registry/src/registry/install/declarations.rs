@@ -734,7 +734,7 @@ fn dts_source_with_reexported_functions_inner(
             }
             for mut snippet in declarations {
                 if exported != original {
-                    snippet = rename_declared_function(snippet, &exported);
+                    snippet = export_function_as(snippet, &exported, entry_path);
                 }
                 output.push('\n');
                 output.push_str(&snippet);
@@ -784,7 +784,7 @@ fn dts_source_with_reexported_functions_inner(
         }
         for mut snippet in declarations {
             if exported != member {
-                snippet = rename_declared_function(snippet, &exported);
+                snippet = export_function_as(snippet, &exported, entry_path);
             }
             output.push('\n');
             output.push_str(&snippet);
@@ -1337,13 +1337,9 @@ fn is_ecmascript_keyword(name: &str) -> bool {
 /// doesn't name a callable shape at all (an ordinary data constant, or a
 /// type this doesn't resolve).
 ///
-/// `decl_span` is the caller's choice of "the const's own declaration
-/// text" -- an `ExportDecl`'s span (to keep an `export` prefix) for an
-/// exported const (`callable_const_declarations`, below), or a bare
-/// `VarDecl`'s own span for one reached only through a later local
-/// rename-export (`all_reexported_function_declarations`'s own
-/// `local_declarations` loop, mirroring how it already handles a bare
-/// `Decl::Fn`).
+/// Take only the requested declarator from a `const a: A, b: B` statement.
+/// Keeping the whole statement confuses both the alias renamer (it sees `a`)
+/// and the bridge's signature extractor (which sees an unrelated binding).
 ///
 /// The interface lookup is restricted to a *same-file* interface, not one
 /// reached through a further import: every real package seen so far
@@ -1354,12 +1350,15 @@ fn is_ecmascript_keyword(name: &str) -> bool {
 fn callable_const_declaration_snippet(
     module: &thaw_parser::ast::Module,
     source_map: &thaw_parser::common::SourceMap,
-    decl_span: thaw_parser::common::Span,
+    var_decl: &thaw_parser::ast::VarDecl,
+    declarator: &thaw_parser::ast::VarDeclarator,
+    exported: bool,
     binding: &thaw_parser::ast::BindingIdent,
     path: &Path,
 ) -> Result<Option<String>, String> {
     use thaw_parser::ast::{
         Decl, ModuleDecl, ModuleItem, TsEntityName, TsFnOrConstructorType, TsType, TsTypeElement,
+        VarDeclKind,
     };
     use thaw_parser::common::{SourceMapper, Spanned};
 
@@ -1440,14 +1439,21 @@ fn callable_const_declaration_snippet(
     let Some(annotation) = binding.type_ann.as_ref() else {
         return Ok(None);
     };
+    let declarator_snippet = source_map.span_to_snippet(declarator.span()).map_err(|error| {
+        format!("failed to read declaration for `{}`: {error:?}", binding.id.sym)
+    })?;
+    let kind = match var_decl.kind {
+        VarDeclKind::Const => "const",
+        VarDeclKind::Let => "let",
+        VarDeclKind::Var => "var",
+    };
+    let const_snippet = format!(
+        "{}{}{kind} {declarator_snippet};",
+        if exported { "export " } else { "" },
+        if var_decl.declare { "declare " } else { "" },
+    );
     match annotation.type_ann.as_ref() {
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(_)) => {
-            let const_snippet = source_map.span_to_snippet(decl_span).map_err(|error| {
-                format!(
-                    "failed to read declaration for `{}`: {error:?}",
-                    binding.id.sym
-                )
-            })?;
             Ok(Some(const_snippet))
         }
         TsType::TsTypeRef(ty_ref) => {
@@ -1475,12 +1481,6 @@ fn callable_const_declaration_snippet(
                     .iter()
                     .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
                 {
-                    let const_snippet = source_map.span_to_snippet(decl_span).map_err(|error| {
-                        format!(
-                            "failed to read declaration for `{}`: {error:?}",
-                            binding.id.sym
-                        )
-                    })?;
                     let iface_snippet =
                         source_map.span_to_snippet(iface_export.span()).map_err(|error| {
                             format!("failed to read declaration for `{iface_name}`: {error:?}")
@@ -1521,12 +1521,7 @@ fn callable_const_declaration_snippet(
             if !resolves_locally {
                 return Ok(None);
             }
-            let mut combined = source_map.span_to_snippet(decl_span).map_err(|error| {
-                format!(
-                    "failed to read declaration for `{}`: {error:?}",
-                    binding.id.sym
-                )
-            })?;
+            let mut combined = const_snippet;
             for item in &module.body {
                 let decl = match item {
                     ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(decl)) => decl,
@@ -1611,7 +1606,6 @@ fn callable_const_declarations(
     path: &Path,
 ) -> Result<Vec<(String, String)>, String> {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat};
-    use thaw_parser::common::Spanned;
 
     let mut declarations = Vec::new();
     for item in &module.body {
@@ -1628,7 +1622,9 @@ fn callable_const_declarations(
             if let Some(snippet) = callable_const_declaration_snippet(
                 module,
                 source_map,
-                export.span(),
+                var_decl,
+                declarator,
+                true,
                 binding,
                 path,
             )? {
@@ -1647,27 +1643,34 @@ fn callable_const_declarations(
 /// for a `default` lookup is resolved through `export default <ident>;` (or
 /// an inline `export default function <ident>(...) {}`) and keeps that
 /// real `<ident>`, which need not equal the literal string `"default"`.
-fn rename_declared_function(snippet: String, exported: &str) -> String {
-    // `"const "` covers a callable-const snippet (`callable_const_
+fn declared_function_name_range(snippet: &str) -> Option<(usize, usize)> {
+    // Variable keywords cover callable bindings (`callable_const_
     // declaration_snippet`, e.g. zod v3's `declare const objectType:
     // (...) => ...;`) -- for the interface-backed shape, whose snippet
     // concatenates the const's own declaration with its referenced
-    // interface's, `"const "` always appears before that interface's own
-    // `"interface "`, so this still renames the *const's* binding name
+    // interface's, the variable keyword appears before that interface's own
+    // `"interface "`, so this still renames the callable binding name
     // (the one actually being re-exported), not the interface's.
-    let Some((keyword_index, keyword)) = ["function ", "class ", "interface ", "const "]
+    let Some((keyword_index, keyword)) = ["function ", "class ", "interface ", "const ", "let ", "var "]
         .into_iter()
         .filter_map(|keyword| snippet.find(keyword).map(|index| (index, keyword)))
         .min_by_key(|(index, _)| *index)
     else {
-        return snippet;
+        return None;
     };
     let name_start = keyword_index + keyword.len();
     let name_end = snippet[name_start..]
         .find(|character: char| !(character.is_alphanumeric() || character == '_' || character == '$'))
         .map(|offset| name_start + offset)
         .unwrap_or(snippet.len());
-    if name_start == name_end || &snippet[name_start..name_end] == exported {
+    (name_start != name_end).then_some((name_start, name_end))
+}
+
+fn rename_declared_function(snippet: String, exported: &str) -> String {
+    let Some((name_start, name_end)) = declared_function_name_range(&snippet) else {
+        return snippet;
+    };
+    if &snippet[name_start..name_end] == exported {
         return snippet;
     }
     let mut renamed = String::with_capacity(snippet.len());
@@ -1675,6 +1678,36 @@ fn rename_declared_function(snippet: String, exported: &str) -> String {
     renamed.push_str(exported);
     renamed.push_str(&snippet[name_end..]);
     renamed
+}
+
+// A reserved public property name is legal in an export specifier but not
+// as a function's own declaration name. Keep the internal binding valid so
+// the bridge can carry the public alias into the generated qualified shim.
+fn export_function_as(mut snippet: String, exported: &str, origin: &Path) -> String {
+    const GENERATED_ALIAS: &str = "\n/* __thaw_public_function_alias__ */\nexport { ";
+    if let Some((declaration, alias)) = snippet.rsplit_once(GENERATED_ALIAS) {
+        if alias.ends_with(" };") {
+            snippet = declaration.to_string();
+        }
+    }
+    if !is_ecmascript_keyword(exported) {
+        return rename_declared_function(snippet, exported);
+    }
+    if declared_function_name_range(&snippet).is_none() {
+        return snippet;
+    }
+    // Two source files can both declare `f` and independently export a
+    // reserved property. Use the origin plus public key for a valid binding:
+    // all overloads at one origin share it, unrelated files never do.
+    let origin_hash = format!("{:x}", Sha256::digest(origin.to_string_lossy().as_bytes()));
+    let internal = format!(
+        "__thaw_public_{}_{}",
+        exported.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+        &origin_hash[..16],
+    );
+    snippet = rename_declared_function(snippet, &internal);
+    snippet.push_str(&format!("{GENERATED_ALIAS}{internal} as {exported} }};"));
+    snippet
 }
 
 fn all_reexported_function_declarations(
@@ -1726,18 +1759,26 @@ fn all_reexported_function_declarations(
     let mut local_declarations: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for item in &module.body {
-        if let ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Fn(function))) = item {
-            let snippet = source_map.span_to_snippet(function.span()).map_err(|error| {
-                format!(
-                    "failed to read declaration for `{}`: {error:?}",
-                    function.ident.sym
-                )
-            })?;
-            local_declarations
-                .entry(function.ident.sym.to_string())
-                .or_default()
-                .push(snippet);
-        }
+        let function = match item {
+            ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Fn(function))) => {
+                Some((function, function.span()))
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) => {
+                match &declaration.decl {
+                    Decl::Fn(function) => Some((function, declaration.span())),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some((function, span)) = function else { continue };
+        let snippet = source_map.span_to_snippet(span).map_err(|error| {
+            format!("failed to read declaration for `{}`: {error:?}", function.ident.sym)
+        })?;
+        local_declarations
+            .entry(function.ident.sym.to_string())
+            .or_default()
+            .push(snippet);
     }
     // A *local*, non-exported callable `const` -- the `Decl::Var`
     // counterpart to the bare `Decl::Fn` loop just above, for the exact
@@ -1760,7 +1801,9 @@ fn all_reexported_function_declarations(
             if let Some(snippet) = callable_const_declaration_snippet(
                 &module,
                 &source_map,
-                var_decl.span(),
+                var_decl,
+                declarator,
+                false,
                 binding,
                 path,
             )? {
@@ -1810,30 +1853,10 @@ fn all_reexported_function_declarations(
                 continue;
             };
             for snippet in snippets {
-                let snippet = if exported == original {
-                    snippet
-                } else {
-                    rename_declared_function(snippet, &exported)
-                };
-                // The exported alias can be any identifier-like text at
-                // all in TS export-specifier syntax, including a real
-                // ECMAScript reserved word (`null`, `void`, `function`,
-                // `catch`, `instanceof`) that can never actually be a
-                // function's own declared name -- real example: zod's
-                // own `export { _null as null };`. Renaming to one of
-                // those would produce text no parser accepts (`declare
-                // function null(...)`), and letting that reach the
-                // flattened file poisons parsing for every other
-                // declaration in it, not just this one -- confirmed via
-                // a standalone repro of each word below. `enum` (a
-                // future-reserved word, not a full keyword) and
-                // `undefined` (not reserved at all, just a predefined
-                // global) are deliberately not in this list -- both are
-                // real, valid function names to this parser, and zod
-                // uses both (`z.enum(...)`, `z.undefined()`).
-                if is_ecmascript_keyword(&exported) {
+                if exported == original && snippet.trim_start().starts_with("export ") {
                     continue;
                 }
+                let snippet = export_function_as(snippet, &exported, path);
                 declarations.push((exported.clone(), snippet));
             }
         }
@@ -1885,7 +1908,7 @@ fn all_reexported_function_declarations(
                         &mut named_visited,
                     )? {
                         if exported != original {
-                            snippet = rename_declared_function(snippet, &exported);
+                            snippet = export_function_as(snippet, &exported, path);
                         }
                         declarations.push((exported.clone(), snippet));
                     }
@@ -1968,6 +1991,26 @@ fn reexported_function_declarations(
         });
         if let Some(local_name) = local_name {
             for item in &module.body {
+                let function = match item {
+                    ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Fn(function))) => {
+                        Some((function, function.span()))
+                    }
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) => {
+                        match &declaration.decl {
+                            Decl::Fn(function) => Some((function, declaration.span())),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some((function, span)) = function {
+                    if function.ident.sym.as_ref() == local_name.as_str() {
+                        let snippet = source_map.span_to_snippet(span).map_err(|error| {
+                            format!("failed to read declaration for `{local_name}`: {error:?}")
+                        })?;
+                        declarations.push(export_function_as(snippet, name, path));
+                    }
+                }
                 let ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Var(var_decl))) = item
                 else {
                     continue;
@@ -1980,11 +2023,13 @@ fn reexported_function_declarations(
                         if let Some(snippet) = callable_const_declaration_snippet(
                             &module,
                             &source_map,
-                            var_decl.span(),
+                            var_decl,
+                            declarator,
+                            false,
                             binding,
                             path,
                         )? {
-                            declarations.push(snippet);
+                            declarations.push(export_function_as(snippet, name, path));
                         }
                     }
                 }
@@ -2117,7 +2162,8 @@ fn reexported_function_declarations(
                     &target_path,
                     original.as_deref().unwrap_or(name),
                     visited,
-                );
+                )
+                .map(|snippets| snippets.into_iter().map(|snippet| export_function_as(snippet, name, path)).collect());
             }
         }
     }
@@ -2673,12 +2719,9 @@ fn with_d_ts_suffix(path: &Path) -> Option<PathBuf> {
 /// `with_d_ts_suffix` for the ESM/CJS-explicit extensions: `.mjs`/`.mts`
 /// declarations are `.d.mts`, `.cjs`/`.cts` are `.d.cts`. Deliberately
 /// separate from `with_d_ts_suffix` (which maps every source extension to
-/// `.d.ts`) so this precise mapping is used only where the delegation
-/// shape is already known, not for every re-export hop -- mapping `.mjs`
-/// globally pulled a package's *own* ESM declarations into its CJS
-/// flattening and produced duplicate declarations (real trigger:
-/// csv-parse's `CsvError` class, declared in both its `.d.cts` and ESM
-/// `.d.ts`, then lowered as a duplicate class).
+/// `.d.ts`) so a re-export hop can try the precise extension first while
+/// retaining the ordinary `.d.ts` fallback. Package-entry selection still
+/// uses its manifest; it must not load both ESM and CJS entry declarations.
 fn with_explicit_d_ts_suffix(path: &Path) -> Option<PathBuf> {
     let extension = path.extension().and_then(|extension| extension.to_str())?;
     let declaration_extension = match extension {
@@ -2693,7 +2736,10 @@ fn with_explicit_d_ts_suffix(path: &Path) -> Option<PathBuf> {
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {
     if source == "." || source.starts_with("./") || source.starts_with("../") {
         let path = entry_path.parent()?.join(source);
-        return [with_d_ts_suffix(&path), Some(path.join("index.d.ts"))]
+        let direct_declaration = path.file_name().and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts"))
+            .then(|| path.clone());
+        return [direct_declaration, with_explicit_d_ts_suffix(&path), with_d_ts_suffix(&path), Some(path.join("index.d.ts"))]
             .into_iter()
             .flatten()
             .find(|candidate| candidate.is_file())

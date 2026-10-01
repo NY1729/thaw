@@ -974,3 +974,64 @@ fn relative_qualified_type_reference_uses_enclosing_namespace() {
     let f = functions.iter().find(|function| function.name == "f").unwrap();
     assert_eq!(f.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
 }
+
+#[test]
+fn reserved_public_function_alias_keeps_internal_signature_and_public_overloads() {
+    // Unrun regression: the declaration name must remain parseable while
+    // the qualified package call uses the public property key `null`.
+    let functions = parse_dts(
+        "declare function _null(value: string): string;\n\
+         declare function _null(value: number): number;\n\
+         export { _null as null };\n\
+         export { _null as default };\n\
+         export type { _null as TypeOnly };\n",
+    )
+    .unwrap();
+    assert_eq!(functions.iter().filter(|function| function.name == "_null").count(), 2);
+    let public = functions.iter().filter(|function| function.name == "null").collect::<Vec<_>>();
+    assert_eq!(public.len(), 2);
+    assert_eq!(public[0].params[0].1, DtsType::Native(HirType::Str));
+    assert_eq!(public[1].params[0].1, DtsType::Native(HirType::F64));
+    assert_eq!(functions.iter().filter(|function| function.name == "default").count(), 2);
+    assert!(!functions.iter().any(|function| function.name == "TypeOnly"));
+}
+
+#[test]
+fn reserved_aliases_do_not_mix_same_named_source_functions() {
+    // Unrun regression for two re-exported files both originally declaring
+    // `f`: the flattening gives the two public names separate bindings.
+    let functions = parse_dts(
+        "declare function __thaw_public_6e756c6c(value: string): string;\n\
+         export { __thaw_public_6e756c6c as null };\n\
+         declare function __thaw_public_766f6964(value: number): number;\n\
+         export { __thaw_public_766f6964 as void };\n",
+    )
+    .unwrap();
+    let null = functions.iter().find(|function| function.name == "null").unwrap();
+    let void = functions.iter().find(|function| function.name == "void").unwrap();
+    assert_eq!(null.params[0].1, DtsType::Native(HirType::Str));
+    assert_eq!(void.params[0].1, DtsType::Native(HirType::F64));
+    assert!(!functions.iter().any(|function| function.name.starts_with("__thaw_public_")));
+    assert!(parse_dts_values(
+        "declare const __thaw_public_6e756c6c: () => string;\n\
+         export { __thaw_public_6e756c6c as null };\n"
+    ).unwrap().iter().all(|value| !value.name.starts_with("__thaw_public_")));
+}
+
+#[test]
+fn reserved_callable_let_and_var_aliases_keep_their_own_types() {
+    // Unrun regression: callable `let` and interface-backed `var` follow
+    // the same public-key mapping as callable `const` and functions.
+    let functions = parse_dts(
+        "interface NumberCall { (): number; }\n\
+         declare let __thaw_public_766f6964_a: () => string;\n\
+         export { __thaw_public_766f6964_a as void };\n\
+         declare var __thaw_public_6e756c6c_b: NumberCall;\n\
+         export { __thaw_public_6e756c6c_b as null };\n",
+    ).unwrap();
+    let void = functions.iter().find(|function| function.name == "void").unwrap();
+    let null = functions.iter().find(|function| function.name == "null").unwrap();
+    assert_eq!(void.ret, DtsType::Native(HirType::Str));
+    assert_eq!(null.ret, DtsType::Native(HirType::F64));
+    assert!(!functions.iter().any(|function| function.name.starts_with("__thaw_public_")));
+}

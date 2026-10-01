@@ -10,6 +10,7 @@
 /// model.
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     let module = thaw_parser::parse_declarations(source)?;
+    let generated_internals = generated_public_alias_internals(&module);
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let mut functions = scoped_fn_decls(&module)
         .into_iter()
@@ -69,13 +70,83 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
                 ),
             }),
     );
+    // An export specifier may expose a reserved property name that cannot be
+    // the name of a function declaration (`export { _null as null }`). The
+    // registry keeps the valid internal declaration and the public export;
+    // carry its signatures under that public name for the qualified shim.
+    // Ordinary aliases are already materialized as renamed declarations by
+    // the registry and do not need a second copy here.
+    let mut seen_aliases = HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+            continue;
+        };
+        if export.type_only || export.src.is_some() {
+            continue;
+        }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            if named.is_type_only {
+                continue;
+            }
+            let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else {
+                continue;
+            };
+            let Some(swc_ecma_ast::ModuleExportName::Ident(exported)) = &named.exported else {
+                continue;
+            };
+            let original = original.sym.as_ref();
+            let exported = exported.sym.as_ref();
+            if !is_reserved_js_identifier(exported)
+                || !seen_aliases.insert((original, exported))
+                || (!original.starts_with("__thaw_public_")
+                    && functions.iter().any(|function| function.name == exported))
+            {
+                continue;
+            }
+            let aliases = functions
+                .iter()
+                .filter(|function| function.name == original)
+                .cloned()
+                .map(|mut function| {
+                    function.name = exported.to_string();
+                    function
+                })
+                .collect::<Vec<_>>();
+            functions.extend(aliases);
+        }
+    }
+    functions.retain(|function| !generated_internals.contains(&function.name));
     Ok(functions)
+}
+
+fn generated_public_alias_internals(module: &Module) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.type_only || export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            if named.is_type_only { continue; }
+            let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else { continue };
+            let Some(swc_ecma_ast::ModuleExportName::Ident(exported)) = &named.exported else { continue };
+            if original.sym.as_str().starts_with("__thaw_public_")
+                && is_reserved_js_identifier(exported.sym.as_ref())
+            {
+                names.insert(original.sym.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Extracts typed, non-callable top-level value declarations. Callable
 /// `const`s are already returned by [`parse_dts`] and are excluded here.
 pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
     let module = thaw_parser::parse_declarations(source)?;
+    let generated_internals = generated_public_alias_internals(&module);
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let interface_declarations = all_interface_decls_by_name(&module);
     let callable_objects = module
@@ -190,6 +261,9 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
                 continue;
             };
             let name = binding.id.sym.to_string();
+            if generated_internals.contains(&name) {
+                continue;
+            }
             let Some(annotation) = &binding.type_ann else {
                 continue;
             };
