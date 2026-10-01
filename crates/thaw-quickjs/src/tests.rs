@@ -4816,6 +4816,70 @@ fn writable_abort_listener_reentry_shares_pending_abort() {
 }
 
 #[test]
+fn headers_iterators_observe_mutation_and_resume_after_done() {
+    assert_eq!(load(r#"
+      function headersIteratorsObserveMutation() {
+        const headers = new Headers([['b', 'B'], ['d', 'D']]);
+        const keys = headers.keys(), values = headers.values(), entries = headers.entries();
+        const first = [keys.next().value, values.next().value, entries.next().value];
+        headers.append('c', 'C');
+        const second = [keys.next().value, values.next().value, entries.next().value];
+        headers.delete('b');
+        const third = [keys.next().value, values.next().value, entries.next().value];
+        const done = [keys.next().done, values.next().done, entries.next().done];
+        headers.append('e', 'E');
+        const resumed = [keys.next().value, values.next().value, entries.next().value];
+        return [first, second, third, done, resumed];
+      }
+    "#), 1);
+    assert_eq!(call("headersIteratorsObserveMutation", "[]"),
+        r#"[["b","B",["b","B"]],["c","C",["c","C"]],[null,null,null],[true,true,true],["e","E",["e","E"]]]"#);
+}
+
+#[test]
+fn headers_for_each_refetches_pairs_after_callback() {
+    assert_eq!(load(r#"
+      function headersForEachRefetchesPairs() {
+        const headers = new Headers([['a', 'A'], ['b', 'B']]);
+        const receiver = {};
+        const seen = [];
+        function visit(value, name, target) {
+          seen.push([name, value, this === receiver, target === headers]);
+          if (name === 'a') { headers.delete('b'); headers.append('c', 'C'); }
+          if (name === 'c') headers.append('d', 'D');
+        }
+        visit.call = () => { throw new Error('callback.call must not be used'); };
+        headers.entries = () => { throw new Error('public entries must not be used'); };
+        headers.forEach(visit, receiver);
+        return [seen, [...headers.keys()], [...headers]];
+      }
+    "#), 1);
+    assert_eq!(call("headersForEachRefetchesPairs", "[]"),
+        r#"[[["a","A",true,true],["c","C",true,true],["d","D",true,true]],["a","c","d"],[["a","A"],["c","C"],["d","D"]]]"#);
+}
+
+#[test]
+fn headers_set_cookie_and_iterator_brands() {
+    assert_eq!(load(r#"
+      function headersSetCookieAndIteratorBrands() {
+        const headers = new Headers([['x', 'one'], ['set-cookie', 'a=1'], ['x', 'two'], ['set-cookie', 'b=2']]);
+        const entries = headers.entries();
+        const initial = [...entries];
+        const done = entries.next().done;
+        headers.append('x', 'three');
+        headers.append('z', 'Z');
+        const resumed = entries.next().value;
+        const combined = [...headers.values()];
+        const rejectsReceiver = (() => { try { Headers.prototype.keys.call({}); return false; } catch (error) { return error instanceof TypeError; } })();
+        const rejectsIterator = (() => { try { entries.next.call({}); return false; } catch (error) { return error instanceof TypeError; } })();
+        return [initial, done, resumed, combined, rejectsReceiver, rejectsIterator];
+      }
+    "#), 1);
+    assert_eq!(call("headersSetCookieAndIteratorBrands", "[]"),
+        r#"[[["set-cookie","a=1"],["set-cookie","b=2"],["x","one, two"]],true,["z","Z"],["a=1","b=2","one, two, three","Z"],true,true]"#);
+}
+
+#[test]
 fn crypto_buffer_regressions() {
     assert_eq!(
         load(r#"async function cryptoBufferRegressions() {
