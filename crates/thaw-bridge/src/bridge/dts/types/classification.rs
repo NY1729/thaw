@@ -400,22 +400,10 @@ fn classify_ts_type(
         }
 
         TsType::TsTypeRef(ty_ref) => {
-            // A qualified reference (`ms.StringValue`) is tracked by its
-            // own bare rightmost identifier only, matching how every
-            // interface/alias/class/function here already is regardless
-            // of which namespace declares it (see
-            // `export_assignment_interface_name`'s doc comment, and
-            // `extract_interface_decls`/`extract_type_alias_decls`,
-            // which populate `interfaces`/`generic_interfaces` this same
-            // namespace-agnostic way) -- real example: `ms`'s own
-            // `declare namespace ms { type StringValue = ...; }`,
-            // referenced from its sibling overload as `ms.StringValue`.
-            // Falls through to the ordinary "not classified" case below
-            // exactly as before when no such name is known at all.
-            let ref_name = match &ty_ref.type_name {
-                TsEntityName::Ident(id) => id.sym.to_string(),
-                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-            };
+            // Resolver keys retain their declaration namespace. A qualified
+            // reference must use that full key so A.Options cannot silently
+            // resolve to B.Options; unique bare references remain available.
+            let ref_name = type_reference_name(&ty_ref.type_name);
 
             // A name matching a resolved (non-generic) `interface` --
             // treated exactly like an inline `{ ... }` type literal.
@@ -426,7 +414,7 @@ fn classify_ts_type(
             // arguments -- resolved on demand via substitution.
             if let Some(decl) = generic_interfaces.interfaces.get(&ref_name) {
                 return resolve_generic_interface(
-                    &ref_name,
+                    generic_canonical_name(&ref_name, generic_interfaces),
                     decl,
                     ty_ref,
                     None,
@@ -437,7 +425,7 @@ fn classify_ts_type(
             }
             if let Some(decl) = generic_interfaces.aliases.get(&ref_name) {
                 return resolve_generic_alias(
-                    &ref_name,
+                    generic_canonical_name(&ref_name, generic_interfaces),
                     decl,
                     ty_ref,
                     None,

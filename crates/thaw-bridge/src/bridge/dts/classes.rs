@@ -1,11 +1,48 @@
 pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
     let module = thaw_parser::parse_declarations(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
-    let mut classes = module
-        .body
-        .iter()
-        .flat_map(extract_class_decls)
-        .map(|(name, class)| lower_dts_class(name, class, &interfaces, &generic_interfaces))
+    let scoped_class_decls = scoped_class_decls(&module);
+    let scoped_classes = scoped_class_decls.iter().map(|(qualified, bare, _)|
+        (qualified.clone(), bare.clone())).collect::<Vec<_>>();
+    let mut locations = HashMap::<String, HashSet<String>>::new();
+    for (qualified, bare) in &scoped_classes {
+        locations.entry(bare.clone()).or_default().insert(qualified.clone());
+    }
+    let unique_self_names = locations.iter().filter_map(|(bare, scopes)|
+        (scopes.len() == 1).then(|| bare.clone())).collect::<HashSet<_>>();
+    let mut instance_class_names = HashMap::<String, String>::new();
+    for (qualified, bare) in &scoped_classes {
+        // The public DtsClass table is still keyed by its bare name. A
+        // namespace class can only map to that key when it is unique.
+        if locations[bare].len() == 1 {
+            instance_class_names.insert(qualified.clone(), bare.clone());
+            instance_class_names.insert(bare.clone(), bare.clone());
+        }
+    }
+    for (alias, target) in class_constructor_aliases(&module) {
+        if instance_class_names.contains_key(&target) {
+            instance_class_names.insert(alias.clone(), alias);
+        }
+    }
+    let mut declared_type_names = scoped_classes.iter().map(|(name, _)| name.clone())
+        .collect::<HashSet<_>>();
+    declared_type_names.extend(class_constructor_aliases(&module).into_iter().map(|(alias, _)| alias));
+    let (type_interfaces, type_aliases) = scoped_type_declarations(&module);
+    for name in type_interfaces.into_iter().map(|(name, _)| name)
+        .chain(type_aliases.into_iter().map(|(name, _)| name))
+    {
+        declared_type_names.insert(name.clone());
+        if !name.contains('.') && !scoped_classes.iter().any(|(class, _)| class == &name) {
+            instance_class_names.remove(&name);
+        }
+    }
+    let mut classes = scoped_class_decls.iter().map(|(qualified, name, class)| {
+        let (context, generic_context) = scoped_type_context(
+            declaration_scope(qualified), &interfaces, &generic_interfaces,
+        );
+        lower_dts_class(name, class, &context, &generic_context, &instance_class_names,
+            &unique_self_names, declaration_scope(qualified), &declared_type_names)
+    })
         .collect::<Vec<_>>();
     let declared = classes
         .iter()
@@ -94,8 +131,8 @@ fn constructor_interface_classes(
     generic_interfaces: &GenericInterfaces,
 ) -> Vec<DtsClass> {
     let mut interface_bodies: HashMap<String, Vec<&swc_ecma_ast::TsInterfaceBody>> = HashMap::new();
-    for iface in module.body.iter().flat_map(extract_interface_decls) {
-        interface_bodies.entry(iface.id.sym.to_string()).or_default().push(&iface.body);
+    for (name, iface) in scoped_type_declarations(module).0 {
+        interface_bodies.entry(name).or_default().push(&iface.body);
     }
 
     let var_decls = module.body.iter().filter_map(|item| match item {
@@ -119,12 +156,12 @@ fn constructor_interface_classes(
             let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() else {
                 return None;
             };
-            let interface_name = match &reference.type_name {
-                TsEntityName::Ident(name) => name.sym.to_string(),
-                TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
-            };
+            let interface_name = type_reference_name(&reference.type_name);
             let bodies = interface_bodies.get(&interface_name)?;
             let name = binding.id.sym.to_string();
+            let (context, generic_context) = scoped_type_context(
+                declaration_scope(&interface_name), interfaces, generic_interfaces,
+            );
             let constructors = bodies.iter().flat_map(|body| body.body.iter()).filter_map(|member| {
                 let TsTypeElement::TsConstructSignatureDecl(signature) = member else {
                     return None;
@@ -136,7 +173,7 @@ fn constructor_interface_classes(
                     type_ann: signature.type_ann.clone()?,
                 };
                 let function = lower_dts_fn_type(
-                    &name, &synthetic_fn_type, interfaces, generic_interfaces,
+                    &name, &synthetic_fn_type, &context, &generic_context,
                     &HashMap::new(), &HashMap::new(),
                 );
                 Some(DtsConstructor {
@@ -186,26 +223,31 @@ fn self_constructible_interface_classes(
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Vec<DtsClass> {
-    let alias_targets: HashSet<String> = nested_namespace_members(source)
-        .values()
-        .flat_map(|members| members.values().cloned())
-        .collect();
-    if alias_targets.is_empty() {
+    let namespace_members = nested_namespace_members(source);
+    if namespace_members.is_empty() {
         return Vec::new();
     }
-    let mut declarations: HashMap<String, Vec<&TsInterfaceDecl>> = HashMap::new();
-    let mut names = Vec::new();
-    for interface in module.body.iter().flat_map(extract_interface_decls) {
-        if alias_targets.contains(interface.id.sym.as_str()) {
-            let name = interface.id.sym.to_string();
-            if !declarations.contains_key(&name) {
-                names.push(name.clone());
+    let mut scoped = HashMap::<String, Vec<&TsInterfaceDecl>>::new();
+    for (name, interface) in scoped_type_declarations(module).0 {
+        scoped.entry(name).or_default().push(interface);
+    }
+    let mut targets = std::collections::BTreeMap::<String, HashSet<String>>::new();
+    for (namespace, members) in namespace_members {
+        for target in members.into_values() {
+            if let Some(key) = lexical_type_key(&target, &namespace, |name| scoped.contains_key(name)) {
+                targets.entry(target).or_default().insert(key);
             }
-            declarations.entry(name).or_default().push(interface);
         }
     }
-    names.into_iter().filter_map(|name| {
-            let interfaces_for_name = declarations.get(&name)?;
+    targets.into_iter().filter_map(|(name, keys)| {
+            // The public class key is bare; two namespace-local targets
+            // with this name cannot safely share one constructor shape.
+            if keys.len() != 1 { return None; }
+            let key = keys.into_iter().next()?;
+            let interfaces_for_name = scoped.get(&key)?;
+            let (context, generic_context) = scoped_type_context(
+                declaration_scope(&key), interfaces, generic_interfaces,
+            );
             let constructors = interfaces_for_name.iter()
                 .flat_map(|interface| interface.body.body.iter())
                 .filter_map(|member| {
@@ -219,7 +261,7 @@ fn self_constructible_interface_classes(
                     type_ann: signature.type_ann.clone()?,
                 };
                 let function = lower_dts_fn_type(
-                    &name, &synthetic_fn_type, interfaces, generic_interfaces,
+                    &name, &synthetic_fn_type, &context, &generic_context,
                     &HashMap::new(), &HashMap::new(),
                 );
                 Some(DtsConstructor {
@@ -380,6 +422,49 @@ fn extract_class_decls_from_decl(decl: &Decl) -> Vec<(&str, &Class)> {
     }
 }
 
+fn scoped_class_decls<'a>(module: &'a Module) -> Vec<(String, String, &'a Class)> {
+    fn walk<'a>(item: &'a ModuleItem, scope: &str, names: &mut Vec<(String, String, &'a Class)>) {
+        if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) = item {
+            if let DefaultDecl::Class(class) = &export.decl {
+                let bare = class.ident.as_ref().map_or("default", |ident| ident.sym.as_str());
+                names.push((bare.to_string(), bare.to_string(), class.class.as_ref()));
+            }
+            return;
+        }
+        let decl = match item {
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => decl,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+            _ => return,
+        };
+        match decl {
+            Decl::Class(class) => {
+                let bare = class.ident.sym.to_string();
+                let qualified = if scope.is_empty() { bare.clone() } else { format!("{scope}.{bare}") };
+                names.push((qualified, bare, &class.class));
+            }
+            Decl::TsModule(namespace) => {
+                let swc_ecma_ast::TsModuleName::Ident(name) = &namespace.id else { return; };
+                let scope = if scope.is_empty() {
+                    name.sym.to_string()
+                } else {
+                    format!("{scope}.{}", name.sym)
+                };
+                if let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body {
+                    for item in &block.body { walk(item, &scope, names); }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut names = Vec::new();
+    for item in &module.body { walk(item, "", &mut names); }
+    names
+}
+
+fn scoped_class_names(module: &Module) -> Vec<(String, String)> {
+    scoped_class_decls(module).into_iter().map(|(qualified, bare, _)| (qualified, bare)).collect()
+}
+
 fn property_name(key: &PropName) -> Option<String> {
     match key {
         PropName::Ident(name) => Some(name.sym.to_string()),
@@ -403,6 +488,11 @@ fn type_property_name(key: &Expr) -> Option<String> {
 fn named_return_type(
     annotation: Option<&swc_ecma_ast::TsTypeAnn>,
     self_name: &str,
+    instance_class_names: &HashMap<String, String>,
+    unique_self_names: &HashSet<String>,
+    scope: &str,
+    declared_type_names: &HashSet<String>,
+    type_params: &HashSet<String>,
 ) -> Option<String> {
     match annotation?.type_ann.as_ref() {
         // A fluent `this` return -- `name(str): this` on commander's
@@ -410,11 +500,17 @@ fn named_return_type(
         // so route it through the existing named-instance-return path
         // (`return_instance_class` -> a `JsValue` handle, chainable) the
         // same as an explicit `foo(): Command` would.
-        TsType::TsThisType(_) => Some(self_name.to_string()),
-        TsType::TsTypeRef(reference) => Some(match &reference.type_name {
-            TsEntityName::Ident(name) => name.sym.to_string(),
-            TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
-        }),
+        TsType::TsThisType(_) => unique_self_names.contains(self_name).then(|| self_name.to_string()),
+        TsType::TsTypeRef(reference) => {
+            let reference = type_reference_name(&reference.type_name);
+            if type_params.contains(&reference)
+                || (reference == self_name && !unique_self_names.contains(self_name)) {
+                None
+            } else {
+                let key = lexical_type_key(&reference, scope, |name| declared_type_names.contains(name))?;
+                instance_class_names.get(&key).cloned()
+            }
+        }
         _ => None,
     }
 }
@@ -831,7 +927,13 @@ fn lower_dts_class(
     class: &Class,
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
+    instance_class_names: &HashMap<String, String>,
+    unique_self_names: &HashSet<String>,
+    scope: &str,
+    declared_type_names: &HashSet<String>,
 ) -> DtsClass {
+    let class_type_params = class.type_params.iter().flat_map(|params| &params.params)
+        .map(|param| param.name.sym.to_string()).collect::<HashSet<_>>();
     let class_type_defaults = class
         .type_params
         .iter()
@@ -1077,7 +1179,14 @@ fn lower_dts_class(
                     }
                 }
                 let rest_param = function.rest_param;
-                let return_instance_class = named_return_type(method.function.return_type.as_deref(), name);
+                let mut return_type_params = class_type_params.clone();
+                if let Some(params) = &method.function.type_params {
+                    return_type_params.extend(params.params.iter().map(|param| param.name.sym.to_string()));
+                }
+                let return_instance_class = named_return_type(
+                    method.function.return_type.as_deref(), name, instance_class_names,
+                    unique_self_names, scope, declared_type_names, &return_type_params,
+                );
                 methods.push(DtsMethod {
                     name: function.name,
                     params,
@@ -1113,7 +1222,11 @@ fn lower_dts_class(
                     TsFnOrConstructorType::TsFnType(function),
                 )) = property.type_ann.as_ref().map(|annotation| annotation.type_ann.as_ref())
                 {
-                    let return_instance_class = named_return_type(Some(&function.type_ann), name);
+                    let mut return_type_params = class_type_params.clone();
+                    if let Some(params) = &function.type_params {
+                        return_type_params.extend(params.params.iter().map(|param| param.name.sym.to_string()));
+                    }
+                    let return_annotation = &function.type_ann;
                     let function = lower_dts_fn_type(
                         &property_name,
                         function,
@@ -1121,6 +1234,10 @@ fn lower_dts_class(
                         generic_interfaces,
                         &HashMap::new(),
                         &HashMap::new(),
+                    );
+                    let return_instance_class = named_return_type(
+                        Some(return_annotation), name, instance_class_names,
+                        unique_self_names, scope, declared_type_names, &return_type_params,
                     );
                     methods.push(DtsMethod {
                         name: function.name,
