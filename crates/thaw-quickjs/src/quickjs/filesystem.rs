@@ -332,19 +332,42 @@ fn fs_write_with_mode(path: &str, value: &str, append: bool, exclusive: bool) ->
 }
 
 #[cfg(unix)]
-fn fs_mkdir_with_mode(path: &str, value: &str, recursive: bool) -> io::Result<()> {
+fn fs_create_dir_mode(path: &std::path::Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
-    let mut builder = std::fs::DirBuilder::new();
-    builder
-        .recursive(recursive)
-        .mode(fs_parse_mode(value)?)
-        .create(path)
+    std::fs::DirBuilder::new().mode(mode).create(path)
 }
 
 #[cfg(not(unix))]
-fn fs_mkdir_with_mode(path: &str, value: &str, recursive: bool) -> io::Result<()> {
-    fs_parse_mode(value)?;
-    std::fs::DirBuilder::new().recursive(recursive).create(path)
+fn fs_create_dir_mode(path: &std::path::Path, _mode: u32) -> io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+fn fs_mkdir_recursive(path: &std::path::Path, mode: u32) -> io::Result<Option<std::path::PathBuf>> {
+    match fs_create_dir_mode(path, mode) {
+        Ok(()) => Ok(Some(path.to_path_buf())),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+                .ok_or(error)?;
+            let first = fs_mkdir_recursive(parent, mode)?;
+            match fs_create_dir_mode(path, mode) {
+                Ok(()) => Ok(first.or_else(|| Some(path.to_path_buf()))),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(first),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn fs_mkdir_with_mode(path: &str, value: &str, recursive: bool) -> io::Result<Option<String>> {
+    let mode = fs_parse_mode(value)?;
+    if !recursive {
+        fs_create_dir_mode(std::path::Path::new(path), mode)?;
+        return Ok(None);
+    }
+    fs_mkdir_recursive(std::path::Path::new(path), mode)
+        .map(|first| first.map(|path| path.to_string_lossy().into_owned()))
 }
 
 fn system_time_millis(time: io::Result<std::time::SystemTime>) -> f64 {
@@ -652,8 +675,8 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool, tabl
             Ok(serde_json::json!({ "ok": true, "length": bytes.len() }))
         })(),
         "append" => std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
-        "mkdir" => if recursive { std::fs::create_dir_all(&path) } else { std::fs::create_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
-        "mkdir_mode" => fs_mkdir_with_mode(&path, &value, recursive).map(|_| serde_json::json!({ "ok": true })),
+        "mkdir" => fs_mkdir_with_mode(&path, "511", recursive).map(|created| serde_json::json!({ "ok": true, "created": created })),
+        "mkdir_mode" => fs_mkdir_with_mode(&path, &value, recursive).map(|created| serde_json::json!({ "ok": true, "created": created })),
         "readdir" => std::fs::read_dir(&path).and_then(|entries| entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<io::Result<Vec<_>>>()).map(|entries| serde_json::json!({ "ok": true, "entries": entries })),
         "stat" => std::fs::metadata(&path).map(fs_metadata_record),
         "lstat" => std::fs::symlink_metadata(&path).map(fs_metadata_record),
