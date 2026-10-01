@@ -1152,3 +1152,44 @@ fn fs_glob_parses_patterns_and_prunes_excluded_directories() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn fs_recursive_mkdir_returns_first_created_path_across_api_styles() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_mkdir_result");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(root, checkMode) { var base = root + '/mkdir'; var first = fs.mkdirSync(base + '/one/two', { recursive: true, mode: 448 }); var existing = fs.mkdirSync(base + '/one/two', { recursive: true }); var nonrecursive = fs.mkdirSync(base + '/flat'); var promised = await fs.promises.mkdir(base + '/three/four', { recursive: true }); var callback = await new Promise(function(resolve, reject) { fs.mkdir(base + '/five/six', { recursive: true }, function(error, created) { error ? reject(error) : resolve([created, arguments.length]); }); }); var callbackFlat = await new Promise(function(resolve, reject) { fs.mkdir(base + '/plain', function(error) { error ? reject(error) : resolve(arguments.length); }); }); fs.writeFileSync(base + '/file', 'x'); var fileCode, parentCode; try { fs.mkdirSync(base + '/file', { recursive: true }); } catch (error) { fileCode = error.code; } try { fs.mkdirSync(base + '/file/child', { recursive: true }); } catch (error) { parentCode = error.code; } return [first, existing === undefined, nonrecursive === undefined, promised, callback, callbackFlat, fileCode, parentCode, fs.existsSync(base + '/one/two'), (!checkMode || (fs.statSync(base + '/one').mode & 63) === 0)]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_mkdir_result_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsMkdirResult = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments =
+        CString::new(serde_json::to_string(&(dir.to_string_lossy().into_owned(), cfg!(unix))).unwrap())
+            .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsMkdirResult").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let base = dir.join("mkdir").to_string_lossy().into_owned();
+    assert_eq!(parsed, serde_json::json!([
+        base.clone(),
+        true,
+        true,
+        format!("{base}/three"),
+        [format!("{base}/five"), 2],
+        1,
+        "EEXIST",
+        "ENOTDIR",
+        true,
+        true,
+    ]));
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
