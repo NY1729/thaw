@@ -708,7 +708,7 @@ fn lowers_native_class_construction_and_this_field_initialization() {
     assert_eq!(constructor.params.len(), 2);
     assert!(matches!(
         &constructor.body[0],
-        HirStmt::Let(name, HirType::Object(fields), HirExpr::ObjectAlloc(_))
+        HirStmt::Let(name, HirType::Object(fields), HirExpr::ClassAlloc(_))
             if name == "__thaw_this"
                 && fields.iter().any(|(name, ty)| name == "value" && ty == &HirType::F64)
                 && fields.iter().any(|(name, ty)| name == "label" && ty == &HirType::Str)
@@ -946,7 +946,7 @@ fn builds_forward_class_inheritance_layouts_in_base_to_derived_order() {
     assert_eq!(
         fields,
         &vec![
-            ("__thaw_class_identity_Derived$Base".into(), HirType::Bool),
+            ("__thaw_class_identity_\u{1e}Derived\u{1f}Base".into(), HirType::Bool),
             ("value".into(), HirType::F64),
             ("label".into(), HirType::Str),
         ]
@@ -1661,7 +1661,28 @@ fn lowers_native_instanceof_across_the_inheritance_chain() {
     else {
         panic!("leaf constructor must return an object")
     };
-    assert_eq!(fields[0].0, "__thaw_class_identity_Leaf$Middle$Base");
+    assert_eq!(fields[0].0, "__thaw_class_identity_\u{1e}Leaf\u{1f}Middle\u{1f}Base");
+}
+
+#[test]
+fn dollar_sign_in_class_name_does_not_split_nominal_ancestry() {
+    let program = lower(
+        r#"class Base$Name {}
+           class Leaf extends Base$Name {}
+           function main(): boolean {
+               const value = new Leaf();
+               return value instanceof Base$Name;
+           }"#,
+    );
+    let class = program
+        .functions
+        .iter()
+        .find(|function| function.name == class_constructor_symbol("Leaf"))
+        .unwrap();
+    let HirType::Object(fields) = &class.ret else {
+        panic!("leaf constructor must return an object")
+    };
+    assert_eq!(fields[0].0, "__thaw_class_identity_\u{1e}Leaf\u{1f}Base$Name");
 }
 
 #[test]

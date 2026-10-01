@@ -277,8 +277,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::TypedClosure(_, closure) => self.compile_expr(closure),
             HirExpr::FunctionRef(name, params, ret) => self.compile_function_ref(name, params, ret),
-            HirExpr::MethodRef(unbound, explicit, params, ret, is_static) => {
-                self.compile_method_ref(unbound, explicit, params, ret, *is_static)
+            HirExpr::MethodRef(unbound, explicit, params, ret, is_static, receiver_class) => {
+                self.compile_method_ref(unbound, explicit, params, ret, *is_static, receiver_class.as_deref())
             }
             HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args)?.ok_or_else(|| {
                 format!(
@@ -424,7 +424,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 let handle = self.compile_expr(inner)?;
                 self.compile_dynamic_value_placeholder_unchecked(handle)
             }
-            HirExpr::ObjectAlloc(object_type) => self.compile_object_alloc(object_type),
+            HirExpr::ObjectAlloc(object_type) => self.compile_object_alloc(object_type, false),
+            HirExpr::ClassAlloc(object_type) => self.compile_object_alloc(object_type, true),
             HirExpr::PropAccess(obj, object_ty, field) => {
                 let HirType::Object(fields) = object_ty else {
                     return Err(format!("property access requires an object, got {object_ty:?}"));

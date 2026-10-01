@@ -4,6 +4,11 @@ thread_local! {
     // shows the pointer lookup matters.
     static OBJECT_ACCESSORS: RefCell<HashMap<usize, HashMap<String, [usize; 2]>>> =
         RefCell::new(HashMap::new());
+    // The source HIR type carries class ancestry in the marker field name;
+    // the compiled object stores only that field's Boolean value. Keep the
+    // marker beside the allocation so an extracted method can validate the
+    // actual receiver after function values flow through aliases/containers.
+    static OBJECT_CLASS_IDENTITIES: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
 }
 
 const NON_EXTENSIBLE: u8 = 1;
@@ -16,6 +21,51 @@ pub extern "C" fn thaw_object_clear_state(object: *const u8) {
     let _ = OBJECT_STATES.try_with(|states| {
         states.borrow_mut().remove(&(object as usize));
     });
+}
+
+#[no_mangle]
+/// # Safety
+/// `marker` must be a valid NUL-terminated class identity field name.
+/// `object` is an arena-owned native object identity and is not dereferenced.
+pub unsafe extern "C" fn thaw_object_set_class_identity(
+    object: *const u8,
+    marker: *const c_char,
+) -> bool {
+    if object.is_null() || marker.is_null() {
+        return false;
+    }
+    let Ok(marker) = CStr::from_ptr(marker).to_str() else {
+        return false;
+    };
+    let Some(identities) = marker.strip_prefix("__thaw_class_identity_\u{1e}") else {
+        return false;
+    };
+    OBJECT_CLASS_IDENTITIES.with(|stored| {
+        stored.borrow_mut().insert(object as usize, identities.to_owned());
+    });
+    true
+}
+
+#[no_mangle]
+/// # Safety
+/// `expected` must be a valid NUL-terminated class name. `object` is used
+/// only as an identity; no unverified receiver pointer is dereferenced.
+pub unsafe extern "C" fn thaw_object_has_class_identity(
+    object: *const u8,
+    expected: *const c_char,
+) -> bool {
+    if object.is_null() || expected.is_null() {
+        return false;
+    }
+    let Ok(expected) = CStr::from_ptr(expected).to_str() else {
+        return false;
+    };
+    OBJECT_CLASS_IDENTITIES.with(|stored| {
+        stored
+            .borrow()
+            .get(&(object as usize))
+            .is_some_and(|identities| identities.split('\u{1f}').any(|name| name == expected))
+    })
 }
 
 /// Records `preventExtensions` (1), `seal` (2), or `freeze` (3) for one
@@ -139,17 +189,38 @@ pub unsafe extern "C" fn thaw_object_accessor(
 fn clear_object_states() {
     OBJECT_STATES.with(|states| states.borrow_mut().clear());
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().clear());
+    OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().clear());
 }
 
 fn prune_object_states() {
     if !thaw_arena::is_tracing() { clear_object_states(); return; }
     OBJECT_STATES.with(|states| states.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
+    OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
 }
 
 #[cfg(test)]
 mod object_state_tests {
     use super::*;
+
+    #[test]
+    fn class_identity_tracks_actual_allocation_and_inherited_names() {
+        clear_object_states();
+        let object = 0_u8;
+        let identity = &object as *const u8;
+        let marker = std::ffi::CString::new("__thaw_class_identity_\u{1e}Leaf\u{1f}Base$Name").unwrap();
+        let leaf = std::ffi::CString::new("Leaf").unwrap();
+        let base = std::ffi::CString::new("Base$Name").unwrap();
+        let false_base = std::ffi::CString::new("Base").unwrap();
+        let other = std::ffi::CString::new("Other").unwrap();
+        assert!(unsafe { thaw_object_set_class_identity(identity, marker.as_ptr()) });
+        assert!(unsafe { thaw_object_has_class_identity(identity, leaf.as_ptr()) });
+        assert!(unsafe { thaw_object_has_class_identity(identity, base.as_ptr()) });
+        assert!(!unsafe { thaw_object_has_class_identity(identity, false_base.as_ptr()) });
+        assert!(!unsafe { thaw_object_has_class_identity(identity, other.as_ptr()) });
+        clear_object_states();
+        assert!(!unsafe { thaw_object_has_class_identity(identity, leaf.as_ptr()) });
+    }
 
     #[test]
     fn integrity_state_follows_pointer_identity_and_resets() {

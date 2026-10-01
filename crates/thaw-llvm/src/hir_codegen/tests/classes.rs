@@ -690,6 +690,39 @@ fn compiles_and_runs_native_instanceof() {
 }
 
 #[test]
+fn native_method_receiver_keeps_actual_class_through_function_values() {
+    let source = r#"
+        class Base$Name {
+            constructor(public value: number) {}
+            read(): number { return this.value; }
+        }
+        class Derived extends Base$Name {}
+        class Other {
+            constructor(public value: number) {}
+        }
+        function passthrough(read: () => number): () => number { return read; }
+        function main(): void {
+            const method = passthrough(new Base$Name(1).read);
+            const container = { method };
+            console.log(container.method.call(new Derived(42)));
+            console.log(container.method.apply(new Derived(43), []));
+            console.log(container.method.bind(new Derived(44))());
+            for (const receiver of [new Other(99), null, undefined, 7]) {
+                try {
+                    console.log(container.method.call(receiver));
+                } catch (error) {
+                    console.log((error as any).name);
+                }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_method_receiver_identity"),
+        "42\n43\n44\nTypeError\nTypeError\nTypeError\nTypeError\n"
+    );
+}
+
+#[test]
 fn compiles_and_runs_native_class_default_parameters() {
     let source = r#"
         class Box {
