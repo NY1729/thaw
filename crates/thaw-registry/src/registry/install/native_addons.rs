@@ -1,3 +1,7 @@
+mod napi_version {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../thaw-napi/src/napi/version.rs"));
+}
+
 /// Where a freshly `add`ed package's declarations/JS entry came from,
 /// inside the fetched package itself -- informational only, since the
 /// scratch directory these were read from is deleted before `add`
@@ -329,7 +333,7 @@ fn prebuild_install_asset(
         .as_array()?
         .iter()
         .filter_map(serde_json::Value::as_u64)
-        .filter(|version| *version <= 8)
+        .filter(|version| *version <= u64::from(napi_version::SUPPORTED_NAPI_VERSION))
         .max()?;
     let name = manifest.get("name")?.as_str()?;
     let version = manifest.get("version")?.as_str()?;
