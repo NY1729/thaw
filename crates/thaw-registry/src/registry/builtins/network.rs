@@ -1,9 +1,185 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "dgram" => Some(
-            "function Socket(type, listener) { if (!(this instanceof Socket)) return new Socket(type, listener); var options = typeof type === 'object' ? type : { type: type }; this.type = options.type || 'udp4'; if (this.type !== 'udp4' && this.type !== 'udp6') throw new TypeError('Bad socket type'); this._events = Object.create(null); this._handle = 0; this._address = null; this._remote = null; this._refed = true; if (typeof listener === 'function') this.on('message', listener); } Socket.prototype.on = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: false }); return this; }; Socket.prototype.once = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: true }); return this; }; Socket.prototype.off = Socket.prototype.removeListener = function(name, listener) { var key = String(name); this._events[key] = (this._events[key] || []).filter(function(entry) { return entry.listener !== listener; }); return this; }; Socket.prototype.emit = function(name) { var key = String(name), list = (this._events[key] || []).slice(), args = Array.prototype.slice.call(arguments, 1); list.forEach(function(entry) { if (entry.once) this.off(key, entry.listener); entry.listener.apply(this, args); }, this); return list.length > 0; };\n\
-             Socket.prototype.bind = function(port, address, callback) { var options = typeof port === 'object' ? port : { port: port, address: address }; if (typeof address === 'function') callback = address; if (typeof callback === 'function') this.once('listening', callback); var host = String(options.address || (this.type === 'udp6' ? '::' : '0.0.0.0')); var outcome = __thaw_udp_bind(host, Number(options.port || 0)); if (outcome.indexOf('ok|') !== 0) { var error = new Error(outcome.substring(4)); error.code = 'EADDRINUSE'; queueMicrotask(() => this.emit('error', error)); return this; } var fields = outcome.split('|'); this._handle = Number(fields[1]); this._address = { address: fields[2], family: this.type === 'udp6' ? 'IPv6' : 'IPv4', port: Number(fields[3]) }; queueMicrotask(() => { this.emit('listening'); var incoming = __thaw_udp_receive(this._handle); if (incoming.indexOf('ok|') !== 0) { if (this._handle) { var error = new Error(incoming.substring(4)); error.code = 'EIO'; this.emit('error', error); } return; } var parts = incoming.split('|'); var message = Buffer.from(parts[1], 'hex'); this.emit('message', message, { address: parts[2], family: parts[2].indexOf(':') >= 0 ? 'IPv6' : 'IPv4', port: Number(parts[3]), size: Number(parts[4]) }); }); return this; }; Socket.prototype.send = function(message) { var args = Array.prototype.slice.call(arguments, 1); var callback = typeof args[args.length - 1] === 'function' ? args.pop() : null; var port, address; if (args.length >= 4 && typeof args[0] === 'number' && typeof args[1] === 'number') { var offset = args.shift(), length = args.shift(); message = Buffer.from(message).subarray(offset, offset + length); } port = args.length ? Number(args.shift()) : this._remote && this._remote.port; address = args.length ? String(args.shift()) : this._remote && this._remote.address; if (!this._handle) { var bound = __thaw_udp_bind(this.type === 'udp6' ? '::' : '0.0.0.0', 0); if (bound.indexOf('ok|') !== 0) throw new Error(bound.substring(4)); var fields = bound.split('|'); this._handle = Number(fields[1]); this._address = { address: fields[2], family: this.type === 'udp6' ? 'IPv6' : 'IPv4', port: Number(fields[3]) }; } if (!port || !address) throw new TypeError('Port and address are required'); var buffer = Array.isArray(message) ? Buffer.concat(message.map(function(value) { return Buffer.from(value); })) : Buffer.from(message); var outcome = __thaw_udp_send(this._handle, buffer.toString('hex'), address, port); if (outcome.indexOf('ok|') !== 0) { var error = new Error(outcome.substring(4)); error.code = 'EIO'; if (callback) queueMicrotask(function() { callback(error); }); else queueMicrotask(() => this.emit('error', error)); } else if (callback) queueMicrotask(function() { callback(null, Number(outcome.substring(3))); }); return this; };\n\
-             Socket.prototype.connect = function(port, address, callback) { this._remote = { address: String(address || (this.type === 'udp6' ? '::1' : '127.0.0.1')), family: this.type === 'udp6' ? 'IPv6' : 'IPv4', port: Number(port) }; if (callback) queueMicrotask(callback); return this; }; Socket.prototype.disconnect = function() { this._remote = null; }; Socket.prototype.address = function() { if (!this._address) throw new Error('Socket is not running'); return this._address; }; Socket.prototype.remoteAddress = function() { if (!this._remote) throw new Error('Socket is not connected'); return this._remote; }; Socket.prototype.close = function(callback) { if (callback) this.once('close', callback); if (this._handle) __thaw_udp_close(this._handle); this._handle = 0; queueMicrotask(() => this.emit('close')); return this; }; Socket.prototype.ref = function() { this._refed = true; return this; }; Socket.prototype.unref = function() { this._refed = false; return this; }; Socket.prototype.hasRef = function() { return this._refed; }; Socket.prototype.setBroadcast = Socket.prototype.setMulticastLoopback = Socket.prototype.setMulticastTTL = Socket.prototype.setTTL = function() { return this; }; Socket.prototype.addMembership = Socket.prototype.dropMembership = Socket.prototype.addSourceSpecificMembership = Socket.prototype.dropSourceSpecificMembership = function() { return this; }; Socket.prototype.getRecvBufferSize = Socket.prototype.getSendBufferSize = function() { return 212992; }; Socket.prototype.setRecvBufferSize = Socket.prototype.setSendBufferSize = function() { return this; }; function createSocket(type, listener) { return new Socket(type, listener); } module.exports = { Socket: Socket, createSocket: createSocket }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+            r#"function Socket(type, listener) {
+  if (!(this instanceof Socket)) return new Socket(type, listener);
+  var options = typeof type === 'object' ? type : { type: type };
+  this.type = options.type || 'udp4';
+  if (this.type !== 'udp4' && this.type !== 'udp6') throw new TypeError('Bad socket type');
+  this._events = Object.create(null);
+  this._handle = 0;
+  this._address = null;
+  this._remote = null;
+  this._refed = true;
+  this._closed = false;
+  this._receiveTimer = null;
+  if (typeof listener === 'function') this.on('message', listener);
+}
+Socket.prototype.on = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: false }); return this; };
+Socket.prototype.once = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: true }); return this; };
+Socket.prototype.off = Socket.prototype.removeListener = function(name, listener) { var key = String(name); this._events[key] = (this._events[key] || []).filter(function(entry) { return entry.listener !== listener; }); return this; };
+Socket.prototype.emit = function(name) { var key = String(name), list = (this._events[key] || []).slice(), args = Array.prototype.slice.call(arguments, 1); list.forEach(function(entry) { if (entry.once) this.off(key, entry.listener); entry.listener.apply(this, args); }, this); return list.length > 0; };
+function portNumber(value, allowZero) {
+  var port = Number(value);
+  if (!Number.isInteger(port) || port < (allowZero ? 0 : 1) || port > 65535) throw new RangeError('Invalid UDP port');
+  return port;
+}
+Socket.prototype._checkOpen = function() { if (this._closed) throw new Error('Socket is closed'); };
+function nativeError(outcome) {
+  var separator = outcome.indexOf('|', 4);
+  var error = new Error(outcome.substring(separator + 1));
+  error.code = outcome.substring(4, separator);
+  return error;
+}
+Socket.prototype._startReceive = function() {
+  var socket = this, retryDelay = 1;
+  if (this._receiveTimer !== null || !this._handle) return;
+  function schedule(delay) {
+    if (!socket._handle || socket._closed) return;
+    socket._receiveTimer = setTimeout(pump, delay || 1);
+    if (!socket._refed) socket._receiveTimer.unref();
+  }
+  function pump() {
+    socket._receiveTimer = null;
+    if (!socket._handle || socket._closed) return;
+    var incoming = __thaw_udp_receive(socket._handle);
+    if (incoming !== 'pending') {
+      if (incoming.indexOf('ok|') !== 0) {
+        socket.emit('error', nativeError(incoming));
+        retryDelay = Math.min(retryDelay * 2, 1000);
+        schedule(retryDelay);
+        return;
+      } else {
+        retryDelay = 1;
+        var parts = incoming.split('|'), message = Buffer.from(parts[1], 'hex');
+        socket.emit('message', message, { address: parts[2], family: parts[2].indexOf(':') >= 0 ? 'IPv6' : 'IPv4', port: Number(parts[3]), size: Number(parts[4]) });
+      }
+    }
+    retryDelay = 1;
+    schedule();
+  }
+  schedule();
+};
+Socket.prototype._bind = function(host, port) {
+  this._checkOpen();
+  if (this._handle) throw new Error('Socket is already bound');
+  var outcome = __thaw_udp_bind(host, port);
+  if (outcome.indexOf('ok|') !== 0) return outcome;
+  var fields = outcome.split('|');
+  this._handle = Number(fields[1]);
+  this._address = { address: fields[2], family: this.type === 'udp6' ? 'IPv6' : 'IPv4', port: Number(fields[3]) };
+  var socket = this;
+  queueMicrotask(function() { if (!socket._closed) socket.emit('listening'); });
+  this._startReceive();
+  return outcome;
+};
+Socket.prototype.bind = function(port, address, callback) {
+  var options = typeof port === 'object' && port !== null ? port : { port: port, address: address };
+  if (typeof address === 'function') callback = address;
+  var number = portNumber(options.port == null ? 0 : options.port, true);
+  var host = String(options.address || (this.type === 'udp6' ? '::' : '0.0.0.0'));
+  this._checkOpen();
+  if (this._handle) throw new Error('Socket is already bound');
+  var outcome = this._bind(host, number);
+  if (outcome.indexOf('ok|') === 0 && typeof callback === 'function') this.once('listening', callback);
+  if (outcome.indexOf('ok|') !== 0) {
+    var error = nativeError(outcome);
+    queueMicrotask(() => this.emit('error', error));
+  }
+  return this;
+};
+Socket.prototype.send = function(message) {
+  this._checkOpen();
+  var args = Array.prototype.slice.call(arguments, 1);
+  var callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+  var connected = this._remote !== null;
+  var sliced = typeof args[0] === 'number' && typeof args[1] === 'number' && (connected || args.length >= 3);
+  if (sliced) {
+    var offset = args.shift(), length = args.shift();
+    var original = Buffer.from(message);
+    if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || offset + length > original.length) throw new RangeError('Invalid UDP buffer range');
+    message = original.subarray(offset, offset + length);
+  }
+  var port, address;
+  if (connected) {
+    if (args.length) throw new TypeError('Connected socket does not take a destination');
+    port = this._remote.port; address = this._remote.address;
+  } else {
+    port = portNumber(args.shift(), false);
+    address = args.length && args[0] != null ? String(args.shift()) : (this.type === 'udp6' ? '::1' : '127.0.0.1');
+  }
+  var buffer = Array.isArray(message) ? Buffer.concat(message.map(function(value) { return Buffer.from(value); })) : Buffer.from(message);
+  if (!this._handle) {
+    var bound = this._bind(this.type === 'udp6' ? '::' : '0.0.0.0', 0);
+    if (bound.indexOf('ok|') !== 0) {
+      var bindError = nativeError(bound), socket = this;
+      queueMicrotask(function() { if (callback) callback(bindError); else socket.emit('error', bindError); });
+      return this;
+    }
+  }
+  var outcome = __thaw_udp_send(this._handle, buffer.toString('hex'), address, port);
+  if (outcome.indexOf('ok|') !== 0) {
+    var error = nativeError(outcome);
+    if (callback) queueMicrotask(function() { callback(error); }); else queueMicrotask(() => this.emit('error', error));
+  } else if (callback) queueMicrotask(function() { callback(null, Number(outcome.substring(3))); });
+  return this;
+};
+Socket.prototype.connect = function(port, address, callback) {
+  this._checkOpen();
+  if (typeof address === 'function') { callback = address; address = undefined; }
+  var number = portNumber(port, false);
+  address = String(address || (this.type === 'udp6' ? '::1' : '127.0.0.1'));
+  if (this._remote) throw new Error('Socket is already connected');
+  var socket = this;
+  function fail(outcome) {
+    var error = nativeError(outcome);
+    queueMicrotask(function() { if (typeof callback === 'function') callback(error); else socket.emit('error', error); });
+    return socket;
+  }
+  if (!this._handle) {
+    var bound = this._bind(this.type === 'udp6' ? '::' : '0.0.0.0', 0);
+    if (bound.indexOf('ok|') !== 0) return fail(bound);
+  }
+  var outcome = __thaw_udp_connect(this._handle, address, number);
+  if (outcome !== 'ok') return fail(outcome);
+  this._remote = { address: address, family: this.type === 'udp6' ? 'IPv6' : 'IPv4', port: number };
+  queueMicrotask(function() { if (!socket._closed) { socket.emit('connect'); if (typeof callback === 'function') callback(); } });
+  return this;
+};
+Socket.prototype.disconnect = function() {
+  this._checkOpen();
+  if (!this._remote) throw new Error('Socket is not connected');
+  var outcome = __thaw_udp_disconnect(this._handle);
+  if (outcome !== 'ok') throw nativeError(outcome);
+  this._remote = null;
+  return this;
+};
+Socket.prototype.address = function() { if (!this._address || this._closed) throw new Error('Socket is not running'); return this._address; };
+Socket.prototype.remoteAddress = function() { if (!this._remote || this._closed) throw new Error('Socket is not connected'); return this._remote; };
+Socket.prototype.close = function(callback) {
+  if (this._closed) throw new Error('Socket is closed');
+  this._closed = true;
+  if (typeof callback === 'function') this.once('close', callback);
+  if (this._receiveTimer !== null) { clearTimeout(this._receiveTimer); this._receiveTimer = null; }
+  if (this._handle) __thaw_udp_close(this._handle);
+  this._handle = 0;
+  this._address = null;
+  this._remote = null;
+  queueMicrotask(() => this.emit('close'));
+  return this;
+};
+Socket.prototype.ref = function() { this._refed = true; if (this._receiveTimer !== null) this._receiveTimer.ref(); return this; };
+Socket.prototype.unref = function() { this._refed = false; if (this._receiveTimer !== null) this._receiveTimer.unref(); return this; };
+Socket.prototype.hasRef = function() { return this._refed; };
+Socket.prototype.setBroadcast = Socket.prototype.setMulticastLoopback = Socket.prototype.setMulticastTTL = Socket.prototype.setTTL = function() { return this; };
+Socket.prototype.addMembership = Socket.prototype.dropMembership = Socket.prototype.addSourceSpecificMembership = Socket.prototype.dropSourceSpecificMembership = function() { return this; };
+Socket.prototype.getRecvBufferSize = Socket.prototype.getSendBufferSize = function() { return 212992; };
+Socket.prototype.setRecvBufferSize = Socket.prototype.setSendBufferSize = function() { return this; };
+function createSocket(type, listener) { return new Socket(type, listener); }
+module.exports = { Socket: Socket, createSocket: createSocket };
+module.exports.default = module.exports;
+module.exports.__esModule = true;
+"#,
         ),
         "dns" => Some(
             "var defaultOrder = globalThis.__thaw_dns_order || 'verbatim'; function familyOf(value) { value = String(value); if (/^(?:\\d{1,3}\\.){3}\\d{1,3}$/.test(value) && value.split('.').every(function(part) { return Number(part) <= 255; })) return 4; if (value.indexOf(':') >= 0) return 6; return 0; } function addresses(hostname, family) { var direct = familyOf(hostname); if (direct) return !family || family === direct ? [{ address: String(hostname), family: direct }] : []; if (String(hostname).toLowerCase() === 'localhost') { if (family === 4) return [{ address: '127.0.0.1', family: 4 }]; if (family === 6) return [{ address: '::1', family: 6 }]; return [{ address: '127.0.0.1', family: 4 }, { address: '::1', family: 6 }]; } if (typeof __thaw_dns_lookup === 'function') { var resolved = JSON.parse(__thaw_dns_lookup(String(hostname))); if (resolved.ok) return resolved.addresses.filter(function(entry) { return !family || family === entry.family; }); } return []; } function notFound(hostname, syscall) { var error = new Error('getaddrinfo ENOTFOUND ' + hostname); error.code = 'ENOTFOUND'; error.errno = -3008; error.syscall = syscall || 'getaddrinfo'; error.hostname = String(hostname); return error; } function lookup(hostname, options, callback) { if (typeof options === 'function') { callback = options; options = {}; } else if (typeof options === 'number') options = { family: options }; options = options || {}; queueMicrotask(function() { var found = addresses(hostname, Number(options.family || 0)); if (!found.length) { callback(notFound(hostname)); return; } if (options.all) callback(null, found); else callback(null, found[0].address, found[0].family); }); } function resolve(hostname, rrtype, callback) { if (typeof rrtype === 'function') { callback = rrtype; rrtype = 'A'; } queueMicrotask(function() { var found = addresses(hostname, String(rrtype || 'A').toUpperCase() === 'AAAA' ? 6 : 4); if (!found.length) callback(notFound(hostname, 'query' + String(rrtype || 'A'))); else callback(null, found.map(function(entry) { return entry.address; })); }); } function reverse(ip, callback) { queueMicrotask(function() { if (ip === '127.0.0.1' || ip === '::1') callback(null, ['localhost']); else callback(notFound(ip, 'getHostByAddr')); }); } function Resolver() { this._servers = []; } Resolver.prototype.setServers = function(servers) { this._servers = Array.from(servers, String); }; Resolver.prototype.getServers = function() { return this._servers.slice(); }; Resolver.prototype.resolve = resolve; Resolver.prototype.reverse = reverse; var promises = { lookup: function(hostname, options) { return new Promise(function(resolvePromise, reject) { lookup(hostname, options, function(error, address, family) { if (error) reject(error); else if (options && options.all) resolvePromise(address); else resolvePromise({ address: address, family: family }); }); }); }, resolve: function(hostname, rrtype) { return new Promise(function(resolvePromise, reject) { resolve(hostname, rrtype, function(error, value) { error ? reject(error) : resolvePromise(value); }); }); }, reverse: function(ip) { return new Promise(function(resolvePromise, reject) { reverse(ip, function(error, value) { error ? reject(error) : resolvePromise(value); }); }); } }; module.exports = { lookup: lookup, resolve: resolve, resolve4: function(hostname, callback) { resolve(hostname, 'A', callback); }, resolve6: function(hostname, callback) { resolve(hostname, 'AAAA', callback); }, reverse: reverse, Resolver: Resolver, promises: promises, getDefaultResultOrder: function() { return defaultOrder; }, setDefaultResultOrder: function(order) { defaultOrder = String(order); globalThis.__thaw_dns_order = defaultOrder; }, getServers: function() { return []; }, setServers: function() {}, ADDRCONFIG: 32, V4MAPPED: 8, NODATA: 'ENODATA', FORMERR: 'EFORMERR', SERVFAIL: 'ESERVFAIL', NOTFOUND: 'ENOTFOUND', NOTIMP: 'ENOTIMP', REFUSED: 'EREFUSED' }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
