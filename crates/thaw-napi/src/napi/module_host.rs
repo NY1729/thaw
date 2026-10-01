@@ -2013,11 +2013,24 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
             return ptr::null_mut();
         };
         let result = callback(bridge.context as *mut c_void, args.as_ptr());
-        let Ok(result) = text(result)
-            .and_then(|result| serde_json::from_str(&result).map_err(|error| error.to_string()))
-        else {
+        let Ok(result) = text(result) else { return ptr::null_mut(); };
+        if let Some(message) = result.strip_prefix('\u{2}') {
+            let env = env_mut(_env).unwrap();
+            let error = if _is_quickjs {
+                let message = serde_json::from_str::<String>(message)
+                    .unwrap_or_else(|_| "invalid QuickJS callback error response".into());
+                let (name, body) = message.strip_prefix('\u{1}')
+                    .and_then(|tagged| tagged.split_once('\u{1}'))
+                    .filter(|(name, _)| !name.is_empty())
+                    .unwrap_or(("Error", message.as_str()));
+                alloc_error(env, name, body.into(), None)
+            } else {
+                env.alloc(Value::Error(message.into()))
+            };
+            env.exception = Some(error);
             return ptr::null_mut();
-        };
+        }
+        let Ok(result) = serde_json::from_str(&result) else { return ptr::null_mut(); };
         return match value_from_json_with_undefined(env_mut(_env).unwrap(), &result, true) {
             Ok(value) => value,
             Err(message) => {
