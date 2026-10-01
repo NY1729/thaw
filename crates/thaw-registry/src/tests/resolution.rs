@@ -1061,6 +1061,216 @@ fn installed_package_inlines_types_through_wildcard_barrels() {
 }
 
 #[test]
+fn installed_type_reexports_keep_class_shape_without_value_export() {
+    // Unrun regression: a type-only wildcard and a named type alias must
+    // retain the instance declaration, while only the explicit value alias
+    // remains constructible at runtime.
+    let scratch = temp_registry("installed-dts-type-class-scratch");
+    let registry = temp_registry("installed-dts-type-class-registry");
+    let package = scratch.join("node_modules/type-class");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"type-class","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export type * from './client';\nexport type { Client as TypeClient } from './client';\nexport { Client as LiveClient } from './client';\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { constructor(name: string); getName(): string; static create(): Client; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { LiveClient: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "type-class").unwrap();
+    let declarations = resolve(&registry, "type-class").unwrap().dts_source;
+    assert!(declarations.contains("export type { Client }"), "{declarations}");
+    assert!(declarations.contains("export type { Client as TypeClient }"), "{declarations}");
+    assert!(declarations.contains("export { Client as LiveClient }"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_type_reexports_follow_named_type_imports_and_barrels() {
+    // Unrun regression: import type and export type must resolve through
+    // the same source graph without creating a runtime class value.
+    let scratch = temp_registry("installed-dts-type-import-scratch");
+    let registry = temp_registry("installed-dts-type-import-registry");
+    let package = scratch.join("node_modules/type-import");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"type-import","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export type * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"),
+        "import type { Client as Local } from './client';\nexport type { Local as PublicClient };\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { request(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "type-import").unwrap();
+    let declarations = resolve(&registry, "type-import").unwrap().dts_source;
+    assert!(declarations.contains("request(): string"), "{declarations}");
+    assert!(declarations.contains("export type { Client as PublicClient }"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn imported_type_reexport_without_type_modifier_stays_type_only() {
+    // Unrun regression: the import's type-only provenance must survive a
+    // plain `export { Local }`, while the parallel value import remains live.
+    let scratch = temp_registry("installed-dts-import-type-provenance-scratch");
+    let registry = temp_registry("installed-dts-import-type-provenance-registry");
+    let package = scratch.join("node_modules/import-type-provenance");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"import-type-provenance","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export * from './types';\nexport { TypeClient as Alias } from './types';\nexport * from './values';\n").unwrap();
+    fs::write(package.join("types.d.ts"),
+        "import type { Client as Local } from './client';\nexport { Local };\nexport { Local as TypeClient };\n").unwrap();
+    fs::write(package.join("values.d.ts"),
+        "import { Client as Local } from './client';\nexport { Local as LiveClient };\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { method(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { LiveClient: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "import-type-provenance").unwrap();
+    let declarations = resolve(&registry, "import-type-provenance").unwrap().dts_source;
+    assert!(declarations.contains("export type { Client as Local }"), "{declarations}");
+    assert!(declarations.contains("export type { Client as TypeClient }"), "{declarations}");
+    assert!(declarations.contains("export type { Client as Alias }"), "{declarations}");
+    assert!(declarations.contains("export { Client as LiveClient }"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_wildcard_follows_ordinary_named_class_barrel() {
+    // Unrun regression for exact named edge inside a wildcard barrel.
+    let scratch = temp_registry("installed-dts-named-class-barrel-scratch");
+    let registry = temp_registry("installed-dts-named-class-barrel-registry");
+    let package = scratch.join("node_modules/named-class-barrel");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"named-class-barrel","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"), "export { Client as PublicClient } from './client';\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { request(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { PublicClient: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "named-class-barrel").unwrap();
+    let declarations = resolve(&registry, "named-class-barrel").unwrap().dts_source;
+    assert!(declarations.contains("export { Client as PublicClient }"), "{declarations}");
+    assert!(declarations.contains("request(): string"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_wildcard_keeps_imported_class_aliases_at_each_barrel() {
+    // Unrun regression: the declaration is named Client, but a plain
+    // export of an imported Local must expose Local, then PublicClient.
+    let scratch = temp_registry("installed-dts-imported-class-alias-scratch");
+    let registry = temp_registry("installed-dts-imported-class-alias-registry");
+    let package = scratch.join("node_modules/imported-class-alias");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"imported-class-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"),
+        "import { Client as Local } from './client';\nexport { Local };\nexport { Local as PublicClient };\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { request(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { Local: class {}, PublicClient: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "imported-class-alias").unwrap();
+    let declarations = resolve(&registry, "imported-class-alias").unwrap().dts_source;
+    assert!(declarations.contains("export { Client as Local }"), "{declarations}");
+    assert!(declarations.contains("export { Client as PublicClient }"), "{declarations}");
+    assert!(declarations.contains("request(): string"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn named_class_alias_keeps_imported_superclass_name() {
+    // Unrun regression: Base is supporting type information, not another
+    // declaration of the public Derived alias.
+    let scratch = temp_registry("installed-dts-derived-alias-scratch");
+    let registry = temp_registry("installed-dts-derived-alias-registry");
+    let package = scratch.join("node_modules/derived-alias");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"derived-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { Derived as PublicDerived } from './derived';\nexport type { Derived as TypeDerived } from './derived';\n").unwrap();
+    fs::write(package.join("derived.d.ts"),
+        "import { Base } from './base';\nexport declare class Derived extends Base { self(): Derived; }\n").unwrap();
+    fs::write(package.join("base.d.ts"),
+        "export declare class Base { base(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = { PublicDerived: class {} };\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "derived-alias").unwrap();
+    let declarations = resolve(&registry, "derived-alias").unwrap().dts_source;
+    assert!(declarations.contains("class Base"), "{declarations}");
+    assert!(declarations.contains("export type { Base }"), "{declarations}");
+    assert!(declarations.contains("extends Base"), "{declarations}");
+    assert!(declarations.contains("self(): Derived"), "{declarations}");
+    assert!(declarations.contains("class Derived"), "{declarations}");
+    assert!(declarations.contains("export { Derived as PublicDerived }"), "{declarations}");
+    assert!(declarations.contains("export type { Derived as TypeDerived }"), "{declarations}");
+    assert!(!declarations.contains("class PublicDerived { base()"), "{declarations}");
+    assert!(!declarations.contains("class TypeDerived { base()"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn type_wildcard_converts_inlined_class_value_alias() {
+    // Unrun regression: a later type-only wildcard must not retain the
+    // generated value export of an earlier class alias.
+    let scratch = temp_registry("installed-dts-type-over-value-alias-scratch");
+    let registry = temp_registry("installed-dts-type-over-value-alias-registry");
+    let package = scratch.join("node_modules/type-over-value-alias");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"type-over-value-alias","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export type * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"), "export { Client as PublicClient } from './client';\n").unwrap();
+    fs::write(package.join("client.d.ts"), "export declare class Client { self(): Client; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "type-over-value-alias").unwrap();
+    let declarations = resolve(&registry, "type-over-value-alias").unwrap().dts_source;
+    assert!(declarations.contains("export type { Client as PublicClient }"), "{declarations}");
+    assert!(!declarations.contains("export { Client as PublicClient }"), "{declarations}");
+    assert!(declarations.contains("self(): Client"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_type_namespace_reexport_preserves_qualified_class_shape() {
+    // Unrun regression for `export type * as NS` through a second barrel.
+    let scratch = temp_registry("installed-dts-type-namespace-scratch");
+    let registry = temp_registry("installed-dts-type-namespace-registry");
+    let package = scratch.join("node_modules/type-namespace");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"type-namespace","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export type * from './barrel';\n").unwrap();
+    fs::write(package.join("barrel.d.ts"), "export type * as Types from './client';\n").unwrap();
+    fs::write(package.join("client.d.ts"),
+        "export declare class Client { request(): string; }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "type-namespace").unwrap();
+    let declarations = resolve(&registry, "type-namespace").unwrap().dts_source;
+    assert!(declarations.contains("declare namespace Types"), "{declarations}");
+    assert!(declarations.contains("export type { Types }"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserved_word_alias() {
     // `declare function _enum(...)` (no `export` prefix at all) followed
     // by a separate, *same-file* `export { _enum as enum };` -- real-

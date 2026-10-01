@@ -684,6 +684,62 @@ fn duplicate_namespace_classes_keep_independent_identity_and_inheritance() {
 }
 
 #[test]
+fn type_only_class_alias_keeps_instance_shape_and_separate_value_alias() {
+    // Unrun regression: the public type alias and live constructor alias
+    // can name the same declaration without turning the type alias into a
+    // runtime class value.
+    let source = r#"
+        declare class Client {
+            constructor(name: string);
+            getName(): string;
+            chain(): this;
+            static create(): Client;
+        }
+        export type { Client as TypeClient };
+        export { Client as LiveClient };
+    "#;
+    let classes = parse_dts_classes(source).unwrap();
+    for name in ["TypeClient", "LiveClient"] {
+        let class = classes.iter().find(|class| class.name == name).unwrap();
+        assert!(class.methods.iter().any(|method| method.name == "getName" && !method.is_static));
+        assert_eq!(class.methods.iter().find(|method| method.name == "chain").unwrap()
+            .return_instance_class.as_deref(), Some(name));
+    }
+    let type_names = exported_type_names(source);
+    let value_names = exported_value_names(source);
+    assert!(type_names.contains("TypeClient"));
+    assert!(!value_names.contains("TypeClient"));
+    assert!(value_names.contains("LiveClient"));
+}
+
+#[test]
+fn reserved_class_and_value_exports_keep_public_runtime_names() {
+    // Unrun regression for the registry's valid synthetic identifiers.
+    let source = r#"
+        export declare class __thaw_public_6e756c6c_deadbeef {
+            constructor(value: number);
+            label(): string;
+        }
+        export { __thaw_public_6e756c6c_deadbeef as null };
+        export declare const __thaw_public_766f6964_deadbeef: number;
+        export { __thaw_public_766f6964_deadbeef as void };
+    "#;
+    let classes = parse_dts_classes(source).unwrap();
+    assert!(classes.iter().any(|class| class.name == "null"
+        && class.methods.iter().any(|method| method.name == "label")));
+    assert!(!classes.iter().any(|class| class.name.starts_with("__thaw_public_")));
+    let values = parse_dts_values(source).unwrap();
+    assert!(values.iter().any(|value| value.name == "void"));
+    assert!(!values.iter().any(|value| value.name.starts_with("__thaw_public_")));
+}
+
+#[test]
+fn interface_alias_without_type_modifier_is_not_a_value_export() {
+    let source = "interface Shape { size: number; } export { Shape as PublicShape };";
+    assert!(!exported_value_names(source).contains("PublicShape"));
+}
+
+#[test]
 fn namespace_class_method_uses_local_interface_layout() {
     let classes = parse_dts_classes(r#"
         declare namespace A {

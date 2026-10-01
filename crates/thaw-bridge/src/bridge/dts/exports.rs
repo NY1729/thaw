@@ -261,9 +261,6 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
                 continue;
             };
             let name = binding.id.sym.to_string();
-            if generated_internals.contains(&name) {
-                continue;
-            }
             let Some(annotation) = &binding.type_ann else {
                 continue;
             };
@@ -324,6 +321,34 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
             ty: DtsType::Native(HirType::JsValue),
         });
     }
+    let mut aliases = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else { continue };
+            let Some(swc_ecma_ast::ModuleExportName::Ident(public)) = &named.exported else { continue };
+            if original.sym == public.sym { continue; }
+            if callable.contains(public.sym.as_ref()) || class_names.contains(public.sym.as_ref()) {
+                continue;
+            }
+            aliases.push((original.sym.to_string(), public.sym.to_string()));
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (original, public) in &aliases {
+            if values.iter().any(|value| &value.name == public) { continue; }
+            if let Some(mut value) = values.iter().find(|value| &value.name == original).cloned() {
+                value.name = public.clone();
+                values.push(value);
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    values.retain(|value| !generated_internals.contains(&value.name));
     Ok(values)
 }
 
@@ -1190,6 +1215,115 @@ pub fn exported_type_names(source: &str) -> HashSet<String> {
             })
         })
         .collect()
+}
+
+/// Value exports in the flattened declaration, kept separate from
+/// `exported_type_names`: the same class can be exported as a type through
+/// one edge and as a value through another.
+pub fn exported_value_names(source: &str) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations(source) else {
+        return HashSet::new();
+    };
+    let mut value_bindings = HashSet::new();
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+            if !import.type_only {
+                for specifier in &import.specifiers {
+                    match specifier {
+                        swc_ecma_ast::ImportSpecifier::Named(named) if !named.is_type_only => {
+                            value_bindings.insert(named.local.sym.to_string());
+                        }
+                        swc_ecma_ast::ImportSpecifier::Default(default) => {
+                            value_bindings.insert(default.local.sym.to_string());
+                        }
+                        swc_ecma_ast::ImportSpecifier::Namespace(namespace) => {
+                            value_bindings.insert(namespace.local.sym.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let declaration = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(declaration)) => Some(declaration),
+            _ => None,
+        };
+        match declaration {
+            Some(Decl::Class(class)) => { value_bindings.insert(class.ident.sym.to_string()); }
+            Some(Decl::Fn(function)) => { value_bindings.insert(function.ident.sym.to_string()); }
+            Some(Decl::TsEnum(enumeration)) => { value_bindings.insert(enumeration.id.sym.to_string()); }
+            Some(Decl::TsModule(namespace)) => {
+                if let swc_ecma_ast::TsModuleName::Ident(ident) = &namespace.id {
+                    value_bindings.insert(ident.sym.to_string());
+                }
+            }
+            Some(Decl::Var(variables)) => {
+                for declarator in &variables.decls {
+                    if let Pat::Ident(binding) = &declarator.name {
+                        value_bindings.insert(binding.id.sym.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut names = HashSet::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                let name = match &export.decl {
+                    Decl::Class(class) => Some(class.ident.sym.to_string()),
+                    Decl::Fn(function) => Some(function.ident.sym.to_string()),
+                    Decl::TsEnum(enumeration) => Some(enumeration.id.sym.to_string()),
+                    Decl::TsModule(namespace) => match &namespace.id {
+                        swc_ecma_ast::TsModuleName::Ident(ident) => Some(ident.sym.to_string()),
+                        _ => None,
+                    },
+                    Decl::Var(variables) => {
+                        for declarator in &variables.decls {
+                            if let Pat::Ident(binding) = &declarator.name {
+                                names.insert(binding.id.sym.to_string());
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(name) = name { names.insert(name); }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if !export.type_only && export.src.is_none() => {
+                for specifier in &export.specifiers {
+                    let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+                    if named.is_type_only { continue; }
+                    let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else { continue };
+                    if !value_bindings.contains(original.sym.as_ref()) { continue; }
+                    let name = named.exported.as_ref().unwrap_or(&named.orig);
+                    if let swc_ecma_ast::ModuleExportName::Ident(ident) = name {
+                        names.insert(ident.sym.to_string());
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if !export.type_only => {
+                for specifier in &export.specifiers {
+                    let swc_ecma_ast::ExportSpecifier::Namespace(namespace) = specifier else { continue };
+                    if let swc_ecma_ast::ModuleExportName::Ident(name) = &namespace.name {
+                        names.insert(name.sym.to_string());
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default))
+                if matches!(&default.decl, DefaultDecl::Class(_) | DefaultDecl::Fn(_)) => {
+                names.insert("default".to_string());
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(_)
+                | ModuleDecl::TsExportAssignment(_)) => {
+                names.insert("default".to_string());
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 /// Every `declare namespace NAME { ... }` block whose members can be
