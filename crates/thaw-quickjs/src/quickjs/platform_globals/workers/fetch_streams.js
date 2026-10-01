@@ -1,5 +1,7 @@
   if (typeof globalThis.Headers !== 'function') {
     const headerLists = new WeakMap();
+    const headerIteratorStates = new WeakMap();
+    const headerApply = Reflect.apply;
     const headerName = value => {
       const name = String(value).toLowerCase();
       if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(name)) throw new TypeError(`invalid header name: ${value}`);
@@ -22,6 +24,24 @@
       }
       return entries;
     };
+    const headerIteratorPrototype = {
+      next() {
+        const state = headerIteratorStates.get(this);
+        if (!state) throw new TypeError('invalid Headers iterator receiver');
+        const pairs = normalizedHeaderEntries(state.target);
+        if (state.index >= pairs.length) return { value: undefined, done: true };
+        const [name, value] = pairs[state.index++];
+        return { value: state.kind === 'key' ? name : state.kind === 'value' ? value : [name, value], done: false };
+      },
+      [Symbol.iterator]() { return this; },
+      get [Symbol.toStringTag]() { return 'Headers Iterator'; }
+    };
+    const headerIterator = (target, kind) => {
+      headersList(target);
+      const iterator = Object.create(headerIteratorPrototype);
+      headerIteratorStates.set(iterator, { target, kind, index: 0 });
+      return iterator;
+    };
     class Headers {
       constructor(init = undefined) {
         headerLists.set(this, []);
@@ -40,11 +60,20 @@
       has(name) { const normalized = headerName(name); return headersList(this).some(entry => entry[0] === normalized); }
       set(name, value) { const normalized = headerName(name), text = headerValue(value), list = headersList(this).filter(entry => entry[0] !== normalized); list.push([normalized, text]); headerLists.set(this, list); }
       getSetCookie() { return headersList(this).filter(entry => entry[0] === 'set-cookie').map(entry => entry[1]); }
-      *keys() { for (const entry of normalizedHeaderEntries(this)) yield entry[0]; }
-      *values() { for (const entry of normalizedHeaderEntries(this)) yield entry[1]; }
-      *entries() { yield* normalizedHeaderEntries(this); }
-      forEach(callback, thisArg = undefined) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); for (const [name, value] of normalizedHeaderEntries(this)) callback.call(thisArg, value, name, this); }
-      [Symbol.iterator]() { return this.entries(); }
+      keys() { return headerIterator(this, 'key'); }
+      values() { return headerIterator(this, 'value'); }
+      entries() { return headerIterator(this, 'entry'); }
+      forEach(callback, thisArg = undefined) {
+        headersList(this);
+        if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+        let index = 0, pairs = normalizedHeaderEntries(this);
+        while (index < pairs.length) {
+          const [name, value] = pairs[index++];
+          headerApply(callback, thisArg, [value, name, this]);
+          pairs = normalizedHeaderEntries(this);
+        }
+      }
+      [Symbol.iterator]() { return headerIterator(this, 'entry'); }
       get [Symbol.toStringTag]() { return 'Headers'; }
     }
     for (const name of ['append', 'delete', 'get', 'has', 'set', 'getSetCookie', 'keys', 'values', 'entries', 'forEach']) {
