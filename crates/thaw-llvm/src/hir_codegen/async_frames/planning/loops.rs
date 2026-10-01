@@ -93,9 +93,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 vec![HirExpr::Lit(HirLit::F64(0.0))],
             )
         };
-        current.awaited = Some(sleep_zero());
-        current.await_guard = Some((enabled_guard.clone(), true));
         let condition_state = segments.len();
+        current.await_next = Some(condition_state);
         segments.push(AsyncSegment {
             stmts: Vec::new(),
             awaited: None,
