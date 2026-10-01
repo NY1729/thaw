@@ -2989,6 +2989,36 @@ fn named_declaration_hop_follows_wildcard_function_and_superclass() {
 }
 
 #[test]
+fn reexported_child_keeps_same_file_superclass_chain() {
+    // Unrun regression: the selected class is re-exported, while its Base
+    // and GrandBase are declared in the target file without any imports.
+    let root = temp_registry("same-file-superclasses");
+    let entry = root.join("entry.d.ts");
+    fs::write(&entry, "export { Child as PublicChild } from './child';").unwrap();
+    fs::write(
+        root.join("child.d.ts"),
+        "declare class GrandBase { grand(): boolean; }\n\
+         declare class Base extends GrandBase { inherited(): number; }\n\
+         export declare class Child extends Base { own(): string; }",
+    ).unwrap();
+
+    let classes = reexported_class_or_interface_declarations(&entry, "PublicChild").unwrap();
+    assert_eq!(classes.len(), 3, "{classes:?}");
+    assert!(classes[0].contains("class Child extends Base"), "{classes:?}");
+    assert!(classes[1].contains("class Base extends GrandBase"), "{classes:?}");
+    assert!(classes[2].contains("class GrandBase"), "{classes:?}");
+    let flattened = dts_source_with_reexported_functions(
+        &entry, &fs::read_to_string(&entry).unwrap(),
+    ).unwrap();
+    assert!(flattened.contains("Child as PublicChild"), "{flattened}");
+    assert!(flattened.contains("inherited(): number"), "{flattened}");
+    assert!(flattened.contains("grand(): boolean"), "{flattened}");
+    assert!(!flattened.contains("Base as PublicChild"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn selects_a_single_addon_from_a_hidden_generated_package() {
     let node_modules = temp_registry("generated_native_addon");
     let addon = node_modules.join(".generated/client/engine.so.node");
