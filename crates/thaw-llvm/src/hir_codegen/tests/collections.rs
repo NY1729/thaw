@@ -1288,6 +1288,7 @@ fn compiles_map_with_bigint_values() {
             m.set("b", 9007199254740993n);
             const missing: bigint | undefined = m.get("c");
             console.log(m.has("c"), missing === undefined);
+            console.log(m.get("a"), m.get("b"), missing);
             console.log(m.size);
             m.forEach((value: bigint, key: string) => {
                 console.log(key, value, typeof value);
@@ -1296,7 +1297,7 @@ fn compiles_map_with_bigint_values() {
     "#;
     assert_eq!(
         compile_and_run(source, "map_bigint_values"),
-        "false true\n2\na 10n bigint\nb 9007199254740993n bigint\n"
+        "false true\n10n 9007199254740993n undefined\n2\na 10n bigint\nb 9007199254740993n bigint\n"
     );
 }
 
