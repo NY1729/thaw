@@ -597,6 +597,27 @@
   }
   if (typeof globalThis.FormData !== 'function') {
     const formDataEntries = new WeakMap();
+    const formDataIteratorStates = new WeakMap();
+    const formDataApply = Reflect.apply;
+    const formDataList = value => { const entries = formDataEntries.get(value); if (!entries) throw new TypeError('invalid FormData receiver'); return entries; };
+    const formDataIteratorPrototype = {
+      next() {
+        const state = formDataIteratorStates.get(this);
+        if (!state) throw new TypeError('invalid FormData iterator receiver');
+        const entries = formDataList(state.target);
+        if (state.index >= entries.length) return { value: undefined, done: true };
+        const [name, value] = entries[state.index++];
+        return { value: state.kind === 'key' ? name : state.kind === 'value' ? value : [name, value], done: false };
+      },
+      [Symbol.iterator]() { return this; },
+      get [Symbol.toStringTag]() { return 'FormData Iterator'; }
+    };
+    const formDataIterator = (target, kind) => {
+      formDataList(target);
+      const iterator = Object.create(formDataIteratorPrototype);
+      formDataIteratorStates.set(iterator, { target, kind, index: 0 });
+      return iterator;
+    };
     const formDataEntry = (name, value, filename) => {
       const key = String(name);
       if (!(value instanceof Blob)) {
@@ -615,17 +636,26 @@
       getAll(name) { const key = String(name); return formDataEntries.get(this).filter(entry => entry[0] === key).map(entry => entry[1]); }
       has(name) { const key = String(name); return formDataEntries.get(this).some(entry => entry[0] === key); }
       set(name, value, filename = undefined) { const replacement = formDataEntry(name, value, filename), key = replacement[0], entries = formDataEntries.get(this), index = entries.findIndex(entry => entry[0] === key); if (index < 0) entries.push(replacement); else { entries[index] = replacement; formDataEntries.set(this, entries.filter((entry, current) => entry[0] !== key || current === index)); } }
-      *entries() { for (const entry of formDataEntries.get(this)) yield [entry[0], entry[1]]; }
-      *keys() { for (const entry of formDataEntries.get(this)) yield entry[0]; }
-      *values() { for (const entry of formDataEntries.get(this)) yield entry[1]; }
-      forEach(callback, thisArg = undefined) { for (const [name, value] of this.entries()) callback.call(thisArg, value, name, this); }
-      [Symbol.iterator]() { return this.entries(); }
+      entries() { return formDataIterator(this, 'entry'); }
+      keys() { return formDataIterator(this, 'key'); }
+      values() { return formDataIterator(this, 'value'); }
+      forEach(callback, thisArg = undefined) {
+        formDataList(this);
+        if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+        let index = 0, entries = formDataList(this);
+        while (index < entries.length) {
+          const [name, value] = entries[index++];
+          formDataApply(callback, thisArg, [value, name, this]);
+          entries = formDataList(this);
+        }
+      }
+      [Symbol.iterator]() { return formDataIterator(this, 'entry'); }
       get [Symbol.toStringTag]() { return 'FormData'; }
     }
     globalThis.FormData = FormData;
     Object.defineProperty(globalThis, '__thaw_form_data_entries', {
       configurable: true,
-      value(value) { const entries = formDataEntries.get(value); if (!entries) throw new TypeError('invalid FormData receiver'); return entries.slice(); }
+      value(value) { return formDataList(value).slice(); }
     });
   }
   if (typeof globalThis.Response !== 'function') {
