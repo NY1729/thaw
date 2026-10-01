@@ -777,6 +777,20 @@ fn env_cleanup_hooks_run_in_reverse_and_can_be_removed() {
 }
 
 #[test]
+fn removed_async_cleanup_handle_rejects_removal_after_environment_drop() {
+    unsafe extern "C" fn cleanup(_handle: *mut AsyncCleanupHookHandle, _data: *mut c_void) {}
+    let mut env = Box::new(Env::new());
+    let mut handle = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_add_async_cleanup_hook(&mut *env, Some(cleanup), ptr::null_mut(), &mut handle), NAPI_OK);
+        assert_eq!(napi_remove_async_cleanup_hook(handle), NAPI_OK);
+    }
+    drop(env);
+    // Run under a memory checker to catch accesses through the retired Env.
+    unsafe { assert_eq!(napi_remove_async_cleanup_hook(handle), NAPI_INVALID_ARG); }
+}
+
+#[test]
 fn async_cleanup_hooks_complete_in_reverse_and_can_be_removed() {
     let output = Arc::new(Mutex::new(Vec::new()));
     let first = Box::into_raw(Box::new(CleanupProbe {
