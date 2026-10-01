@@ -1416,3 +1416,28 @@ fn fs_deferred_buffer_paths_are_snapshotted() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn fs_directory_iterator_closes_on_early_exit() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_dir_early_exit");
+    fs::write(dir.join("index.js"), r#"var fs = require('node:fs'); module.exports = async function(root) {
+        fs.mkdirSync(root + '/entries'); fs.writeFileSync(root + '/entries/a', 'a');
+        var normal = fs.opendirSync(root + '/entries');
+        for await (var item of normal) { break; }
+        var failed = fs.opendirSync(root + '/entries');
+        try { for await (var item of failed) { throw new Error('body'); } } catch (error) {}
+        var iterator = normal[Symbol.asyncIterator](); await iterator.return();
+        return [normal.closed, failed.closed, (await iterator.return()).done];
+    };"#).unwrap();
+    let modules = temp_registry("builtin_fs_dir_early_exit_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; {bundle} globalThis.exerciseDirExit = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseDirExit").unwrap();
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
