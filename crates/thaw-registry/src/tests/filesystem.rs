@@ -1,4 +1,62 @@
 #[test]
+fn fs_promise_write_file_consumes_iterables_and_keeps_descriptor_ownership() {
+    // Unrun regression: iterable chunks must be written in order through one
+    // descriptor; an iterator failure rejects and closes only an opened path.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_write_iterable");
+    fs::write(
+        dir.join("index.js"),
+        r#"var fs = require('node:fs'), promises = require('node:fs/promises'), Readable = require('node:stream').Readable;
+        module.exports = async function(root) {
+            var path = root + '/iterable.txt';
+            function* first() { yield 'a'; yield Buffer.from('62', 'hex'); yield new Uint8Array([99]); }
+            await promises.writeFile(path, first());
+            async function* second() { yield 'd'; await Promise.resolve(); yield Buffer.from('e'); }
+            await promises.appendFile(path, second());
+            await promises.appendFile(path, Readable.from(['f', 'g']));
+            var combined = fs.readFileSync(path, 'utf8');
+            var encodingReads = 0, encodingPath = root + '/encoded.txt';
+            await promises.writeFile(encodingPath, ['41', '42'], { get encoding() { encodingReads++; return 'hex'; } });
+            var encodedText = fs.readFileSync(encodingPath, 'utf8');
+            var handle = await promises.open(path, 'r+');
+            await handle.writeFile((function*() { yield 'X'; yield 'Y'; })());
+            var position = await handle.write('Z');
+            await handle.close();
+            var afterHandle = fs.readFileSync(path, 'utf8');
+            var appendHandle = await promises.open(path, 'a');
+            await appendHandle.appendFile((async function*() { yield '!'; })());
+            await appendHandle.close();
+            var afterAppend = fs.readFileSync(path, 'utf8');
+            var badEmpty, badData;
+            try { await promises.writeFile(path, [], { encoding: 'invalid-encoding' }); }
+            catch (error) { badEmpty = error instanceof TypeError; }
+            try { await promises.writeFile(path, ['x'], { encoding: 'invalid-encoding' }); }
+            catch (error) { badData = error instanceof TypeError; }
+            var untouched = fs.readFileSync(path, 'utf8') === afterAppend;
+            var failed;
+            try { await promises.writeFile(path, (async function*() { yield 'q'; throw new Error('iterator failed'); })()); }
+            catch (error) { failed = error.message; }
+            await promises.writeFile(path, []);
+            return [combined, encodedText, encodingReads, position.bytesWritten, afterHandle, afterAppend, badEmpty, badData, untouched, failed, fs.readFileSync(path).length];
+        };"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_write_iterable_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWriteIterable = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseWriteIterable").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["abcdefg","AB",1,1,"XYZdefg","XYZdefg!",true,true,true,"iterator failed",0]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn fs_sync_and_promise_apis_operate_on_the_host_filesystem() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_promises");
