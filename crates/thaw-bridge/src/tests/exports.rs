@@ -794,3 +794,44 @@ fn resolves_a_callable_alias_const_with_an_optional_call_signature_parameter() {
     assert_eq!(helmet.params.len(), 1);
     assert_eq!(helmet.required_params, 0, "{helmet:?}");
 }
+
+#[test]
+fn collects_each_named_callable_intersection_signature() {
+    let functions = parse_dts(
+        "interface A { (x: string): string } interface B { (x: number): number } declare const f: A & B;",
+    )
+    .unwrap();
+    assert_eq!(functions.iter().filter(|function| function.name == "f").count(), 2);
+}
+
+#[test]
+fn optional_native_function_uses_fallback_arity() {
+    let functions = parse_dts("declare function f(x?: number): number;").unwrap();
+    assert!(matches!(classify(&functions[0]), Classification::Fallback { .. }));
+}
+
+#[test]
+fn namespace_export_without_alias_keeps_member_name() {
+    let members = nested_namespace_members(
+        "declare namespace N { class Foo {} export { Foo }; }",
+    );
+    assert_eq!(members["N"]["Foo"], "Foo");
+}
+
+#[test]
+fn non_nullable_removes_nested_null_from_union_member() {
+    let functions = parse_dts(
+        "type Value = NonNullable<(string | null) | undefined>; declare function f(): Value;",
+    )
+    .unwrap();
+    assert_eq!(functions[0].ret, DtsType::Native(HirType::Str));
+}
+
+#[test]
+fn merged_callable_interface_keeps_each_signature() {
+    let functions = parse_dts(
+        "interface Callable { (x: string): string } interface Callable { (x: number): number } declare const f: Callable;",
+    )
+    .unwrap();
+    assert_eq!(functions.iter().filter(|function| function.name == "f").count(), 2);
+}

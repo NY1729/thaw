@@ -200,7 +200,7 @@ fn strip_non_nullable(ty: DtsType) -> DtsType {
     match ty {
         DtsType::Native(HirType::Optional(value))
         | DtsType::Native(HirType::Nullable(value))
-        | DtsType::Native(HirType::Nullish(value)) => DtsType::Native(*value),
+        | DtsType::Native(HirType::Nullish(value)) => strip_non_nullable(DtsType::Native(*value)),
         other => other,
     }
 }
@@ -231,7 +231,7 @@ fn classify_non_nullable_type(
         ) {
             continue;
         }
-        match classify_ts_type(element, interfaces, generic_interfaces) {
+        match strip_non_nullable(classify_ts_type(element, interfaces, generic_interfaces)) {
             DtsType::Native(ty) if native.as_ref().is_none_or(|current| current == &ty) => {
                 native = Some(ty)
             }

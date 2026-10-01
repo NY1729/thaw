@@ -577,3 +577,34 @@ fn deduplicates_a_value_name_declared_more_than_once() {
         }]
     );
 }
+
+#[test]
+fn constructor_rest_parameter_keeps_element_type() {
+    let classes = parse_dts_classes("declare class C { constructor(...parts: string[]); }").unwrap();
+    assert!(classes[0].constructors[0].params.is_empty());
+    assert_eq!(
+        classes[0].constructors[0].rest_param,
+        Some(("parts".to_string(), DtsType::Native(HirType::Str)))
+    );
+}
+
+#[test]
+fn merged_constructible_interface_keeps_each_constructor() {
+    let classes = parse_dts_classes(
+        "interface Maker { new(x: string): Item } interface Maker { new(x: number): Item } declare const Factory: Maker;",
+    )
+    .unwrap();
+    let factory = classes.iter().find(|class| class.name == "Factory").unwrap();
+    assert_eq!(factory.constructors.len(), 2);
+    assert!(factory.constructors.iter().all(|constructor| constructor.overloaded));
+}
+
+#[test]
+fn merged_namespace_constructor_interface_keeps_each_signature() {
+    let classes = parse_dts_classes(
+        "interface Maker { new(x: string): Item } interface Maker { new(x: number): Item } declare namespace makers { export { Maker as Public }; }",
+    )
+    .unwrap();
+    let maker = classes.iter().find(|class| class.name == "Maker").unwrap();
+    assert_eq!(maker.constructors.len(), 2);
+}

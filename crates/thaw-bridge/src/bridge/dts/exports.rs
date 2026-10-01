@@ -32,6 +32,7 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
         );
     }
     let call_signature_interfaces = all_interface_decls_by_name(&module);
+    let merged_call_signature_interfaces = all_interface_decls_by_name_merged(&module);
     let local_type_aliases = all_type_alias_decls_by_name(&module);
     functions.extend(
         module
@@ -40,7 +41,7 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
             .flat_map(|item| {
                 extract_const_call_signature_decls(
                     item,
-                    &call_signature_interfaces,
+                    &merged_call_signature_interfaces,
                     &local_type_aliases,
                 )
             })
@@ -269,6 +270,14 @@ fn all_interface_decls_by_name(module: &Module) -> HashMap<String, &TsInterfaceD
     map
 }
 
+fn all_interface_decls_by_name_merged(module: &Module) -> HashMap<String, Vec<&TsInterfaceDecl>> {
+    let mut map: HashMap<String, Vec<&TsInterfaceDecl>> = HashMap::new();
+    for iface in module.body.iter().flat_map(extract_interface_decls) {
+        map.entry(iface.id.sym.to_string()).or_default().push(iface);
+    }
+    map
+}
+
 /// Every type alias declared anywhere in `module`, by its own bare name --
 /// like `all_interface_decls_by_name` just above, this doesn't split
 /// generic from non-generic aliases: a generic alias's own type parameter
@@ -397,7 +406,7 @@ enum CallableConstSignature<'a> {
 /// an ordinary ambient function declaration.
 fn extract_const_call_signature_decls<'a>(
     item: &'a ModuleItem,
-    interfaces: &HashMap<String, &'a TsInterfaceDecl>,
+    interfaces: &HashMap<String, Vec<&'a TsInterfaceDecl>>,
     local_type_aliases: &HashMap<String, &'a TsType>,
 ) -> Vec<(String, CallableConstSignature<'a>)> {
     let var_decl = match item {
@@ -421,7 +430,7 @@ fn extract_const_call_signature_decls<'a>(
                     TsEntityName::Ident(ident) => ident.sym.as_str(),
                     TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
                 };
-                let interface = interfaces.get(interface_name)?;
+                let declarations = interfaces.get(interface_name)?;
                 let bindings = object
                     .props
                     .iter()
@@ -443,7 +452,7 @@ fn extract_const_call_signature_decls<'a>(
                     })
                     .collect::<HashMap<_, _>>();
                 let mut signatures = Vec::new();
-                for member in &interface.body.body {
+                for member in declarations.iter().flat_map(|iface| iface.body.body.iter()) {
                     match member {
                         TsTypeElement::TsMethodSignature(method) => {
                             let Expr::Ident(key) = method.key.as_ref() else {
@@ -479,7 +488,7 @@ fn extract_const_call_signature_decls<'a>(
                                     TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
                                 };
                                 if let Some(callable) = interfaces.get(callable_name) {
-                                    signatures.extend(callable.body.body.iter().filter_map(|member| {
+                                    signatures.extend(callable.iter().flat_map(|iface| iface.body.body.iter()).filter_map(|member| {
                                         match member {
                                             TsTypeElement::TsCallSignatureDecl(call) => Some((
                                                 name.clone(),
@@ -501,38 +510,31 @@ fn extract_const_call_signature_decls<'a>(
             };
             let annotation = binding.type_ann.as_ref()?;
             let name = binding.id.sym.to_string();
-            // `A & { ... }` (`debug`: `debug.Debug & { debug: ...;
-            // default: ... }`): a callable interface intersected with a
-            // plain property bag. Use the callable member's signatures.
-            let type_ann = match annotation.type_ann.as_ref() {
-                TsType::TsUnionOrIntersectionType(
-                    TsUnionOrIntersectionType::TsIntersectionType(intersection),
-                ) => intersection
-                    .types
-                    .iter()
-                    .map(Box::as_ref)
-                    .find(|member| {
-                        let TsType::TsTypeRef(ty_ref) = member else {
-                            return matches!(
-                                member,
-                                TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(_))
-                            );
+            if let TsType::TsUnionOrIntersectionType(
+                TsUnionOrIntersectionType::TsIntersectionType(intersection),
+            ) = annotation.type_ann.as_ref() {
+                let mut signatures = Vec::new();
+                for member in &intersection.types {
+                    if let TsType::TsTypeRef(reference) = member.as_ref() {
+                        let iface_name = match &reference.type_name {
+                            TsEntityName::Ident(ident) => ident.sym.as_str(),
+                            TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
                         };
-                        let iface_name = match &ty_ref.type_name {
-                            TsEntityName::Ident(ident) => ident.sym.to_string(),
-                            TsEntityName::TsQualifiedName(qualified) => {
-                                qualified.right.sym.to_string()
-                            }
-                        };
-                        interfaces.get(iface_name.as_str()).is_some_and(|iface| {
-                            iface.body.body.iter().any(|member| {
-                                matches!(member, TsTypeElement::TsCallSignatureDecl(_))
-                            })
-                        })
-                    })
-                    .unwrap_or(annotation.type_ann.as_ref()),
-                other => other,
-            };
+                        if let Some(iface) = interfaces.get(iface_name) {
+                            signatures.extend(iface.iter().flat_map(|decl| decl.body.body.iter()).filter_map(|member| match member {
+                                TsTypeElement::TsCallSignatureDecl(call) =>
+                                    Some((name.clone(), CallableConstSignature::Interface(call))),
+                                _ => None,
+                            }));
+                        }
+                    }
+                    signatures.extend(resolve_local_callable_fn_types(
+                        member, local_type_aliases, &mut HashSet::new(),
+                    ).into_iter().map(|signature| (name.clone(), signature)));
+                }
+                return (!signatures.is_empty()).then_some(signatures);
+            }
+            let type_ann = annotation.type_ann.as_ref();
             match type_ann {
                 TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
                     Some(vec![(name, CallableConstSignature::Direct(function))])
@@ -544,9 +546,8 @@ fn extract_const_call_signature_decls<'a>(
                     };
                     if let Some(iface) = interfaces.get(iface_name.as_str()) {
                         let mut signatures = iface
-                            .body
-                            .body
                             .iter()
+                            .flat_map(|decl| decl.body.body.iter())
                             .filter_map(|member| match member {
                                 TsTypeElement::TsCallSignatureDecl(call) => {
                                     Some((name.clone(), CallableConstSignature::Interface(call)))
@@ -565,7 +566,7 @@ fn extract_const_call_signature_decls<'a>(
                         // actually callable, so an ordinary property-bag
                         // interface is unaffected.
                         if !signatures.is_empty() {
-                            for member in &iface.body.body {
+                            for member in iface.iter().flat_map(|decl| decl.body.body.iter()) {
                                 if let TsTypeElement::TsPropertySignature(property) = member {
                                     let Some(annotation) = &property.type_ann else {
                                         continue;
@@ -1024,7 +1025,8 @@ pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
             };
             Some(import.specifiers.iter().filter_map(|specifier| {
                 match specifier {
-                    swc_ecma_ast::ImportSpecifier::Namespace(namespace) => {
+                    swc_ecma_ast::ImportSpecifier::Namespace(namespace)
+                        if import.src.value.starts_with('.') => {
                         Some(namespace.local.sym.to_string())
                     }
                     _ => None,
@@ -1182,9 +1184,7 @@ pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String,
                         let Some(target) = export_name(&named.orig) else {
                             continue;
                         };
-                        let Some(member_name) = named.exported.as_ref().and_then(export_name) else {
-                            continue;
-                        };
+                        let member_name = named.exported.as_ref().and_then(export_name).unwrap_or_else(|| target.clone());
                         members.insert(member_name, target);
                     }
                 }

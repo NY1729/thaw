@@ -3,6 +3,12 @@
 /// docs/design/bridge.md section 4.2 for why partial native/dynamic
 /// signatures aren't supported).
 pub fn classify(func: &DtsFunction) -> Classification {
+    if func.required_params < func.params.len() {
+        return Classification::Fallback {
+            function: func.name.clone(),
+            reason: "optional parameters require a variable-arity wrapper".to_string(),
+        };
+    }
     let mut params = Vec::with_capacity(func.params.len());
     for (name, ty) in &func.params {
         match ty {

@@ -198,7 +198,7 @@ pub fn generate_shim(
                     .map(|((name, _), ty)| format!("{name}: {}", render_ts_type(ty)))
                     .collect::<Vec<_>>();
                 if let (Some((name, _)), Some(variadic)) = (&func.rest_param, &sig.variadic) {
-                    params.push(format!("...{name}: {}[]", render_ts_type(variadic)));
+                    params.push(format!("...{name}: ({})[]", render_ts_type(variadic)));
                 }
                 let params = params.join(", ");
                 out.push_str(&format!(
@@ -321,7 +321,7 @@ pub fn generate_native_addon_shim(
                 continue;
             }
         }
-        if shadows_a_thaw_literal_identifier(&function) {
+        if shadows_a_thaw_literal_identifier(&function) || is_reserved_js_identifier(&function) {
             continue;
         }
         out.push_str("// Fallback (N-API)\n");
@@ -351,13 +351,13 @@ pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
         for dependency in &addon.dependencies {
             let hex = encode_embedded_native(dependency);
             out.push_str(&format!(
-                "    loadNativeSharedLibraryEmbedded(\"{hex}\");\n"
+                "    if (!loadNativeSharedLibraryEmbedded(\"{hex}\")) throw new Error(\"failed to load native dependency\");\n"
             ));
         }
         let hex = encode_embedded_native(addon.bytes);
         let root_export = escape_ts_string_literal(addon.root_export.unwrap_or(""));
         out.push_str(&format!(
-            "    loadNativeAddonEmbedded(\"{hex}\", \"{root_export}\");\n"
+            "    if (!loadNativeAddonEmbedded(\"{hex}\", \"{root_export}\")) throw new Error(\"failed to load native addon\");\n"
         ));
     }
     out.push_str("}\n");
@@ -380,12 +380,12 @@ pub fn generate_native_addon_path_init(addons: &[NativeAddonPath<'_>]) -> String
         out.push_str(&format!("    // {}\n", addon.package_name));
         for dependency in &addon.dependencies {
             out.push_str(&format!(
-                "    loadNativeSharedLibrary(\"{}\");\n",
+                "    if (!loadNativeSharedLibrary(\"{}\")) throw new Error(\"failed to load native dependency\");\n",
                 escape_ts_string_literal(dependency)
             ));
         }
         out.push_str(&format!(
-            "    loadNativeAddon(\"{}\", \"{}\");\n",
+            "    if (!loadNativeAddon(\"{}\", \"{}\")) throw new Error(\"failed to load native addon\");\n",
             escape_ts_string_literal(addon.path),
             escape_ts_string_literal(addon.root_export.unwrap_or(""))
         ));
@@ -758,7 +758,7 @@ pub fn required_runtime_features(source: &str) -> std::collections::BTreeSet<&'s
         ("wasm", &["WebAssembly", "node:wasi", "require('wasi')", "require(\"wasi\")"][..]),
         ("brotli", &["brotli", "Brotli"][..]),
         ("intl", &["Intl.Locale", "Intl.PluralRules", "Intl.Collator", "Intl.Segmenter",
-            "Intl.RelativeTimeFormat", "Intl.NumberFormat", "Intl.DateTimeFormat"][..]),
+            "Intl.RelativeTimeFormat", "Intl.NumberFormat", "Intl.DateTimeFormat", "Intl.ListFormat"][..]),
     ].into_iter().filter_map(|(feature, markers)| {
         markers.iter().any(|marker| source.contains(marker)).then_some(feature)
     }).collect()
@@ -789,15 +789,14 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
         ));
         out.push_str("    loadScript(\"globalThis.Array = globalThis.__thaw_intrinsic_Array;\");\n");
         for (export_name, runtime_getter, _, _) in bundle.value_exports {
-            let value_path = export_name
+            let path = export_name
                 .split('.')
-                .map(|part| format!("?.[\"{}\"]", escape_ts_string_literal(part)))
-                .collect::<String>();
+                .map(|part| format!("\"{}\"", escape_ts_string_literal(part)))
+                .collect::<Vec<_>>()
+                .join(",");
             let getter_source = format!(
-                "globalThis[\"{}\"] = (function(value) {{ return function() {{ return value != null && typeof value{} !== 'undefined' ? value{} : value != null && Object.prototype.hasOwnProperty.call(value, \"default\") ? value.default : value; }}; }})(globalThis.module.exports);",
+                "globalThis[\"{}\"] = (function(value) {{ return function() {{ var current = value, path = [{path}], found = true; for (var i = 0; i < path.length; i++) {{ if (current == null || !Object.prototype.hasOwnProperty.call(current, path[i])) {{ found = false; break; }} current = current[path[i]]; }} return found ? current : value != null && Object.prototype.hasOwnProperty.call(value, \"default\") ? value.default : value; }}; }})(globalThis.module.exports);",
                 escape_ts_string_literal(runtime_getter),
-                value_path,
-                value_path,
             );
             out.push_str(&format!(
                 "    loadScript(\"{}\");\n",

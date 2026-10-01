@@ -26,6 +26,16 @@ fn rewrite_external_class_constructors(
                             qualifier == package.sym.as_str() && name == class.sym.as_str()
                         })
                     }
+                    (Expr::Member(namespace), MemberProp::Ident(class)) => {
+                        let (Expr::Ident(package), MemberProp::Ident(namespace_name)) =
+                            (namespace.obj.as_ref(), &namespace.prop) else {
+                                return expression.visit_children_with(self);
+                            };
+                        let member_name = format!("{}.{}", namespace_name.sym, class.sym);
+                        self.classes.iter().find(|(qualifier, name, _)| {
+                            qualifier == package.sym.as_str() && name == &member_name
+                        })
+                    }
                     _ => None,
                 },
                 _ => None,
