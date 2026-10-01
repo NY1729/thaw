@@ -8,6 +8,48 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
 #[test]
+fn bytes_encoding_preserves_native_units_and_stops_at_invalid_hex() {
+    let face = thaw_arena::arena_string("😀".as_bytes());
+    let latin1 = c"latin1".as_ptr();
+    assert_eq!(unsafe { read_byte_array(thaw_bytes_from_string(face, latin1)) }.unwrap(), [0x3d, 0x00]);
+    assert_eq!(unsafe { thaw_bytes_byte_length(face, latin1) }, 2.0);
+    let lone = thaw_string_from_char_code(0xD83D as f64);
+    assert_eq!(unsafe { read_byte_array(thaw_bytes_from_string(lone, latin1)) }.unwrap(), [0x3d]);
+    let nul = thaw_arena::arena_string(b"a\0b");
+    assert_eq!(unsafe { read_byte_array(thaw_bytes_from_string(nul, c"utf8".as_ptr())) }.unwrap(), b"a\0b");
+    assert_eq!(unsafe { thaw_bytes_byte_length(nul, c"utf8".as_ptr()) }, 3.0);
+    assert_eq!(unsafe { thaw_bytes_byte_length(c"1ag123".as_ptr(), c"hex".as_ptr()) }, 3.0);
+    assert_eq!(unsafe { thaw_bytes_byte_length(c"Zg==".as_ptr(), c"base64".as_ptr()) }, 1.0);
+    assert_eq!(unsafe { read_byte_array(thaw_bytes_from_string(c"1a7".as_ptr(), c"hex".as_ptr())) }.unwrap(), [0x1a]);
+    assert_eq!(unsafe { read_byte_array(thaw_bytes_from_string(c"1ag123".as_ptr(), c"hex".as_ptr())) }.unwrap(), [0x1a]);
+    let output = unsafe { write_byte_array(&[0, 0, 0]) };
+    assert_eq!(unsafe { thaw_bytes_set_from_string(output, c"1ag123".as_ptr(), c"hex".as_ptr()) }, 1.0);
+    assert_eq!(unsafe { read_byte_array(output) }.unwrap(), [0x1a, 0, 0]);
+    let ascii = unsafe { thaw_bytes_to_string(unsafe { write_byte_array(&[0xc1]) }, c"ascii".as_ptr()) };
+    assert_eq!(unsafe { CStr::from_ptr(ascii) }.to_bytes(), b"A");
+}
+
+#[test]
+fn bytes_accessors_reject_overflowed_offsets() {
+    let buffer = unsafe { write_byte_array(&[1, 2, 3, 4, 5, 6, 7, 8]) };
+    assert_eq!(unsafe { thaw_bytes_read(buffer, f64::MAX, 4.0, 0.0, 1.0) }, 0.0);
+    assert_eq!(unsafe { thaw_bytes_read_i64(buffer, f64::MAX, 1.0) }, 0);
+    unsafe { thaw_bytes_write(buffer, f64::MAX, 42.0, 4.0, 0.0, 1.0) };
+    unsafe { thaw_bytes_write_i64(buffer, f64::MAX, 42, 1.0) };
+    assert_eq!(unsafe { read_byte_array(buffer) }.unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn bytes_forward_search_distinguishes_infinity_and_nan() {
+    let haystack = unsafe { write_byte_array(&[1, 2, 1]) };
+    let needle = unsafe { write_byte_array(&[1]) };
+    assert_eq!(unsafe { thaw_bytes_index_of(haystack, needle, f64::INFINITY, 0.0) }, -1.0);
+    assert_eq!(unsafe { thaw_bytes_index_of(haystack, needle, f64::NEG_INFINITY, 0.0) }, 0.0);
+    assert_eq!(unsafe { thaw_bytes_index_of(haystack, needle, f64::NAN, 0.0) }, 0.0);
+    assert_eq!(unsafe { thaw_bytes_index_of(haystack, needle, f64::INFINITY, 1.0) }, 2.0);
+}
+
+#[test]
 fn native_string_operations_preserve_utf16_units() {
     let lone = thaw_string_from_char_code(0xD800 as f64);
     let low = thaw_string_from_char_code(0xDC00 as f64);
