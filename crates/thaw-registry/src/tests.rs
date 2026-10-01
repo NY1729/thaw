@@ -389,6 +389,74 @@ fn live_import_rewrite_keeps_named_function_expression_self_binding() {
 }
 
 #[test]
+fn live_import_rewrite_respects_hoisted_var_across_nested_statements() {
+    // Unrun regression: var belongs to the whole function, including text
+    // before its declaration, but not to an enclosing function.
+    let rewritten = rewrite_esm_to_commonjs(
+        "import { x } from './dep.js'; \
+         function read() { const before = x; if (false) { var x; } return before; } \
+         const arrow = () => { const before = x; for (var x of []) {} return before; }; \
+         const lexicalArrow = () => { const before = x; let x = 1; return before; }; \
+         function outer() { function inner() { var x; return x; } return x; }",
+    )
+    .unwrap();
+    assert!(rewritten.contains("const before = x; if (false) { var x; }"), "{rewritten}");
+    assert!(rewritten.contains("const before = x; for (var x of [])"), "{rewritten}");
+    assert!(rewritten.contains("const before = x; let x = 1;"), "{rewritten}");
+    assert!(rewritten.contains("function inner() { var x; return x; }"), "{rewritten}");
+    assert!(rewritten.contains("return __thaw_esm_import_0[\"x\"]; }"), "{rewritten}");
+}
+
+#[test]
+fn live_import_rewrite_respects_later_parameter_bindings() {
+    // Unrun regression: all parameter names exist before defaults evaluate.
+    let rewritten = rewrite_esm_to_commonjs(
+        "import { x } from './dep.js'; \
+         function regular(before = x, x = 1) { return before; } \
+         const arrow = (before = x, x = 1) => before; \
+         const outside = x;",
+    )
+    .unwrap();
+    assert!(rewritten.contains("function regular(before = x, x = 1)"), "{rewritten}");
+    assert!(rewritten.contains("(before = x, x = 1) => before"), "{rewritten}");
+    assert!(rewritten.contains("const outside = __thaw_esm_import_0[\"x\"]"), "{rewritten}");
+}
+
+#[test]
+fn live_import_rewrite_respects_loop_header_lexical_bindings() {
+    // Unrun regression: let/const hide the import within the loop only.
+    let rewritten = rewrite_esm_to_commonjs(
+        "import { x } from './dep.js'; \
+         for (let x = 0; x < 1; x++) { console.log(x); } \
+         for (const x of [1]) console.log(x); \
+         for (const x in { a: 1 }) console.log(x); \
+         console.log(x);",
+    )
+    .unwrap();
+    assert!(rewritten.contains("let x = 0; x < 1; x++"), "{rewritten}");
+    assert!(rewritten.contains("for (const x of [1]) console.log(x)"), "{rewritten}");
+    assert!(rewritten.contains("for (const x in { a: 1 }) console.log(x)"), "{rewritten}");
+    assert!(rewritten.contains("console.log(__thaw_esm_import_0[\"x\"]);"), "{rewritten}");
+}
+
+#[test]
+fn live_import_rewrite_respects_switch_and_static_block_scopes() {
+    // Unrun regression: switch lexical names and static-block var names do
+    // not leak to the surrounding module.
+    let rewritten = rewrite_esm_to_commonjs(
+        "import { x } from './dep.js'; \
+         switch (x) { case 1: let x = 2; console.log(x); break; } \
+         class Holder { static { const before = x; if (false) { var x; } } } \
+         console.log(x);",
+    )
+    .unwrap();
+    assert!(rewritten.contains("switch (__thaw_esm_import_0[\"x\"])"), "{rewritten}");
+    assert!(rewritten.contains("let x = 2; console.log(x)"), "{rewritten}");
+    assert!(rewritten.contains("const before = x; if (false) { var x; }"), "{rewritten}");
+    assert!(rewritten.contains("console.log(__thaw_esm_import_0[\"x\"]);"), "{rewritten}");
+}
+
+#[test]
 fn live_import_rewrite_updates_destructured_parameter_defaults() {
     let rewritten = rewrite_esm_to_commonjs(
         "import process from 'node:process';\n\
