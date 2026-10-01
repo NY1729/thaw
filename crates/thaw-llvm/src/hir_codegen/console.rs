@@ -128,6 +128,16 @@ impl<'ctx> HirCompiler<'ctx> {
         ) = hir_type
         {
             self.compile_console_structured(value.into_pointer_value(), &ty, newline, descriptor)?;
+        } else if let Some(ty @ (HirType::Map(_, _) | HirType::Set(_))) = hir_type {
+            self.compile_console_collection(value.into_pointer_value(), &ty, newline, descriptor)?;
+        } else if matches!(hir_type, Some(HirType::WeakMap(_, _))) {
+            self.compile_console_literal(
+                "WeakMap { <items unknown> }", newline, "console_weak_map", descriptor,
+            )?;
+        } else if matches!(hir_type, Some(HirType::WeakSet(_))) {
+            self.compile_console_literal(
+                "WeakSet { <items unknown> }", newline, "console_weak_set", descriptor,
+            )?;
         } else if matches!(
             hir_type,
             Some(HirType::Function(_, _) | HirType::CallableFunction(..))
@@ -367,6 +377,35 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_console_text(text, newline, "console_structured", descriptor)
     }
 
+    fn compile_console_collection(
+        &mut self,
+        value: PointerValue<'ctx>,
+        ty: &HirType,
+        newline: bool,
+        descriptor: u64,
+    ) -> Result<(), String> {
+        let label = if matches!(ty, HirType::Map(_, _)) {
+            "Map { size: "
+        } else {
+            "Set { size: "
+        };
+        self.compile_console_literal(label, false, "console_collection_label", descriptor)?;
+        let size = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_map_size").unwrap(),
+                &[value.into()],
+                "console_collection_size",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_map_size returned no value")?
+            .into_float_value();
+        self.compile_console_number(size, false, "console_collection_size", descriptor)?;
+        self.compile_console_literal(" }", newline, "console_collection_end", descriptor)
+    }
+
     fn compile_console_literal(
         &mut self,
         text: &str,
@@ -552,6 +591,17 @@ impl<'ctx> HirCompiler<'ctx> {
                     descriptor,
                 )?;
             }
+            HirType::Map(_, _) | HirType::Set(_) => {
+                self.compile_console_collection(
+                    value.into_pointer_value(), member, newline, descriptor,
+                )?;
+            }
+            HirType::WeakMap(_, _) => self.compile_console_literal(
+                "WeakMap { <items unknown> }", newline, "console_union_weak_map", descriptor,
+            )?,
+            HirType::WeakSet(_) => self.compile_console_literal(
+                "WeakSet { <items unknown> }", newline, "console_union_weak_set", descriptor,
+            )?,
             HirType::Function(_, _) | HirType::CallableFunction(..) => self
                 .compile_console_literal(
                     "[Function]",

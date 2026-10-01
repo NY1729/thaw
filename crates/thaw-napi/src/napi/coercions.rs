@@ -27,7 +27,7 @@ pub unsafe extern "C" fn napi_get_value_int32(
     }
     let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
-            *out = *number as i32;
+            *out = javascript_to_uint32(*number) as i32;
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
@@ -46,16 +46,39 @@ pub unsafe extern "C" fn napi_get_value_uint32(
     }
     let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
-            *out = if !number.is_finite() || *number == 0.0 {
-                0
-            } else {
-                number.trunc().rem_euclid(4_294_967_296.0) as u32
-            };
+            *out = javascript_to_uint32(*number);
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
     };
     record_status(env, status)
+}
+
+fn javascript_to_uint32(number: f64) -> u32 {
+    if !number.is_finite() || number == 0.0 {
+        0
+    } else {
+        number.trunc().rem_euclid(4_294_967_296.0) as u32
+    }
+}
+
+#[cfg(test)]
+mod integer_conversion_tests {
+    use super::javascript_to_uint32;
+
+    #[test]
+    fn int32_and_uint32_use_wrapped_bits() {
+        for (input, expected) in [
+            (f64::NAN, 0),
+            (f64::INFINITY, 0),
+            (f64::NEG_INFINITY, 0),
+            (-1.5, -1),
+            (4_294_967_297.9, 1),
+            (2_147_483_648.0, i32::MIN),
+        ] {
+            assert_eq!(javascript_to_uint32(input) as i32, expected);
+        }
+    }
 }
 
 #[no_mangle]

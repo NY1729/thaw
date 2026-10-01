@@ -617,14 +617,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | BinOp::RShift
             | BinOp::ZeroFillRShift => {
                 let i32_type = self.context.i32_type();
-                let lhs_int = self
-                    .builder
-                    .build_float_to_signed_int(lhs_val, i32_type, "bit_lhs")
-                    .map_err(|error| error.to_string())?;
-                let rhs_int = self
-                    .builder
-                    .build_float_to_signed_int(rhs_val, i32_type, "bit_rhs")
-                    .map_err(|error| error.to_string())?;
+                let lhs_int = self.compile_to_uint32(lhs_val)?;
+                let rhs_int = self.compile_to_uint32(rhs_val)?;
                 let shift = self
                     .builder
                     .build_and(rhs_int, i32_type.const_int(31, false), "shift_count")
@@ -677,5 +671,37 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string()),
             BinOp::EqEqEq => unreachable!(),
         }
+    }
+
+    // ECMAScript ToUint32's bit pattern is also ToInt32's bit pattern.
+    fn compile_to_uint32(&mut self, value: FloatValue<'ctx>) -> Result<IntValue<'ctx>, String> {
+        let float = self.context.f64_type();
+        let zero = float.const_zero();
+        let finite_low = self.builder.build_float_compare(
+            FloatPredicate::OGT, value, float.const_float(f64::NEG_INFINITY), "bit_finite_low",
+        ).map_err(|error| error.to_string())?;
+        let finite_high = self.builder.build_float_compare(
+            FloatPredicate::OLT, value, float.const_float(f64::INFINITY), "bit_finite_high",
+        ).map_err(|error| error.to_string())?;
+        let finite = self.builder.build_and(finite_low, finite_high, "bit_finite")
+            .map_err(|error| error.to_string())?;
+        let safe = self.builder.build_select(finite, value, zero, "bit_finite_value")
+            .map_err(|error| error.to_string())?.into_float_value();
+        let truncated = self.builder.build_call(
+            self.module.get_function("llvm.trunc.f64").unwrap(), &[safe.into()], "bit_truncated",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("llvm.trunc returned no value")?.into_float_value();
+        let modulus = float.const_float(4_294_967_296.0);
+        let remainder = self.builder.build_float_rem(truncated, modulus, "bit_remainder")
+            .map_err(|error| error.to_string())?;
+        let negative = self.builder.build_float_compare(
+            FloatPredicate::OLT, remainder, zero, "bit_negative",
+        ).map_err(|error| error.to_string())?;
+        let wrapped = self.builder.build_float_add(remainder, modulus, "bit_wrapped")
+            .map_err(|error| error.to_string())?;
+        let normalized = self.builder.build_select(negative, wrapped, remainder, "bit_normalized")
+            .map_err(|error| error.to_string())?.into_float_value();
+        self.builder.build_float_to_unsigned_int(normalized, self.context.i32_type(), "bit_uint32")
+            .map_err(|error| error.to_string())
     }
 }
