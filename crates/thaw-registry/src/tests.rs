@@ -232,7 +232,7 @@ fn rewrites_import_meta_url_without_touching_text() {
     )
     .unwrap();
     assert!(
-        rewritten.contains("const url = {url: ('file://' + __filename)"),
+        rewritten.contains("const url = ({url: ('file://' + __filename)"),
         "{rewritten}"
     );
     assert!(
@@ -287,6 +287,32 @@ fn rewrites_import_meta_resolve_so_the_bundle_still_parses() {
         "{rewritten}"
     );
     assert!(rewritten.contains("resolve: function()"), "{rewritten}");
+    assert!(thaw_parser::parse_javascript(&rewritten).is_ok(), "{rewritten}");
+}
+
+#[test]
+fn rewrites_import_meta_as_an_expression_in_every_position() {
+    // Unrun regression: an unparenthesized object after `=>` is parsed
+    // as a block, not the arrow function's returned object value.
+    let rewritten = rewrite_esm_to_commonjs(
+        "export const meta = () => import.meta; export const url = import.meta.url; \
+         export const resolved = import.meta.resolve('x'); import.meta.url;",
+    )
+    .unwrap();
+    assert!(rewritten.contains("const meta = () => ({url:"), "{rewritten}");
+    assert!(rewritten.contains("}).url"), "{rewritten}");
+    assert!(rewritten.contains("}).resolve('x')"), "{rewritten}");
+    assert!(thaw_parser::parse_javascript(&rewritten).is_ok(), "{rewritten}");
+}
+
+#[test]
+fn rewrites_bare_import_meta_expression_statement_without_export_syntax() {
+    // Unrun regression: ESM can use import.meta without an import/export
+    // declaration, and the CJS wrapper still evaluates it as script code.
+    let rewritten = rewrite_esm_to_commonjs("import.meta.url;").unwrap();
+    assert!(rewritten.starts_with("({url:"), "{rewritten}");
+    assert!(rewritten.ends_with("}).url;"), "{rewritten}");
+    assert!(thaw_parser::parse_javascript(&rewritten).is_ok(), "{rewritten}");
 }
 
 #[test]
