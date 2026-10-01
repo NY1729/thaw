@@ -2491,10 +2491,20 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_load_named_qualified",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_load_embedded_hex",
             self.context
                 .i8_type()
                 .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_load_embedded_hex_qualified",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -2577,6 +2587,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_napi_get_export",
             self.context.i64_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_get_export_typed_result",
+            handle_result_type.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

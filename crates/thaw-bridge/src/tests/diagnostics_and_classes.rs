@@ -608,6 +608,18 @@ fn merged_namespace_constructor_interface_keeps_each_signature() {
     let maker = classes.iter().find(|class| class.name == "Maker").unwrap();
     assert_eq!(maker.constructors.len(), 2);
 }
+
+#[test]
+fn namespace_constructible_interfaces_with_same_bare_name_stay_distinct() {
+    let classes = parse_dts_classes(
+        "declare namespace A { interface Client { new(x: string): Client } export { Client as Public }; } \
+         declare namespace B { interface Client { new(x: number): Client } export { Client as Public }; }",
+    ).unwrap();
+    let a = classes.iter().find(|class| class.name == "A.Client").unwrap();
+    let b = classes.iter().find(|class| class.name == "B.Client").unwrap();
+    assert_eq!(a.constructors[0].params[0].1, DtsType::Native(HirType::Str));
+    assert_eq!(b.constructors[0].params[0].1, DtsType::Native(HirType::F64));
+}
 #[test]
 fn class_return_identity_excludes_scalar_aliases_and_ambiguous_namespace_classes() {
     let classes = parse_dts_classes(r#"
@@ -628,22 +640,47 @@ fn class_return_identity_excludes_scalar_aliases_and_ambiguous_namespace_classes
     assert_eq!(label.ret, DtsType::Native(HirType::Str));
     assert_eq!(label.return_instance_class, None);
     let ambiguous = provider.methods.iter().find(|method| method.name == "ambiguous").unwrap();
-    assert_eq!(ambiguous.return_instance_class, None);
+    assert_eq!(ambiguous.return_instance_class.as_deref(), Some("A.Client"));
     let unique = provider.methods.iter().find(|method| method.name == "unique").unwrap();
-    assert_eq!(unique.return_instance_class.as_deref(), Some("Solo"));
+    assert_eq!(unique.return_instance_class.as_deref(), Some("A.Solo"));
     let this = provider.methods.iter().find(|method| method.name == "self").unwrap();
     assert_eq!(this.return_instance_class.as_deref(), Some("Provider"));
 }
 
 #[test]
-fn duplicate_namespace_class_does_not_claim_this_instance_identity() {
+fn duplicate_namespace_classes_keep_independent_identity_and_inheritance() {
     let classes = parse_dts_classes(r#"
-        declare namespace A { class Client { chain(): this; } }
-        declare namespace B { class Client { chain(): this; } }
+        declare namespace A {
+            class Base { fromA(): string; }
+            class Client extends Base {
+                constructor(value: number);
+                chain(): this;
+                other(): B.Client;
+            }
+        }
+        declare namespace B {
+            class Base { fromB(): number; }
+            class Client extends Base {
+                constructor(value: string);
+                chain(): this;
+                other(): A.Client;
+            }
+        }
     "#).unwrap();
-    let client = classes.iter().find(|class| class.name == "Client").unwrap();
-    let chain = client.methods.iter().find(|method| method.name == "chain").unwrap();
-    assert_eq!(chain.return_instance_class, None);
+    let a = classes.iter().find(|class| class.name == "A.Client").unwrap();
+    let b = classes.iter().find(|class| class.name == "B.Client").unwrap();
+    assert_eq!(a.extends.as_deref(), Some("A.Base"));
+    assert_eq!(b.extends.as_deref(), Some("B.Base"));
+    assert!(a.methods.iter().any(|method| method.name == "fromA"));
+    assert!(!a.methods.iter().any(|method| method.name == "fromB"));
+    assert!(b.methods.iter().any(|method| method.name == "fromB"));
+    assert!(!b.methods.iter().any(|method| method.name == "fromA"));
+    assert_eq!(a.constructors[0].params[0].1, DtsType::Native(HirType::F64));
+    assert_eq!(b.constructors[0].params[0].1, DtsType::Native(HirType::Str));
+    assert_eq!(a.methods.iter().find(|method| method.name == "chain").unwrap().return_instance_class.as_deref(), Some("A.Client"));
+    assert_eq!(b.methods.iter().find(|method| method.name == "chain").unwrap().return_instance_class.as_deref(), Some("B.Client"));
+    assert_eq!(a.methods.iter().find(|method| method.name == "other").unwrap().return_instance_class.as_deref(), Some("B.Client"));
+    assert_eq!(b.methods.iter().find(|method| method.name == "other").unwrap().return_instance_class.as_deref(), Some("A.Client"));
 }
 
 #[test]
@@ -655,7 +692,7 @@ fn namespace_class_method_uses_local_interface_layout() {
         }
         declare namespace B { interface Options { y: string; } class Options {} }
     "#).unwrap();
-    let provider = classes.iter().find(|class| class.name == "Provider").unwrap();
+    let provider = classes.iter().find(|class| class.name == "A.Provider").unwrap();
     let method = provider.methods.iter().find(|method| method.name == "use").unwrap();
     assert_eq!(method.params[0].1, DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
     let getter = provider.methods.iter().find(|method| method.name == "get").unwrap();

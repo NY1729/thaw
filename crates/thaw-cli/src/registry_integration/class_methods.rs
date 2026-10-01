@@ -67,17 +67,44 @@ fn rewrite_external_class_methods_with_static(
     factories: &[FactoryClassRewrite],
     functions: &[FallbackFunctionOverloadRewrite],
 ) -> Result<String, String> {
+    rewrite_external_class_methods_with_static_qualified(
+        source, classes, methods, method_contexts, static_methods, getters, setters,
+        static_getters, static_setters, factories, functions, &std::collections::HashMap::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_external_class_methods_with_static_qualified(
+    source: &str,
+    classes: &[ClassConstructorRewrite],
+    methods: &[ClassMethodRewrite],
+    method_contexts: &[ClassMethodContext],
+    static_methods: &[StaticClassMethodRewrite],
+    getters: &[ClassGetterRewrite],
+    setters: &[ClassSetterRewrite],
+    static_getters: &[StaticClassGetterRewrite],
+    static_setters: &[StaticClassSetterRewrite],
+    factories: &[FactoryClassRewrite],
+    functions: &[FallbackFunctionOverloadRewrite],
+    package_qualifiers: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
-        Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
-        Function, ImportSpecifier, Lit, MemberProp, ModuleDecl, ModuleItem, NewExpr, Pat, Prop,
+        ArrowExpr, ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BlockStmt,
+        BreakStmt, CallExpr, Callee, CatchClause, ClassExpr, Constructor, Decl, DefaultDecl,
+        DoWhileStmt, Expr, FnDecl, FnExpr, ForHead, ForInStmt, ForOfStmt, ForStmt, FunctionBody,
+        IfStmt, Function, ImportSpecifier, Lit, MemberProp, ModuleDecl, ModuleItem, NewExpr,
+        ParamOrTsParamProp, Pat, Prop,
         PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt, SwitchStmt, TryStmt,
-        TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsType, TsTypeAliasDecl,
-        TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType, UnaryOp, VarDeclarator,
-        WhileStmt,
+        TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsParamPropParam, TsType,
+        TsTypeAliasDecl, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType, UnaryOp,
+        VarDeclKind, VarDeclOrExpr, VarDeclarator, WhileStmt,
     };
     use thaw_parser::common::Spanned;
+
+    fn is_shadowed(scopes: &[std::collections::HashSet<String>], name: &str) -> bool {
+        scopes.iter().any(|scope| scope.contains(name))
+    }
 
     if classes.is_empty()
         && methods.is_empty()
@@ -92,42 +119,32 @@ fn rewrite_external_class_methods_with_static(
         return Ok(source.to_string());
     }
 
-    fn constructed_class<'a>(
-        expression: &'a Expr,
-        classes: &'a [ClassConstructorRewrite],
-    ) -> Option<&'a str> {
-        let Expr::New(new_expression) = expression else {
-            return None;
-        };
-        match new_expression.callee.as_ref() {
-            Expr::Ident(class) => classes
-                .iter()
-                .find(|(_, name, _)| name == class.sym.as_str())
-                .map(|(_, name, _)| name.as_str()),
-            Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
-                (Expr::Ident(package), MemberProp::Ident(class)) => classes
-                    .iter()
-                    .find(|(qualifier, name, _)| {
-                        qualifier == package.sym.as_str() && name == class.sym.as_str()
-                    })
-                    .map(|(_, name, _)| name.as_str()),
-                _ => None,
-            },
-            _ => None,
-        }
+    fn constructed_class(
+        expression: &Expr,
+        classes: &[ClassConstructorRewrite],
+        import_aliases: &std::collections::HashMap<String, String>,
+        shadowed: &[std::collections::HashSet<String>],
+    ) -> Option<String> {
+        let Expr::New(new_expression) = expression else { return None; };
+        matching_class(&new_expression.callee, classes, import_aliases, shadowed)
+            .map(|(package, name, helpers)| {
+                let canonical = classes.iter().rev()
+                    .find(|(candidate_package, _, candidate_helpers)|
+                        candidate_package == package && candidate_helpers == helpers)
+                    .map_or(name, |(_, canonical, _)| canonical);
+                format!("{package}::{canonical}")
+            })
     }
 
-    /// A bare call to a registered Fallback factory function (real
+    /// A call to a registered Fallback factory function (real
     /// example: dayjs's `dayjs(...)`, whose declared return type
     /// `dayjs.Dayjs` names its own `Dayjs` class) -- tracked as
-    /// producing a class instance the same way `constructed_class`
-    /// tracks `new ClassName(...)`, even though nothing about the call
-    /// syntax itself says `new`. Matched by bare callee name only, same
-    /// simplification `constructed_class` already makes for a bare `new
-    /// ClassName(...)` (no import/qualifier resolution).
+    /// producing a class instance using the import's package identity.
     fn factory_call_class<'a>(
-        expression: &'a Expr,
+        expression: &Expr,
         factories: &'a [FactoryClassRewrite],
+        import_aliases: &std::collections::HashMap<String, String>,
+        shadowed: &[std::collections::HashSet<String>],
     ) -> Option<&'a str> {
         let Expr::Call(call) = expression else {
             return None;
@@ -135,18 +152,38 @@ fn rewrite_external_class_methods_with_static(
         let Callee::Expr(callee) = &call.callee else {
             return None;
         };
-        let function = match callee.as_ref() {
-            Expr::Ident(function) => function.sym.as_str(),
-            Expr::Member(member) => match &member.prop {
-                MemberProp::Ident(function) => function.sym.as_str(),
-                _ => return None,
-            },
-            _ => return None,
-        };
-        factories
-            .iter()
-            .find(|(name, _)| name == function)
-            .map(|(_, class)| class.as_str())
+        let (root, function) = static_class_receiver(callee)?;
+        if is_shadowed(shadowed, root.as_deref().unwrap_or(&function)) { return None; }
+        let imported = root.as_ref().and_then(|root| import_aliases.get(root))
+            .or_else(|| import_aliases.get(&function));
+        if let Some((package, exported)) = imported.and_then(|name| name.split_once("::")) {
+            let name = if root.is_some() {
+                format!("{package}::{}{function}", if exported.is_empty() { String::new() } else { format!("{exported}.") })
+            } else {
+                format!("{package}::{exported}")
+            };
+            if let Some((_, class)) = factories.iter().find(|(candidate, _)| candidate == &name) {
+                return Some(class);
+            }
+            if exported == "default" && root.is_none() {
+                let local_name = format!("{package}::{function}");
+                if let Some((_, class)) = factories.iter().find(|(candidate, _)| candidate == &local_name) {
+                    return Some(class);
+                }
+                let mut candidates = factories.iter().filter(|(candidate, _)| candidate.starts_with(&format!("{package}::")));
+                let only = candidates.next()?;
+                return candidates.next().is_none().then_some(only.1.as_str());
+            }
+            return None;
+        }
+        if let Some(root) = root {
+            let key = format!("{root}::{function}");
+            return factories.iter().find(|(candidate, _)| candidate == &key).map(|(_, class)| class.as_str());
+        }
+        let mut candidates = factories.iter().filter(|(candidate, _)|
+            candidate == &function || candidate.rsplit_once("::").is_some_and(|(_, name)| name == function));
+        let only = candidates.next()?;
+        candidates.next().is_none().then_some(only.1.as_str())
     }
 
     fn source_instance_class(
@@ -155,6 +192,8 @@ fn rewrite_external_class_methods_with_static(
         factories: &[FactoryClassRewrite],
         methods: &[ClassMethodRewrite],
         variables: &std::collections::HashMap<String, String>,
+        import_aliases: &std::collections::HashMap<String, String>,
+        shadowed: &[std::collections::HashSet<String>],
     ) -> Option<String> {
         match expression {
             Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
@@ -162,20 +201,20 @@ fn rewrite_external_class_methods_with_static(
                 .map(|(root, path)| instance_path_key(&root, &path))
                 .and_then(|key| variables.get(&key).cloned()),
             Expr::Paren(parenthesized) => {
-                source_instance_class(&parenthesized.expr, classes, factories, methods, variables)
+                source_instance_class(&parenthesized.expr, classes, factories, methods, variables, import_aliases, shadowed)
             }
             Expr::TsAs(assertion) => {
-                source_instance_class(&assertion.expr, classes, factories, methods, variables)
+                source_instance_class(&assertion.expr, classes, factories, methods, variables, import_aliases, shadowed)
             }
             Expr::TsTypeAssertion(assertion) => {
-                source_instance_class(&assertion.expr, classes, factories, methods, variables)
+                source_instance_class(&assertion.expr, classes, factories, methods, variables, import_aliases, shadowed)
             }
             Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
                 };
                 let Expr::Member(member) = callee.as_ref() else {
-                    return factory_call_class(expression, factories).map(str::to_owned);
+                    return factory_call_class(expression, factories, import_aliases, shadowed).map(str::to_owned);
                 };
                 // A `Member` callee is usually an instance-method call whose
                 // result is another instance (`builder.where(...)` etc.) --
@@ -191,22 +230,23 @@ fn rewrite_external_class_methods_with_static(
                         factories,
                         methods,
                         variables,
+                        import_aliases,
+                        shadowed,
                     )?;
                     methods
                         .iter()
                         .find(|candidate| {
-                            candidate.0 == receiver
+                            (candidate.0 == receiver || receiver.split_once("::").is_some_and(|(_, bare)| candidate.0 == bare))
                                 && candidate.1 == method
                                 && candidate.3 == call.args.len()
                         })
                         .and_then(|candidate| candidate.6.clone())
                 });
                 instance_method_class
-                    .or_else(|| factory_call_class(expression, factories).map(str::to_owned))
+                    .or_else(|| factory_call_class(expression, factories, import_aliases, shadowed).map(str::to_owned))
             }
-            _ => constructed_class(expression, classes)
-                .or_else(|| factory_call_class(expression, factories))
-                .map(str::to_owned),
+            _ => constructed_class(expression, classes, import_aliases, shadowed)
+                .or_else(|| factory_call_class(expression, factories, import_aliases, shadowed).map(str::to_owned)),
         }
     }
 
@@ -263,14 +303,76 @@ fn rewrite_external_class_methods_with_static(
     fn static_class_receiver(expression: &Expr) -> Option<(Option<String>, String)> {
         match expression {
             Expr::Ident(class) => Some((None, class.sym.to_string())),
-            Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
-                (Expr::Ident(qualifier), MemberProp::Ident(class)) => {
-                    Some((Some(qualifier.sym.to_string()), class.sym.to_string()))
-                }
-                _ => None,
-            },
+            Expr::Member(member) => {
+                let (root, path) = member_assignment_path(member)?;
+                Some((Some(root), path.join(".")))
+            }
             _ => None,
         }
+    }
+
+    fn static_class_matches(
+        qualifier: Option<&str>,
+        class: &str,
+        candidate_qualifier: &str,
+        candidate_class: &str,
+        import_aliases: &std::collections::HashMap<String, String>,
+        shadowed: &[std::collections::HashSet<String>],
+    ) -> bool {
+        if is_shadowed(shadowed, qualifier.unwrap_or(class)) { return false; }
+        let imported_package = qualifier.and_then(|qualifier| import_aliases.get(qualifier))
+            .or_else(|| import_aliases.get(class));
+        if let Some((package, exported)) = imported_package.and_then(|value| value.split_once("::")) {
+            let expected = if qualifier.is_some() && !exported.is_empty() {
+                format!("{exported}.{class}")
+            } else if qualifier.is_some() {
+                class.to_string()
+            } else {
+                exported.to_string()
+            };
+            return candidate_qualifier == package && candidate_class == expected;
+        }
+        (candidate_class == import_aliases.get(class).map_or(class, String::as_str)
+            && qualifier.is_none_or(|qualifier| candidate_qualifier == qualifier))
+            || qualifier.is_some_and(|qualifier| {
+                let imported = import_aliases.get(qualifier);
+                candidate_class == match imported {
+                    Some(prefix) if prefix.is_empty() => class.to_string(),
+                    Some(prefix) => format!("{prefix}.{class}"),
+                    None => format!("{qualifier}.{class}"),
+                }
+            })
+    }
+
+    fn matching_class<'a>(
+        expression: &Expr,
+        classes: &'a [ClassConstructorRewrite],
+        import_aliases: &std::collections::HashMap<String, String>,
+        shadowed: &[std::collections::HashSet<String>],
+    ) -> Option<&'a ClassConstructorRewrite> {
+        let (root, name) = static_class_receiver(expression)?;
+        if is_shadowed(shadowed, root.as_deref().unwrap_or(&name)) { return None; }
+        let imported = root.as_ref().and_then(|root| import_aliases.get(root))
+            .or_else(|| import_aliases.get(&name));
+        if let Some((package, exported)) = imported.and_then(|value| value.split_once("::")) {
+            let target = if root.is_some() && !exported.is_empty() {
+                format!("{exported}.{name}")
+            } else if root.is_some() { name.clone() } else { exported.to_string() };
+            return classes.iter().find(|(qualifier, class, _)| qualifier == package && class == &target);
+        }
+        classes.iter().find(|(qualifier, class, _)| match &root {
+            None => class == import_aliases.get(&name).unwrap_or(&name)
+                && classes.iter().filter(|(_, candidate, _)| candidate == class).count() == 1,
+            Some(root) => {
+                let imported = import_aliases.get(root);
+                (qualifier == root && class == &name)
+                    || class == &match imported {
+                        Some(prefix) if prefix.is_empty() => name.clone(),
+                        Some(prefix) => format!("{prefix}.{name}"),
+                        None => format!("{root}.{name}"),
+                    }
+            }
+        })
     }
 
     fn collect_object_instance_classes(
@@ -280,6 +382,8 @@ fn rewrite_external_class_methods_with_static(
         factories: &[FactoryClassRewrite],
         methods: &[ClassMethodRewrite],
         variables: &std::collections::HashMap<String, String>,
+        import_aliases: &std::collections::HashMap<String, String>,
+        shadowed: &[std::collections::HashSet<String>],
         additions: &mut Vec<(String, String)>,
     ) {
         let Expr::Object(object) = expression else {
@@ -317,12 +421,12 @@ fn rewrite_external_class_methods_with_static(
             };
             let key = format!("{prefix}\u{1f}{name}");
             if let Some(class) =
-                source_instance_class(value, classes, factories, methods, variables)
+                source_instance_class(value, classes, factories, methods, variables, import_aliases, shadowed)
             {
                 additions.push((key.clone(), class));
             }
             collect_object_instance_classes(
-                value, &key, classes, factories, methods, variables, additions,
+                value, &key, classes, factories, methods, variables, import_aliases, shadowed, additions,
             );
         }
     }
@@ -1739,6 +1843,7 @@ fn rewrite_external_class_methods_with_static(
         /// (`import { parse } from "csv-parse"`) -- see the bare-call
         /// `Expr::Ident` branch below for why this exists.
         imported_from: std::collections::HashMap<String, String>,
+        import_aliases: std::collections::HashMap<String, String>,
         methods: &'a [ClassMethodRewrite],
         method_contexts: &'a [ClassMethodContext],
         static_methods: &'a [StaticClassMethodRewrite],
@@ -1751,7 +1856,9 @@ fn rewrite_external_class_methods_with_static(
         function_types: &'a std::collections::HashMap<String, SourceFunctionResult>,
         named_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
         callbacks: std::collections::HashSet<String>,
+        callback_instance_seeds: std::collections::HashMap<u32, Vec<(String, String)>>,
         local_bindings: std::collections::HashSet<String>,
+        shadowed: Vec<std::collections::HashSet<String>>,
         edits: Vec<(u32, u32, String)>,
         switch_break_depth: usize,
         switch_break_exits: Vec<FlowState>,
@@ -1764,7 +1871,50 @@ fn rewrite_external_class_methods_with_static(
         callbacks: std::collections::HashSet<String>,
     }
 
+    struct ShadowSnapshot {
+        flow: FlowState,
+        local_bindings: std::collections::HashSet<String>,
+    }
+
     impl Finder<'_> {
+        fn enter_shadow_scope(&mut self, names: std::collections::HashSet<String>) -> ShadowSnapshot {
+            let saved = ShadowSnapshot {
+                flow: self.flow_state(),
+                local_bindings: self.local_bindings.clone(),
+            };
+            for name in &names {
+                invalidate_instance_path(&mut self.variables, name);
+                self.value_types.remove(name);
+                self.callbacks.remove(name);
+            }
+            self.local_bindings.extend(names.iter().cloned());
+            self.shadowed.push(names);
+            saved
+        }
+
+        fn exit_shadow_scope(&mut self, saved: ShadowSnapshot) {
+            let names = self.shadowed.pop().expect("shadow scope");
+            for name in &names {
+                invalidate_instance_path(&mut self.variables, name);
+                for (key, class) in &saved.flow.variables {
+                    if key == name || key.strip_prefix(name).is_some_and(|rest| rest.starts_with('\u{1f}')) {
+                        self.variables.insert(key.clone(), class.clone());
+                    }
+                }
+                if let Some(ty) = saved.flow.value_types.get(name) {
+                    self.value_types.insert(name.clone(), ty.clone());
+                } else {
+                    self.value_types.remove(name);
+                }
+                if saved.flow.callbacks.contains(name) {
+                    self.callbacks.insert(name.clone());
+                } else {
+                    self.callbacks.remove(name);
+                }
+            }
+            self.local_bindings = saved.local_bindings;
+        }
+
         fn flow_state(&self) -> FlowState {
             FlowState {
                 variables: self.variables.clone(),
@@ -1789,45 +1939,101 @@ fn rewrite_external_class_methods_with_static(
     }
 
     impl Visit for Finder<'_> {
-        fn visit_function(&mut self, function: &Function) {
-            let saved = self.local_bindings.clone();
-            self.local_bindings.clear();
-            for parameter in &function.params {
-                if let Pat::Ident(binding) = &parameter.pat {
-                    self.local_bindings.insert(binding.id.sym.to_string());
+        fn visit_block_stmt(&mut self, block: &BlockStmt) {
+            let mut names = std::collections::HashSet::new();
+            for statement in &block.stmts {
+                match statement {
+                    Stmt::Decl(Decl::Var(vars)) if vars.kind != VarDeclKind::Var => {
+                        for var in &vars.decls { constructor_pat_names(&var.name, &mut names); }
+                    }
+                    Stmt::Decl(decl @ (Decl::Class(_) | Decl::Fn(_))) =>
+                        constructor_decl_names(decl, &mut names),
+                    _ => {}
                 }
             }
-            function.visit_children_with(self);
-            self.local_bindings = saved;
+            let saved = self.enter_shadow_scope(names);
+            block.visit_children_with(self);
+            self.exit_shadow_scope(saved);
         }
 
-        fn visit_arrow_expr(&mut self, arrow: &thaw_parser::ast::ArrowExpr) {
-            let saved = self.local_bindings.clone();
+        fn visit_function(&mut self, function: &Function) {
+            let mut names = std::collections::HashSet::new();
+            for parameter in &function.params {
+                constructor_pat_names(&parameter.pat, &mut names);
+            }
+            if let Some(body) = &function.body {
+                let mut hoisted = ConstructorHoistedVars::default();
+                body.visit_with(&mut hoisted);
+                names.extend(hoisted.0);
+            }
+            let saved = self.enter_shadow_scope(names);
+            function.visit_children_with(self);
+            self.exit_shadow_scope(saved);
+        }
+
+        fn visit_fn_expr(&mut self, expression: &FnExpr) {
+            let mut names = std::collections::HashSet::new();
+            if let Some(name) = &expression.ident { names.insert(name.sym.to_string()); }
+            let saved = self.enter_shadow_scope(names);
+            expression.visit_children_with(self);
+            self.exit_shadow_scope(saved);
+        }
+
+        fn visit_arrow_expr(&mut self, arrow: &ArrowExpr) {
+            let mut names = std::collections::HashSet::new();
             for parameter in &arrow.params {
-                if let Pat::Ident(binding) = parameter {
-                    self.local_bindings.insert(binding.id.sym.to_string());
-                }
+                constructor_pat_names(parameter, &mut names);
+            }
+            let mut hoisted = ConstructorHoistedVars::default();
+            arrow.body.visit_with(&mut hoisted);
+            names.extend(hoisted.0);
+            let saved = self.enter_shadow_scope(names);
+            if let Some(seeds) = self.callback_instance_seeds.remove(&arrow.span.lo.0) {
+                for (name, class) in seeds { self.variables.insert(name, class); }
             }
             arrow.visit_children_with(self);
-            self.local_bindings = saved;
+            self.exit_shadow_scope(saved);
+        }
+
+        fn visit_catch_clause(&mut self, clause: &CatchClause) {
+            let mut names = std::collections::HashSet::new();
+            if let Some(parameter) = &clause.param { constructor_pat_names(parameter, &mut names); }
+            let saved = self.enter_shadow_scope(names);
+            clause.visit_children_with(self);
+            self.exit_shadow_scope(saved);
+        }
+
+        fn visit_class_expr(&mut self, expression: &ClassExpr) {
+            let mut names = std::collections::HashSet::new();
+            if let Some(name) = &expression.ident { names.insert(name.sym.to_string()); }
+            let saved = self.enter_shadow_scope(names);
+            expression.visit_children_with(self);
+            self.exit_shadow_scope(saved);
+        }
+
+        fn visit_constructor(&mut self, constructor: &Constructor) {
+            let mut names = std::collections::HashSet::new();
+            for parameter in &constructor.params {
+                match parameter {
+                    ParamOrTsParamProp::Param(param) => constructor_pat_names(&param.pat, &mut names),
+                    ParamOrTsParamProp::TsParamProp(property) => match &property.param {
+                        TsParamPropParam::Ident(binding) => { names.insert(binding.id.sym.to_string()); }
+                        TsParamPropParam::Assign(assign) => constructor_pat_names(&assign.left, &mut names),
+                    },
+                }
+            }
+            if let Some(body) = &constructor.body {
+                let mut hoisted = ConstructorHoistedVars::default();
+                body.visit_with(&mut hoisted);
+                names.extend(hoisted.0);
+            }
+            let saved = self.enter_shadow_scope(names);
+            constructor.visit_children_with(self);
+            self.exit_shadow_scope(saved);
         }
 
         fn visit_new_expr(&mut self, expression: &NewExpr) {
-            let class = match expression.callee.as_ref() {
-                Expr::Ident(class) => self
-                    .classes
-                    .iter()
-                    .find(|(_, name, _)| name == class.sym.as_str()),
-                Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
-                    (Expr::Ident(package), MemberProp::Ident(class)) => {
-                        self.classes.iter().find(|(qualifier, name, _)| {
-                            qualifier == package.sym.as_str() && name == class.sym.as_str()
-                        })
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
+            let class = matching_class(&expression.callee, self.classes, &self.import_aliases, &self.shadowed);
             if let Some((_, _, helpers)) = class {
                 let arguments = expression.args.as_deref().unwrap_or_default();
                 let selected = helpers
@@ -1875,11 +2081,8 @@ fn rewrite_external_class_methods_with_static(
             {
                 if let Some((_, _, _, helper)) = self.static_getters.iter().find(
                     |(candidate_qualifier, candidate_class, candidate_property, _)| {
-                        candidate_class == &class
+                        static_class_matches(qualifier.as_deref(), &class, candidate_qualifier, candidate_class, &self.import_aliases, &self.shadowed)
                             && candidate_property == property.sym.as_str()
-                            && qualifier
-                                .as_ref()
-                                .is_none_or(|qualifier| candidate_qualifier == qualifier)
                     },
                 ) {
                     let span = member.span();
@@ -1896,7 +2099,7 @@ fn rewrite_external_class_methods_with_static(
                         self.getters
                             .iter()
                             .find(|(candidate_class, candidate_property, _)| {
-                                candidate_class == class
+                                (candidate_class == class || class.split_once("::").is_some_and(|(_, bare)| candidate_class == bare))
                                     && candidate_property == property.sym.as_str()
                             })
                     {
@@ -1941,6 +2144,13 @@ fn rewrite_external_class_methods_with_static(
         }
 
         fn visit_for_stmt(&mut self, statement: &ForStmt) {
+            let mut names = std::collections::HashSet::new();
+            if let Some(VarDeclOrExpr::VarDecl(vars)) = &statement.init {
+                if vars.kind != VarDeclKind::Var {
+                    for var in &vars.decls { constructor_pat_names(&var.name, &mut names); }
+                }
+            }
+            let saved = self.enter_shadow_scope(names);
             if let Some(initializer) = &statement.init {
                 initializer.visit_with(self);
             }
@@ -1955,6 +2165,7 @@ fn rewrite_external_class_methods_with_static(
                 update.visit_with(self);
             }
             self.join_current_flow_with(&zero_iterations);
+            self.exit_shadow_scope(saved);
         }
 
         fn visit_do_while_stmt(&mut self, statement: &DoWhileStmt) {
@@ -1966,18 +2177,34 @@ fn rewrite_external_class_methods_with_static(
 
         fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
             statement.right.visit_with(self);
+            let mut names = std::collections::HashSet::new();
+            if let ForHead::VarDecl(vars) = &statement.left {
+                if vars.kind != VarDeclKind::Var {
+                    for var in &vars.decls { constructor_pat_names(&var.name, &mut names); }
+                }
+            }
+            let saved = self.enter_shadow_scope(names);
             statement.left.visit_with(self);
             self.switch_break_depth += usize::from(self.switch_break_depth > 0);
             statement.body.visit_with(self);
             self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
+            self.exit_shadow_scope(saved);
         }
 
         fn visit_for_of_stmt(&mut self, statement: &ForOfStmt) {
             statement.right.visit_with(self);
+            let mut names = std::collections::HashSet::new();
+            if let ForHead::VarDecl(vars) = &statement.left {
+                if vars.kind != VarDeclKind::Var {
+                    for var in &vars.decls { constructor_pat_names(&var.name, &mut names); }
+                }
+            }
+            let saved = self.enter_shadow_scope(names);
             statement.left.visit_with(self);
             self.switch_break_depth += usize::from(self.switch_break_depth > 0);
             statement.body.visit_with(self);
             self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
+            self.exit_shadow_scope(saved);
         }
 
         fn visit_break_stmt(&mut self, statement: &BreakStmt) {
@@ -1990,6 +2217,20 @@ fn rewrite_external_class_methods_with_static(
             let outer_break_depth = std::mem::replace(&mut self.switch_break_depth, 1);
             let outer_break_exits = std::mem::take(&mut self.switch_break_exits);
             statement.discriminant.visit_with(self);
+            let mut names = std::collections::HashSet::new();
+            for case in &statement.cases {
+                for statement in &case.cons {
+                    match statement {
+                        Stmt::Decl(Decl::Var(vars)) if vars.kind != VarDeclKind::Var => {
+                            for var in &vars.decls { constructor_pat_names(&var.name, &mut names); }
+                        }
+                        Stmt::Decl(decl @ (Decl::Class(_) | Decl::Fn(_))) =>
+                            constructor_decl_names(decl, &mut names),
+                        _ => {}
+                    }
+                }
+            }
+            let saved = self.enter_shadow_scope(names);
             let base = self.flow_state();
             let mut direct_entries = vec![None; statement.cases.len()];
 
@@ -2044,12 +2285,14 @@ fn rewrite_external_class_methods_with_static(
             let mut exits = exits.into_iter();
             let Some(first) = exits.next() else {
                 self.restore_flow_state(base);
+                self.exit_shadow_scope(saved);
                 return;
             };
             self.restore_flow_state(first);
             for exit in exits {
                 self.join_current_flow_with(&exit);
             }
+            self.exit_shadow_scope(saved);
         }
 
         fn visit_try_stmt(&mut self, statement: &TryStmt) {
@@ -2072,7 +2315,7 @@ fn rewrite_external_class_methods_with_static(
                     .callbacks
                     .retain(|name| incoming.callbacks.contains(name));
                 self.restore_flow_state(catch_entry);
-                handler.body.visit_with(self);
+                handler.visit_with(self);
                 let catch_exit = self.flow_state();
 
                 self.restore_flow_state(try_exit);
@@ -2108,6 +2351,8 @@ fn rewrite_external_class_methods_with_static(
                     self.factories,
                     self.methods,
                     &self.variables,
+                    &self.import_aliases,
+                    &self.shadowed,
                 ) {
                     self.variables.insert(binding.id.sym.to_string(), class);
                     if binding.type_ann.is_none()
@@ -2132,6 +2377,8 @@ fn rewrite_external_class_methods_with_static(
                     self.factories,
                     self.methods,
                     &self.variables,
+                    &self.import_aliases,
+                    &self.shadowed,
                     &mut property_classes,
                 );
                 self.variables.extend(property_classes);
@@ -2157,18 +2404,7 @@ fn rewrite_external_class_methods_with_static(
         fn visit_call_expr(&mut self, call: &CallExpr) {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(member) = callee.as_ref() {
-                    let static_target = match member.obj.as_ref() {
-                        Expr::Ident(class) => Some((None, class.sym.as_str())),
-                        Expr::Member(class_member) => {
-                            match (class_member.obj.as_ref(), &class_member.prop) {
-                                (Expr::Ident(qualifier), MemberProp::Ident(class)) => {
-                                    Some((Some(qualifier.sym.as_str()), class.sym.as_str()))
-                                }
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    };
+                    let static_target = static_class_receiver(&member.obj);
                     if let (Some((qualifier, class)), MemberProp::Ident(method)) =
                         (static_target, &member.prop)
                     {
@@ -2180,11 +2416,10 @@ fn rewrite_external_class_methods_with_static(
                             .static_methods
                             .iter()
                             .filter(|candidate| {
-                                candidate.1 == class
+                                static_class_matches(qualifier.as_deref(), &class, &candidate.0, &candidate.1, &self.import_aliases, &self.shadowed)
                                     && candidate.2 == method.sym.as_str()
                                     && candidate.4 == call.args.len()
                                     && candidate.5 == has_callback
-                                    && qualifier.is_none_or(|qualifier| candidate.0 == qualifier)
                             })
                             .filter_map(|candidate| {
                                 let mut score = 0u16;
@@ -2236,7 +2471,7 @@ fn rewrite_external_class_methods_with_static(
                                         _,
                                         _,
                                     )| {
-                                        candidate_class == class
+                                        (candidate_class == class || class.split_once("::").is_some_and(|(_, bare)| candidate_class == bare))
                                             && candidate_method == method.sym.as_str()
                                             && *argument_count == call.args.len()
                                             && *candidate_callback == has_callback
@@ -2319,8 +2554,10 @@ fn rewrite_external_class_methods_with_static(
                                     else {
                                         continue;
                                     };
-                                    self.variables
-                                        .insert(parameter.id.sym.to_string(), class.clone());
+                                    self.callback_instance_seeds
+                                        .entry(callback.span.lo.0)
+                                        .or_default()
+                                        .push((parameter.id.sym.to_string(), class.clone()));
                                 }
                                 call.visit_children_with(self);
                                 self.restore_flow_state(state);
@@ -2685,11 +2922,8 @@ fn rewrite_external_class_methods_with_static(
                                 _,
                                 declared,
                             )| {
-                                candidate_class == &class
+                                static_class_matches(qualifier.as_deref(), &class, candidate_qualifier, candidate_class, &self.import_aliases, &self.shadowed)
                                     && candidate_property == &property
-                                    && qualifier
-                                        .as_ref()
-                                        .is_none_or(|qualifier| candidate_qualifier == qualifier)
                                     && source_expr_type(
                                         &assignment.right,
                                         &self.value_types,
@@ -2724,7 +2958,7 @@ fn rewrite_external_class_methods_with_static(
                             if let Some((_, _, helper, _)) =
                                 self.setters.iter().find(
                                     |(candidate_class, candidate_property, _, declared)| {
-                                        candidate_class == class
+                                        (candidate_class == class || class.split_once("::").is_some_and(|(_, bare)| candidate_class == bare))
                                             && candidate_property == &property
                                             && source_expr_type(
                                                 &assignment.right,
@@ -2785,6 +3019,8 @@ fn rewrite_external_class_methods_with_static(
                         self.factories,
                         self.methods,
                         &self.variables,
+                        &self.import_aliases,
+                        &self.shadowed,
                     )
                 })
                 .flatten();
@@ -2841,6 +3077,7 @@ fn rewrite_external_class_methods_with_static(
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
     let mut imported_from: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut import_aliases = std::collections::HashMap::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
             continue;
@@ -2849,8 +3086,35 @@ fn rewrite_external_class_methods_with_static(
             continue;
         };
         for specifier in &import.specifiers {
-            if let ImportSpecifier::Named(named) = specifier {
-                imported_from.insert(named.local.sym.to_string(), package.to_string());
+            match specifier {
+                ImportSpecifier::Named(named) => {
+                    imported_from.insert(named.local.sym.to_string(), package.to_string());
+                    if let Some(imported) = &named.imported {
+                        if let thaw_parser::ast::ModuleExportName::Ident(imported) = imported {
+                            let exported = imported.sym.to_string();
+                            let identity = package_qualifiers.get(package)
+                                .map_or(exported.clone(), |qualifier| format!("{qualifier}::{exported}"));
+                            import_aliases.insert(named.local.sym.to_string(), identity);
+                        }
+                    } else {
+                        let exported = named.local.sym.to_string();
+                        let identity = package_qualifiers.get(package)
+                            .map_or(exported.clone(), |qualifier| format!("{qualifier}::{exported}"));
+                        import_aliases.insert(named.local.sym.to_string(), identity);
+                    }
+                }
+                ImportSpecifier::Namespace(namespace) => {
+                    let identity = package_qualifiers.get(package)
+                        .map_or(String::new(), |qualifier| format!("{qualifier}::"));
+                    import_aliases.insert(namespace.local.sym.to_string(), identity);
+                }
+                ImportSpecifier::Default(default) => {
+                    imported_from.insert(default.local.sym.to_string(), package.to_string());
+                    let identity = package_qualifiers.get(package)
+                        .map_or("default".to_string(), |qualifier| format!("{qualifier}::default"));
+                    import_aliases.insert(default.local.sym.to_string(), identity);
+                }
+                _ => {}
             }
         }
     }
@@ -2900,11 +3164,33 @@ fn rewrite_external_class_methods_with_static(
         }
         function_types.types.extend(inferred.additions);
     }
+    let mut top_level = std::collections::HashSet::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(decl)) => constructor_decl_names(decl, &mut top_level),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) =>
+                constructor_decl_names(&export.decl, &mut top_level),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
+                DefaultDecl::Class(class) => {
+                    if let Some(name) = &class.ident { top_level.insert(name.sym.to_string()); }
+                }
+                DefaultDecl::Fn(function) => {
+                    if let Some(name) = &function.ident { top_level.insert(name.sym.to_string()); }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    let mut hoisted = ConstructorHoistedVars::default();
+    module.visit_with(&mut hoisted);
+    top_level.extend(hoisted.0);
     let mut finder = Finder {
         classes,
         factories,
         functions,
         imported_from,
+        import_aliases,
         methods,
         method_contexts,
         static_methods,
@@ -2917,7 +3203,9 @@ fn rewrite_external_class_methods_with_static(
         function_types: &function_types.types,
         named_types: &named_types,
         callbacks: std::collections::HashSet::new(),
-        local_bindings: std::collections::HashSet::new(),
+        callback_instance_seeds: std::collections::HashMap::new(),
+        local_bindings: top_level.clone(),
+        shadowed: vec![top_level],
         edits: Vec::new(),
         switch_break_depth: 0,
         switch_break_exits: Vec::new(),

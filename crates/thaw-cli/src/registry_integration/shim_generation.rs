@@ -19,6 +19,14 @@ const ERROR_FAMILY_NAMES: [&str; 7] = [
 /// `inherited_class_constructors`/`inherited_class_members` walks
 /// (`crates/thaw-bridge/src/bridge/dts/classes.rs`), just checking
 /// Error-family membership instead of collecting inherited members.
+fn class_identifier(name: &str) -> String {
+    if !name.contains('.') {
+        return name.to_string();
+    }
+    let encoded = name.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    format!("__thaw_class_{encoded}")
+}
+
 fn class_is_error_family(name: &str, classes: &[thaw_bridge::DtsClass]) -> bool {
     let mut current = name;
     let mut seen = std::collections::HashSet::new();
@@ -77,7 +85,15 @@ fn push_error_family_ambient_declarations(classes: &[thaw_bridge::DtsClass], shi
         let Some(base) = &class.extends else {
             continue;
         };
-        shim.push_str(&format!("class {} extends {} {{}}\n", class.name, base));
+        shim.push_str(&format!(
+            "class {} extends {} {{}}\n",
+            class_identifier(&class.name),
+            if classes.iter().any(|candidate| &candidate.name == base) {
+                class_identifier(base)
+            } else {
+                base.clone()
+            },
+        ));
     }
 }
 
@@ -189,7 +205,15 @@ fn generate_registry_shims(
             thaw_bridge::self_referential_namespace_aliases(&package.dts_source);
         let mut type_only_exports = thaw_bridge::exported_type_names(&package.dts_source);
         type_only_exports.extend(classes.iter().map(|class| class.name.clone()));
-        let nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
+        let mut nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
+        for (namespace, members) in &mut nested_namespaces {
+            for (member, target) in members {
+                let identity = format!("{namespace}.{member}");
+                if classes.iter().any(|class| class.name == identity) {
+                    *target = identity;
+                }
+            }
+        }
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             commonjs_export_name,
@@ -367,7 +391,7 @@ fn generate_registry_shims(
             pkg.factory_class_returns
                 .iter()
                 .filter(|(_, class)| class.as_str() != "Buffer")
-                .map(|(function, class)| (function.clone(), class.clone()))
+                .map(|(function, class)| (format!("{}::{function}", qualifier_by_package[&pkg.name]), format!("{}::{class}", qualifier_by_package[&pkg.name])))
         })
         .collect();
     let mut class_method_rewrites = Vec::new();
@@ -387,8 +411,32 @@ fn generate_registry_shims(
     for pkg in &resolved {
         let mut constructor_arities_for_package = observed_constructor_arities.clone();
         let qualifier = &qualifier_by_package[&pkg.name];
+        let callback_context_start = callback_instance_rewrites.len();
+        for class in &pkg.classes {
+            if let Some(arities) = observed_constructor_arities.get(&format!("{qualifier}.{}", class.name)) {
+                constructor_arities_for_package.entry(class.name.clone())
+                    .or_default().extend(arities);
+            }
+        }
+        for (local, source_qualifier) in &constructor_namespace_imports {
+            if source_qualifier != qualifier { continue; }
+            for class in &pkg.classes {
+                if let Some(arities) = observed_constructor_arities.get(&format!("{local}.{}", class.name)) {
+                    constructor_arities_for_package.entry(class.name.clone())
+                        .or_default().extend(arities);
+                }
+            }
+        }
         for (local, (source_qualifier, exported)) in &constructor_named_imports {
             if source_qualifier != qualifier { continue; }
+            for class in &pkg.classes {
+                if let Some(suffix) = class.name.strip_prefix(&format!("{exported}.")) {
+                    if let Some(arities) = observed_constructor_arities.get(&format!("{local}.{suffix}")) {
+                        constructor_arities_for_package.entry(class.name.clone())
+                            .or_default().extend(arities);
+                    }
+                }
+            }
             let target = if exported == "default" {
                 pkg.commonjs_export_name.as_deref()
             } else {
@@ -409,11 +457,15 @@ fn generate_registry_shims(
                 }
             }
         }
-        for members in pkg.nested_namespaces.values() {
+        for (namespace, members) in &pkg.nested_namespaces {
             for (alias, target) in members {
-                if let Some(arities) = observed_constructor_arities.get(alias) {
+                let path = format!("{namespace}.{alias}");
+                if let Some(arities) = observed_constructor_arities.get(&path) {
+                    let identity = pkg.classes.iter()
+                        .find(|class| class.name == path)
+                        .map_or(target.as_str(), |class| class.name.as_str());
                     constructor_arities_for_package
-                        .entry(target.clone())
+                        .entry(identity.to_string())
                         .or_default()
                         .extend(arities);
                 }
@@ -425,7 +477,12 @@ fn generate_registry_shims(
         let overload_rewrite_start = fallback_function_overload_rewrites.len();
         if pkg.native_addon.is_some() && pkg.bundle_js.is_none() {
             for class in &pkg.classes {
-                let helpers = generate_napi_class_constructors(class, true, &constructor_arities_for_package, &mut shim);
+                let mut runtime_class = class.clone();
+                runtime_class.name = format!("{}::{}", pkg.name, class.name);
+                if let Some(arities) = constructor_arities_for_package.get(&class.name).cloned() {
+                    constructor_arities_for_package.entry(runtime_class.name.clone()).or_default().extend(arities);
+                }
+                let helpers = generate_napi_class_constructors(&runtime_class, true, &constructor_arities_for_package, &mut shim);
                 if helpers.is_empty() {
                     continue;
                 }
@@ -435,7 +492,9 @@ fn generate_registry_shims(
                 );
                 for (namespace, members) in &pkg.nested_namespaces {
                     for (alias, target) in members {
-                        if target == &class.name {
+                        if (target == &class.name
+                            || format!("{namespace}.{target}") == class.name)
+                            && format!("{namespace}.{alias}") != class.name {
                             class_rewrites.push((
                                 qualifier_by_package[&pkg.name].clone(),
                                 format!("{namespace}.{alias}"),
@@ -466,7 +525,7 @@ fn generate_registry_shims(
 
                 for (method, symbol, argument_count, has_callback, parameter_types, return_class) in
                     generate_napi_class_method_overloads_with_callback_instances(
-                        class,
+                        &runtime_class,
                         false,
                         &observed_arities,
                         &mut shim,
@@ -475,13 +534,13 @@ fn generate_registry_shims(
                     )
                 {
                     class_method_rewrites.push((
-                        class.name.clone(),
+                        format!("{qualifier}::{}", class.name),
                         method,
                         symbol,
                         argument_count,
                         has_callback,
                         parameter_types,
-                        return_class,
+                        return_class.map(|name| format!("{qualifier}::{name}")),
                     ));
                 }
                 for getter in class.methods.iter().filter(|method| {
@@ -497,7 +556,7 @@ fn generate_registry_shims(
                         continue;
                     };
                     let runtime_key =
-                        format!("$getter${}{}", class.name, format_args!("${}", getter.name));
+                        format!("$getter${}{}", runtime_class.name, format_args!("${}", getter.name));
                     let encoded = runtime_key
                         .as_bytes()
                         .iter()
@@ -507,7 +566,7 @@ fn generate_registry_shims(
                     shim.push_str(&format!(
                         "declare function {symbol}(receiver: JsValue): {return_type};\n"
                     ));
-                    class_getter_rewrites.push((class.name.clone(), getter.name.clone(), symbol));
+                    class_getter_rewrites.push((format!("{qualifier}::{}", class.name), getter.name.clone(), symbol));
                 }
                 for setter in class.methods.iter().filter(|method| {
                     !method.is_static
@@ -522,7 +581,7 @@ fn generate_registry_shims(
                         continue;
                     };
                     let runtime_key =
-                        format!("$setter${}{}", class.name, format_args!("${}", setter.name));
+                        format!("$setter${}{}", runtime_class.name, format_args!("${}", setter.name));
                     let encoded = runtime_key
                         .as_bytes()
                         .iter()
@@ -533,7 +592,7 @@ fn generate_registry_shims(
                         "declare function {symbol}(receiver: JsValue, value: {rendered_type}): {rendered_type};\n"
                     ));
                     class_setter_rewrites.push((
-                        class.name.clone(),
+                        format!("{qualifier}::{}", class.name),
                         setter.name.clone(),
                         symbol,
                         value_type.clone(),
@@ -553,7 +612,7 @@ fn generate_registry_shims(
                     };
                     let runtime_key = format!(
                         "$staticgetter${}{}",
-                        class.name,
+                        runtime_class.name,
                         format_args!("${}", getter.name)
                     );
                     let encoded = runtime_key
@@ -584,7 +643,7 @@ fn generate_registry_shims(
                     };
                     let runtime_key = format!(
                         "$staticsetter${}{}",
-                        class.name,
+                        runtime_class.name,
                         format_args!("${}", setter.name)
                     );
                     let encoded = runtime_key
@@ -612,7 +671,7 @@ fn generate_registry_shims(
                     });
                     if !has_getter {
                         if let Some(symbol) = generate_napi_class_property_getter(
-                            &class.name,
+                            &runtime_class.name,
                             &property.name,
                             &property.ty,
                             property.is_static,
@@ -627,7 +686,7 @@ fn generate_registry_shims(
                                 ));
                             } else {
                                 class_getter_rewrites.push((
-                                    class.name.clone(),
+                                    format!("{qualifier}::{}", class.name),
                                     property.name.clone(),
                                     symbol,
                                 ));
@@ -642,7 +701,7 @@ fn generate_registry_shims(
                     });
                     if !property.readonly && !has_setter {
                         if let Some((symbol, value_type)) = generate_napi_class_property_setter(
-                            &class.name,
+                            &runtime_class.name,
                             &property.name,
                             &property.ty,
                             property.is_static,
@@ -659,7 +718,7 @@ fn generate_registry_shims(
                                 ));
                             } else {
                                 class_setter_rewrites.push((
-                                    class.name.clone(),
+                                    format!("{qualifier}::{}", class.name),
                                     property.name.clone(),
                                     symbol,
                                     value_type,
@@ -670,7 +729,7 @@ fn generate_registry_shims(
                 }
                 for (method, symbol, argument_count, has_callback, parameter_types, _) in
                     generate_napi_class_method_overloads_with_callback_instances(
-                        class,
+                        &runtime_class,
                         true,
                         &observed_arities,
                         &mut shim,
@@ -709,7 +768,12 @@ fn generate_registry_shims(
             // export), but hono's `Hono` -- constructed directly via
             // `new Hono()` -- does.
             for class in &pkg.classes {
-                let helpers = generate_napi_class_constructors(class, false, &constructor_arities_for_package, &mut shim);
+                let mut runtime_class = class.clone();
+                runtime_class.name = format!("{}::{}", pkg.name, class.name);
+                if let Some(arities) = constructor_arities_for_package.get(&class.name).cloned() {
+                    constructor_arities_for_package.entry(runtime_class.name.clone()).or_default().extend(arities);
+                }
+                let helpers = generate_napi_class_constructors(&runtime_class, false, &constructor_arities_for_package, &mut shim);
                 if !helpers.is_empty() {
                     // A class reached through a *namespace member alias*
                     // (real trigger: winston's
@@ -726,7 +790,7 @@ fn generate_registry_shims(
                     // the direct-rewrite path's per-arity helpers as they
                     // are.
                     let target = generate_class_constructor_dispatcher(
-                        &class.name,
+                        &runtime_class.name,
                         &helpers,
                         &mut shim,
                     )
@@ -754,7 +818,7 @@ fn generate_registry_shims(
                 }
                 for (method, symbol, argument_count, has_callback, parameter_types, return_class) in
                     generate_napi_class_method_overloads_with_callback_instances(
-                        class,
+                        &runtime_class,
                         false,
                         &observed_arities,
                         &mut shim,
@@ -763,18 +827,18 @@ fn generate_registry_shims(
                     )
                 {
                     class_method_rewrites.push((
-                        class.name.clone(),
+                        format!("{qualifier}::{}", class.name),
                         method,
                         symbol,
                         argument_count,
                         has_callback,
                         parameter_types,
-                        return_class,
+                        return_class.map(|name| format!("{qualifier}::{name}")),
                     ));
                 }
                 for (method, symbol, argument_count, has_callback, parameter_types, _) in
                     generate_napi_class_method_overloads_with_callback_instances(
-                        class,
+                        &runtime_class,
                         true,
                         &observed_arities,
                         &mut shim,
@@ -797,7 +861,7 @@ fn generate_registry_shims(
                         continue;
                     }
                     if let Some((symbol, value_type)) = generate_napi_class_property_setter(
-                        &class.name,
+                        &runtime_class.name,
                         &property.name,
                         &property.ty,
                         false,
@@ -805,13 +869,18 @@ fn generate_registry_shims(
                         &mut shim,
                     ) {
                         class_setter_rewrites.push((
-                            class.name.clone(),
+                            format!("{qualifier}::{}", class.name),
                             property.name.clone(),
                             symbol,
                             value_type,
                         ));
                     }
                 }
+            }
+        }
+        for context in &mut callback_instance_rewrites[callback_context_start..] {
+            if let ClassMethodContext::CallbackInstance(_, _, _, class) = context {
+                *class = format!("{qualifier}::{class}");
             }
         }
         // Pre-claims a genuinely type-disjoint overload set's name (real
@@ -1376,7 +1445,7 @@ fn generate_registry_shims(
                     members.iter().filter_map(move |(member, target)| {
                         let declared = pkg.values.iter().any(|value| &value.name == target)
                             || pkg.functions.iter().any(|function| &function.name == target)
-                            || pkg.classes.iter().any(|class| &class.name == target);
+                            || (!target.contains('.') && pkg.classes.iter().any(|class| &class.name == target));
                         if declared {
                             return None;
                         }
@@ -1429,7 +1498,7 @@ fn generate_registry_shims(
                     let local = format!(
                         "__thaw_value_{}_{}",
                         sanitize_identifier(&pkg.name),
-                        sanitize_identifier(&value.name)
+                        class_identifier(&value.name)
                     );
                     let runtime_getter = format!("{}::$value${}", pkg.name, value.name);
                     let encoded = runtime_getter
@@ -1471,10 +1540,15 @@ fn generate_registry_shims(
                     _ => None,
                 })
                 .collect();
-            let qualified_aliases: Vec<(String, String)> = qualified
+            let mut qualified_aliases: Vec<(String, String)> = qualified
                 .iter()
                 .map(|q| (q.name.clone(), q.qualified_key.clone()))
                 .collect();
+            for class in &pkg.classes {
+                if !class.name.contains('.') && !qualified_aliases.iter().any(|(name, _)| name == &class.name) {
+                    qualified_aliases.push((class.name.clone(), format!("{}::{}", pkg.name, class.name)));
+                }
+            }
             // A nested-namespace member (`z.coerce.number`, flattened to
             // its own synthetic top-level name `__thaw_ns_coerce_number`
             // by thaw-registry -- see `thaw_bridge::
@@ -1488,15 +1562,28 @@ fn generate_registry_shims(
             // dotted path needs a different capture mechanism (inside
             // the bundle's own wrapped script) than a plain collision
             // alias (a separate, later `loadScript`) does.
-            let nested_namespace_aliases: Vec<(String, String)> = pkg
+            let mut nested_namespace_aliases: Vec<(String, String)> = pkg
                 .nested_namespaces
                 .iter()
                 .flat_map(|(namespace, members)| {
                     members.iter().map(move |(member, target)| {
-                        (format!("{namespace}.{member}"), target.clone())
+                        let path = format!("{namespace}.{member}");
+                        let runtime_key = if pkg.classes.iter().any(|class| class.name == path) {
+                            path.clone()
+                        } else {
+                            target.clone()
+                        };
+                        (path, format!("{}::{runtime_key}", pkg.name))
                     })
                 })
                 .collect();
+            for class in &pkg.classes {
+                if class.name.contains('.')
+                    && !nested_namespace_aliases.iter().any(|(path, _)| path == &class.name)
+                {
+                    nested_namespace_aliases.push((class.name.clone(), format!("{}::{}", pkg.name, class.name)));
+                }
+            }
             // A package whose *only* export is a class (real example:
             // hono, whose main export is the `Hono` class with no
             // top-level functions at all) previously never got its
@@ -1518,8 +1605,9 @@ fn generate_registry_shims(
             // *default*-exported class specifically needs this (a named
             // one already gets bound by the generic `module.exports` ->
             // `globalThis` copy loop below).
-            let class_names: Vec<String> =
-                pkg.classes.iter().map(|class| class.name.clone()).collect();
+            let class_names: Vec<String> = pkg.classes.iter()
+                .filter(|class| !class.name.contains('.'))
+                .map(|class| class.name.clone()).collect();
             if !fallback_names.is_empty()
                 || pkg.native_addon.is_some()
                 || !pkg.classes.is_empty()
@@ -1616,7 +1704,7 @@ fn generate_registry_shims(
         for name in &pkg.type_only_exports {
             // ponytail: external type-only imports are erased to JsValue;
             // preserve their structure only when native layout is required.
-            let target = format!("__thaw_type_{}_{}", sanitize_identifier(&pkg.name), name);
+            let target = format!("__thaw_type_{}_{}", sanitize_identifier(&pkg.name), class_identifier(name));
             shim.push_str(&format!("type {target} = JsValue;\n"));
             package_exports.insert(name.clone(), target);
         }

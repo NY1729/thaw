@@ -120,14 +120,19 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_napi = true;
-        if !(1..=2).contains(&args.len()) {
-            return Err("loadNativeAddon expects a path and optional root export name".to_string());
+        if !(1..=3).contains(&args.len()) {
+            return Err("loadNativeAddon expects a path, optional root export name, and optional package name".to_string());
         }
         let path = self.compile_expr(&args[0])?;
         let mut call_args = vec![path.into()];
-        let symbol = if args.len() == 2 {
+        let symbol = if args.len() >= 2 {
             call_args.push(self.compile_expr(&args[1])?.into());
-            "thaw_napi_load_named"
+            if args.len() == 3 {
+                call_args.push(self.compile_expr(&args[2])?.into());
+                "thaw_napi_load_named_qualified"
+            } else {
+                "thaw_napi_load_named"
+            }
         } else {
             "thaw_napi_load"
         };
@@ -156,22 +161,23 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_napi = true;
-        if args.len() != 2 {
+        if !(2..=3).contains(&args.len()) {
             return Err(
                 "loadNativeAddonEmbedded expects addon bytes and a root export name".into(),
             );
         }
         let bytes = self.compile_expr(&args[0])?;
         let root = self.compile_expr(&args[1])?;
+        let package = args.get(2).map(|package| self.compile_expr(package)).transpose()?;
         let function = self
             .module
-            .get_function("thaw_napi_load_embedded_hex")
+            .get_function(if package.is_some() { "thaw_napi_load_embedded_hex_qualified" } else { "thaw_napi_load_embedded_hex" })
             .unwrap();
         let loaded = self
             .builder
             .build_call(
                 function,
-                &[bytes.into(), root.into()],
+                &if let Some(package) = package { vec![bytes.into(), root.into(), package.into()] } else { vec![bytes.into(), root.into()] },
                 "load_embedded_napi_u8",
             )
             .map_err(|error| error.to_string())?

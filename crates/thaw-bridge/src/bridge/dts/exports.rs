@@ -977,8 +977,8 @@ fn lower_dts_fn_type(
 
 /// For every top-level function declaration in `source` (see
 /// `extract_fn_decls`) whose return type is a plain or namespace-
-/// qualified type reference, `name -> <the reference's own bare
-/// identifier>` -- independent of whether that reference ever resolves
+/// qualified type reference, `name -> <the reference's qualified
+/// identity>` -- independent of whether that reference ever resolves
 /// to a `Native` `DtsType` at all (`classify_ts_type` still calls a
 /// qualified name like `dayjs.Dayjs` `Unsupported`, since qualified
 /// names aren't resolved). Lets a caller elsewhere (thaw-cli's
@@ -1269,10 +1269,7 @@ pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
             let TsType::TsTypeRef(ty_ref) = alias.type_ann.as_ref() else {
                 return None;
             };
-            let target = match &ty_ref.type_name {
-                TsEntityName::Ident(ident) => ident.sym.to_string(),
-                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-            };
+            let target = type_reference_name(&ty_ref.type_name);
             Some((alias.id.sym.to_string(), target))
         })
         .collect();
@@ -1285,10 +1282,7 @@ pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
             let TsType::TsTypeRef(ty_ref) = ann.type_ann.as_ref() else {
                 return None;
             };
-            let type_name = match &ty_ref.type_name {
-                TsEntityName::Ident(ident) => ident.sym.to_string(),
-                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-            };
+            let type_name = type_reference_name(&ty_ref.type_name);
             let type_name =
                 resolve_bare_type_alias_chain(&type_name, &type_aliases, &mut HashSet::new());
             Some((
