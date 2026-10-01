@@ -1329,3 +1329,198 @@ fn export_assignment_namespace_import_constructs_root_class() {
     let rewritten = rewrite_external_class_constructors(source, &classes, &packages).unwrap();
     assert!(rewritten.contains("pkg_ctor()"));
 }
+
+
+#[test]
+fn qualified_namespace_classes_rewrite_distinct_construction_methods_and_returns() {
+    let parsed = thaw_bridge::parse_dts_classes(
+        "declare namespace A { class Client { constructor(value: number); kind(): string; } } \
+         declare namespace B { class Client { constructor(value: string); kind(): string; } }",
+    ).unwrap();
+    let mut shim = String::new();
+    let a = generate_napi_class_constructors(
+        parsed.iter().find(|class| class.name == "A.Client").unwrap(),
+        true, &std::collections::HashMap::new(), &mut shim,
+    );
+    let b = generate_napi_class_constructors(
+        parsed.iter().find(|class| class.name == "B.Client").unwrap(),
+        true, &std::collections::HashMap::new(), &mut shim,
+    );
+    assert_ne!(a[0].1, b[0].1);
+    let classes = vec![
+        ("pkg".into(), "A.Client".into(), vec![(1, "a_ctor".into(), vec![thaw_hir::HirType::F64])]),
+        ("pkg".into(), "B.Client".into(), vec![(1, "b_ctor".into(), vec![thaw_hir::HirType::Str])]),
+    ];
+    let source = "const a = new pkg.A.Client(1); const b = new pkg.B.Client('x'); a.kind(); b.kind(); const again = a.chain(); again.kind(); pkg.A.Client.describe(); pkg.B.Client.describe();";
+    let constructors = rewrite_external_class_constructors(
+        source, &classes, &std::collections::HashMap::new(),
+    ).unwrap();
+    assert!(constructors.contains("a_ctor(1)"));
+    assert!(constructors.contains("b_ctor('x')"));
+
+    let methods: Vec<ClassMethodRewrite> = vec![
+        ("A.Client".into(), "kind".into(), "a_kind".into(), 0, false, vec![], None),
+        ("B.Client".into(), "kind".into(), "b_kind".into(), 0, false, vec![], None),
+        ("A.Client".into(), "chain".into(), "a_chain".into(), 0, false, vec![], Some("A.Client".into())),
+    ];
+    let static_methods: Vec<StaticClassMethodRewrite> = vec![
+        ("pkg".into(), "A.Client".into(), "describe".into(), "a_describe".into(), 0, false, vec![]),
+        ("pkg".into(), "B.Client".into(), "describe".into(), "b_describe".into(), 0, false, vec![]),
+    ];
+    let rewritten = rewrite_external_class_methods_with_static(
+        source, &classes, &methods, &[], &static_methods, &[], &[], &[], &[], &[], &[],
+    ).unwrap();
+    assert_eq!(rewritten.matches("a_kind(").count(), 2);
+    assert_eq!(rewritten.matches("b_kind(").count(), 1);
+    assert!(rewritten.contains("a_chain("));
+    assert!(rewritten.contains("a_describe()"));
+    assert!(rewritten.contains("b_describe()"));
+
+    let imported = "import { A as Alias } from 'package'; import * as Bundle from 'package'; \
+        const x = new Alias.Client(1); x.kind(); Alias.Client.describe(); \
+        const y = new Bundle.B.Client('x'); y.kind(); Bundle.B.Client.describe();";
+    let imported_rewrites = rewrite_external_class_methods_with_static(
+        imported, &classes, &methods, &[], &static_methods, &[], &[], &[], &[], &[], &[],
+    ).unwrap();
+    assert!(imported_rewrites.contains("a_kind("));
+    assert!(imported_rewrites.contains("b_kind("));
+    assert!(imported_rewrites.contains("a_describe()"));
+    assert!(imported_rewrites.contains("b_describe()"));
+}
+
+
+#[test]
+fn named_class_import_alias_keeps_constructor_instance_and_static_methods() {
+    let classes = vec![("pkg".into(), "Client".into(), vec![(0, "client_ctor".into(), vec![])])];
+    let methods: Vec<ClassMethodRewrite> = vec![
+        ("Client".into(), "kind".into(), "client_kind".into(), 0, false, vec![], None),
+    ];
+    let static_methods: Vec<StaticClassMethodRewrite> = vec![
+        ("pkg".into(), "Client".into(), "describe".into(), "client_describe".into(), 0, false, vec![]),
+    ];
+    let source = "import { Client as Alias } from 'package'; const c = new Alias(); c.kind(); Alias.describe();";
+    let imported = rewrite_external_class_methods_with_static(
+        source, &classes, &methods, &[], &static_methods, &[], &[], &[], &[], &[], &[],
+    ).unwrap();
+    assert!(imported.contains("client_kind("));
+    assert!(imported.contains("client_describe()"));
+    let constructors = rewrite_external_class_constructors(
+        source, &classes, &std::collections::HashMap::from([("package".into(), "pkg".into())]),
+    ).unwrap();
+    assert!(constructors.contains("client_ctor()"));
+}
+
+#[test]
+fn same_named_classes_keep_package_identity_through_methods_and_returns() {
+    let qualifiers = std::collections::HashMap::from([
+        ("first-package".into(), "first".into()),
+        ("second-package".into(), "second".into()),
+    ]);
+    let source = "import { Client as First } from 'first-package'; import { Client as Second } from 'second-package'; \
+        import * as Other from 'second-package'; \
+        const a = new First(); const b = new Second(); const c = new Other.Client(); \
+        a.kind(); b.kind(); c.kind(); const next = b.chain(); next.kind(); First.describe(); Second.describe(); Other.Client.describe();";
+    for reverse in [false, true] {
+        let mut classes = vec![
+            ("first".into(), "Client".into(), vec![(0, "first_ctor".into(), vec![])]),
+            ("second".into(), "Client".into(), vec![(0, "second_ctor".into(), vec![])]),
+        ];
+        let mut methods: Vec<ClassMethodRewrite> = vec![
+            ("first::Client".into(), "kind".into(), "first_kind".into(), 0, false, vec![], None),
+            ("second::Client".into(), "kind".into(), "second_kind".into(), 0, false, vec![], None),
+            ("second::Client".into(), "chain".into(), "second_chain".into(), 0, false, vec![], Some("second::Client".into())),
+        ];
+        let mut statics: Vec<StaticClassMethodRewrite> = vec![
+            ("first".into(), "Client".into(), "describe".into(), "first_describe".into(), 0, false, vec![]),
+            ("second".into(), "Client".into(), "describe".into(), "second_describe".into(), 0, false, vec![]),
+        ];
+        if reverse { classes.reverse(); methods.reverse(); statics.reverse(); }
+        let rewritten = rewrite_external_class_methods_with_static_qualified(
+            source, &classes, &methods, &[], &statics, &[], &[], &[], &[], &[], &[], &qualifiers,
+        ).unwrap();
+        assert_eq!(rewritten.matches("first_kind(").count(), 1);
+        assert_eq!(rewritten.matches("second_kind(").count(), 3);
+        assert_eq!(rewritten.matches("second_chain(").count(), 1);
+        assert_eq!(rewritten.matches("first_describe(").count(), 1);
+        assert_eq!(rewritten.matches("second_describe(").count(), 2);
+        let constructors = rewrite_external_class_constructors(source, &classes, &qualifiers).unwrap();
+        assert_eq!(constructors.matches("first_ctor(").count(), 1);
+        assert_eq!(constructors.matches("second_ctor(").count(), 2);
+    }
+}
+
+#[test]
+fn same_named_factories_keep_their_return_class_package() {
+    let qualifiers = std::collections::HashMap::from([
+        ("first-package".into(), "first".into()),
+        ("second-package".into(), "second".into()),
+    ]);
+    let source = "import { make as firstMake } from 'first-package'; import { make as secondMake } from 'second-package'; \
+        import * as other from 'second-package'; import DefaultSecond from 'second-package'; \
+        const a = firstMake(); const b = secondMake(); const c = other.make(); const d = DefaultSecond(); \
+        a.kind(); b.kind(); c.kind(); d.kind();";
+    for reverse in [false, true] {
+        let mut factories: Vec<FactoryClassRewrite> = vec![
+            ("first::make".into(), "first::Client".into()),
+            ("second::make".into(), "second::Client".into()),
+        ];
+        let mut methods: Vec<ClassMethodRewrite> = vec![
+            ("first::Client".into(), "kind".into(), "first_kind".into(), 0, false, vec![], None),
+            ("second::Client".into(), "kind".into(), "second_kind".into(), 0, false, vec![], None),
+        ];
+        if reverse { factories.reverse(); methods.reverse(); }
+        let rewritten = rewrite_external_class_methods_with_static_qualified(
+            source, &[], &methods, &[], &[], &[], &[], &[], &[], &factories, &[], &qualifiers,
+        ).unwrap();
+        assert_eq!(rewritten.matches("first_kind(").count(), 1);
+        assert_eq!(rewritten.matches("second_kind(").count(), 3);
+    }
+}
+
+#[test]
+fn class_methods_respect_shadowed_import_aliases_and_restore_outer_imports() {
+    let qualifiers = std::collections::HashMap::from([("package".into(), "pkg".into())]);
+    let classes = vec![("pkg".into(), "Client".into(), vec![(0, "client_ctor".into(), vec![])])];
+    let methods: Vec<ClassMethodRewrite> = vec![
+        ("pkg::Client".into(), "kind".into(), "client_kind".into(), 0, false, vec![], None),
+    ];
+    let statics: Vec<StaticClassMethodRewrite> = vec![
+        ("pkg".into(), "Client".into(), "describe".into(), "client_describe".into(), 0, false, vec![]),
+    ];
+    let source = "import { Client as Alias } from 'package'; import * as Ns from 'package'; \
+        const outer = new Alias(); outer.kind(); Alias.describe(); Ns.Client.describe(); \
+        function parameter(Alias: any, { Ns }: any) { const local = new Alias(); local.kind(); Alias.describe(); Ns.Client.describe(); } \
+        const arrow = (Alias: any) => { const local = new Alias(); local.kind(); Alias.describe(); }; \
+        { Alias.describe(); let Alias: any; Alias.describe(); } \
+        try {} catch (Alias) { Alias.describe(); } \
+        function hoisted() { Alias.describe(); var Alias: any; } \
+        Alias.describe(); Ns.Client.describe();";
+    let rewritten = rewrite_external_class_methods_with_static_qualified(
+        source, &classes, &methods, &[], &statics, &[], &[], &[], &[], &[], &[], &qualifiers,
+    ).unwrap();
+    assert_eq!(rewritten.matches("client_kind(").count(), 1);
+    assert_eq!(rewritten.matches("client_describe(").count(), 4);
+    assert!(rewritten.contains("function parameter(Alias: any, { Ns }: any) { const local = new Alias(); local.kind(); Alias.describe(); Ns.Client.describe(); }"));
+    assert!(rewritten.contains("{ Alias.describe(); let Alias: any; Alias.describe(); }"));
+    let constructors = rewrite_external_class_constructors(source, &classes, &qualifiers).unwrap();
+    assert_eq!(constructors.matches("client_ctor(").count(), 1);
+}
+
+#[test]
+fn factory_return_tracking_ignores_shadowed_import_alias() {
+    let qualifiers = std::collections::HashMap::from([("package".into(), "pkg".into())]);
+    let factories: Vec<FactoryClassRewrite> = vec![("pkg::make".into(), "pkg::Client".into())];
+    let methods: Vec<ClassMethodRewrite> = vec![
+        ("pkg::Client".into(), "kind".into(), "client_kind".into(), 0, false, vec![], None),
+    ];
+    let source = "import { make as factory } from 'package'; \
+        const external = factory(); external.kind(); \
+        function local(factory: any) { const value = factory(); value.kind(); } \
+        { const value = factory(); value.kind(); let factory: any; } \
+        const again = factory(); again.kind();";
+    let rewritten = rewrite_external_class_methods_with_static_qualified(
+        source, &[], &methods, &[], &[], &[], &[], &[], &[], &factories, &[], &qualifiers,
+    ).unwrap();
+    assert_eq!(rewritten.matches("client_kind(").count(), 2);
+    assert!(rewritten.contains("const value = factory(); value.kind(); let factory: any;"));
+}

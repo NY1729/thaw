@@ -28,7 +28,25 @@ fn executable_relative_path(path: &str) -> Result<std::path::PathBuf, String> {
         .join(relative))
 }
 
-unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
+fn register_loaded_exports(
+    host: &mut Host,
+    env_ptr: usize,
+    package_name: Option<&str>,
+    functions: Vec<(String, Function)>,
+    exported_values: Vec<(String, NapiValue)>,
+) {
+    if let Some(package) = package_name {
+        host.functions.extend(functions.iter().map(|(name, function)|
+            (format!("{package}::{name}"), function.clone())));
+        host.exports.extend(exported_values.iter().map(|(name, value)|
+            (format!("{package}::{name}"), (env_ptr, *value))));
+    }
+    host.functions.extend(functions);
+    host.exports.extend(exported_values.into_iter().map(|(name, value)|
+        (name, (env_ptr, value))));
+}
+
+unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&str>) -> Result<(), String> {
     if HOST.with(|host| host.borrow().unloading) {
         return Err("cannot load N-API addons while unloading".into());
     }
@@ -141,12 +159,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     };
     HOST.with(|host| {
         let mut host = host.borrow_mut();
-        host.functions.extend(functions);
-        host.exports.extend(
-            exported_values
-                .into_iter()
-                .map(|(name, value)| (name, (env_ptr as usize, value))),
-        );
+        register_loaded_exports(&mut host, env_ptr as usize, package_name, functions, exported_values);
         #[cfg(target_os = "linux")]
         if !uv_handle.is_null() {
             host.libraries.push(uv_handle);
@@ -252,7 +265,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         }
         let handle = if operation == "construct" {
             let target = CString::new(target).map_err(|_| "export contains NUL")?;
-            thaw_napi_get_export(target.as_ptr())
+            get_export_result(target.as_ptr())?
         } else {
             target
                 .parse::<u64>()
@@ -516,7 +529,7 @@ fn release_napi_handle(handle: u64) -> Result<(), String> {
 
 #[no_mangle]
 pub unsafe extern "C" fn thaw_napi_load(path: *const c_char) -> u8 {
-    match text(path).and_then(|path| load_impl(&path, None)) {
+    match text(path).and_then(|path| load_impl(&path, None, None)) {
         Ok(()) => 1,
         Err(error) => {
             HOST.with(|host| host.borrow_mut().last_error = error.clone());
@@ -529,7 +542,24 @@ pub unsafe extern "C" fn thaw_napi_load(path: *const c_char) -> u8 {
 #[no_mangle]
 pub unsafe extern "C" fn thaw_napi_load_named(path: *const c_char, root_name: *const c_char) -> u8 {
     let result = text(path)
-        .and_then(|path| text(root_name).and_then(|root_name| load_impl(&path, Some(&root_name))));
+        .and_then(|path| text(root_name).and_then(|root_name| load_impl(&path, Some(&root_name), None)));
+    match result {
+        Ok(()) => 1,
+        Err(error) => {
+            HOST.with(|host| host.borrow_mut().last_error = error.clone());
+            eprintln!("thaw-napi: {error}");
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_load_named_qualified(
+    path: *const c_char, root_name: *const c_char, package_name: *const c_char,
+) -> u8 {
+    let result = text(path).and_then(|path| text(root_name).and_then(|root_name|
+        text(package_name).and_then(|package_name|
+            load_impl(&path, (!root_name.is_empty()).then_some(root_name.as_str()), Some(&package_name)))));
     match result {
         Ok(()) => 1,
         Err(error) => {
@@ -699,7 +729,7 @@ pub unsafe extern "C" fn thaw_napi_load_shared(path: *const c_char) -> u8 {
 }
 
 #[cfg(target_os = "linux")]
-fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), String> {
+fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>, package_name: Option<&str>) -> Result<(), String> {
     let name = CString::new("thaw-native-addon").unwrap();
     let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
@@ -711,13 +741,13 @@ fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), Strin
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.write_all(bytes)
         .map_err(|error| format!("failed to write embedded addon: {error}"))?;
-    unsafe { load_impl(&format!("/proc/self/fd/{fd}"), root_name)? };
+    unsafe { load_impl(&format!("/proc/self/fd/{fd}"), root_name, package_name)? };
     HOST.with(|host| host.borrow_mut().embedded_files.push(file));
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), String> {
+fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>, package_name: Option<&str>) -> Result<(), String> {
     let mut file = tempfile::Builder::new()
         .prefix("thaw-native-addon-")
         .suffix(".node")
@@ -727,7 +757,7 @@ fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), Strin
         .map_err(|error| format!("failed to write embedded addon: {error}"))?;
     file.flush()
         .map_err(|error| format!("failed to flush embedded addon: {error}"))?;
-    unsafe { load_impl(&file.path().to_string_lossy(), root_name) }
+    unsafe { load_impl(&file.path().to_string_lossy(), root_name, package_name) }
 }
 
 #[no_mangle]
@@ -739,7 +769,27 @@ pub unsafe extern "C" fn thaw_napi_load_embedded_hex(
         let bytes = decode_hex(&hex)?;
         let root_name = text(root_name)?;
         let root_name = (!root_name.is_empty()).then_some(root_name.as_str());
-        load_embedded_impl(&bytes, root_name)
+        load_embedded_impl(&bytes, root_name, None)
+    });
+    match result {
+        Ok(()) => 1,
+        Err(error) => {
+            HOST.with(|host| host.borrow_mut().last_error = error.clone());
+            eprintln!("thaw-napi: {error}");
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_load_embedded_hex_qualified(
+    hex: *const c_char, root_name: *const c_char, package_name: *const c_char,
+) -> u8 {
+    let result = text(hex).and_then(|hex| {
+        let bytes = decode_hex(&hex)?;
+        let root_name = text(root_name)?;
+        let package_name = text(package_name)?;
+        load_embedded_impl(&bytes, (!root_name.is_empty()).then_some(root_name.as_str()), Some(&package_name))
     });
     match result {
         Ok(()) => 1,
@@ -1396,16 +1446,49 @@ pub unsafe extern "C" fn thaw_napi_call_typed_result(
 
 #[no_mangle]
 pub unsafe extern "C" fn thaw_napi_get_export(name: *const c_char) -> u64 {
-    let Ok(name) = text(name) else {
-        return 0;
+    get_export_result(name).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_get_export_typed_result(name: *const c_char) -> ThawNapiHandleResult {
+    match get_export_result(name) {
+        Ok(value) => ThawNapiHandleResult { value, error: ptr::null_mut() },
+        Err(error) => handle_error(error),
+    }
+}
+
+unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
+    let name = text(name)?;
+    if let Some(value) = HOST.with(|host| host.borrow().exports.get(&name).map(|(_, value)| *value as u64)) {
+        return Ok(value);
+    }
+    let (first, parts) = if let Some((package, path)) = name.split_once("::") {
+        let mut parts = path.split('.');
+        let Some(root) = parts.next() else { return Ok(0); };
+        (format!("{package}::{root}"), parts.collect::<Vec<_>>())
+    } else {
+        let mut parts = name.split('.');
+        let Some(root) = parts.next() else { return Ok(0); };
+        (root.to_string(), parts.collect::<Vec<_>>())
     };
-    HOST.with(|host| {
-        host.borrow()
-            .exports
-            .get(&name)
-            .map(|(_, value)| *value as u64)
-            .unwrap_or(0)
-    })
+    let Some(mut value) = HOST.with(|host| host.borrow().exports.get(&first).map(|(_, value)| *value as u64)) else {
+        return Ok(0);
+    };
+    for part in parts {
+        let env = module_env_for_handle(value)?;
+        let property = CString::new(part).map_err(|_| "native addon export contains NUL")?;
+        let mut next = ptr::null_mut();
+        let status = napi_get_named_property(env, value as NapiValue, property.as_ptr(), &mut next);
+        if status != NAPI_OK {
+            take_env_exception(env)?;
+            return Err(format!("failed to read native addon export `{name}`: N-API status {status}"));
+        }
+        if next.is_null() || matches!(value_ref(next), Ok(Value::Undefined)) {
+            return Ok(0);
+        }
+        value = next as u64;
+    }
+    Ok(value)
 }
 
 fn handle_error(error: impl Into<String>) -> ThawNapiHandleResult {
@@ -1475,7 +1558,7 @@ unsafe fn call_export_handle_impl(
 ) -> ThawNapiHandleResult {
     let result = (|| -> Result<u64, String> {
         let name = text(name)?;
-        let callable = thaw_napi_get_export(CString::new(name.as_str()).unwrap().as_ptr());
+        let callable = get_export_result(CString::new(name.as_str()).unwrap().as_ptr())?;
         if callable == 0 {
             return Err("unknown native addon export".into());
         }
@@ -1531,7 +1614,7 @@ unsafe fn call_export_with_functions(
         return Err("native addon function argument list is null".into());
     }
     let name = text(name)?;
-    let callable = thaw_napi_get_export(CString::new(name.as_str()).unwrap().as_ptr());
+    let callable = get_export_result(CString::new(name.as_str()).unwrap().as_ptr())?;
     let env = module_env_for_handle(callable)?;
     let mut values = module_arguments(env, args, true)?;
     let functions = if function_count == 0 {

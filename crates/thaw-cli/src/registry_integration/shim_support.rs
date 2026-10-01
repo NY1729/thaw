@@ -409,7 +409,7 @@ fn generate_napi_class_method_overloads_with_callback_instances(
     let mut generated = Vec::new();
     let mut method_names = std::collections::HashSet::new();
     for method in &class.methods {
-        if class.name == "Buffer" && method.name == "toString" {
+        if class.name.rsplit("::").next() == Some("Buffer") && method.name == "toString" {
             continue;
         }
         if method.is_static != is_static
@@ -636,13 +636,12 @@ type RegistryShims = (
 type ExternalExportAssignments = std::collections::HashMap<String, String>;
 type JitFallbackReasons = std::collections::HashMap<(String, String), String>;
 
-/// `(factory function name, class name)` -- a Fallback factory function
+/// `(package-qualified factory function, package-qualified class)` -- a Fallback factory function
 /// call (real example: dayjs's `dayjs(...)`) that should be tracked as
 /// producing an instance of that class, the same way `new ClassName(...)`
 /// already is (see `class_methods.rs`'s `constructed_class`), even
-/// though the call itself doesn't say `new`. No qualifier: matched by
-/// bare callee name only, same simplification `ClassConstructorRewrite`
-/// already makes for a bare `new ClassName(...)`.
+/// though the call itself doesn't say `new`. Imported aliases resolve
+/// through their package; a bare name resolves only when unique.
 type FactoryClassRewrite = (String, String);
 
 /// The identifier a user writes as the object in `pkg.name(...)`
@@ -769,11 +768,25 @@ fn observed_constructor_arities(
     impl Visit for Finder {
         fn visit_new_expr(&mut self, expression: &NewExpr) {
             let name = match expression.callee.as_ref() {
-                Expr::Ident(name) => Some(name.sym.as_str()),
-                Expr::Member(member) => match &member.prop {
-                    MemberProp::Ident(name) => Some(name.sym.as_str()),
-                    _ => None,
-                },
+                Expr::Ident(name) => Some(name.sym.to_string()),
+                Expr::Member(member) => {
+                    let mut parts = Vec::new();
+                    let mut current = member;
+                    let root = loop {
+                        let MemberProp::Ident(property) = &current.prop else { break None; };
+                        parts.push(property.sym.to_string());
+                        match current.obj.as_ref() {
+                            Expr::Ident(root) => break Some(root.sym.to_string()),
+                            Expr::Member(parent) => current = parent,
+                            _ => break None,
+                        }
+                    };
+                    root.map(|root| {
+                        parts.push(root);
+                        parts.reverse();
+                        parts.join(".")
+                    })
+                }
                 _ => None,
             };
             if let Some(name) = name {

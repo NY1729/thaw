@@ -357,7 +357,8 @@ pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
         let hex = encode_embedded_native(addon.bytes);
         let root_export = escape_ts_string_literal(addon.root_export.unwrap_or(""));
         out.push_str(&format!(
-            "    if (!loadNativeAddonEmbedded(\"{hex}\", \"{root_export}\")) throw new Error(\"failed to load native addon\");\n"
+            "    if (!loadNativeAddonEmbedded(\"{hex}\", \"{root_export}\", \"{}\")) throw new Error(\"failed to load native addon\");\n",
+            escape_ts_string_literal(addon.package_name)
         ));
     }
     out.push_str("}\n");
@@ -385,9 +386,10 @@ pub fn generate_native_addon_path_init(addons: &[NativeAddonPath<'_>]) -> String
             ));
         }
         out.push_str(&format!(
-            "    if (!loadNativeAddon(\"{}\", \"{}\")) throw new Error(\"failed to load native addon\");\n",
+            "    if (!loadNativeAddon(\"{}\", \"{}\", \"{}\")) throw new Error(\"failed to load native addon\");\n",
             escape_ts_string_literal(addon.path),
-            escape_ts_string_literal(addon.root_export.unwrap_or(""))
+            escape_ts_string_literal(addon.root_export.unwrap_or("")),
+            escape_ts_string_literal(addon.package_name)
         ));
     }
     out.push_str("}\n");

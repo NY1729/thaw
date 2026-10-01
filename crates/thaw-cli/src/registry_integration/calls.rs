@@ -123,27 +123,36 @@ fn rewrite_external_class_constructors(
                     candidates.next().is_none().then_some(only)
                 }
                 Expr::Member(member) => {
-                    let MemberProp::Ident(property) = &member.prop else { return None; };
-                    let (root, name) = match member.obj.as_ref() {
-                        Expr::Ident(root) => (root.sym.as_str(), property.sym.to_string()),
-                        Expr::Member(namespace) => {
-                            let (Expr::Ident(root), MemberProp::Ident(namespace_name)) =
-                                (namespace.obj.as_ref(), &namespace.prop) else { return None; };
-                            (root.sym.as_str(), format!("{}.{}", namespace_name.sym, property.sym))
+                    let mut names = Vec::new();
+                    let mut current = member;
+                    let root = loop {
+                        let MemberProp::Ident(property) = &current.prop else { return None; };
+                        names.push(property.sym.to_string());
+                        match current.obj.as_ref() {
+                            Expr::Ident(root) => break root.sym.as_str(),
+                            Expr::Member(parent) => current = parent,
+                            _ => return None,
                         }
-                        _ => return None,
                     };
+                    names.reverse();
+                    let path = names.join(".");
                     if self.is_shadowed(root) { return None; }
+                    let unimported = !self.namespace_imports.contains_key(root)
+                        && !self.named_imports.contains_key(root);
                     let (package, name) = if let Some(package) = self.namespace_imports.get(root) {
-                        (package.as_str(), name)
+                        (package.as_str(), path)
                     } else if let Some((package, exported)) = self.named_imports.get(root) {
-                        (package.as_str(), format!("{exported}.{name}"))
+                        (package.as_str(), format!("{exported}.{path}"))
                     } else if self.imported_names.contains(root) {
                         return None;
                     } else {
-                        (root, name)
+                        (root, path)
                     };
-                    self.find_class(package, &name)
+                    self.find_class(package, &name).or_else(|| {
+                        unimported.then(|| {
+                            self.classes.iter().find(|(_, class, _)| class == &format!("{root}.{name}"))
+                        }).flatten()
+                    })
                 }
                 _ => None,
             }

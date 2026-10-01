@@ -28,16 +28,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_global_string_ptr(class, "napi_static_setter_class_name")
                 .map_err(|error| error.to_string())?;
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_napi_get_export").unwrap(),
-                    &[class.as_pointer_value().into()],
-                    "napi_static_setter_class",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
+            self.compile_napi_export_handle(class.as_pointer_value())?
         };
         let assigned_type = signature
             .params
@@ -139,16 +130,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_global_string_ptr(class, "napi_static_getter_class_name")
                 .map_err(|error| error.to_string())?;
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_napi_get_export").unwrap(),
-                    &[class.as_pointer_value().into()],
-                    "napi_static_getter_class",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
+            self.compile_napi_export_handle(class.as_pointer_value())?
         } else {
             let [receiver] = args else {
                 return Err("typed N-API getter expects one receiver".into());
@@ -252,16 +234,20 @@ impl<'ctx> HirCompiler<'ctx> {
             } else {
                 "thaw_napi_get_export"
             };
-            self.builder
-                .build_call(
-                    self.module.get_function(lookup).unwrap(),
-                    &[class.as_pointer_value().into()],
-                    "dynamic_static_class",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
+            if signature.backend == DynamicBackend::Napi {
+                self.compile_napi_export_handle(class.as_pointer_value())?
+            } else {
+                self.builder
+                    .build_call(
+                        self.module.get_function(lookup).unwrap(),
+                        &[class.as_pointer_value().into()],
+                        "dynamic_static_class",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+            }
         };
         let array = self
             .builder
