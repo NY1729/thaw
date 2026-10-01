@@ -2865,3 +2865,28 @@ fn non_arrow_string_literal_this_uses_string_receiver_abi() {
     "#;
     assert_eq!(compile_and_run(source, "non_arrow_literal_this"), "open\nTypeError\n");
 }
+#[test]
+fn non_arrow_same_tag_string_union_selects_literal_and_fallback() {
+    let source = r#"
+        type Choice<T> = "open" | T;
+        type Plain = "open" | "closed";
+        function main(): void {
+            const exact = function(this: "open" | "closed"): string { return typeof this; };
+            console.log(exact.call("open"), exact.call("closed"));
+            try { exact.call("other" as "open"); }
+            catch (error) { console.log("TypeError"); }
+            const wide = function(this: string | "open"): string { return typeof this; };
+            console.log(wide.call("open"), wide.call("other"));
+            const json = function(this: Json | "open"): string { return typeof this; };
+            console.log(json.call("open"), json.call("other"));
+            const genericAlias = function(this: Choice<"closed">): string { return typeof this; };
+            console.log(genericAlias.call("open"), genericAlias.call("closed"));
+            const nestedAlias = function(this: Choice<Choice<"closed">>): string { return typeof this; };
+            console.log(nestedAlias.call("open"), nestedAlias.call("closed"));
+            const plainAlias = function(this: Plain): string { return typeof this; };
+            console.log(plainAlias.call("open"), plainAlias.call("closed"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_string_union"),
+        "string string\nTypeError\nstring string\nstring string\nstring string\nstring string\nstring string\n");
+}

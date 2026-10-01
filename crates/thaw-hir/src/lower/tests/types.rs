@@ -1854,3 +1854,54 @@ fn non_arrow_receiver_nullability_and_disjoint_union_lower() {
         console.log(jsonOptional(), jsonOptional.call({ value: 1 } as Json));
     }"#);
 }
+#[test]
+fn non_arrow_string_literal_union_receiver_lowers() {
+    lower(r#"type Choice<T> = "open" | T;
+    type Plain = "open" | "closed";
+    function main(): void {
+        const exact = function(this: "open" | "closed"): string { return typeof this; };
+        console.log(exact.call("open"), exact.call("closed"));
+        const wide = function(this: string | "open"): string { return typeof this; };
+        console.log(wide.call("other"));
+        const json = function(this: Json | "open"): string { return typeof this; };
+        console.log(json.call("other"));
+        const genericAlias = function(this: Choice<"closed">): string { return typeof this; };
+        console.log(genericAlias.call("open"), genericAlias.call("closed"));
+        const nestedAlias = function(this: Choice<Choice<"closed">>): string { return typeof this; };
+        console.log(nestedAlias.call("open"), nestedAlias.call("closed"));
+        const plainAlias = function(this: Plain): string { return typeof this; };
+        console.log(plainAlias.call("open"), plainAlias.call("closed"));
+    }"#);
+
+    let circular = thaw_parser::parse_typescript(r#"
+        type Cycle = "open" | Cycle;
+        function main(): void {
+            const bad = function(this: Cycle): string { return typeof this; };
+            console.log(bad.call("open"));
+        }
+    "#).unwrap();
+    let error = lower_module(&circular).unwrap_err();
+    assert!(error.contains("cycle"), "unexpected error: {error}");
+
+    let generic_cycle = thaw_parser::parse_typescript(r#"
+        type Loop<T> = "open" | Loop<T>;
+        function main(): void {
+            const bad = function(this: Loop<"closed">): string { return typeof this; };
+            console.log(bad.call("open"));
+        }
+    "#).unwrap();
+    let error = lower_module(&generic_cycle).unwrap_err();
+    assert!(error.contains("receiver type alias `Loop` is (indirectly) self-referential"),
+        "unexpected error: {error}");
+
+    let default_cycle = thaw_parser::parse_typescript(r#"
+        type DefaultLoop<T = DefaultLoop> = "open" | T;
+        function main(): void {
+            const bad = function(this: DefaultLoop): string { return typeof this; };
+            console.log(bad.call("open"));
+        }
+    "#).unwrap();
+    let error = lower_module(&default_cycle).unwrap_err();
+    assert!(error.contains("receiver type alias `DefaultLoop` is (indirectly) self-referential"),
+        "unexpected error: {error}");
+}

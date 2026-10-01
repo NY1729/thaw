@@ -22,7 +22,8 @@ impl<'a> FnLowerer<'a> {
         if let Some(this) = &expression.function.this_param {
             let annotation = this.type_ann.as_ref()
                 .ok_or("function expression `this` needs a type annotation")?;
-            lower_ts_type(&annotation.type_ann, self.interfaces, self.generic_interfaces)
+            lower_non_arrow_receiver_type(&annotation.type_ann, &HashMap::new(),
+                self.interfaces, self.generic_interfaces, &mut Vec::new())
         } else {
             Ok(HirType::Json)
         }
@@ -54,7 +55,7 @@ impl<'a> FnLowerer<'a> {
         if let Some(template) = self.generic_non_arrow_receiver_templates.get(name) {
             let substitution = signature.generic_type_params.iter().cloned()
                 .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
-            return resolve_ts_type_with_substitution(template, &substitution,
+            return lower_non_arrow_receiver_type(template, &substitution,
                 self.interfaces, self.generic_interfaces, &mut Vec::new()).map(Some);
         }
         Ok(self.generic_non_arrow_receivers.get(name).cloned())
