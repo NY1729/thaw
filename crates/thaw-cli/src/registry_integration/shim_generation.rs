@@ -28,7 +28,7 @@ const ERROR_FAMILY_NAMES: [&str; 7] = [
 /// (`crates/thaw-bridge/src/bridge/dts/classes.rs`), just checking
 /// Error-family membership instead of collecting inherited members.
 fn class_identifier(name: &str) -> String {
-    if !name.contains('.') {
+    if !name.contains('.') && !thaw_bridge::is_reserved_js_identifier(name) {
         return name.to_string();
     }
     let encoded = name.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
@@ -160,10 +160,17 @@ fn generate_registry_shims(
                 function.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue);
             }
         }
-        let classes = thaw_bridge::parse_dts_classes(&package.dts_source)
+        let mut classes = thaw_bridge::parse_dts_classes(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
-        let values = thaw_bridge::parse_dts_values(&package.dts_source)
+        let mut values = thaw_bridge::parse_dts_values(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
+        let explicit_type_exports = thaw_bridge::exported_type_names(&package.dts_source);
+        let value_exports = thaw_bridge::exported_value_names(&package.dts_source);
+        let type_only_value_names = exclusive_type_only_value_names(
+            &explicit_type_exports, &value_exports, &functions, &classes, &values);
+        functions.retain(|function| !type_only_value_names.contains(&function.name));
+        values.retain(|value| !type_only_value_names.contains(&value.name));
+        restrict_type_only_class_values(&mut classes, &type_only_value_names);
         let commonjs_export_name = commonjs_export_name(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s CommonJS export: {e}"))?;
         let commonjs_export_assignment = commonjs_export_assignment(&package.dts_source)
@@ -214,7 +221,7 @@ fn generate_registry_shims(
             .collect();
         let namespace_self_aliases =
             thaw_bridge::self_referential_namespace_aliases(&package.dts_source);
-        let mut type_only_exports = thaw_bridge::exported_type_names(&package.dts_source);
+        let mut type_only_exports = explicit_type_exports;
         type_only_exports.extend(classes.iter().map(|class| class.name.clone()));
         let mut nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
         for (namespace, members) in &mut nested_namespaces {
@@ -244,6 +251,7 @@ fn generate_registry_shims(
             factory_class_returns,
             namespace_self_aliases,
             type_only_exports,
+            type_only_value_names,
             nested_namespaces,
         });
     }
@@ -502,45 +510,44 @@ fn generate_registry_shims(
                     constructor_arities_for_package.entry(runtime_class.name.clone()).or_default().extend(arities);
                 }
                 let helpers = generate_napi_class_constructors(&runtime_class, true, &constructor_arities_for_package, &mut shim);
-                if helpers.is_empty() {
-                    continue;
-                }
-                class_targets.insert(
-                    (pkg.name.clone(), class.name.clone()),
-                    helpers[0].1.clone(),
-                );
-                for (namespace, members) in &pkg.nested_namespaces {
-                    for (alias, target) in members {
-                        if (target == &class.name
-                            || format!("{namespace}.{target}") == class.name)
-                            && format!("{namespace}.{alias}") != class.name {
-                            class_rewrites.push((
-                                qualifier_by_package[&pkg.name].clone(),
-                                format!("{namespace}.{alias}"),
-                                helpers.clone(),
-                            ));
+                if !helpers.is_empty() {
+                    class_targets.insert(
+                        (pkg.name.clone(), class.name.clone()),
+                        helpers[0].1.clone(),
+                    );
+                    for (namespace, members) in &pkg.nested_namespaces {
+                        for (alias, target) in members {
+                            if (target == &class.name
+                                || format!("{namespace}.{target}") == class.name)
+                                && format!("{namespace}.{alias}") != class.name {
+                                class_rewrites.push((
+                                    qualifier_by_package[&pkg.name].clone(),
+                                    format!("{namespace}.{alias}"),
+                                    helpers.clone(),
+                                ));
+                            }
                         }
                     }
-                }
-                if pkg.commonjs_export_name.as_deref() == Some(class.name.as_str()) {
+                    if pkg.commonjs_export_name.as_deref() == Some(class.name.as_str()) {
+                        class_rewrites.push((
+                            qualifier_by_package[&pkg.name].clone(),
+                            "default".to_string(),
+                            helpers.clone(),
+                        ));
+                    }
+                    if pkg.commonjs_export_assignment.as_deref() == Some(class.name.as_str()) {
+                        class_rewrites.push((
+                            qualifier_by_package[&pkg.name].clone(),
+                            "__namespace_root__".to_string(),
+                            helpers.clone(),
+                        ));
+                    }
                     class_rewrites.push((
                         qualifier_by_package[&pkg.name].clone(),
-                        "default".to_string(),
-                        helpers.clone(),
+                        class.name.clone(),
+                        helpers,
                     ));
                 }
-                if pkg.commonjs_export_assignment.as_deref() == Some(class.name.as_str()) {
-                    class_rewrites.push((
-                        qualifier_by_package[&pkg.name].clone(),
-                        "__namespace_root__".to_string(),
-                        helpers.clone(),
-                    ));
-                }
-                class_rewrites.push((
-                    qualifier_by_package[&pkg.name].clone(),
-                    class.name.clone(),
-                    helpers,
-                ));
 
                 for (method, symbol, argument_count, has_callback, parameter_types, return_class) in
                     generate_napi_class_method_overloads_with_callback_instances(
@@ -1452,7 +1459,8 @@ fn generate_registry_shims(
                 .classes
                 .iter()
                 .filter(|class| {
-                    observed_bare_member_objects.contains(&class.name)
+                    !pkg.type_only_value_names.contains(&class.name)
+                        && observed_bare_member_objects.contains(&class.name)
                         && bare_value_class_names.insert(class.name.clone())
                 })
                 .map(|class| thaw_bridge::DtsValue {
@@ -1465,6 +1473,8 @@ fn generate_registry_shims(
                 .iter()
                 .flat_map(|(namespace, members)| {
                     members.iter().filter_map(move |(member, target)| {
+                        let path = format!("{namespace}.{member}");
+                        if pkg.type_only_value_names.contains(&path) { return None; }
                         let declared = pkg.values.iter().any(|value| &value.name == target)
                             || pkg.functions.iter().any(|function| &function.name == target)
                             || (!target.contains('.') && pkg.classes.iter().any(|class| &class.name == target));
@@ -1478,7 +1488,6 @@ fn generate_registry_shims(
                         // symbol / runtime getter after the bare target made
                         // them collide ("duplicate top-level binding
                         // `__thaw_value_crypto_js_Hex`").
-                        let path = format!("{namespace}.{member}");
                         Some((
                             path.clone(),
                             thaw_bridge::DtsValue {
@@ -1571,7 +1580,8 @@ fn generate_registry_shims(
                 .map(|q| (q.name.clone(), q.qualified_key.clone()))
                 .collect();
             for class in &pkg.classes {
-                if !class.name.contains('.') && !qualified_aliases.iter().any(|(name, _)| name == &class.name) {
+                if !pkg.type_only_value_names.contains(&class.name)
+                    && !class.name.contains('.') && !qualified_aliases.iter().any(|(name, _)| name == &class.name) {
                     qualified_aliases.push((class.name.clone(), format!("{}::{}", pkg.name, class.name)));
                 }
             }
@@ -1592,19 +1602,21 @@ fn generate_registry_shims(
                 .nested_namespaces
                 .iter()
                 .flat_map(|(namespace, members)| {
-                    members.iter().map(move |(member, target)| {
+                    members.iter().filter_map(move |(member, target)| {
                         let path = format!("{namespace}.{member}");
+                        if pkg.type_only_value_names.contains(&path) { return None; }
                         let runtime_key = if pkg.classes.iter().any(|class| class.name == path) {
                             path.clone()
                         } else {
                             target.clone()
                         };
-                        (path, format!("{}::{runtime_key}", pkg.name))
+                        Some((path, format!("{}::{runtime_key}", pkg.name)))
                     })
                 })
                 .collect();
             for class in &pkg.classes {
-                if class.name.contains('.')
+                if !pkg.type_only_value_names.contains(&class.name)
+                    && class.name.contains('.')
                     && !nested_namespace_aliases.iter().any(|(path, _)| path == &class.name)
                 {
                     nested_namespace_aliases.push((class.name.clone(), format!("{}::{}", pkg.name, class.name)));
@@ -1632,12 +1644,12 @@ fn generate_registry_shims(
             // one already gets bound by the generic `module.exports` ->
             // `globalThis` copy loop below).
             let class_names: Vec<String> = pkg.classes.iter()
-                .filter(|class| !class.name.contains('.'))
+                .filter(|class| !class.name.contains('.') && !pkg.type_only_value_names.contains(&class.name))
                 .map(|class| class.name.clone()).collect();
             if runtime_package && (dynamic_packages.contains(&pkg.name)
                 || !fallback_names.is_empty()
                 || pkg.native_addon.is_some()
-                || !pkg.classes.is_empty()
+                || pkg.classes.iter().any(|class| !pkg.type_only_value_names.contains(&class.name))
                 || !value_exports.is_empty())
             {
                 bundles.push((
@@ -1921,4 +1933,38 @@ fn generate_registry_shims(
         jit_fallback_reasons,
         runtime_features,
     ))
+}
+
+fn restrict_type_only_class_values(
+    classes: &mut [thaw_bridge::DtsClass],
+    type_only_value_names: &std::collections::HashSet<String>,
+) {
+    for class in classes {
+        if type_only_value_names.contains(&class.name) {
+            class.constructible = false;
+            class.constructors.clear();
+            class.methods.retain(|method| !method.is_static);
+            class.properties.retain(|property| !property.is_static);
+        }
+    }
+}
+
+fn exclusive_type_only_value_names(
+    type_exports: &std::collections::HashSet<String>,
+    value_exports: &std::collections::HashSet<String>,
+    functions: &[thaw_bridge::DtsFunction],
+    classes: &[thaw_bridge::DtsClass],
+    values: &[thaw_bridge::DtsValue],
+) -> std::collections::HashSet<String> {
+    let mut exclusive = type_exports.difference(value_exports).cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let namespaces = exclusive.clone();
+    for name in functions.iter().map(|function| &function.name)
+        .chain(classes.iter().map(|class| &class.name))
+        .chain(values.iter().map(|value| &value.name)) {
+        if namespaces.iter().any(|namespace| name.starts_with(&format!("{namespace}."))) {
+            exclusive.insert(name.clone());
+        }
+    }
+    exclusive
 }

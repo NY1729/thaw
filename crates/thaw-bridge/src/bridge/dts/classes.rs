@@ -96,6 +96,51 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
             classes.push(class);
         }
     }
+    // Flattened barrels keep a declaration's valid local identifier and
+    // expose its public property through an export specifier. Carry the
+    // class shape under that public name for both value and type aliases.
+    let mut generated_internals = HashSet::new();
+    let mut aliases = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            let swc_ecma_ast::ModuleExportName::Ident(original) = &named.orig else { continue };
+            let Some(swc_ecma_ast::ModuleExportName::Ident(public)) = &named.exported else { continue };
+            if original.sym == public.sym { continue; }
+            aliases.push((original.sym.to_string(), public.sym.to_string()));
+            if original.sym.as_str().starts_with("__thaw_public_") {
+                generated_internals.insert(original.sym.to_string());
+            }
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (original, public) in &aliases {
+            if classes.iter().any(|class| &class.name == public) { continue; }
+            if let Some(mut class) = classes.iter().find(|class| &class.name == original).cloned() {
+                let original_name = class.name.clone();
+                class.name = public.clone();
+                for method in &mut class.methods {
+                    if method.return_instance_class.as_deref() == Some(original_name.as_str()) {
+                        method.return_instance_class = Some(class.name.clone());
+                    }
+                    for callback in &mut method.callback_instance_classes {
+                        for identity in callback {
+                            if identity.as_deref() == Some(original_name.as_str()) {
+                                *identity = Some(class.name.clone());
+                            }
+                        }
+                    }
+                }
+                classes.push(class);
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+    classes.retain(|class| !generated_internals.contains(&class.name));
     // Flattened declaration files can repeat the same qualified binding.
     // Keep the first declaration for each binding without collapsing
     // distinct namespace classes that happen to share a bare name.
