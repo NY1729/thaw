@@ -255,8 +255,9 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self.allocate_lambda_environment(entry, this_adapter, captures)?.into())
     }
 
-    // A non-arrow closure keeps its typed `this` parameter in the body ABI,
-    // but neither public closure entry exposes it as a positional JS argument.
+    // Non-arrow closures expose a receiver-free ordinary entry and a tagged
+    // entry. Both decode into the same hidden parameter ABI before calling
+    // the one body; the ordinary entry supplies an undefined receiver.
     fn compile_non_arrow_entries(
         &mut self,
         target: FunctionValue<'ctx>,
@@ -271,30 +272,16 @@ impl<'ctx> HirCompiler<'ctx> {
             &format!("{name}__ordinary"), self.function_type(&visible, ret)?, Some(Linkage::Internal));
         let entry = self.context.append_basic_block(ordinary, "entry");
         self.builder.position_at_end(entry);
-        let undefined = match receiver {
-            HirType::Undefined => self.context.bool_type().const_zero().into(),
-            HirType::Json | HirType::Dictionary(_) => self.builder.build_call(
-                self.module.get_function("thaw_json_undefined").unwrap(), &[], "ordinary_this_undefined")
+        let undefined = if *receiver == HirType::JsValue {
+            let name = self.builder.build_global_string_ptr("undefined", "ordinary_this_name")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(self.module.get_function("thaw_js_get_global").unwrap(),
+                &[name.as_pointer_value().into()], "ordinary_this_handle")
                 .map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                .ok_or("undefined Json returned no value")?,
-            HirType::JsValue => {
-                let name = self.builder.build_global_string_ptr("undefined", "ordinary_this_name")
-                    .map_err(|error| error.to_string())?;
-                self.builder.build_call(self.module.get_function("thaw_js_get_global").unwrap(),
-                    &[name.as_pointer_value().into()], "ordinary_this_handle")
-                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                    .ok_or("undefined JsValue returned no value")?
-            }
-            _ => {
-                let saved_catch_stack = std::mem::take(&mut self.catch_stack);
-                let saved_async_completion = self.active_async_completion.take();
-                self.compile_throw_type_error("Incompatible function receiver")?;
-                self.catch_stack = saved_catch_stack;
-                self.active_async_completion = saved_async_completion;
-                self.builder.position_at_end(parent);
-                let explicit = self.compile_non_arrow_this_entry(target, &visible, receiver, ret, name)?;
-                return Ok((ordinary, explicit));
-            }
+                .ok_or("undefined JsValue returned no value")?
+        } else {
+            self.compile_non_arrow_receiver_value(ordinary, receiver,
+                self.context.i8_type().const_zero(), self.context.i64_type().const_zero())?
         };
         let mut args = vec![ordinary.get_nth_param(0).unwrap().into(), undefined.into()];
         args.extend(ordinary.get_param_iter().skip(1).map(BasicMetadataValueEnum::from));
@@ -326,15 +313,179 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?.into_int_value();
         let word = self.builder.build_extract_value(tagged, 1, "receiver_word")
             .map_err(|error| error.to_string())?.into_int_value();
-        if *receiver == HirType::Json {
-            self.compile_non_arrow_json_this_entry(entry_fn, target, ret, kind, word)?;
-            self.builder.position_at_end(parent);
-            return Ok(entry_fn);
+        let value = self.compile_non_arrow_receiver_value(entry_fn, receiver, kind, word)?;
+        let mut args = vec![entry_fn.get_nth_param(0).unwrap().into(), value.into()];
+        args.extend(entry_fn.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
+        let call = self.builder.build_call(target, &args, "invoke_non_arrow_with_this")
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
+        else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
+            .ok_or("non-arrow this entry returned no value")?)).map_err(|error| error.to_string())?; }
+        self.builder.position_at_end(parent);
+        Ok(entry_fn)
+    }
+
+    fn non_arrow_receiver_tags(receiver: &HirType) -> Result<Vec<u64>, String> {
+        let tags = match receiver {
+            HirType::Undefined => vec![0],
+            HirType::Null => vec![1],
+            HirType::Bool => vec![2],
+            HirType::F64 => vec![3],
+            HirType::I64 => vec![4],
+            HirType::Str => vec![5],
+            HirType::Symbol => vec![6],
+            HirType::Json => vec![0, 1, 2, 3, 5, 7],
+            HirType::Dictionary(_) => vec![7],
+            HirType::JsValue => vec![8],
+            HirType::Object(fields) if fields.first().is_some_and(|(name, _)|
+                    name.starts_with("__thaw_class_identity_\u{1e}")) => vec![9],
+            HirType::Optional(inner) => {
+                let mut tags = Self::non_arrow_receiver_tags(inner)?;
+                if !tags.contains(&0) { tags.push(0); }
+                tags
+            }
+            HirType::Nullable(inner) => {
+                let mut tags = Self::non_arrow_receiver_tags(inner)?;
+                if !tags.contains(&1) { tags.push(1); }
+                tags
+            }
+            HirType::Nullish(inner) => {
+                let mut tags = Self::non_arrow_receiver_tags(inner)?;
+                for tag in [0, 1] { if !tags.contains(&tag) { tags.push(tag); } }
+                tags
+            }
+            HirType::Union(members) => {
+                let mut tags = Vec::new();
+                for member in members {
+                    for tag in Self::non_arrow_receiver_tags(member)? {
+                        if tags.contains(&tag) {
+                            return Err("union receiver members have indistinguishable runtime tags".into());
+                        }
+                        tags.push(tag);
+                    }
+                }
+                tags
+            }
+            other => return Err(format!("unsupported non-arrow this type {other:?}")),
+        };
+        Ok(tags)
+    }
+
+    fn reject_non_arrow_receiver(&mut self) -> Result<(), String> {
+        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+        let saved_async_completion = self.active_async_completion.take();
+        self.compile_throw_type_error("Incompatible function receiver")?;
+        self.catch_stack = saved_catch_stack;
+        self.active_async_completion = saved_async_completion;
+        Ok(())
+    }
+
+    fn compile_non_arrow_receiver_value(
+        &mut self,
+        entry_fn: FunctionValue<'ctx>,
+        receiver: &HirType,
+        kind: IntValue<'ctx>,
+        word: IntValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match receiver {
+            HirType::Json => return self.compile_non_arrow_json_value(entry_fn, kind, word).map(Into::into),
+            HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+                let is_absent = match receiver {
+                    HirType::Optional(_) => self.builder.build_int_compare(IntPredicate::EQ, kind,
+                        self.context.i8_type().const_zero(), "receiver_optional_absent"),
+                    HirType::Nullable(_) => self.builder.build_int_compare(IntPredicate::EQ, kind,
+                        self.context.i8_type().const_int(1, false), "receiver_nullable_absent"),
+                    _ => {
+                        let is_undefined = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                            self.context.i8_type().const_zero(), "receiver_nullish_undefined")
+                            .map_err(|error| error.to_string())?;
+                        let is_null = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                            self.context.i8_type().const_int(1, false), "receiver_nullish_null")
+                            .map_err(|error| error.to_string())?;
+                        self.builder.build_or(is_undefined, is_null, "receiver_nullish_absent")
+                    }
+                }.map_err(|error| error.to_string())?;
+                let absent = self.context.append_basic_block(entry_fn, "receiver_absent");
+                let present = self.context.append_basic_block(entry_fn, "receiver_present");
+                let join = self.context.append_basic_block(entry_fn, "receiver_join");
+                self.builder.build_conditional_branch(is_absent, absent, present)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(absent);
+                let zero = self.basic_type(inner)?.const_zero();
+                let absent_value = if matches!(receiver, HirType::Nullish(_)) {
+                    let tag = self.builder.build_select(
+                        self.builder.build_int_compare(IntPredicate::EQ, kind,
+                            self.context.i8_type().const_int(1, false), "receiver_absent_is_null")
+                            .map_err(|error| error.to_string())?,
+                        self.context.i8_type().const_int(1, false),
+                        self.context.i8_type().const_int(2, false), "receiver_nullish_absent_tag")
+                        .map_err(|error| error.to_string())?.into_int_value();
+                    self.build_nullish_tagged_value(zero, inner, tag)?
+                } else { self.build_optional_value(zero, inner, false)? };
+                let absent_exit = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(present);
+                let payload = self.compile_non_arrow_receiver_value(entry_fn, inner, kind, word)?;
+                let present_value = if matches!(receiver, HirType::Nullish(_)) {
+                    self.build_nullish_value(payload, inner, 0)?
+                } else { self.build_optional_value(payload, inner, true)? };
+                let present_exit = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(join);
+                let selected = self.builder.build_phi(self.basic_type(receiver)?, "receiver_optional_value")
+                    .map_err(|error| error.to_string())?;
+                selected.add_incoming(&[
+                    (&absent_value as &dyn inkwell::values::BasicValue<'ctx>, absent_exit),
+                    (&present_value as &dyn inkwell::values::BasicValue<'ctx>, present_exit),
+                ]);
+                return Ok(selected.as_basic_value());
+            }
+            HirType::Union(members) => {
+                let mut cases = Vec::new();
+                let mut claimed = HashSet::new();
+                for (index, member) in members.iter().enumerate() {
+                    if matches!(member, HirType::Optional(_) | HirType::Nullable(_)
+                        | HirType::Nullish(_) | HirType::Union(_)) {
+                        return Err("nested tagged receiver union member exceeds the union word ABI".into());
+                    }
+                    for tag in Self::non_arrow_receiver_tags(member)? {
+                        if !claimed.insert(tag) {
+                            return Err("union receiver members have indistinguishable runtime tags".into());
+                        }
+                        cases.push((index, tag, self.context.append_basic_block(entry_fn,
+                            &format!("receiver_union_{index}_{tag}"))));
+                    }
+                }
+                let rejected = self.context.append_basic_block(entry_fn, "receiver_union_rejected");
+                let join = self.context.append_basic_block(entry_fn, "receiver_union_join");
+                let switches = cases.iter().map(|(_, tag, block)|
+                    (self.context.i8_type().const_int(*tag, false), *block)).collect::<Vec<_>>();
+                self.builder.build_switch(kind, rejected, &switches)
+                    .map_err(|error| error.to_string())?;
+                let mut incoming = Vec::new();
+                for (index, _, block) in cases {
+                    self.builder.position_at_end(block);
+                    let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word)?;
+                    let tagged = self.build_union_value(value, index, members)?;
+                    let exit = self.builder.get_insert_block().unwrap();
+                    self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                    incoming.push((tagged, exit));
+                }
+                self.builder.position_at_end(rejected);
+                self.reject_non_arrow_receiver()?;
+                self.builder.position_at_end(join);
+                let selected = self.builder.build_phi(self.basic_type(receiver)?, "receiver_union_value")
+                    .map_err(|error| error.to_string())?;
+                selected.add_incoming(&incoming.iter().map(|(value, block)|
+                    (value as &dyn inkwell::values::BasicValue<'ctx>, *block)).collect::<Vec<_>>());
+                return Ok(selected.as_basic_value());
+            }
+            _ => {}
         }
         let (expected, value): (u64, BasicValueEnum<'ctx>) = match receiver {
             HirType::Undefined => (0, self.context.bool_type().const_zero().into()),
             HirType::Null => (1, self.context.bool_type().const_int(1, false).into()),
-            HirType::Json | HirType::Dictionary(_) => (7, self.builder.build_int_to_ptr(word,
+            HirType::Dictionary(_) => (7, self.builder.build_int_to_ptr(word,
                 self.context.ptr_type(AddressSpace::default()), "receiver_json")
                 .map_err(|error| error.to_string())?.into()),
             HirType::JsValue => (8, word.into()),
@@ -375,34 +526,20 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(valid, accepted, rejected)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(rejected);
-        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
-        let saved_async_completion = self.active_async_completion.take();
-        self.compile_throw_type_error("Incompatible function receiver")?;
-        self.catch_stack = saved_catch_stack;
-        self.active_async_completion = saved_async_completion;
+        self.reject_non_arrow_receiver()?;
         self.builder.position_at_end(accepted);
-        let mut args = vec![entry_fn.get_nth_param(0).unwrap().into(), value.into()];
-        args.extend(entry_fn.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
-        let call = self.builder.build_call(target, &args, "invoke_non_arrow_with_this")
-            .map_err(|error| error.to_string())?;
-        if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
-        else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
-            .ok_or("non-arrow this entry returned no value")?)).map_err(|error| error.to_string())?; }
-        self.builder.position_at_end(parent);
-        Ok(entry_fn)
+        Ok(value)
     }
 
     // All scalar cases create an owned Json root, just like other Json
     // constructors. A lambda parameter is borrowed for its invocation and
     // may return or capture the root, so the adapter cannot destroy it here.
-    fn compile_non_arrow_json_this_entry(
+    fn compile_non_arrow_json_value(
         &mut self,
         entry_fn: FunctionValue<'ctx>,
-        target: FunctionValue<'ctx>,
-        ret: &HirType,
         kind: IntValue<'ctx>,
         word: IntValue<'ctx>,
-    ) -> Result<(), String> {
+    ) -> Result<PointerValue<'ctx>, String> {
         let join = self.context.append_basic_block(entry_fn, "receiver_json_ready");
         let rejected = self.context.append_basic_block(entry_fn, "receiver_json_rejected");
         let cases = [0_u64, 1, 2, 3, 5, 7]
@@ -463,14 +600,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         selected.add_incoming(&incoming.iter().map(|(value, block)|
             (value as &dyn inkwell::values::BasicValue<'ctx>, *block)).collect::<Vec<_>>());
-        let mut args = vec![entry_fn.get_nth_param(0).unwrap().into(), selected.as_basic_value().into()];
-        args.extend(entry_fn.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
-        let call = self.builder.build_call(target, &args, "invoke_non_arrow_json_this")
-            .map_err(|error| error.to_string())?;
-        if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
-        else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
-            .ok_or("non-arrow Json entry returned no value")?)).map_err(|error| error.to_string())?; }
-        Ok(())
+        Ok(selected.as_basic_value().into_pointer_value())
     }
 
     fn compile_lambda(

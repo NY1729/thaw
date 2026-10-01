@@ -1838,3 +1838,19 @@ fn generic_non_arrow_apply_runtime_nullish_tuple_preserves_order() {
         console.log(order.join(","));
     }"#);
 }
+
+#[test]
+fn non_arrow_receiver_nullability_and_disjoint_union_lower() {
+    lower(r#"function main(): void {
+        const optional = function(this: number | undefined): string { return typeof this; };
+        const nullable = function(this: number | null): string { return typeof this; };
+        const nullish = function(this: number | null | undefined): string { return typeof this; };
+        const choice = function(this: number | string): string { return typeof this; };
+        const jsonOptional = function(this: Json | undefined): string { return typeof this; };
+        console.log(optional(), optional.call(5), optional.call(undefined));
+        console.log(nullable.call(null), nullable.call(6));
+        console.log(nullish(), nullish.call(null), nullish.call(7));
+        console.log(choice.call(8), choice.call("x"));
+        console.log(jsonOptional(), jsonOptional.call({ value: 1 } as Json));
+    }"#);
+}
