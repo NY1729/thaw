@@ -1193,3 +1193,40 @@ fn fs_recursive_mkdir_returns_first_created_path_across_api_styles() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[cfg(unix)]
+#[test]
+fn fs_readdir_names_do_not_require_search_permission() {
+    use std::ffi::{CStr, CString};
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_registry("builtin_fs_readdir_names_no_search");
+    fs::write(
+        dir.join("index.js"),
+        "var fs = require('node:fs'); module.exports = async function(path) { var sync = fs.readdirSync(path).sort(); var callback = await new Promise(function(resolve, reject) { fs.readdir(path, function(error, names) { error ? reject(error) : resolve(names.sort()); }); }); var promised = (await fs.promises.readdir(path)).sort(); var typeReads = 0, recursiveReads = 0, changing = { get withFileTypes() { return ++typeReads > 1; }, get recursive() { return ++recursiveReads > 1; } }; var changingNames = fs.readdirSync(path, changing).sort(); return [sync, callback, promised, changingNames, typeReads, recursiveReads]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_readdir_names_no_search_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsReaddirNames = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+
+    let locked = dir.join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("entry.txt"), "data").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o400)).unwrap();
+    let function = CString::new("exerciseFsReaddirNames").unwrap();
+    let arguments = CString::new(
+        serde_json::to_string(&[locked.to_string_lossy().into_owned()]).unwrap(),
+    )
+    .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed, serde_json::json!([["entry.txt"], ["entry.txt"], ["entry.txt"], ["entry.txt"], 1, 1]));
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
