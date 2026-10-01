@@ -3355,6 +3355,16 @@ fn with_explicit_d_ts_suffix(path: &Path) -> Option<PathBuf> {
     Some(path.with_extension(declaration_extension))
 }
 
+fn declaration_file_candidate(path: &Path) -> Option<PathBuf> {
+    let direct_declaration = path.file_name().and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts"))
+        .then(|| path.to_path_buf());
+    [direct_declaration, with_explicit_d_ts_suffix(path), with_d_ts_suffix(path), Some(path.join("index.d.ts"))]
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.is_file())
+}
+
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {
     if source == "." || source.starts_with("./") || source.starts_with("../") {
         let path = entry_path.parent()?.join(source);
@@ -3380,36 +3390,60 @@ fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf>
             // re-export cycle).
             .map(|candidate| candidate.canonicalize().unwrap_or(candidate));
     }
-    // A bare specifier re-exports from a genuinely *different* installed
-    // package, not another file within the same one -- real example:
-    // `@types/ramda`'s entire `index.d.ts` is just `export * from
-    // "types-ramda";`, where `types-ramda` is its own separate npm
-    // package. That target package's own real type entry point can live
-    // anywhere its own `package.json`'s `types`/`typings` field says
-    // (`types-ramda`'s is `./es/index.d.ts`, not a root-level
-    // `index.d.ts` at all) -- reusing `find_own_dts` (the same
-    // resolution already used for a `--use`d package's own entry point)
-    // instead of only ever guessing `<name>.d.ts`/`<name>/index.d.ts`
-    // fixes this the same general way for every package shaped like
-    // this, not just ramda specifically. Falls back to the old guesses
-    // if the target's own `package.json` is missing/unreadable, rather
-    // than narrowing what used to resolve.
+    // Bare declaration re-exports use the same package-name split and
+    // nearest dependency lookup as runtime imports. A package's root types
+    // entry still uses `find_own_dts`; a subpath must honor its exports
+    // map before any physical-file fallback.
     let node_modules = entry_path
         .ancestors()
-        .find(|path| path.file_name().is_some_and(|name| name == "node_modules"))?;
-    let package_dir = node_modules.join(source);
+        .filter(|path| path.file_name().is_some_and(|name| name == "node_modules"))
+        .last()?;
+    let (package_name, subpath) = split_bare_spec(source);
+    if let Some(subpath) = subpath {
+        validate_export_subpath(subpath).ok()?;
+    }
+    let requiring_dir = entry_path.parent()?;
+    let project_root = node_modules.parent().unwrap_or(node_modules);
+    let mut package_dir = None;
+    for ancestor in requiring_dir.ancestors() {
+        let candidate = ancestor.join("node_modules").join(package_name);
+        let requested = subpath.map_or_else(|| candidate.clone(), |subpath| candidate.join(subpath));
+        if read_manifest(&candidate).is_ok()
+            || declaration_file_candidate(&candidate).is_some()
+            || declaration_file_candidate(&requested).is_some()
+        {
+            package_dir = Some(candidate);
+            break;
+        }
+        if ancestor == project_root {
+            break;
+        }
+    }
+    let package_dir = package_dir.unwrap_or_else(||
+        resolve_dependency_dir(node_modules, requiring_dir, package_name));
     if let Ok(manifest) = read_manifest(&package_dir) {
-        if let Some((_, absolute)) = find_own_dts(&manifest, &package_dir) {
+        if let Some(subpath) = subpath {
+            if manifest.get("exports").is_some() {
+                // Once the nearest package declares exports, an absent or
+                // blocked subpath cannot fall through to a physical file or
+                // a different version in an ancestor node_modules.
+                let target = package_subpath_runtime_target(&manifest, subpath, &["types"])?;
+                let relative = target.strip_prefix("./")?;
+                validate_export_subpath(relative).ok()?;
+                if relative.split('/').any(|segment| segment == "node_modules") {
+                    return None;
+                }
+                let absolute = package_dir.join(relative);
+                return absolute.is_file().then(|| absolute.canonicalize().unwrap_or(absolute));
+            }
+        } else if let Some((_, absolute)) = find_own_dts(&manifest, &package_dir) {
             if absolute.is_file() {
                 return Some(absolute.canonicalize().unwrap_or(absolute));
             }
         }
     }
-    let path = package_dir;
-    [with_d_ts_suffix(&path), Some(path.join("index.d.ts"))]
-        .into_iter()
-        .flatten()
-        .find(|candidate| candidate.is_file())
+    let path = subpath.map_or_else(|| package_dir.clone(), |subpath| package_dir.join(subpath));
+    declaration_file_candidate(&path)
         .map(|candidate| candidate.canonicalize().unwrap_or(candidate))
 }
 
