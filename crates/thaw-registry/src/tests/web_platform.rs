@@ -848,3 +848,23 @@ fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
     let _ = fs::remove_dir_all(&certificate_dir);
 }
 
+
+
+#[test]
+fn file_urls_resolve_relative_paths_from_current_working_directory() {
+    // Unrun regression: use a deterministic cwd without changing host process state.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_file_url_cwd");
+    fs::write(dir.join("index.js"), "var url = require('node:url'); module.exports = function () { var original = process.cwd; process.cwd = function () { return '/work/current'; }; try { return [url.pathToFileURL('file.txt').href, url.pathToFileURL('../a b#%.txt').href, url.pathToFileURL('').href, url.pathToFileURL('/absolute/a b').href, url.fileURLToPath(url.pathToFileURL('./a b#%.txt')), url.pathToFileURL('directory/').href]; } finally { process.cwd = original; } };").unwrap();
+    let empty_node_modules = temp_registry("builtin_file_url_cwd_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileUrl = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseFileUrl").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["file:///work/current/file.txt","file:///work/a%20b%23%25.txt","file:///work/current","file:///absolute/a%20b","/work/current/a b#%.txt","file:///work/current/directory/"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
