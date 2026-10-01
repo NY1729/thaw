@@ -4880,6 +4880,69 @@ fn headers_set_cookie_and_iterator_brands() {
 }
 
 #[test]
+fn form_data_iterators_observe_set_and_resume_after_done() {
+    assert_eq!(load(r#"
+      function formDataIteratorsObserveSet() {
+        const data = new FormData();
+        data.append('a', 'A'); data.append('b', 'B'); data.append('c', 'C');
+        const keys = data.keys(), values = data.values(), entries = data.entries(), defaultIterator = data[Symbol.iterator]();
+        const first = [keys.next().value, values.next().value, entries.next().value, defaultIterator.next().value];
+        data.set('b', 'B2');
+        const second = [keys.next().value, values.next().value, entries.next().value, defaultIterator.next().value];
+        const third = [keys.next().value, values.next().value, entries.next().value, defaultIterator.next().value];
+        const done = [keys.next().done, values.next().done, entries.next().done, defaultIterator.next().done];
+        data.append('d', 'D');
+        const resumed = [keys.next().value, values.next().value, entries.next().value, defaultIterator.next().value];
+        return [first, second, third, done, resumed];
+      }
+    "#), 1);
+    assert_eq!(call("formDataIteratorsObserveSet", "[]"),
+        r#"[["a","A",["a","A"],["a","A"]],["b","B2",["b","B2"],["b","B2"]],["c","C",["c","C"],["c","C"]],[true,true,true,true],["d","D",["d","D"],["d","D"]]]"#);
+}
+
+#[test]
+fn form_data_iteration_refetches_after_delete_and_callback() {
+    assert_eq!(load(r#"
+      function formDataIterationRefetchesAfterDelete() {
+        const data = new FormData();
+        data.append('a', 'A'); data.append('b', 'B'); data.append('c', 'C');
+        const iterator = data.entries();
+        const first = iterator.next().value;
+        data.delete('b');
+        const second = iterator.next().value;
+        const receiver = {};
+        const seen = [];
+        function visit(value, name, target) {
+          seen.push([name, value, this === receiver, target === data]);
+          if (name === 'a') data.set('c', 'C2');
+          if (name === 'c') data.append('d', 'D');
+        }
+        visit.call = () => { throw new Error('callback.call must not be used'); };
+        data.entries = () => { throw new Error('public entries must not be used'); };
+        data.forEach(visit, receiver);
+        return [first, second, seen, [...data.keys()], [...data]];
+      }
+    "#), 1);
+    assert_eq!(call("formDataIterationRefetchesAfterDelete", "[]"),
+        r#"[["a","A"],["c","C"],[["a","A",true,true],["c","C2",true,true],["d","D",true,true]],["a","c","d"],[["a","A"],["c","C2"],["d","D"]]]"#);
+}
+
+#[test]
+fn form_data_iteration_checks_receiver_at_call_time() {
+    assert_eq!(load(r#"
+      function formDataIterationChecksReceiver() {
+        const data = new FormData();
+        const iterator = data.keys();
+        const rejects = method => { try { method.call({}); return false; } catch (error) { return error instanceof TypeError; } };
+        return [rejects(FormData.prototype.keys), rejects(FormData.prototype.values),
+          rejects(FormData.prototype.entries), rejects(FormData.prototype.forEach),
+          rejects(FormData.prototype[Symbol.iterator]), rejects(iterator.next)];
+      }
+    "#), 1);
+    assert_eq!(call("formDataIterationChecksReceiver", "[]"), "[true,true,true,true,true,true]");
+}
+
+#[test]
 fn crypto_buffer_regressions() {
     assert_eq!(
         load(r#"async function cryptoBufferRegressions() {
