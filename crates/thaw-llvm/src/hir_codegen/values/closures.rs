@@ -444,6 +444,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 let mut cases = Vec::new();
                 let mut claimed = HashSet::new();
                 let mut classes = Vec::new();
+                let mut string_literals: Vec<(usize, String)> = Vec::new();
+                let mut string_catchall = None;
                 let mut json_fallback = None;
                 for (index, member) in members.iter().enumerate() {
                     if matches!(member, HirType::Optional(_) | HirType::Nullable(_)
@@ -457,6 +459,21 @@ impl<'ctx> HirCompiler<'ctx> {
                     if *member == HirType::Json {
                         if json_fallback.replace(index).is_some() {
                             return Err("ambiguous Json receiver union".into());
+                        }
+                        continue;
+                    }
+                    // All string literals use source tag 5. Resolve their
+                    // values before the broad string or Json member.
+                    if let HirType::StrLiteral(literal) = member {
+                        if string_literals.iter().any(|(_, existing)| existing == literal) {
+                            return Err("duplicate string literal receiver union member".into());
+                        }
+                        string_literals.push((index, literal.clone()));
+                        continue;
+                    }
+                    if *member == HirType::Str {
+                        if string_catchall.replace(index).is_some() {
+                            return Err("duplicate string receiver union member".into());
                         }
                         continue;
                     }
@@ -485,6 +502,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         return Err("Json and dictionary receiver union members share the same source tag".into());
                     }
                     for tag in [0_u64, 1, 2, 3, 5, 7] {
+                        if tag == 5 && (!string_literals.is_empty() || string_catchall.is_some()) {
+                            continue;
+                        }
                         if claimed.insert(tag) {
                             cases.push((index, tag, self.context.append_basic_block(entry_fn,
                                 &format!("receiver_union_json_{tag}"))));
@@ -495,10 +515,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 let join = self.context.append_basic_block(entry_fn, "receiver_union_join");
                 let class_dispatch = (!classes.is_empty()).then(||
                     self.context.append_basic_block(entry_fn, "receiver_union_native_classes"));
+                let string_dispatch = (!string_literals.is_empty() || string_catchall.is_some()).then(||
+                    self.context.append_basic_block(entry_fn, "receiver_union_strings"));
                 let mut switches = cases.iter().map(|(_, tag, block)|
                     (self.context.i8_type().const_int(*tag, false), *block)).collect::<Vec<_>>();
                 if let Some(block) = class_dispatch {
                     switches.push((self.context.i8_type().const_int(9, false), block));
+                }
+                if let Some(block) = string_dispatch {
+                    switches.push((self.context.i8_type().const_int(5, false), block));
                 }
                 self.builder.build_switch(kind, rejected, &switches)
                     .map_err(|error| error.to_string())?;
@@ -510,6 +535,45 @@ impl<'ctx> HirCompiler<'ctx> {
                     let exit = self.builder.get_insert_block().unwrap();
                     self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
                     incoming.push((tagged, exit));
+                }
+                if let Some(block) = string_dispatch {
+                    self.builder.position_at_end(block);
+                    let actual = self.builder.build_int_to_ptr(word,
+                        self.context.ptr_type(AddressSpace::default()), "receiver_union_string_pointer")
+                        .map_err(|error| error.to_string())?;
+                    for (index, literal) in string_literals {
+                        let matched = self.context.append_basic_block(entry_fn,
+                            &format!("receiver_union_literal_{index}"));
+                        let next = self.context.append_basic_block(entry_fn,
+                            &format!("receiver_union_next_literal_{index}"));
+                        let expected = self.compile_raw_string_literal(literal.as_bytes())?.into_pointer_value();
+                        let compared = self.builder.build_call(
+                            self.module.get_function("thaw_string_compare").unwrap(),
+                            &[actual.into(), expected.into()], "receiver_union_string_compare")
+                            .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                            .ok_or("string comparison returned no value")?.into_int_value();
+                        let equal = self.builder.build_int_compare(IntPredicate::EQ, compared,
+                            self.context.i32_type().const_zero(), "receiver_union_literal_matches")
+                            .map_err(|error| error.to_string())?;
+                        self.builder.build_conditional_branch(equal, matched, next)
+                            .map_err(|error| error.to_string())?;
+                        self.builder.position_at_end(matched);
+                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word)?;
+                        let tagged = self.build_union_value(value, index, members)?;
+                        let exit = self.builder.get_insert_block().unwrap();
+                        self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                        incoming.push((tagged, exit));
+                        self.builder.position_at_end(next);
+                    }
+                    if let Some(index) = string_catchall.or(json_fallback) {
+                        let value = self.compile_non_arrow_receiver_value(entry_fn, &members[index], kind, word)?;
+                        let tagged = self.build_union_value(value, index, members)?;
+                        let exit = self.builder.get_insert_block().unwrap();
+                        self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                        incoming.push((tagged, exit));
+                    } else {
+                        self.builder.build_unconditional_branch(rejected).map_err(|error| error.to_string())?;
+                    }
                 }
                 if let Some(block) = class_dispatch {
                     self.builder.position_at_end(block);
