@@ -410,7 +410,7 @@ pub unsafe extern "C" fn napi_remove_async_cleanup_hook(
             ACTIVE_ASYNC_CLEANUP_HOOKS.fetch_sub(1, Ordering::AcqRel);
         }
         _ => {
-            return record_status(handle_ref.env as NapiEnv, NAPI_INVALID_ARG);
+            return NAPI_INVALID_ARG;
         }
     }
     NAPI_OK
