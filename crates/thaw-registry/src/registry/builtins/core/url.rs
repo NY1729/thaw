@@ -2,8 +2,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "url" => Some(
             "function pathToFileURL(path) {\n\
-             \x20\x20var value = String(path);\n\
-             \x20\x20if (value.charAt(0) !== '/') value = '/' + value;\n\
+             \x20\x20var value = require('node:path').resolve(String(path));\n\
              \x20\x20var encoded = value.split('/').map(function(part) { return encodeURIComponent(part); }).join('/');\n\
              \x20\x20return new globalThis.URL('file://' + encoded);\n\
              }\n\
