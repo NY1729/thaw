@@ -1380,6 +1380,25 @@ fn compiles_remainder_exponentiation_and_compound_forms() {
 }
 
 #[test]
+fn compiles_javascript_pow_special_values() {
+    let source = r#"
+        function main(): void {
+            const one = 1;
+            const minusOne = -1;
+            const infinity = 1 / 0;
+            const nan = 0 / 0;
+            console.log(Number.isNaN(one ** infinity), Number.isNaN(minusOne ** -infinity));
+            console.log(Number.isNaN(one ** nan), Number.isNaN(Math.pow(minusOne, infinity)));
+            console.log(Number.isNaN(Math.pow(one, nan)), Math.pow(nan, 0), 2 ** 3);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "javascript_pow_special_values"),
+        "true true\ntrue true\ntrue 1 8\n"
+    );
+}
+
+#[test]
 fn compiles_bitwise_shift_and_compound_forms() {
     let source = r#"
         async function numberValue(): Promise<number> {

@@ -93,6 +93,9 @@ fn eval_enum_initializer(
                 BinaryOp::Mul => left * right,
                 BinaryOp::Div => left / right,
                 BinaryOp::Mod => left % right,
+                BinaryOp::Exp if right.is_nan() || (right.is_infinite() && left.abs() == 1.0) => {
+                    f64::NAN
+                }
                 BinaryOp::Exp => left.powf(right),
                 BinaryOp::BitOr => ((left as i32) | (right as i32)) as f64,
                 BinaryOp::BitXor => ((left as i32) ^ (right as i32)) as f64,
