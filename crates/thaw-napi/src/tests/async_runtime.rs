@@ -370,6 +370,207 @@ unsafe extern "C" fn cancelled_complete(_env: NapiEnv, status: NapiStatus, data:
 }
 
 #[test]
+fn threadsafe_abort_finalizes_then_accepts_remaining_owner_releases() {
+    let _guard = lock_async_test();
+    unsafe extern "C" fn finalize(env: NapiEnv, data: *mut c_void, _hint: *mut c_void) {
+        let finalizations = &*(data as *const AtomicUsize);
+        finalizations.fetch_add(1, Ordering::AcqRel);
+        let mut undefined = ptr::null_mut();
+        assert_eq!(napi_get_undefined(env, &mut undefined), NAPI_OK);
+    }
+    unsafe extern "C" fn call_js(
+        _env: NapiEnv,
+        _function: NapiValue,
+        _context: *mut c_void,
+        _data: *mut c_void,
+    ) {
+    }
+    let mut env = Env::new();
+    let finalizations = AtomicUsize::new(0);
+    let mut function = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            napi_create_threadsafe_function(
+                &mut env,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                3,
+                (&finalizations as *const AtomicUsize).cast_mut().cast(),
+                Some(finalize),
+                ptr::null_mut(),
+                Some(call_js),
+                &mut function,
+            ),
+            NAPI_OK
+        );
+    }
+    unsafe {
+        assert_eq!(napi_release_threadsafe_function(function, 1), NAPI_OK);
+        assert_eq!(napi_acquire_threadsafe_function(function), NAPI_CLOSING);
+    }
+    thaw_napi_poll_async_work();
+    assert_eq!(finalizations.load(Ordering::Acquire), 1);
+    unsafe { assert_eq!(napi_release_threadsafe_function(function, 0), NAPI_OK); }
+    thaw_napi_poll_async_work();
+    assert_eq!(finalizations.load(Ordering::Acquire), 1);
+    unsafe { assert_eq!(napi_release_threadsafe_function(function, 0), NAPI_OK); }
+    thaw_napi_poll_async_work();
+    assert_eq!(finalizations.load(Ordering::Acquire), 1);
+    thaw_napi_poll_async_work();
+    assert_eq!(finalizations.load(Ordering::Acquire), 1);
+
+    let mut closing_call = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            napi_create_threadsafe_function(
+                &mut env,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                2,
+                (&finalizations as *const AtomicUsize).cast_mut().cast(),
+                Some(finalize),
+                ptr::null_mut(),
+                Some(call_js),
+                &mut closing_call,
+            ),
+            NAPI_OK
+        );
+    }
+    unsafe { assert_eq!(napi_release_threadsafe_function(closing_call, 1), NAPI_OK); }
+    thaw_napi_poll_async_work();
+    assert_eq!(finalizations.load(Ordering::Acquire), 2);
+    unsafe {
+        assert_eq!(
+            napi_call_threadsafe_function(closing_call, ptr::null_mut(), 0),
+            NAPI_CLOSING
+        );
+    }
+    thaw_napi_poll_async_work();
+    assert_eq!(finalizations.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn threadsafe_finalization_waits_for_reentrant_callback_to_return() {
+    let _guard = lock_async_test();
+    struct ReentryProbe {
+        function: AtomicUsize,
+        finalizations: AtomicUsize,
+    }
+    unsafe extern "C" fn call_js(
+        _env: NapiEnv,
+        _function: NapiValue,
+        context: *mut c_void,
+        _data: *mut c_void,
+    ) {
+        let probe = &*(context as *const ReentryProbe);
+        let function = probe.function.load(Ordering::Acquire) as *mut ThreadsafeFunction;
+        assert_eq!(napi_release_threadsafe_function(function, 0), NAPI_OK);
+        thaw_napi_poll_async_work();
+        assert_eq!(probe.finalizations.load(Ordering::Acquire), 0);
+    }
+    unsafe extern "C" fn finalize(_env: NapiEnv, data: *mut c_void, _hint: *mut c_void) {
+        let probe = &*(data as *const ReentryProbe);
+        probe.finalizations.fetch_add(1, Ordering::AcqRel);
+    }
+    let mut env = Env::new();
+    let probe = ReentryProbe {
+        function: AtomicUsize::new(0),
+        finalizations: AtomicUsize::new(0),
+    };
+    let mut function = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            napi_create_threadsafe_function(
+                &mut env,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                1,
+                (&probe as *const ReentryProbe).cast_mut().cast(),
+                Some(finalize),
+                (&probe as *const ReentryProbe).cast_mut().cast(),
+                Some(call_js),
+                &mut function,
+            ),
+            NAPI_OK
+        );
+    }
+    probe.function.store(function as usize, Ordering::Release);
+    unsafe {
+        assert_eq!(napi_call_threadsafe_function(function, ptr::null_mut(), 0), NAPI_OK);
+    }
+    thaw_napi_poll_async_work();
+    assert_eq!(probe.finalizations.load(Ordering::Acquire), 1);
+    thaw_napi_poll_async_work();
+    assert_eq!(probe.finalizations.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn threadsafe_finalizer_and_remaining_owners_keep_module_env_live() {
+    let _guard = lock_async_test();
+    struct UnloadProbe {
+        finalizations: AtomicUsize,
+    }
+    unsafe extern "C" fn finalize(env: NapiEnv, data: *mut c_void, _hint: *mut c_void) {
+        let probe = &*(data as *const UnloadProbe);
+        let mut undefined = ptr::null_mut();
+        assert_eq!(napi_get_undefined(env, &mut undefined), NAPI_OK);
+        assert_eq!(thaw_napi_unload_all(), 0);
+        probe.finalizations.fetch_add(1, Ordering::AcqRel);
+    }
+    unsafe extern "C" fn call_js(
+        _env: NapiEnv,
+        _function: NapiValue,
+        _context: *mut c_void,
+        _data: *mut c_void,
+    ) {
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr = (&mut *env) as NapiEnv;
+    let probe = UnloadProbe {
+        finalizations: AtomicUsize::new(0),
+    };
+    let mut function = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            napi_create_threadsafe_function(
+                env_ptr,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                2,
+                (&probe as *const UnloadProbe).cast_mut().cast(),
+                Some(finalize),
+                ptr::null_mut(),
+                Some(call_js),
+                &mut function,
+            ),
+            NAPI_OK
+        );
+    }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    unsafe { assert_eq!(napi_release_threadsafe_function(function, 1), NAPI_OK); }
+    thaw_napi_poll_async_work();
+    assert_eq!(probe.finalizations.load(Ordering::Acquire), 1);
+    assert_eq!(thaw_napi_unload_all(), 0);
+    let unrelated_pending = unsafe {
+        (&mut *env_ptr).alloc(Value::Promise(Rc::new(RefCell::new(PromiseState::Pending))))
+    };
+    assert_eq!(
+        wait_for_promise(unrelated_pending).unwrap_err(),
+        "native addon returned a Promise with no pending work"
+    );
+    unsafe { assert_eq!(napi_release_threadsafe_function(function, 0), NAPI_OK); }
+    assert_eq!(thaw_napi_unload_all(), 1);
+}
+
+#[test]
 fn threadsafe_function_queues_worker_calls_and_finalizes_on_main_thread() {
     let _guard = lock_async_test();
     let mut env = Env::new();
