@@ -472,7 +472,7 @@ fn build_with_native_mode(
             &qualified_call_rewrites,
             &imported_overload_aliases,
         )?;
-        let source = rewrite_external_class_methods_with_static(
+        let source = rewrite_external_class_methods_with_static_qualified(
             &source,
             &class_constructor_rewrites,
             &class_method_rewrites,
@@ -484,6 +484,7 @@ fn build_with_native_mode(
             &static_class_setter_rewrites,
             &factory_class_rewrites,
             &fallback_function_overload_rewrites,
+            &constructor_package_qualifiers,
         )?;
         rewrite_external_class_constructors(
             &source,

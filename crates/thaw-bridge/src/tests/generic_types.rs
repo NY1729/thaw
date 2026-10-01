@@ -10,7 +10,7 @@ fn generates_native_addon_wrapper_and_module_initializer() {
         root_export: None,
     }]);
     assert!(init.contains("function __thaw_native_module_init(): void"));
-    assert!(init.contains(r#"loadNativeAddonEmbedded("deadbeef", "");"#));
+    assert!(init.contains(r#"loadNativeAddonEmbedded("deadbeef", "", "native-add");"#));
     assert!(init.contains(r#"loadNativeSharedLibraryEmbedded("cafe");"#));
     let init = generate_native_addon_path_init(&[NativeAddonPath {
         package_name: "native-add",
@@ -19,7 +19,7 @@ fn generates_native_addon_wrapper_and_module_initializer() {
         root_export: Some("NativeAdd"),
     }]);
     assert!(init.contains(r#"loadNativeSharedLibrary("/registry/native-add/libvalue.so");"#));
-    assert!(init.contains(r#"loadNativeAddon("/registry/native-add/native.node", "NativeAdd");"#));
+    assert!(init.contains(r#"loadNativeAddon("/registry/native-add/native.node", "NativeAdd", "native-add");"#));
 }
 
 #[test]

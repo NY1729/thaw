@@ -15,6 +15,86 @@ static RELEASED_HANDLE_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
 #[test]
+fn nested_export_getter_preserves_its_exception() {
+    unsafe extern "C" fn throwing_getter(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        assert_eq!(napi_throw_type_error(env, ptr::null(), c"original getter failure".as_ptr()), NAPI_OK);
+        ptr::null_mut()
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let outer = env.alloc(Value::Object(HashMap::new()));
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"Client".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(throwing_getter),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+        data: ptr::null_mut(),
+    };
+    unsafe { assert_eq!(napi_define_properties(env_ptr, outer, 1, &descriptor), NAPI_OK); }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.exports.insert("throwing-test::Outer".into(), (env_ptr as usize, outer));
+        host.module_envs.push(env);
+    });
+    unsafe {
+        let result = thaw_napi_get_export_typed_result(c"throwing-test::Outer.Client".as_ptr());
+        assert_eq!(result.value, 0);
+        assert!(!result.error.is_null());
+        let error = CString::from_raw(result.error).into_string().unwrap();
+        assert!(error.contains("\u{1}TypeError\u{1}original getter failure"), "{error}");
+        assert!(!error.contains("unknown native addon export"));
+        assert!((*env_ptr).exception.is_none());
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.exports.remove("throwing-test::Outer");
+        host.module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+    });
+}
+
+#[test]
+fn package_qualified_exports_survive_opposite_load_orders() {
+    for reverse in [false, true] {
+        let mut first = Box::new(Env::new());
+        let mut second = Box::new(Env::new());
+        let first_env = (&mut *first) as NapiEnv;
+        let second_env = (&mut *second) as NapiEnv;
+        let first_client = first.alloc(Value::Object(HashMap::new()));
+        let second_client = second.alloc(Value::Object(HashMap::new()));
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            let entries = if reverse {
+                [("second-test", second_env, second_client), ("first-test", first_env, first_client)]
+            } else {
+                [("first-test", first_env, first_client), ("second-test", second_env, second_client)]
+            };
+            for (package, env, client) in entries {
+                register_loaded_exports(&mut host, env as usize, Some(package), vec![], vec![("Client".into(), client)]);
+            }
+            host.module_envs.push(first);
+            host.module_envs.push(second);
+        });
+        unsafe {
+            assert_eq!(get_export_result(c"first-test::Client".as_ptr()).unwrap(), first_client as u64);
+            assert_eq!(get_export_result(c"second-test::Client".as_ptr()).unwrap(), second_client as u64);
+        }
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            for name in ["Client", "first-test::Client", "second-test::Client"] {
+                host.exports.remove(name);
+            }
+            host.module_envs.retain(|entry| {
+                let pointer = (&**entry as *const Env).cast_mut();
+                pointer != first_env && pointer != second_env
+            });
+        });
+    }
+}
+
+#[test]
 fn resolves_packaged_native_paths_next_to_the_executable() {
     let resolved = executable_relative_path("@executable/app.native/pkg/native.node").unwrap();
     assert_eq!(

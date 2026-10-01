@@ -78,6 +78,7 @@ pub struct DtsGenericFunction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DtsClass {
+    /// Qualified declaration and runtime path, e.g. `API.Client`.
     pub name: String,
     pub extends: Option<String>,
     pub constructible: bool,
@@ -105,7 +106,7 @@ pub struct DtsMethod {
     /// the array type written in TypeScript.
     pub rest_param: Option<(String, DtsType)>,
     pub ret: DtsType,
-    /// Bare class name named by the declared return type, when present.
+    /// Qualified class identity named by the declared return type, when present.
     pub return_instance_class: Option<String>,
     /// For each method parameter, class identities of values delivered to
     /// its callback parameters. `None` means an ordinary non-class value.

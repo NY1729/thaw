@@ -957,17 +957,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_global_string_ptr(constructor_name, "napi_constructor_name")
                 .map_err(|error| error.to_string())?;
-            let constructor = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_napi_get_export").unwrap(),
-                    &[constructor_name.as_pointer_value().into()],
-                    "napi_constructor",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap();
+            let constructor = self.compile_napi_export_handle(constructor_name.as_pointer_value())?;
             let args_json = self
                 .builder
                 .build_call(

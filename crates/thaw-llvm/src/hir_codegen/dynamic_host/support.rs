@@ -43,6 +43,28 @@ fn quickjs_callback_type(ty: &HirType) -> bool {
 
 type NapiFunctionArgument = (usize, Vec<HirType>, HirType, bool, Option<usize>);
 
+impl<'ctx> HirCompiler<'ctx> {
+    fn compile_napi_export_handle(
+        &mut self,
+        name: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_napi_get_export_typed_result").unwrap(),
+            &[name.into()],
+            "napi_export_lookup",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("N-API export lookup returned no result")?.into_struct_value();
+        let value = self.builder.build_extract_value(result, 0, "napi_export_handle")
+            .map_err(|error| error.to_string())?;
+        let error = self.builder.build_extract_value(result, 1, "napi_export_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+}
+
 fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => Some(1),
