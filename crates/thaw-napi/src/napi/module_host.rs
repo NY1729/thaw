@@ -1349,7 +1349,7 @@ fn wait_for_promise(value: NapiValue) -> Result<NapiValue, String> {
             continue;
         }
         if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
-            && LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
+            && UNFINALIZED_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
             && !unsafe { poll_uv_loop() }
         {
             return Err("native addon returned a Promise with no pending work".into());

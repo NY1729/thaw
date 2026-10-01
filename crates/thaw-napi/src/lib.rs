@@ -116,6 +116,7 @@ static READY_EVENTS: OnceLock<Mutex<VecDeque<ReadyEvent>>> = OnceLock::new();
 static ASYNC_POOL: OnceLock<Option<Arc<AsyncPool>>> = OnceLock::new();
 static ACTIVE_ASYNC_WORK: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
+static UNFINALIZED_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static LIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static FATAL_EXCEPTION_PENDING: AtomicBool = AtomicBool::new(false);
 static ACTIVE_ASYNC_CLEANUP_HOOKS: AtomicUsize = AtomicUsize::new(0);
@@ -158,6 +159,19 @@ struct ThreadsafeState {
     closing: bool,
     aborting: bool,
     scheduled: bool,
+    callbacks_in_flight: usize,
+    finalized: bool,
+    finalizer_completed: bool,
+    live_released: bool,
+}
+
+fn retire_threadsafe_if_ready(state: &mut ThreadsafeState) -> bool {
+    if state.finalizer_completed && state.thread_count == 0 && !state.live_released {
+        state.live_released = true;
+        true
+    } else {
+        false
+    }
 }
 
 fn ready_events() -> &'static Mutex<VecDeque<ReadyEvent>> {
