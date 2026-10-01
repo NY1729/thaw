@@ -1357,3 +1357,30 @@ fn web_pipe_through_respects_prevent_abort() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn transform_start_errors_reach_both_streams() {
+    // Unrun regression: start sees a controller attached to both streams.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("transform_start_binding");
+    fs::write(dir.join("index.js"), r#"module.exports = async function () {
+      var results = [];
+      for (var terminate of [false, true]) {
+        var failure = new Error('start'), stream = new TransformStream({ start(controller) { if (terminate) controller.terminate(); else controller.error(failure); } });
+        var reader = stream.readable.getReader(), writer = stream.writable.getWriter();
+        var outcomes = await Promise.allSettled([reader.read(), writer.closed, writer.write('value')]);
+        results.push([outcomes[0].status, terminate ? outcomes[0].value.done : outcomes[0].reason === failure, outcomes[1].status, outcomes[2].status, outcomes[1].reason === outcomes[2].reason]);
+        reader.releaseLock(); writer.releaseLock();
+      }
+      return results;
+    };"#).unwrap();
+    let modules = temp_registry("transform_start_binding_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTransformStart = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(CString::new("exerciseTransformStart").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["rejected",true,"rejected","rejected",true],["fulfilled",true,"rejected","rejected",true]]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
