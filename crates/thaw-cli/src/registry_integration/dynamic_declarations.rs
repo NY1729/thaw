@@ -1073,8 +1073,7 @@ fn typed_dynamic_bare_alias(
                     | thaw_hir::HirType::F64
                     | thaw_hir::HirType::Bool
                     | thaw_hir::HirType::Json
-                    | thaw_hir::HirType::JsValue
-            )
+            ) || (!napi && matches!(ret.as_ref(), thaw_hir::HirType::JsValue))
         }
         thaw_hir::HirType::CallableFunction(_, _, None, ret) => {
             matches!(
@@ -1083,8 +1082,7 @@ fn typed_dynamic_bare_alias(
                     | thaw_hir::HirType::F64
                     | thaw_hir::HirType::Bool
                     | thaw_hir::HirType::Json
-                    | thaw_hir::HirType::JsValue
-            )
+            ) || (!napi && matches!(ret.as_ref(), thaw_hir::HirType::JsValue))
         }
         _ => false,
     };
@@ -1105,7 +1103,11 @@ fn typed_dynamic_bare_alias(
         thaw_bridge::DtsType::Native(ty) => contains_callable_type(ty),
         thaw_bridge::DtsType::Unsupported(_) => false,
     });
-    if function.params.len() <= 1 && !param_needs_marshaling && !callback_adapter_applies {
+    if function.params.len() == 1
+        && function.required_params == 1
+        && !param_needs_marshaling
+        && !callback_adapter_applies
+    {
         return None;
     }
     // A JIT-backed `symbol` (`jit_numeric_declaration`) renders its own

@@ -254,13 +254,14 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
                 ),
             ],
             required_params: 0,
+            rest_param: None,
             overloaded: false,
         }],
         methods: vec![],
         properties: vec![],
     };
     let mut shim = String::new();
-    let helpers = generate_napi_class_constructors(&class, true, &mut shim);
+    let helpers = generate_napi_class_constructors(&class, true, &std::collections::HashMap::new(), &mut shim);
     assert_eq!(
         helpers
             .iter()
@@ -292,7 +293,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
             properties: vec![],
         },
         true,
-        &mut default_shim,
+        &std::collections::HashMap::new(), &mut default_shim,
     );
     assert_eq!(default_helpers.len(), 1);
     assert_eq!(default_helpers[0].0, 0);
@@ -301,7 +302,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
     let mut locked_shim = String::new();
     let mut locked = class;
     locked.constructible = false;
-    assert!(generate_napi_class_constructors(&locked, true, &mut locked_shim).is_empty());
+    assert!(generate_napi_class_constructors(&locked, true, &std::collections::HashMap::new(), &mut locked_shim).is_empty());
     assert!(locked_shim.is_empty());
 }
 
@@ -317,13 +318,14 @@ fn generates_dynamic_constructor_helpers_for_unclassified_options() {
                 thaw_bridge::DtsType::Unsupported("generic options".into()),
             )],
             required_params: 0,
+            rest_param: None,
             overloaded: false,
         }],
         methods: vec![],
         properties: vec![],
     };
     let mut shim = String::new();
-    let helpers = generate_napi_class_constructors(&class, false, &mut shim);
+    let helpers = generate_napi_class_constructors(&class, false, &std::collections::HashMap::new(), &mut shim);
     assert_eq!(
         helpers.iter().map(|helper| helper.0).collect::<Vec<_>>(),
         vec![0, 1]
@@ -344,6 +346,7 @@ fn selects_same_arity_napi_constructors_by_argument_type() {
                     thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
                 )],
                 required_params: 1,
+                rest_param: None,
                 overloaded: true,
             },
             thaw_bridge::DtsConstructor {
@@ -352,6 +355,7 @@ fn selects_same_arity_napi_constructors_by_argument_type() {
                     thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
                 )],
                 required_params: 1,
+                rest_param: None,
                 overloaded: true,
             },
         ],
@@ -359,7 +363,7 @@ fn selects_same_arity_napi_constructors_by_argument_type() {
         properties: vec![],
     };
     let mut shim = String::new();
-    let helpers = generate_napi_class_constructors(&class, true, &mut shim);
+    let helpers = generate_napi_class_constructors(&class, true, &std::collections::HashMap::new(), &mut shim);
     assert_eq!(helpers.len(), 2);
     let string_helper = helpers
         .iter()
@@ -423,7 +427,7 @@ fn generates_typed_napi_tuple_class_shims() {
     .remove(0);
     let tuple = thaw_hir::HirType::Tuple(vec![thaw_hir::HirType::F64, thaw_hir::HirType::Str]);
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(&class, true, &mut shim);
+    let constructors = generate_napi_class_constructors(&class, true, &std::collections::HashMap::new(), &mut shim);
     assert_eq!(constructors[0].2, vec![tuple.clone()]);
     let methods = generate_napi_class_method_overloads(
         &class,
@@ -505,7 +509,7 @@ fn generates_typed_napi_recursive_array_shims() {
     let strings = thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str));
     let booleans = thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Bool));
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(&class, true, &mut shim);
+    let constructors = generate_napi_class_constructors(&class, true, &std::collections::HashMap::new(), &mut shim);
     assert_eq!(constructors[0].2, vec![strings.clone()]);
     let methods = generate_napi_class_method_overloads(
         &class,
@@ -582,7 +586,7 @@ fn generates_typed_napi_nullable_shims() {
     .remove(0);
     let nullable = thaw_hir::HirType::Nullable(Box::new(thaw_hir::HirType::Str));
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(&class, true, &mut shim);
+    let constructors = generate_napi_class_constructors(&class, true, &std::collections::HashMap::new(), &mut shim);
     assert_eq!(constructors[0].2, vec![nullable.clone()]);
     let methods = generate_napi_class_method_overloads(
         &class,
@@ -645,7 +649,7 @@ fn generates_typed_napi_optional_and_nullish_shims() {
     let optional = thaw_hir::HirType::Optional(Box::new(thaw_hir::HirType::Str));
     let nullish = thaw_hir::HirType::Nullish(Box::new(thaw_hir::HirType::Str));
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(&class, true, &mut shim);
+    let constructors = generate_napi_class_constructors(&class, true, &std::collections::HashMap::new(), &mut shim);
     assert_eq!(constructors[0].2, vec![optional.clone()]);
     let methods = generate_napi_class_method_overloads(
         &class,
@@ -758,7 +762,7 @@ fn rewrites_inherited_external_class_methods() {
         .find(|class| class.name == "Derived")
         .unwrap();
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(derived, true, &mut shim);
+    let constructors = generate_napi_class_constructors(derived, true, &std::collections::HashMap::new(), &mut shim);
     assert_eq!(constructors.len(), 1);
     assert_eq!(constructors[0].0, 1);
     let generated = generate_napi_class_method_overloads(
@@ -1192,4 +1196,27 @@ fn selects_external_method_overloads_by_arity_and_callback_shape() {
             rewritten,
             "const db = Database_ctor(\":memory:\"); const done = (error: Json): void => {}; __run_sync(db, \"select 1\"); __run_callback(db, \"select 1\", done);"
         );
+}
+
+#[test]
+fn constructor_rest_emits_helper_for_observed_arity() {
+    let class = thaw_bridge::parse_dts_classes(
+        "declare class Parts { constructor(...parts: string[]); }",
+    )
+    .unwrap()
+    .remove(0);
+    let observed = std::collections::HashMap::from([(
+        "Parts".to_string(),
+        std::collections::BTreeSet::from([2]),
+    )]);
+    let mut shim = String::new();
+    let helpers = generate_napi_class_constructors(&class, true, &observed, &mut shim);
+    assert!(helpers.iter().any(|(arity, _, _)| *arity == 2));
+    assert!(shim.contains("(parts0: string, parts1: string): JsValue;"));
+    let two_arg_helper = helpers.iter().find(|(arity, _, _)| *arity == 2).unwrap().1.clone();
+    let rewritten = rewrite_external_class_constructors(
+        "new pkg.ns.Parts('a', 'b')",
+        &[("pkg".into(), "ns.Parts".into(), helpers)],
+    ).unwrap();
+    assert!(rewritten.starts_with(&two_arg_helper));
 }

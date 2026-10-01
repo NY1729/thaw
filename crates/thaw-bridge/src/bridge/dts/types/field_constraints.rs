@@ -41,8 +41,18 @@ impl FieldConstraints {
     }
 
     fn merge(mut self, other: FieldConstraints) -> FieldConstraints {
-        self.required_alternatives
-            .extend(other.required_alternatives);
+        self.required_alternatives = match (
+            self.required_alternatives.is_empty(),
+            other.required_alternatives.is_empty(),
+        ) {
+            (true, _) => other.required_alternatives,
+            (_, true) => self.required_alternatives,
+            (false, false) => self.required_alternatives.iter().flat_map(|existing| {
+                other.required_alternatives.iter().map(move |addition| {
+                    existing.iter().cloned().chain(addition.iter().cloned()).collect()
+                })
+            }).collect(),
+        };
         self.excluded.extend(other.excluded);
         self
     }
@@ -238,15 +248,22 @@ pub fn field_constraints(
             if members.is_empty() {
                 return None;
             }
-            let required_alternatives = members
-                .iter()
-                .flat_map(|member| member.required_alternatives.iter().cloned())
-                .collect();
+            let required_alternatives = if members.len() < union.types.len()
+                || members.iter().any(|member| member.required_alternatives.is_empty())
+            {
+                Vec::new()
+            } else {
+                members
+                    .iter()
+                    .flat_map(|member| member.required_alternatives.iter().cloned())
+                    .collect()
+            };
             // Only a key every resolvable alternative agrees is forbidden
             // is a hard exclusion for the whole union -- one alternative
             // that doesn't mention it at all can't rule it out.
-            let excluded = members
-                .first()
+            let excluded = (members.len() == union.types.len())
+                .then(|| members.first())
+                .flatten()
                 .map(|first| {
                     first
                         .excluded

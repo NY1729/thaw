@@ -170,6 +170,7 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
 fn generate_napi_class_constructors(
     class: &thaw_bridge::DtsClass,
     napi: bool,
+    observed_arities: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
     shim: &mut String,
 ) -> Vec<(usize, String, Vec<thaw_hir::HirType>)> {
     if !class.constructible {
@@ -181,8 +182,19 @@ fn generate_napi_class_constructors(
         // Checked per arity, not once for the whole constructor. Types the
         // declaration parser cannot classify still cross the dynamic ABI as
         // Json, matching ordinary Fallback function parameters.
-        for arity in constructor.required_params..=constructor.params.len() {
-            let params = &constructor.params[..arity];
+        let mut arities = (constructor.required_params..=constructor.params.len())
+            .collect::<std::collections::BTreeSet<_>>();
+        if constructor.rest_param.is_some() {
+            arities.extend(observed_arities.get(&class.name).into_iter().flatten()
+                .copied().filter(|arity| *arity >= constructor.required_params));
+        }
+        for arity in arities {
+            let mut params = constructor.params[..arity.min(constructor.params.len())].to_vec();
+            if let Some((name, ty)) = &constructor.rest_param {
+                for index in constructor.params.len()..arity {
+                    params.push((format!("{name}{index}"), ty.clone()));
+                }
+            }
             if !params.iter().all(|(_, ty)| match ty {
                 thaw_bridge::DtsType::Native(native) => render_dynamic_type(native).is_some(),
                 thaw_bridge::DtsType::Unsupported(_) => true,
@@ -690,6 +702,38 @@ fn package_qualifier_identifiers<'a>(
 
 fn is_native_builtin(package: &str) -> bool {
     package == "node:http"
+}
+
+fn observed_constructor_arities(
+    source: &str,
+) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Expr, MemberProp, NewExpr};
+    #[derive(Default)]
+    struct Finder {
+        arities: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+    }
+    impl Visit for Finder {
+        fn visit_new_expr(&mut self, expression: &NewExpr) {
+            let name = match expression.callee.as_ref() {
+                Expr::Ident(name) => Some(name.sym.as_str()),
+                Expr::Member(member) => match &member.prop {
+                    MemberProp::Ident(name) => Some(name.sym.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(name) = name {
+                self.arities.entry(name.to_string()).or_default()
+                    .insert(expression.args.as_ref().map_or(0, Vec::len));
+            }
+            expression.visit_children_with(self);
+        }
+    }
+    let module = thaw_parser::parse_typescript(source)?;
+    let mut finder = Finder::default();
+    module.visit_with(&mut finder);
+    Ok(finder.arities)
 }
 
 fn observed_member_call_arities(

@@ -101,6 +101,7 @@ fn generate_registry_shims(
     external_native_staging: Option<&Path>,
 ) -> Result<RegistryShims, String> {
     let observed_arities = observed_member_call_arities(user_source)?;
+    let observed_constructor_arities = observed_constructor_arities(user_source)?;
     let observed_identifier_arities = observed_identifier_call_arities(user_source)?;
     let observed_bare_member_objects = observed_bare_member_object_identifiers(user_source)?;
     let mut observed_function_arities = observed_identifier_arities.clone();
@@ -381,13 +382,24 @@ fn generate_registry_shims(
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
+        let mut constructor_arities_for_package = observed_constructor_arities.clone();
+        for members in pkg.nested_namespaces.values() {
+            for (alias, target) in members {
+                if let Some(arities) = observed_constructor_arities.get(alias) {
+                    constructor_arities_for_package
+                        .entry(target.clone())
+                        .or_default()
+                        .extend(arities);
+                }
+            }
+        }
         push_error_family_ambient_declarations(&pkg.classes, &mut shim);
         let native_lib_available = pkg.native_lib.is_some() || is_native_builtin(&pkg.name);
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
         let overload_rewrite_start = fallback_function_overload_rewrites.len();
         if pkg.native_addon.is_some() && pkg.bundle_js.is_none() {
             for class in &pkg.classes {
-                let helpers = generate_napi_class_constructors(class, true, &mut shim);
+                let helpers = generate_napi_class_constructors(class, true, &constructor_arities_for_package, &mut shim);
                 if helpers.is_empty() {
                     continue;
                 }
@@ -395,6 +407,17 @@ fn generate_registry_shims(
                     (pkg.name.clone(), class.name.clone()),
                     helpers[0].1.clone(),
                 );
+                for (namespace, members) in &pkg.nested_namespaces {
+                    for (alias, target) in members {
+                        if target == &class.name {
+                            class_rewrites.push((
+                                qualifier_by_package[&pkg.name].clone(),
+                                format!("{namespace}.{alias}"),
+                                helpers.clone(),
+                            ));
+                        }
+                    }
+                }
                 class_rewrites.push((
                     qualifier_by_package[&pkg.name].clone(),
                     class.name.clone(),
@@ -646,7 +669,7 @@ fn generate_registry_shims(
             // export), but hono's `Hono` -- constructed directly via
             // `new Hono()` -- does.
             for class in &pkg.classes {
-                let helpers = generate_napi_class_constructors(class, false, &mut shim);
+                let helpers = generate_napi_class_constructors(class, false, &constructor_arities_for_package, &mut shim);
                 if !helpers.is_empty() {
                     // A class reached through a *namespace member alias*
                     // (real trigger: winston's

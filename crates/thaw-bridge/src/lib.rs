@@ -90,6 +90,7 @@ pub struct DtsClass {
 pub struct DtsConstructor {
     pub params: Vec<(String, DtsType)>,
     pub required_params: usize,
+    pub rest_param: Option<(String, DtsType)>,
     pub overloaded: bool,
 }
 
