@@ -1,7 +1,7 @@
 struct GenericArrowThisOperation {
     receiver: (HirExpr, HirType),
     bind: bool,
-    ignored: Vec<(HirExpr, HirType)>,
+    ignored: Vec<LoweredBinding>,
     prelowered: Option<Vec<HirExpr>>,
 }
 
@@ -34,8 +34,73 @@ impl<'a> FnLowerer<'a> {
                 }
                 let value = self.lower_expr(&values.expr)?;
                 let ty = self.infer_expr_type(&value)?;
+                let nullable_tuple = match &ty {
+                    HirType::Optional(payload) if matches!(payload.as_ref(), HirType::Tuple(_)) =>
+                        Some((payload.as_ref().clone(), 0_u8)),
+                    HirType::Nullable(payload) if matches!(payload.as_ref(), HirType::Tuple(_)) =>
+                        Some((payload.as_ref().clone(), 1_u8)),
+                    HirType::Nullish(payload) if matches!(payload.as_ref(), HirType::Tuple(_)) =>
+                        Some((payload.as_ref().clone(), 2_u8)),
+                    _ => None,
+                };
+                if let Some((payload, absence_kind)) = nullable_tuple {
+                    let this_name = format!("__thaw_apply_this_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(this_name.clone(), this_type.clone());
+                    let tuple_name = format!("__thaw_apply_tuple_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(tuple_name.clone(), ty.clone());
+                    let mut bindings = vec![
+                        (this_name.clone(), this_type.clone(), this_value),
+                        (tuple_name.clone(), ty.clone(), value),
+                    ];
+                    bindings.extend(self.lower_ignored_apply_extras(extras)?);
+                    let tuple_var = HirExpr::Var(tuple_name.clone());
+                    let missing = match absence_kind {
+                        0 => HirExpr::OptionalIsNone(Box::new(tuple_var.clone()), payload.clone()),
+                        1 => HirExpr::NullableIsNone(Box::new(tuple_var.clone()), payload.clone()),
+                        _ => HirExpr::NullishIsNone(Box::new(tuple_var.clone()), payload.clone()),
+                    };
+                    let tuple = match absence_kind {
+                        0 => HirExpr::OptionalValue(Box::new(tuple_var), payload.clone()),
+                        1 => HirExpr::NullableValue(Box::new(tuple_var), payload.clone()),
+                        _ => HirExpr::NullishValue(Box::new(tuple_var), payload.clone()),
+                    };
+                    let mut present_call = call.clone();
+                    present_call.args = vec![swc_ecma_ast::ExprOrSpread {
+                        spread: Some(call.span), expr: values.expr.clone(),
+                    }];
+                    let present = self.lower_generic_arrow_call_with_this(&name, &arrow,
+                        &present_call, Some(GenericArrowThisOperation {
+                            receiver: (HirExpr::Var(this_name.clone()), this_type.clone()),
+                            bind: false, ignored: Vec::new(), prelowered: Some(vec![tuple]),
+                        }))?;
+                    let mut absent_call = call.clone();
+                    absent_call.args.clear();
+                    let absent = self.lower_generic_arrow_call_with_this(&name, &arrow,
+                        &absent_call, Some(GenericArrowThisOperation {
+                            receiver: (HirExpr::Var(this_name), this_type),
+                            bind: false, ignored: Vec::new(), prelowered: None,
+                        }))?;
+                    let result_ty = self.infer_expr_type(&present)?;
+                    if result_ty != self.infer_expr_type(&absent)? {
+                        return Err("generic .apply() nullish tuple branches infer different return types".into());
+                    }
+                    let (absent_stmts, present_stmts) = if result_ty == HirType::Void {
+                        (vec![HirStmt::Expr(absent)], vec![HirStmt::Expr(present)])
+                    } else {
+                        (vec![HirStmt::Return(Some(absent))],
+                         vec![HirStmt::Return(Some(present))])
+                    };
+                    let branch = HirExpr::Block(vec![HirStmt::If(missing,
+                        absent_stmts, present_stmts)]);
+                    return self.wrap_call_argument_bindings(branch, &bindings).map(Some);
+                }
                 let forwarded = if matches!(ty, HirType::Null | HirType::Undefined) {
-                    discarded_apply_arguments.push((value, ty));
+                    let name = format!("__thaw_unused_apply_argument_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    discarded_apply_arguments.push((name, ty, value));
                     Vec::new()
                 } else {
                     prelowered_apply_arguments = Some(vec![value]);
@@ -43,14 +108,7 @@ impl<'a> FnLowerer<'a> {
                         spread: Some(call.span), expr: values.expr.clone(),
                     }]
                 };
-                for extra in extras {
-                    if extra.spread.is_some() {
-                        return Err("generic function .apply() extra spread arguments need tuple expansion".into());
-                    }
-                    let value = self.lower_expr(&extra.expr)?;
-                    let ty = self.infer_expr_type(&value)?;
-                    discarded_apply_arguments.push((value, ty));
-                }
+                discarded_apply_arguments.extend(self.lower_ignored_apply_extras(extras)?);
                 forwarded
             } else { Vec::new() }
         } else { supplied.to_vec() };
@@ -63,6 +121,28 @@ impl<'a> FnLowerer<'a> {
                 ignored: discarded_apply_arguments,
                 prelowered: prelowered_apply_arguments,
             })).map(Some)
+    }
+
+    fn lower_ignored_apply_extras(
+        &mut self,
+        extras: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<Vec<LoweredBinding>, String> {
+        let mut ignored = Vec::new();
+        for extra in extras {
+            let (values, sources) = self.lower_native_spread_values(
+                std::slice::from_ref(extra), "generic function .apply() extra argument")?;
+            ignored.extend(sources);
+            if extra.spread.is_some() {
+                for value in values {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = format!("__thaw_unused_apply_argument_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    ignored.push((name, ty, value));
+                }
+            }
+        }
+        Ok(ignored)
     }
 
     fn lower_generic_arrow_call(
@@ -150,17 +230,17 @@ impl<'a> FnLowerer<'a> {
             bindings.push((temporary.clone(), ty, value));
             arguments.push(HirExpr::Var(temporary));
         }
-        for (value, ty) in discarded_apply_arguments {
-            let name = format!("__thaw_unused_apply_argument_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            bindings.push((name, ty, value));
-        }
-        if (!bind && arrow.params.len() != arguments.len())
-            || (bind && arguments.len() > arrow.params.len()) {
+        bindings.extend(discarded_apply_arguments);
+        let signature = self.generic_arrow_signature(arrow)?;
+        let visible_count = signature.generic_param_patterns.len();
+        let has_rest = matches!(arrow.params.last(), Some(Pat::Rest(_)));
+        let fixed_count = visible_count - usize::from(has_rest);
+        if (!has_rest && arguments.len() > fixed_count) || (!bind
+            && (arguments.len()..fixed_count)
+                .any(|index| !signature.generic_param_optional[index])) {
             return Err(format!(
                 "generic arrow `{name}` expects {} argument(s), got {} after spread expansion",
-                arrow.params.len(),
+                visible_count,
                 arguments.len()
             ));
         }
@@ -168,9 +248,16 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|argument| self.infer_expr_type(argument))
             .collect::<Result<Vec<_>, _>>()?;
-        let signature = self.generic_arrow_signature(arrow)?;
         let mut inference_signature = signature.clone();
         let mut inference_types = parameter_types.clone();
+        if has_rest {
+            let Some(GenericTypePattern::Array(element)) = signature.generic_param_patterns.last() else {
+                return Err("generic rest parameter needs an array type annotation".into());
+            };
+            inference_signature.generic_param_patterns.truncate(fixed_count);
+            inference_signature.generic_param_patterns.extend(
+                parameter_types.iter().skip(fixed_count).map(|_| element.as_ref().clone()));
+        }
         if let (Some(template), Some((_, this_ty))) = (
             self.generic_non_arrow_receiver_templates.get(name), this_argument.as_ref())
         {
@@ -206,11 +293,34 @@ impl<'a> FnLowerer<'a> {
         let receiver = self.specialized_generic_receiver(name, &signature, &concrete_types)?;
         let concrete = signature.generic_type_params.iter().cloned()
             .zip(concrete_types.iter().cloned()).collect::<HashMap<_, _>>();
-        let runtime_parameter_types = if bind {
-            signature.generic_param_patterns.iter()
-                .map(|pattern| instantiate_generic_pattern(pattern, &concrete))
-                .collect::<Result<Vec<_>, _>>()?
+        let runtime_parameter_types = if bind || has_rest || signature.generic_param_optional.iter().any(|optional| *optional) {
+            signature.generic_param_patterns.iter().enumerate()
+                .map(|(index, pattern)| {
+                    let ty = instantiate_generic_pattern(pattern, &concrete)?;
+                    Ok(if signature.generic_param_optional[index] { optional_parameter_type(ty) } else { ty })
+                })
+                .collect::<Result<Vec<_>, String>>()?
         } else { parameter_types.clone() };
+        if !bind {
+            let rest_values = if has_rest {
+                arguments.split_off(fixed_count.min(arguments.len()))
+            } else { Vec::new() };
+            arguments = arguments.into_iter().zip(&runtime_parameter_types)
+                .map(|(value, expected)| self.coerce_to_declared(expected, value))
+                .collect::<Result<Vec<_>, _>>()?;
+            for expected in runtime_parameter_types.iter().take(fixed_count).skip(arguments.len()) {
+                arguments.push(omitted_parameter_value(expected)?);
+            }
+            if has_rest {
+                let HirType::Array(element) = &runtime_parameter_types[fixed_count] else {
+                    return Err("specialized generic rest parameter is not an array".into());
+                };
+                let rest = rest_values.into_iter()
+                    .map(|value| self.coerce_to_declared(element, value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                arguments.push(native_rest_array(rest, element));
+            }
+        }
         let recursive = self.generic_arrow_self_names.get(name).cloned();
         let mut recursive_state = None;
         if let Some(internal) = recursive {
@@ -277,17 +387,84 @@ impl<'a> FnLowerer<'a> {
         }
         let result = if let Some(this_name) = this_name {
             let result_type = self.infer_expr_type(&lambda)?;
-            let return_type = match result_type {
-                HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret) => *ret,
+            let return_type = match &result_type {
+                HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret) => ret.as_ref().clone(),
                 other => return Err(format!("generic function has non-callable type {other:?}")),
             };
-            let this_arg = Box::new(HirExpr::Var(this_name));
+            let this_arg = Box::new(HirExpr::Var(this_name.clone()));
             if bind {
+                if has_rest && arguments.len() > fixed_count {
+                    let HirType::Array(element) = &runtime_parameter_types[fixed_count] else {
+                        return Err("specialized generic rest parameter is not an array".into());
+                    };
+                    let element = element.as_ref().clone();
+                    let target_name = format!("__thaw_generic_rest_target_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(target_name.clone(), result_type.clone());
+                    bindings.push((target_name.clone(), result_type.clone(), lambda));
+                    let mut bound_names = Vec::new();
+                    for (index, value) in arguments.into_iter().enumerate() {
+                        let expected = if index < fixed_count {
+                            &runtime_parameter_types[index]
+                        } else { &element };
+                        let value = self.coerce_to_declared(expected, value)?;
+                        let name = format!("__thaw_generic_rest_bound_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), expected.clone());
+                        bindings.push((name.clone(), expected.clone(), value));
+                        bound_names.push((name, expected.clone()));
+                    }
+                    let remaining_fixed = runtime_parameter_types[bound_names.len().min(fixed_count)..fixed_count].to_vec();
+                    let optional = optional_parameter_mask(
+                        &signature.generic_param_optional[bound_names.len().min(fixed_count)..fixed_count]);
+                    let rest_name = format!("__thaw_generic_rest_invocation_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let mut closure_params = remaining_fixed.iter().enumerate().map(|(index, ty)| HirParam {
+                        name: format!("__thaw_generic_rest_param_{index}"), ty: ty.clone(),
+                    }).collect::<Vec<_>>();
+                    closure_params.push(HirParam {
+                        name: rest_name.clone(), ty: HirType::Array(Box::new(element.clone())),
+                    });
+                    let mut call_args = bound_names[..fixed_count].iter()
+                        .map(|(name, _)| HirExpr::Var(name.clone())).collect::<Vec<_>>();
+                    call_args.extend(closure_params[..remaining_fixed.len()].iter()
+                        .map(|param| HirExpr::Var(param.name.clone())));
+                    call_args.push(HirExpr::ArrayConcat(vec![
+                        HirExpr::ArrayLit(bound_names[fixed_count..].iter()
+                            .map(|(name, _)| HirExpr::Var(name.clone())).collect()),
+                        HirExpr::Var(rest_name),
+                    ], element.clone()));
+                    let body = HirExpr::FunctionCallWithThis(
+                        Box::new(HirExpr::Var(target_name.clone())), this_arg,
+                        call_args, runtime_parameter_types, return_type.clone());
+                    let mut captures = vec![
+                        HirParam { name: target_name, ty: result_type },
+                        HirParam { name: this_name, ty: this_argument.as_ref().unwrap().1.clone() },
+                    ];
+                    captures.extend(bound_names.into_iter()
+                        .map(|(name, ty)| HirParam { name, ty }));
+                    let closure = HirExpr::Lambda(captures, closure_params,
+                        return_type.clone(), Box::new(body));
+                    let bound = HirExpr::TypedClosure(HirType::CallableFunction(
+                        remaining_fixed, optional, Some(Box::new(element)), Box::new(return_type)),
+                        Box::new(closure));
+                    return self.wrap_call_argument_bindings(bound, &bindings);
+                }
                 let bound = arguments.into_iter().zip(&runtime_parameter_types)
                     .map(|(argument, expected)| self.coerce_to_declared(expected, argument))
                     .collect::<Result<Vec<_>, _>>()?;
-                HirExpr::FunctionBindThis(Box::new(lambda), this_arg,
-                    bound, runtime_parameter_types, return_type)
+                let bound_count = bound.len();
+                let remaining = runtime_parameter_types[bound_count..fixed_count].to_vec();
+                let optional = optional_parameter_mask(
+                    &signature.generic_param_optional[bound_count..fixed_count]);
+                let rest = if has_rest {
+                    let HirType::Array(element) = &runtime_parameter_types[fixed_count] else { unreachable!() };
+                    Some(element.clone())
+                } else { None };
+                HirExpr::TypedClosure(HirType::CallableFunction(remaining, optional,
+                    rest, Box::new(return_type.clone())), Box::new(
+                    HirExpr::FunctionBindThis(Box::new(lambda), this_arg,
+                        bound, runtime_parameter_types, return_type)))
             } else {
                 HirExpr::FunctionCallWithThis(Box::new(lambda), this_arg,
                     arguments, runtime_parameter_types, return_type)
@@ -319,13 +496,11 @@ impl<'a> FnLowerer<'a> {
             .params
             .iter()
             .map(|parameter| {
-                let Pat::Ident(binding) = parameter else {
-                    return Err("generic arrows require identifier parameters".into());
-                };
-                let annotation = binding
-                    .type_ann
-                    .as_ref()
-                    .ok_or("generic arrow parameters need type annotations")?;
+                let annotation = match parameter {
+                    Pat::Ident(binding) => binding.type_ann.as_ref(),
+                    Pat::Rest(rest) => rest.type_ann.as_ref(),
+                    _ => return Err("generic arrows require identifier or rest parameters".into()),
+                }.ok_or("generic arrow parameters need type annotations")?;
                 generic_type_pattern(
                     &annotation.type_ann,
                     &substitutions,
