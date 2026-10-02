@@ -497,6 +497,7 @@ impl<'a> FnLowerer<'a> {
         item_type: HirType,
         key_fn: HirExpr,
         object_result: bool,
+        live_length: bool,
     ) -> Result<HirExpr, String> {
         let HirType::Function(_, key_type) = self.infer_expr_type(&key_fn)? else {
             unreachable!("Map.groupBy key function was validated as a function")
@@ -539,7 +540,9 @@ impl<'a> FnLowerer<'a> {
             HirType::Map(Box::new(key_type.clone()), Box::new(items_type.clone()))
         };
         let bucket_type = items_type.clone();
-        self.scope.insert(length_name.clone(), HirType::F64);
+        if !live_length {
+            self.scope.insert(length_name.clone(), HirType::F64);
+        }
         self.scope.insert(result_name.clone(), result_type.clone());
         self.scope.insert(index_name.clone(), HirType::F64);
         self.scope.insert(item_name.clone(), item_type.clone());
@@ -603,12 +606,15 @@ impl<'a> FnLowerer<'a> {
         } else {
             HirExpr::Lit(HirLit::Bool(true))
         };
-        let body = HirExpr::Block(vec![
-            HirStmt::Let(
+        let mut statements = Vec::new();
+        if !live_length {
+            statements.push(HirStmt::Let(
                 length_name.clone(),
                 HirType::F64,
                 HirExpr::ArrayLen(Box::new(var(&items_name))),
-            ),
+            ));
+        }
+        statements.extend([
             HirStmt::Let(
                 result_name.clone(),
                 result_type,
@@ -626,7 +632,11 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::BinOp(
                     BinOp::Lt,
                     Box::new(var(&index_name)),
-                    Box::new(var(&length_name)),
+                    Box::new(if live_length {
+                        HirExpr::ArrayLen(Box::new(var(&items_name)))
+                    } else {
+                        var(&length_name)
+                    }),
                 ),
                 vec![
                     HirStmt::Let(
@@ -669,6 +679,7 @@ impl<'a> FnLowerer<'a> {
             ),
             HirStmt::Return(Some(var(&result_name))),
         ]);
+        let body = HirExpr::Block(statements);
         self.wrap_call_argument_bindings(
             body,
             &[
@@ -718,7 +729,7 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let key_fn = self.lower_array_from_callback(&callback.expr, &item_type)?;
-        self.lower_group_by(items, item_type, key_fn, object_result)
+        self.lower_group_by(items, item_type, key_fn, object_result, false)
     }
 
 }
