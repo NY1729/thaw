@@ -843,3 +843,93 @@ fn private_napi_value_envelopes_preserve_origins_across_result_paths() {
     let result = thaw_quickjs::thaw_js_call(c"inspectPrivateNapiWire".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
 }
+
+#[test]
+fn stale_native_proxy_finalizer_cannot_release_replacement() {
+    use std::ffi::{CStr, CString};
+
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let script = [r#"
+        globalThis.fakeRegistries = [];
+        globalThis.FinalizationRegistry = class {
+          constructor(callback) { this.callback = callback; this.records = []; fakeRegistries.push(this); }
+          register(object, held) { this.records.push({object, held}); }
+        };
+        globalThis.WeakRef = class {
+          constructor(value) { this.value = value; }
+          deref() { return this.value; }
+        };
+        globalThis.__thaw_napi_bridge_exports = () => '["direct"]';
+        globalThis.__thaw_napi_bridge_call = () => JSON.stringify({kind:'value', value:{__thaw_napi_handle__:'91'}});
+        globalThis.releasedNativeHandles = [];
+        globalThis.__thaw_napi_bridge_handle = (operation, target) => {
+          if (operation === 'release_handle') releasedNativeHandles.push(String(target));
+          return JSON.stringify({kind:'value', value:true});
+        };
+    "#, &wrapped, r#"
+        globalThis.inspectStaleProxyFinalizer = () => {
+          const first = require.addon().direct();
+          const registry = fakeRegistries.find(entry =>
+            entry.records.some(record => record.held && record.held.id === '91'));
+          const oldRecord = registry.records.find(record => record.held.id === '91');
+          oldRecord.held.entry.value = undefined;
+          const second = require.addon().direct();
+          registry.callback(oldRecord.held);
+          const retained = require.addon().direct() === second;
+          const noEarlyRelease = releasedNativeHandles.length === 0;
+          const newRecord = registry.records.find(record => record.object === second);
+          registry.callback(newRecord.held);
+          return [first !== second, retained, noEarlyRelease,
+            releasedNativeHandles.length === 1 && releasedNativeHandles[0] === '91'];
+        };
+    "#].join("\n");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"inspectStaleProxyFinalizer".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true]");
+}
+
+#[test]
+fn stale_native_binary_finalizer_cannot_release_replacement() {
+    use std::ffi::{CStr, CString};
+
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let script = [r#"
+        globalThis.fakeRegistries = [];
+        globalThis.FinalizationRegistry = class {
+          constructor(callback) { this.callback = callback; this.records = []; fakeRegistries.push(this); }
+          register(object, held) { this.records.push({object, held}); }
+        };
+        globalThis.WeakRef = class {
+          constructor(value) { this.value = value; }
+          deref() { return this.value; }
+        };
+        globalThis.__thaw_napi_bridge_exports = () => '["direct"]';
+        globalThis.__thaw_napi_bridge_call = () => JSON.stringify({kind:'value', value:{
+          __thaw_napi_binary__:'92', kind:'ArrayBuffer', data:[1, 2]
+        }});
+        globalThis.releasedNativeHandles = [];
+        globalThis.__thaw_napi_bridge_handle = (operation, target) => {
+          if (operation === 'release_handle') releasedNativeHandles.push(String(target));
+          return JSON.stringify({kind:'value', value:true});
+        };
+    "#, &wrapped, r#"
+        globalThis.inspectStaleBinaryFinalizer = () => {
+          const first = require.addon().direct();
+          const registry = fakeRegistries.find(entry =>
+            entry.records.some(record => record.held && record.held.id === '92'));
+          const oldRecord = registry.records.find(record => record.held.id === '92');
+          oldRecord.held.entry.value = undefined;
+          const second = require.addon().direct();
+          registry.callback(oldRecord.held);
+          const retained = require.addon().direct() === second;
+          const noEarlyRelease = releasedNativeHandles.length === 0;
+          const newRecord = registry.records.find(record => record.object === second);
+          registry.callback(newRecord.held);
+          return [first !== second, retained, noEarlyRelease,
+            releasedNativeHandles.length === 1 && releasedNativeHandles[0] === '92'];
+        };
+    "#].join("\n");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"inspectStaleBinaryFinalizer".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true]");
+}
