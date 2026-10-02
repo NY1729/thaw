@@ -806,6 +806,7 @@ fn worker_threads_native_runtime_transfers_structured_array_buffers() {
 fn bundler_embeds_static_file_url_worker_sources() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_file_url");
+    fs::create_dir_all(dir.join("lib/sub")).unwrap();
     fs::write(
         dir.join("double.js"),
         "module.exports = function(value) { return value * 2; };",
@@ -817,14 +818,28 @@ fn bundler_embeds_static_file_url_worker_sources() {
         )
         .unwrap();
     fs::write(
+        dir.join("lib/worker.js"),
+        "require('node:worker_threads').parentPort.postMessage(999);",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("lib/entry.js"),
+        "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); module.exports = async function(run, events) { await run(new Worker(path.join(__dirname, '../worker.js'), { workerData: 7 }), events); await run(new Worker(path.join(__dirname, 'sub', '../../worker.js'), { workerData: 8 }), events); await run(new Worker(path.resolve(__dirname, 'sub', '../../worker.js'), { workerData: 9 }), events); await run(new Worker('../worker.js', { workerData: 10 }), events); };",
+    )
+    .unwrap();
+    fs::write(
             dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); const workerFile = './' + 'worker.js'; const joinedWorkerFile = path.join(__dirname, 'worker.js'); function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); await run(new Worker(workerFile, { workerData: 3 }), events); await run(new Worker(joinedWorkerFile, { workerData: 2 }), events); return events; };",
+            "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); var nested = require('./lib/entry'); const workerFile = './' + 'worker.js'; const joinedWorkerFile = path.join(__dirname, 'worker.js'); function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); await run(new Worker(workerFile, { workerData: 3 }), events); await run(new Worker(joinedWorkerFile, { workerData: 2 }), events); await nested(run, events); return events; };",
         )
         .unwrap();
+    let outside = "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); new Worker(path.join(__dirname, '../../outside.js'));";
+    let error = rewrite_static_worker_urls(outside, &dir.join("lib/entry.js"), "pkg", &dir)
+        .expect_err("a parent path escaping the package must be rejected before reading");
+    assert!(error.contains("outside package"), "{error}");
     let empty_node_modules = temp_registry("builtin_worker_file_url_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 6);
+    assert_eq!(file_count, 7);
     fs::remove_dir_all(&dir).unwrap();
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileWorker = module.exports;");
     let source = CString::new(script).unwrap();
@@ -833,7 +848,7 @@ fn bundler_embeds_static_file_url_worker_sources() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, "[42,0,22,0,10,0,6,0,4,0]");
+    assert_eq!(result, "[42,0,22,0,10,0,6,0,4,0,14,0,16,0,18,0,20,0]");
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
