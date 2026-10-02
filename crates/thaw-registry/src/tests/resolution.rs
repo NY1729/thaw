@@ -3002,6 +3002,41 @@ fn reports_available_targets_when_no_prebuild_matches() {
 }
 
 #[test]
+fn optional_dependency_target_matches_complete_architecture_and_libc_suffixes() {
+    assert!(optional_dependency_matches_target("@esbuild/linux-arm", "linux-arm"));
+    assert!(optional_dependency_matches_target("@example/addon-linux-arm", "linux-arm"));
+    assert!(!optional_dependency_matches_target("@esbuild/linux-arm64", "linux-arm"));
+    assert!(!optional_dependency_matches_target("@example/addon-linux-arm64", "linux-arm"));
+    assert!(optional_dependency_matches_target("@example/addon-linux-x64", "linux-x64"));
+    assert!(optional_dependency_matches_target("@example/addon-linux-x64-glibc", "linux-x64-glibc"));
+    assert!(!optional_dependency_matches_target("@example/addon-linux-x64-musl", "linux-x64"));
+    assert!(!optional_dependency_matches_target("@example/addon-linux-x64-musl", "linux-x64-glibc"));
+}
+
+#[test]
+fn glibc_shared_library_collection_skips_musl_optional_dependency() {
+    let (platform, arch, libc) = target_prebuild_components();
+    if platform != "linux" || libc != "glibc" {
+        return;
+    }
+    let node_modules = temp_registry("glibc-shared-libraries");
+    let glibc_name = format!("@example/addon-linux-{arch}-glibc");
+    let musl_name = format!("@example/addon-linux-{arch}-musl");
+    let glibc_root = node_modules.join(&glibc_name);
+    let musl_root = node_modules.join(&musl_name);
+    fs::create_dir_all(&glibc_root).unwrap();
+    fs::create_dir_all(&musl_root).unwrap();
+    let glibc_library = glibc_root.join("libtarget.so");
+    fs::write(&glibc_library, b"glibc").unwrap();
+    fs::write(musl_root.join("libtarget.so"), b"musl").unwrap();
+    let manifest = serde_json::json!({
+        "optionalDependencies": {glibc_name.clone(): "1.0.0", musl_name.clone(): "1.0.0"}
+    });
+    assert_eq!(platform_shared_libraries(&node_modules, &manifest).unwrap(), vec![glibc_library]);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn selects_a_platform_optional_dependency_node_addon() {
     let node_modules = temp_registry("optional_native_prebuild");
     let (platform, arch, libc) = target_prebuild_components();
