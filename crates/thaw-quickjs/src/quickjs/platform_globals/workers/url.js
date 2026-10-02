@@ -98,111 +98,74 @@
     };
   }
   if (typeof globalThis.URL !== 'function') {
-    const normalizePath = path => {
-      const absolute = path.charAt(0) === '/';
-      const trailing = path.endsWith('/') || path.endsWith('/.') || path.endsWith('/..');
-      const output = [];
-      for (const part of path.split('/')) {
-        if (part === '' || part === '.') continue;
-        if (part === '..') output.pop(); else output.push(part);
+    const toUSV = value => {
+      const source = String(value);
+      let output = '';
+      for (let index = 0; index < source.length; index++) {
+        const code = source.charCodeAt(index);
+        if (code >= 0xD800 && code <= 0xDBFF && index + 1 < source.length) {
+          const next = source.charCodeAt(index + 1);
+          if (next >= 0xDC00 && next <= 0xDFFF) {
+            output += source.slice(index, index + 2); index++; continue;
+          }
+        }
+        output += code >= 0xD800 && code <= 0xDFFF ? '\uFFFD' : source[index];
       }
-      let result = (absolute ? '/' : '') + output.join('/');
-      if (trailing && result !== '/') result += '/';
-      return result || (absolute ? '/' : '');
+      return output;
     };
-    const validPort = port => port === '' || (/^\d+$/.test(port) && Number(port) <= 65535);
-    const parseAuthority = authority => {
-      let userinfo = '', host = authority;
-      const at = authority.lastIndexOf('@');
-      if (at >= 0) { userinfo = authority.substring(0, at); host = authority.substring(at + 1); }
-      let username = '', password = '';
-      const colon = userinfo.indexOf(':');
-      if (colon < 0) username = userinfo;
-      else { username = userinfo.substring(0, colon); password = userinfo.substring(colon + 1); }
-      let hostname = host, port = '';
-      if (host.charAt(0) === '[') {
-        const close = host.indexOf(']');
-        if (close < 0) throw new TypeError('Invalid URL');
-        hostname = host.substring(0, close + 1);
-        if (host.charAt(close + 1) === ':') port = host.substring(close + 2);
-      } else {
-        const hostColon = host.lastIndexOf(':');
-        if (hostColon >= 0) { hostname = host.substring(0, hostColon); port = host.substring(hostColon + 1); }
-      }
-      if (!validPort(port)) throw new TypeError('Invalid URL');
-      return { username, password, hostname: hostname.toLowerCase(), port };
-    };
+    const parseURL = (input, base, hasBase) => JSON.parse(__thaw_url_parse(input, base, hasBase));
+    const setURL = (href, property, value) => JSON.parse(__thaw_url_set(href, property, value));
     globalThis.URL = class URL {
       constructor(input, base) {
-        const value = String(input);
-        const absolute = value.match(/^([A-Za-z][A-Za-z\d+.-]*:)(?:\/\/([^\/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/);
-        if (absolute) {
-          this.__thawProtocol = absolute[1].toLowerCase();
-          const authority = absolute[2] === undefined ? '' : absolute[2];
-          const parsed = parseAuthority(authority);
-          this.__thawUsername = parsed.username;
-          this.__thawPassword = parsed.password;
-          this.__thawHostname = parsed.hostname;
-          this.__thawPort = parsed.port;
-          this.__thawPathname = normalizePath(absolute[3] || (authority !== '' ? '/' : ''));
-          this.__thawSearch = absolute[4] || '';
-          this.__thawHash = absolute[5] || '';
-        } else {
-          if (base === undefined) throw new TypeError('Invalid URL');
-          const parent = base instanceof URL ? base : new URL(base);
-          this.__thawProtocol = parent.protocol;
-          this.__thawUsername = parent.username;
-          this.__thawPassword = parent.password;
-          this.__thawHostname = parent.hostname;
-          this.__thawPort = parent.port;
-          const match = value.match(/^([^?#]*)(\?[^#]*)?(#.*)?$/);
-          const relativePath = match[1];
-          if (relativePath === '') this.__thawPathname = parent.pathname;
-          else if (relativePath.charAt(0) === '/') this.__thawPathname = normalizePath(relativePath);
-          else this.__thawPathname = normalizePath(parent.pathname.substring(0, parent.pathname.lastIndexOf('/') + 1) + relativePath);
-          this.__thawSearch = match[2] !== undefined ? match[2] : (relativePath === '' ? parent.search : '');
-          this.__thawHash = match[3] || '';
-        }
-        this.__thawNormalizePort();
-        this.__thawRefreshParams();
+        const value = toUSV(input);
+        const hasBase = base !== undefined;
+        const baseValue = hasBase ? toUSV(base) : '';
+        const parsed = parseURL(value, baseValue, hasBase);
+        if (parsed === null) throw new TypeError('Invalid URL');
+        this.__thawCommit(parsed);
       }
-      __thawNormalizePort() {
-        if ((this.__thawProtocol === 'http:' && this.__thawPort === '80')
-            || (this.__thawProtocol === 'https:' && this.__thawPort === '443')) this.__thawPort = '';
+      __thawCommit(parsed, refresh = true) {
+        this.__thawState = parsed;
+        if (refresh) this.__thawRefreshParams();
+      }
+      __thawSet(property, value, refresh = true) {
+        const text = toUSV(value);
+        const parsed = setURL(this.__thawState.href, property, text);
+        if (parsed !== null) this.__thawCommit(parsed, refresh);
       }
       __thawRefreshParams() {
-        const parsed = new URLSearchParams(this.__thawSearch);
+        const parsed = new URLSearchParams(this.__thawState.search);
         const params = this.__thawSearchParams || parsed;
         if (params !== parsed) params.__thawEntries = parsed.__thawEntries;
-        params.__thawUpdate = value => { this.__thawSearch = value === '' ? '' : '?' + value; };
+        params.__thawUpdate = value => this.__thawSet('search', value === '' ? '' : '?' + value, false);
         this.__thawSearchParams = params;
       }
-      get protocol() { return this.__thawProtocol; }
-      set protocol(value) { this.__thawProtocol = String(value).replace(/:$/, '').toLowerCase() + ':'; this.__thawNormalizePort(); }
-      get username() { return this.__thawUsername; }
-      set username(value) { this.__thawUsername = String(value); }
-      get password() { return this.__thawPassword; }
-      set password(value) { this.__thawPassword = String(value); }
-      get hostname() { return this.__thawHostname; }
-      set hostname(value) { this.__thawHostname = String(value).toLowerCase(); }
-      get port() { return this.__thawPort; }
-      set port(value) { const port = String(value); if (!validPort(port)) return; this.__thawPort = port; this.__thawNormalizePort(); }
+      get protocol() { return this.__thawState.protocol; }
+      set protocol(value) { this.__thawSet('protocol', value); }
+      get username() { return this.__thawState.username; }
+      set username(value) { this.__thawSet('username', value); }
+      get password() { return this.__thawState.password; }
+      set password(value) { this.__thawSet('password', value); }
+      get hostname() { return this.__thawState.hostname; }
+      set hostname(value) { this.__thawSet('hostname', value); }
+      get port() { return this.__thawState.port; }
+      set port(value) { this.__thawSet('port', value); }
       get host() { return this.hostname + (this.port ? ':' + this.port : ''); }
-      set host(value) { const host = String(value); let parsed; try { parsed = parseAuthority(host); } catch (_) { return; } this.__thawHostname = parsed.hostname; this.__thawPort = parsed.port; this.__thawNormalizePort(); }
-      get pathname() { return this.__thawPathname; }
-      set pathname(value) { this.__thawPathname = normalizePath(String(value).charAt(0) === '/' ? String(value) : '/' + String(value)); }
-      get search() { return this.__thawSearch; }
-      set search(value) { const search = String(value); this.__thawSearch = search === '' ? '' : (search.charAt(0) === '?' ? search : '?' + search); this.__thawRefreshParams(); }
+      set host(value) { this.__thawSet('host', value); }
+      get pathname() { return this.__thawState.pathname; }
+      set pathname(value) { this.__thawSet('pathname', value); }
+      get search() { return this.__thawState.search; }
+      set search(value) { this.__thawSet('search', value); }
       get searchParams() { return this.__thawSearchParams; }
-      get hash() { return this.__thawHash; }
-      set hash(value) { const hash = String(value); this.__thawHash = hash === '' ? '' : (hash.charAt(0) === '#' ? hash : '#' + hash); }
-      get origin() { return this.__thawHostname === '' || this.__thawProtocol === 'file:' ? 'null' : this.protocol + '//' + this.host; }
-      get href() {
-        const credentials = this.username || this.password ? this.username + (this.password ? ':' + this.password : '') + '@' : '';
-        const authority = this.hostname !== '' || this.protocol === 'file:' ? '//' + credentials + this.host : '';
-        return this.protocol + authority + this.pathname + this.search + this.hash;
+      get hash() { return this.__thawState.hash; }
+      set hash(value) { this.__thawSet('hash', value); }
+      get origin() { return this.__thawState.origin; }
+      get href() { return this.__thawState.href; }
+      set href(value) {
+        const parsed = parseURL(toUSV(value), '', false);
+        if (parsed === null) throw new TypeError('Invalid URL');
+        this.__thawCommit(parsed);
       }
-      set href(value) { const replacement = new URL(value), params = this.__thawSearchParams; Object.assign(this, replacement); this.__thawSearchParams = params; this.__thawRefreshParams(); }
       toString() { return this.href; }
       toJSON() { return this.href; }
       static canParse(input, base) { try { new URL(input, base); return true; } catch (_) { return false; } }

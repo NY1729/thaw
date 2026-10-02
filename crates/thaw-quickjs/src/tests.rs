@@ -696,6 +696,77 @@ fn url_rejects_out_of_range_ports_without_mutating_setters() {
 }
 
 #[test]
+fn url_native_parser_preserves_url_components_and_setters() {
+    assert_eq!(load(r#"function nativeUrlCases() {
+        const opaque = new URL('urn:x/../y');
+        opaque.pathname = 'changed';
+        const encoded = new URL('https://example.test/');
+        encoded.username = 'a@b'; encoded.password = 'p#q'; encoded.pathname = '/a?b#c';
+        const host = new URL('https://bücher.example:8080/a');
+        host.hostname = 'bad host';
+        const oldHost = host.host;
+        host.host = 'other.test:70000';
+        const unchangedHost = host.host === oldHost;
+        host.host = '[::1]:8080';
+        const acceptedIPv6 = host.host === '[::1]:8080';
+        host.host = 'other.test';
+        const keptPort = host.host === 'other.test:8080';
+        host.hostname = 'changed.test:9090';
+        const rejectedHostnamePort = host.host === 'other.test:8080';
+        host.host = 'other.test:443';
+        const clearedDefaultPort = host.host === 'other.test';
+        const params = host.searchParams;
+        host.search = '?a=1';
+        const sameParams = host.searchParams === params && params.get('a') === '1';
+        params.append('b', '2');
+        const linkedParams = host.search === '?a=1&b=2';
+        host.protocol = 'foo:';
+        const guardedProtocol = host.protocol === 'https:';
+        host.href = 'https://other.test/?x=1';
+        const hrefIdentity = host.searchParams === params && params.get('x') === '1';
+        const empty = new URL('https://example.test/');
+        empty.search = '?'; empty.hash = '#';
+        const customBase = new URL('https://ignored.test/');
+        let baseCalls = 0;
+        customBase.toString = () => { baseCalls++; return 'https://base.test/root/'; };
+        return [
+          new URL('foo://example.com/x').origin === 'null',
+          new URL('blob:https://example.com/id').origin === 'https://example.com',
+          opaque.href === 'urn:x/../y' && opaque.pathname === 'x/../y',
+          new URL('https://example.test/a//b').pathname === '/a//b',
+          new URL('https://example.test/a/%2e%2e/b').pathname === '/b',
+          new URL('//other.test/x', 'https://first.test/a').href === 'https://other.test/x',
+          encoded.username === 'a%40b' && encoded.password === 'p%23q'
+            && encoded.pathname === '/a%3Fb%23c',
+          oldHost === 'xn--bcher-kva.example:8080' && unchangedHost && acceptedIPv6
+            && keptPort && rejectedHostnamePort && clearedDefaultPort,
+          host.href === 'https://other.test/?x=1' && sameParams && linkedParams
+            && guardedProtocol && hrefIdentity,
+          empty.search === '' && empty.hash === '' && empty.href === 'https://example.test/?#',
+          new Request('https://bücher.example/a//b').url === 'https://xn--bcher-kva.example/a//b',
+          new URL('child', customBase).href === 'https://base.test/root/child' && baseCalls === 1,
+          new URL('https://example.test/\uD800').pathname === '/%EF%BF%BD'
+        ];
+    }"#), 1);
+    assert_eq!(call("nativeUrlCases", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true,true]");
+}
+
+#[test]
+fn url_setter_reentrant_string_conversion_uses_latest_url() {
+    assert_eq!(load(r#"function reentrantUrlSetter() {
+        const url = new URL('https://old.test/old');
+        let calls = 0;
+        url.pathname = { toString() {
+            calls++;
+            url.href = 'https://new.test/base';
+            return '/outer';
+        } };
+        return calls === 1 && url.href === 'https://new.test/outer';
+    }"#), 1);
+    assert_eq!(call("reentrantUrlSetter", "[]"), "true");
+}
+
+#[test]
 fn event_target_dispatches_listeners_and_cancellation() {
     assert_eq!(
             load(
