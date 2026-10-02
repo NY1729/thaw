@@ -992,6 +992,27 @@ fn compiles_dynamic_array_flat() {
     );
 }
 
+#[test]
+fn dynamic_flat_skips_deleted_slots_and_preserves_present_nullish_values() {
+    let source = r#"
+        function main(): void {
+            const sparse: any[] = [, null, undefined, [2]];
+            console.log(JSON.stringify(sparse.flat(0)));
+            console.log(JSON.stringify(sparse.flat()));
+            console.log(JSON.stringify(sparse.flat(2)));
+
+            const nested: any[] = [[4, 5], 6];
+            delete nested[0][0];
+            console.log(JSON.stringify(nested.flat()));
+            console.log(JSON.stringify(nested.flat(0)));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "any_array_flat_holes"),
+        "[null,null,[2]]\n[null,null,2]\n[null,null,2]\n[5,6]\n[[null,5],6]\n"
+    );
+}
+
 /// Sibling of `compiles_dynamic_array_flat` for `.flatMap()`: a callback
 /// whose return value is itself dynamically-typed (`Json`, not a
 /// statically nested `T[][]`) hit `lower_array_flat_map_result`'s final
