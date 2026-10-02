@@ -129,6 +129,141 @@ fn lazy_parent_refresh_keeps_materialized_child_export() {
 }
 
 #[test]
+fn lazy_subpath_versions_reproject_nested_instances_and_drop_replaced_dependencies() {
+    let scratch = temp_registry("lazy-versions-scratch");
+    let registry = temp_registry("lazy-versions-registry");
+    let modules = scratch.join("node_modules");
+    let package = modules.join("version-kit");
+    let top_shared = modules.join("shared");
+    let nested_shared = package.join("feature/node_modules/shared");
+    fs::create_dir_all(&nested_shared).unwrap();
+    fs::create_dir_all(&top_shared).unwrap();
+    fs::write(package.join("package.json"), r#"{"name":"version-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./feature/index.d.ts","require":"./feature/index.js"}}}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.root = require('shared').value;").unwrap();
+    fs::write(package.join("feature/index.d.ts"), "export declare const feature: number;").unwrap();
+    fs::write(package.join("feature/index.js"), "exports.feature = require('shared').value;").unwrap();
+    fs::write(top_shared.join("package.json"), r#"{"name":"shared","version":"1.0.0","main":"index.js"}"#).unwrap();
+    fs::write(top_shared.join("index.js"), "exports.value = 1;").unwrap();
+    fs::write(nested_shared.join("package.json"), r#"{"name":"shared","version":"2.0.0","main":"index.js"}"#).unwrap();
+    fs::write(nested_shared.join("index.js"), "exports.value = 2;").unwrap();
+
+    add_installed_root(&registry, &modules, "version-kit").unwrap();
+    assert_eq!(resolve(&registry, "version-kit").unwrap().dependency_versions.unwrap().get("shared").map(String::as_str), Some("1.0.0"));
+    add_installed_subpath(&registry, &modules, "version-kit/feature").unwrap();
+    let root = resolve(&registry, "version-kit").unwrap().dependency_versions.unwrap();
+    assert_eq!(root.get("shared").map(String::as_str), Some("1.0.0"));
+    assert_eq!(root.get("version-kit/feature/node_modules/shared").map(String::as_str), Some("2.0.0"));
+    let subpath = resolve(&registry, "version-kit/feature").unwrap().dependency_versions.unwrap();
+    assert_eq!(subpath.get("shared").map(String::as_str), Some("2.0.0"));
+
+    fs::write(package.join("feature/index.js"), "exports.feature = 3;").unwrap();
+    add_installed_subpath(&registry, &modules, "version-kit/feature").unwrap();
+    let root = resolve(&registry, "version-kit").unwrap().dependency_versions.unwrap();
+    assert_eq!(root.get("shared").map(String::as_str), Some("1.0.0"));
+    assert!(!root.contains_key("version-kit/feature/node_modules/shared"));
+    assert!(resolve(&registry, "version-kit/feature").unwrap().dependency_versions.is_none());
+    let before_conflict = installed_artifact_snapshot(&registry.join("version-kit"));
+    fs::remove_dir_all(&nested_shared).unwrap();
+    fs::write(top_shared.join("package.json"), r#"{"name":"shared","version":"9.0.0","main":"index.js"}"#).unwrap();
+    fs::write(package.join("feature/index.js"), "exports.feature = require('shared').value;").unwrap();
+    let error = add_installed_subpath(&registry, &modules, "version-kit/feature").unwrap_err();
+    assert!(error.contains("changed between registered bundles"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&registry.join("version-kit")), before_conflict);
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn lazy_subpath_refuses_legacy_index_and_existing_writer_without_mutation() {
+    let scratch = temp_registry("lazy-index-scratch");
+    let registry = temp_registry("lazy-index-registry");
+    let modules = scratch.join("node_modules");
+    let package = modules.join("index-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), r#"{"name":"index-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./index.d.ts","require":"./index.js"}}}"#).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const value: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.value = 1;").unwrap();
+    add_installed_root(&registry, &modules, "index-kit").unwrap();
+    let installed = registry.join("index-kit");
+    let before = installed_artifact_snapshot(&installed);
+    let guard = PackageWriterGuard::acquire(&installed).unwrap();
+    let error = add_installed_subpath(&registry, &modules, "index-kit/feature").unwrap_err();
+    assert!(error.contains("writer"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&installed), before);
+    drop(guard);
+    fs::remove_file(installed.join("instances.json")).unwrap();
+    let legacy = installed_artifact_snapshot(&installed);
+    let error = add_installed_subpath(&registry, &modules, "index-kit/feature").unwrap_err();
+    assert!(error.contains("re-register"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&installed), legacy);
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn indexed_exports_named_instances_json_and_lock_json_work_in_both_orders() {
+    for mode in ["eager", "parent-first", "children-first"] {
+        let scratch = temp_registry(&format!("indexed-name-scratch-{mode}"));
+        let registry = temp_registry(&format!("indexed-name-registry-{mode}"));
+        let modules = scratch.join("node_modules");
+        let package = modules.join("name-kit");
+        let shared = modules.join("shared");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"name-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./foo":{"types":"./foo.d.ts","require":"./foo.js"},"./foo/instances.json":{"types":"./instances.d.ts","require":"./instances.js"},"./foo/lock.json":{"types":"./lock.d.ts","require":"./lock.js"}}}"#).unwrap();
+        fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+        fs::write(package.join("index.js"), "exports.root = 1;").unwrap();
+        fs::write(package.join("foo.d.ts"), "export declare const foo: number;").unwrap();
+        fs::write(package.join("foo.js"), "exports.foo = 1;").unwrap();
+        fs::write(package.join("instances.d.ts"), "export declare const instances: number;").unwrap();
+        fs::write(package.join("instances.js"), "exports.instances = require('shared').value;").unwrap();
+        fs::write(package.join("lock.d.ts"), "export declare const lock: number;").unwrap();
+        fs::write(package.join("lock.js"), "exports.lock = require('shared').value;").unwrap();
+        fs::write(shared.join("package.json"), r#"{"name":"shared","version":"2.0.0","main":"index.js"}"#).unwrap();
+        fs::write(shared.join("index.js"), "exports.value = 2;").unwrap();
+
+        if mode == "eager" {
+            add_installed(&registry, &modules, "name-kit").unwrap();
+        } else {
+            add_installed_root(&registry, &modules, "name-kit").unwrap();
+            let order = if mode == "parent-first" {
+                ["name-kit/foo", "name-kit/foo/instances.json", "name-kit/foo/lock.json"]
+            } else {
+                ["name-kit/foo/lock.json", "name-kit/foo/instances.json", "name-kit/foo"]
+            };
+            for specifier in order {
+                add_installed_subpath(&registry, &modules, specifier).unwrap();
+            }
+        }
+        let installed = registry.join("name-kit");
+        assert!(installed.join("instances.json").is_file());
+        assert!(installed.join("subpaths/foo/instances.json").is_dir());
+        assert!(installed.join("subpaths/foo/lock.json").is_dir());
+        assert!(resolve(&registry, "name-kit/foo").unwrap().bundle_js.is_some());
+        for specifier in ["name-kit/foo/instances.json", "name-kit/foo/lock.json"] {
+            let resolved = resolve(&registry, specifier).unwrap();
+            assert_eq!(resolved.dependency_versions.unwrap().get("shared").map(String::as_str), Some("2.0.0"));
+        }
+        assert_eq!(resolve(&registry, "name-kit").unwrap().dependency_versions.unwrap().get("shared").map(String::as_str), Some("2.0.0"));
+        let _ = fs::remove_dir_all(scratch);
+        let _ = fs::remove_dir_all(registry);
+    }
+}
+
+#[test]
+fn legacy_subpath_lock_remains_readable_without_private_index() {
+    let registry = temp_registry("legacy-subpath-lock");
+    let subpath = registry.join("legacy-kit/subpaths/feature");
+    fs::create_dir_all(&subpath).unwrap();
+    fs::write(subpath.join("package.d.ts"), "export declare const value: number;").unwrap();
+    fs::write(subpath.join("bundle.js"), "exports.value = 1;").unwrap();
+    fs::write(subpath.join("lock.json"), r#"{"legacy-kit":"1.0.0","shared":"2.0.0"}"#).unwrap();
+    assert_eq!(resolve(&registry, "legacy-kit/feature").unwrap().dependency_versions.unwrap().get("shared").map(String::as_str), Some("2.0.0"));
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn publication_failure_restores_the_previous_directory() {
     let registry = temp_registry("atomic-add-rollback");
     let destination = registry.join("package");
