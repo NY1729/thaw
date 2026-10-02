@@ -3258,6 +3258,7 @@ dependencies = [
  "thaw-icu-data",
  "thaw-runtime",
  "thaw-std",
+ "url",
  "wasmi",
  "wasmi_wasi",
  "webpki-roots",
