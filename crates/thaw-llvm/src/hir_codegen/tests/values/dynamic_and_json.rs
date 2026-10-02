@@ -1765,3 +1765,46 @@ fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
         .expect(&top_level);
     assert_one_normal_destroy(&top_level, &top_level_owned[0], "quickjs_graph_invalid", union_loaded);
 }
+
+/// Native values crossed into `any` or a typed QuickJS call must retain
+/// explicit undefined slots; JSON.stringify still applies its public
+/// object-omission/array-null policy.
+#[test]
+fn explicit_undefined_slots_survive_dynamic_conversion() {
+    let source = r#"
+        declare function __thaw_typed_js_70726f6265556e646566696e6564(
+            object: { x: undefined },
+            items: undefined[],
+            nested: { x: undefined }[],
+        ): string;
+        function main(): void {
+            loadScript("globalThis.probeUndefined = (object, items, nested) => [Object.keys(object).includes('x'), object.x === undefined, items[0] === undefined, items[0] !== null, Object.keys(nested[0]).includes('x')].join(',');");
+            const native = { x: undefined };
+            const boxed: any = native;
+            console.log(Object.keys(boxed).join(","), Object.hasOwn(boxed, "x"), boxed.x === undefined);
+            console.log(__thaw_typed_js_70726f6265556e646566696e6564(native, [undefined], [native]));
+            console.log(JSON.stringify(native), JSON.stringify([undefined]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "explicit_undefined_dynamic_slots"),
+        "x true true\ntrue,true,true,true,true\n{} [null]\n"
+    );
+}
+
+#[test]
+fn setter_only_source_copies_undefined_own_value_in_object_assign() {
+    let source = r#"
+        function main(): void {
+            const target: any = { x: 1 };
+            const source = { set x(value: number) {} };
+            const result: any = Object.assign(target, source);
+            console.log(result === target, Object.hasOwn(result, "x"), result.x === undefined);
+            console.log(JSON.stringify(source));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "setter_only_object_assign_undefined"),
+        "true true true\n{}\n"
+    );
+}
