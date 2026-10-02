@@ -491,6 +491,37 @@ fn rewrite_dynamic_imports(source: &str) -> Option<String> {
     Some(output)
 }
 
+fn pattern_names(pattern: &thaw_parser::ast::Pat, names: &mut std::collections::BTreeSet<String>) {
+    match pattern {
+        thaw_parser::ast::Pat::Ident(binding) => {
+            names.insert(binding.id.sym.to_string());
+        }
+        thaw_parser::ast::Pat::Array(array) => {
+            for element in array.elems.iter().flatten() {
+                pattern_names(element, names);
+            }
+        }
+        thaw_parser::ast::Pat::Object(object) => {
+            for property in &object.props {
+                match property {
+                    thaw_parser::ast::ObjectPatProp::KeyValue(property) => {
+                        pattern_names(&property.value, names);
+                    }
+                    thaw_parser::ast::ObjectPatProp::Assign(property) => {
+                        names.insert(property.key.sym.to_string());
+                    }
+                    thaw_parser::ast::ObjectPatProp::Rest(property) => {
+                        pattern_names(&property.arg, names);
+                    }
+                }
+            }
+        }
+        thaw_parser::ast::Pat::Assign(assign) => pattern_names(&assign.left, names),
+        thaw_parser::ast::Pat::Rest(rest) => pattern_names(&rest.arg, names),
+        thaw_parser::ast::Pat::Expr(_) | thaw_parser::ast::Pat::Invalid(_) => {}
+    }
+}
+
 /// Choose one unused number range for every name introduced by ESM lowering.
 /// The reference pass and declaration pass must use the same offset.
 fn esm_synthetic_offset(source: &str) -> Option<usize> {
@@ -532,41 +563,11 @@ fn rewrite_live_import_references(source: &str, synthetic_offset: usize) -> Opti
     use thaw_parser::ast::{
         ArrowExpr, ArrowFunctionBody, BlockStmt, CatchClause, Class, Decl, Expr, FnExpr,
         ForHead, ForInStmt, ForOfStmt, ForStmt, Function, ImportSpecifier, ModuleDecl,
-        ModuleExportName, ModuleItem, Pat, Prop, StaticBlock, Stmt, SwitchStmt, VarDecl,
+        ModuleExportName, ModuleItem, Prop, StaticBlock, Stmt, SwitchStmt, VarDecl,
         VarDeclKind, VarDeclOrExpr,
     };
     use thaw_parser::common::Spanned;
 
-    fn pattern_names(pattern: &Pat, names: &mut BTreeSet<String>) {
-        match pattern {
-            Pat::Ident(binding) => {
-                names.insert(binding.id.sym.to_string());
-            }
-            Pat::Array(array) => {
-                for element in array.elems.iter().flatten() {
-                    pattern_names(element, names);
-                }
-            }
-            Pat::Object(object) => {
-                for property in &object.props {
-                    match property {
-                        thaw_parser::ast::ObjectPatProp::KeyValue(property) => {
-                            pattern_names(&property.value, names);
-                        }
-                        thaw_parser::ast::ObjectPatProp::Assign(property) => {
-                            names.insert(property.key.sym.to_string());
-                        }
-                        thaw_parser::ast::ObjectPatProp::Rest(property) => {
-                            pattern_names(&property.arg, names);
-                        }
-                    }
-                }
-            }
-            Pat::Assign(assign) => pattern_names(&assign.left, names),
-            Pat::Rest(rest) => pattern_names(&rest.arg, names),
-            Pat::Expr(_) | Pat::Invalid(_) => {}
-        }
-    }
 
     fn direct_bindings(statements: &[Stmt]) -> BTreeSet<String> {
         let mut names = BTreeSet::new();
@@ -1044,9 +1045,10 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
 }
 
 fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<String> {
+    use std::collections::BTreeSet;
     use thaw_parser::ast::{
         Decl, DefaultDecl, ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName,
-        ModuleItem, Pat,
+        ModuleItem,
     };
     use thaw_parser::common::{SourceMapper, Spanned};
 
@@ -1081,17 +1083,49 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
         match decl {
             Decl::Fn(f) => vec![f.ident.sym.to_string()],
             Decl::Class(c) => vec![c.ident.sym.to_string()],
-            Decl::Var(v) => v
-                .decls
-                .iter()
-                .filter_map(|d| match &d.name {
-                    Pat::Ident(id) => Some(id.id.sym.to_string()),
-                    _ => None,
-                })
-                .collect(),
+            Decl::Var(v) => {
+                let mut names = BTreeSet::new();
+                for declarator in &v.decls {
+                    pattern_names(&declarator.name, &mut names);
+                }
+                names.into_iter().collect()
+            }
             _ => Vec::new(),
         }
     };
+
+    // Explicit exports take precedence over every star, regardless of source
+    // order. Gather them before emitting the sequential re-export loops.
+    let mut explicit_exports = BTreeSet::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                explicit_exports.extend(names_declared_by(&export.decl));
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if !export.type_only => {
+                for spec in &export.specifiers {
+                    match spec {
+                        ExportSpecifier::Named(named) if !named.is_type_only => {
+                            let name = named.exported.as_ref().unwrap_or(&named.orig);
+                            explicit_exports.insert(export_name(name));
+                        }
+                        ExportSpecifier::Namespace(namespace) => {
+                            explicit_exports.insert(export_name(&namespace.name));
+                        }
+                        ExportSpecifier::Default(default) => {
+                            explicit_exports.insert(default.exported.sym.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(_)
+                | ModuleDecl::ExportDefaultExpr(_)) => {
+                explicit_exports.insert("default".to_string());
+            }
+            _ => {}
+        }
+    }
 
     let mut prologue = String::new();
     let mut local_export_prologue = String::new();
@@ -1187,13 +1221,20 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                 }
             }
             ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default_decl)) => {
-                let text = match &default_decl.decl {
-                    DefaultDecl::Fn(f) => snippet(f.span()),
-                    DefaultDecl::Class(c) => snippet(c.span()),
-                    DefaultDecl::TsInterfaceDecl(_) => None,
+                let (text, local_name) = match &default_decl.decl {
+                    DefaultDecl::Fn(f) => (snippet(f.span()), f.ident.as_ref().map(|id| id.sym.to_string())),
+                    DefaultDecl::Class(c) => (snippet(c.span()), c.ident.as_ref().map(|id| id.sym.to_string())),
+                    DefaultDecl::TsInterfaceDecl(_) => (None, None),
                 };
                 if let Some(text) = text {
-                    rest.push_str(&format!("module.exports.default = {text};\n"));
+                    if let Some(name) = local_name {
+                        rest.push_str(&format!("{text}\n"));
+                        local_export_prologue.push_str(&format!(
+                            "Object.defineProperty(exports, \"default\", {{ enumerable: true, get: function() {{ return {name}; }} }});\n"
+                        ));
+                    } else {
+                        rest.push_str(&format!("module.exports.default = {text};\n"));
+                    }
                 }
             }
             ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(default_expr)) => {
@@ -1267,8 +1308,12 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                     "var {var_name} = {loader}({});\n",
                     js_string_literal(&spec)
                 ));
+                let excluded = explicit_exports.iter().map(|name| {
+                    format!("{key_name} === {}", js_string_literal(name))
+                }).collect::<Vec<_>>().join(" || ");
+                let excluded = if excluded.is_empty() { "false" } else { &excluded };
                 rest.push_str(&format!(
-                    "for (let {key_name} in {var_name}) {{ if ({key_name} !== 'default' && {key_name} !== '__esModule') Object.defineProperty(exports, {key_name}, {{ enumerable: true, get: function() {{ return {var_name}[{key_name}]; }} }}); }}\n"
+                    "for (let {key_name} in {var_name}) {{ if ({key_name} !== 'default' && {key_name} !== '__esModule' && !({excluded})) Object.defineProperty(exports, {key_name}, {{ enumerable: true, get: function() {{ return {var_name}[{key_name}]; }} }}); }}\n"
                 ));
             }
             // `import foo = require(...)`/`export = foo`/`export as

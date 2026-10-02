@@ -205,8 +205,68 @@ fn plain_commonjs_is_left_untouched() {
 fn rewrites_default_export_to_module_exports_default() {
     let rewritten =
         rewrite_esm_to_commonjs("export default function greet() { return 'hi'; }").unwrap();
-    assert!(rewritten.contains("module.exports.default = function greet() { return 'hi'; }"));
+    assert!(rewritten.contains("function greet() { return 'hi'; }"));
+    assert!(rewritten.contains("get: function() { return greet; }"));
     assert!(rewritten.contains("module.exports.__esModule = true;"));
+}
+
+#[test]
+fn named_default_declarations_remain_local_bindings() {
+    use std::ffi::{CStr, CString};
+
+    // Unrun regression: both declaration kinds are visible to later code in
+    // their own module; anonymous defaults retain the expression path.
+    let anonymous = rewrite_esm_to_commonjs("export default function () { return 1; }").unwrap();
+    assert!(anonymous.contains("module.exports.default = function () { return 1; }"));
+    // Separate modules: ESM permits only one default export per module.
+    let cases = [
+        ("export default function greet() { return 'hi'; } export function call() { return greet(); }",
+         "[\"hi\",\"hi\"]", "[module.exports.default(),module.exports.call()]"),
+        ("export default class Greeting { value() { return 4; } } export function call() { return new Greeting().value(); }",
+         "[4,4]", "[(new module.exports.default()).value(),module.exports.call()]"),
+    ];
+    for (source, expected, expression) in cases {
+        let rewritten = rewrite_esm_to_commonjs(source).unwrap();
+        let script = format!("globalThis.__thaw_named_default = (function() {{ \
+            var module = {{ exports: {{}} }}, exports = module.exports; \
+            {rewritten} return function() {{ return {expression}; }}; }})();");
+        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+        let result = thaw_quickjs::thaw_js_call(
+            CString::new("__thaw_named_default").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), expected);
+    }
+}
+
+#[test]
+fn export_star_does_not_redefine_explicit_local_or_reexported_names() {
+    use std::ffi::{CStr, CString};
+
+    // Unrun regression: explicit bindings take priority even when they are
+    // declared after the star. Destructuring and named reexports are explicit.
+    let source = "export * from './a'; \
+        export { remote as chosen } from './c'; export const local = 7; \
+        export const { value: destructured } = { value: 11 };";
+    for await_imports in [false, true] {
+        let rewritten = rewrite_esm_to_commonjs_mode(source, await_imports).unwrap();
+        assert!(rewritten.contains("__thaw_esm_key_"), "{rewritten}");
+        assert_eq!(rewritten.contains("await requireAsync"), await_imports);
+    }
+    let rewritten = rewrite_esm_to_commonjs(source).unwrap();
+    let script = format!("globalThis.__thaw_star_explicit_case = (function() {{ \
+        var module = {{ exports: {{}} }}, exports = module.exports; \
+        var a = {{ local: 1, chosen: 2, destructured: 3, starOnly: 4 }}; \
+        var c = {{ remote: 10 }}; \
+        var __thaw_require = function(name) {{ return name === './a' ? a : c; }}; \
+        {rewritten} return function() {{ return [module.exports.local, module.exports.destructured, \
+            module.exports.chosen, module.exports.starOnly]; }}; }})();");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("__thaw_star_explicit_case").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[7,11,10,4]");
 }
 
 #[test]
