@@ -1361,6 +1361,10 @@ fn lower_function_statements(
             .any(|finalizer| generator_statements_emit_value(finalizer, &values));
         let mut generator_body = Vec::new();
         let state = "__thaw_generator_state".to_string();
+        let mut close_generator = HirStmt::Expr(HirExpr::Assign(
+            "__thaw_generator_initialized".into(),
+            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+        ));
         if let Some((entry, locals, state_machine)) =
             lower_generator_state_machine(
                 &lowered_generator_body,
@@ -1378,6 +1382,9 @@ fn lower_function_statements(
                 &forced_return,
             )
         {
+            close_generator = HirStmt::Expr(HirExpr::Assign(
+                state.clone(), Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+            ));
             lowerer.scope.insert(state.clone(), HirType::F64);
             lowerer
                 .scope
@@ -1458,12 +1465,22 @@ fn lower_function_statements(
                     reentry_error.clone(),
                     vec![
                         clear_running.clone(),
+                        close_generator.clone(),
                         HirStmt::Throw(HirExpr::Var(reentry_error.clone())),
                     ],
                     Some(reentry_error.clone()),
                 ),
                 clear_running,
             ];
+        } else {
+            let uncaught_error = "__thaw_generator_uncaught_error".to_string();
+            lowerer.scope.insert(uncaught_error.clone(), HirType::Str);
+            generator_body = vec![HirStmt::Try(
+                generator_body,
+                uncaught_error.clone(),
+                vec![close_generator, HirStmt::Throw(HirExpr::Var(uncaught_error.clone()))],
+                Some(uncaught_error),
+            )];
         }
         let generator_body = HirExpr::Block(generator_body);
         let mut referenced = BTreeSet::new();

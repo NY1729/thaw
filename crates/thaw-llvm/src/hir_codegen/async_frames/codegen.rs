@@ -84,8 +84,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.bind_async_frame_locals(frame, plan)?;
         // Arena allocation is not zeroed outside tracing mode. Initialize
         // compiler-private provenance before any source statement executes.
-        for (_, native_slot) in self.catch_native_text.values() {
-            self.builder.build_store(*native_slot, ptr_ty.const_null())
+        for (_, native_slot, original_slot, valid_slot) in self.catch_native_text.values() {
+            for slot in [native_slot, original_slot] {
+                self.builder.build_store(*slot, ptr_ty.const_null())
+                    .map_err(|error| error.to_string())?;
+            }
+            self.builder.build_store(*valid_slot, self.context.bool_type().const_zero())
                 .map_err(|error| error.to_string())?;
         }
         for (index, (param_value, param)) in ramp.get_param_iter().zip(&func.params).enumerate() {
@@ -247,7 +251,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|e| e.to_string())?;
             }
             let binding_slot = self.catch_native_text.get(&handler.catch_binding)
-                .map(|(binding, _)| *binding)
+                .map(|(binding, _, _, _)| *binding)
                 .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
             let native_text = self.builder.build_call(
                 self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
@@ -261,8 +265,18 @@ impl<'ctx> HirCompiler<'ctx> {
             ).map_err(|e| e.to_string())?;
             self.builder.build_store(binding_slot, caught_value)
                 .map_err(|e| e.to_string())?;
+            let original_slot = self.catch_native_text.get(&handler.catch_binding)
+                .map(|(_, _, original, _)| *original)
+                .ok_or_else(|| format!("missing catch original for `{}`", handler.catch_binding))?;
+            self.builder.build_store(original_slot, caught_value)
+                .map_err(|e| e.to_string())?;
+            let valid_slot = self.catch_native_text.get(&handler.catch_binding)
+                .map(|(_, _, _, valid)| *valid)
+                .ok_or_else(|| format!("missing catch validity for `{}`", handler.catch_binding))?;
+            self.builder.build_store(valid_slot, self.context.bool_type().const_int(1, false))
+                .map_err(|e| e.to_string())?;
             let native_slot = self.catch_native_text.get(&handler.catch_binding)
-                .map(|(_, native)| *native)
+                .map(|(_, native, _, _)| *native)
                 .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
             self.builder.build_store(native_slot, native_text).map_err(|e| e.to_string())?;
             for (suffix, getter) in [
@@ -688,7 +702,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or_else(|| format!("missing async catch binding `{binding}`"))?;
             let native_slot = self.variables.get(&name).map(|(slot, _)| *slot)
                 .ok_or_else(|| format!("missing async native text cell `{name}`"))?;
-            self.catch_native_text.insert(binding.clone(), (catch_slot, native_slot));
+            let original_name = Self::async_catch_original_name(binding);
+            let original_slot = self.variables.get(&original_name).map(|(slot, _)| *slot)
+                .ok_or_else(|| format!("missing async catch original cell `{original_name}`"))?;
+            let valid_name = Self::async_catch_valid_name(binding);
+            let valid_slot = self.variables.get(&valid_name).map(|(slot, _)| *slot)
+                .ok_or_else(|| format!("missing async catch validity cell `{valid_name}`"))?;
+            self.catch_native_text.insert(binding.clone(), (catch_slot, native_slot, original_slot, valid_slot));
         }
         Ok(())
     }
@@ -870,20 +890,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.builder.position_at_end(reject);
                     let error = self.compile_throw_text(error_expr)?;
                     if let Some(handler) = enclosing_handler {
-                        let catch_index = plan
-                            .locals
-                            .iter()
-                            .position(|(name, _)| name == &handler.catch_binding)
-                            .ok_or_else(|| {
-                                format!("missing async catch binding `{}`", handler.catch_binding)
-                            })?;
-                        let catch_slot = self.async_frame_field(
-                            frame,
-                            self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * catch_index as u64,
-                            "outer_catch_binding",
-                        )?;
-                        self.builder
-                            .build_store(catch_slot, error)
+                        self.capture_pending_async_catch(frame, plan, &handler, error)?;
+                        self.clear_pending_native_text()?;
+                        self.builder.build_store(self.pending_exception_object().as_pointer_value(),
+                            self.context.ptr_type(AddressSpace::default()).const_null())
+                            .map_err(|e| e.to_string())?;
+                        self.builder.build_store(
+                            self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                            self.context.i64_type().const_zero())
                             .map_err(|e| e.to_string())?;
                         for (guard_name, value) in
                             [(&handler.try_guard, false), (&handler.catch_guard, true)]
@@ -912,8 +926,11 @@ impl<'ctx> HirCompiler<'ctx> {
                             .build_unconditional_branch(continue_block)
                             .map_err(|e| e.to_string())?;
                     } else {
-                        self.reject_caught_or_opaque_value(
-                            completion, error, error_expr, "rethrow_rejection",
+                        // compile_throw_text has already selected this throw's
+                        // native/typed tuple. Reclassifying it as opaque here
+                        // would erase a direct string or typed throw.
+                        self.reject_promise_with_pending_exception(
+                            completion, error, "rethrow_rejection",
                         )?;
                         if function.get_type().get_return_type().is_some() {
                             self.builder
@@ -994,6 +1011,58 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(AsyncBlockExit::Continue)
     }
 
+    fn capture_pending_async_catch(
+        &self,
+        frame: PointerValue<'ctx>,
+        plan: &FrameAsyncPlan,
+        handler: &AsyncRejectionHandler,
+        pending: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let binding_slot = self.catch_native_text.get(&handler.catch_binding)
+            .map(|(binding, _, _, _)| *binding)
+            .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
+        self.builder.build_store(binding_slot, pending).map_err(|e| e.to_string())?;
+        let original_slot = self.catch_native_text.get(&handler.catch_binding)
+            .map(|(_, _, original, _)| *original)
+            .ok_or_else(|| format!("missing catch original for `{}`", handler.catch_binding))?;
+        self.builder.build_store(original_slot, pending).map_err(|e| e.to_string())?;
+        let valid_slot = self.catch_native_text.get(&handler.catch_binding)
+            .map(|(_, _, _, valid)| *valid)
+            .ok_or_else(|| format!("missing catch validity for `{}`", handler.catch_binding))?;
+        self.builder.build_store(valid_slot, self.context.bool_type().const_int(1, false))
+            .map_err(|e| e.to_string())?;
+        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 7] = [
+            ("native_text", PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, ptr_ty.into()),
+            ("object", PENDING_EXCEPTION_OBJECT_SYMBOL, ptr_ty.into()),
+            ("aggregate", PENDING_EXCEPTION_AGGREGATE_SYMBOL, ptr_ty.into()),
+            ("tag", PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
+            ("f64", PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
+            ("i64", PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
+            ("bool", PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
+        ];
+        for (suffix, symbol, ty) in pending_metadata {
+            let name = if suffix == "native_text" {
+                Self::async_catch_native_name(&handler.catch_binding)
+            } else {
+                format!("{}__thaw_exception_{suffix}", handler.catch_binding)
+            };
+            let index = plan.locals.iter().position(|(local, _)| local == &name)
+                .ok_or_else(|| format!("missing async catch metadata `{name}`"))?;
+            let slot = self.async_frame_field(
+                frame,
+                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                "caught_sync_metadata",
+            )?;
+            let global = self.module.get_global(symbol)
+                .ok_or_else(|| format!("missing pending exception metadata `{symbol}`"))?;
+            let value = self.builder.build_load(ty, global.as_pointer_value(), "pending_sync_metadata")
+                .map_err(|e| e.to_string())?;
+            self.builder.build_store(slot, value).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     fn finish_async_guarded_stmt(
         &mut self,
         boundary: &Option<(
@@ -1032,38 +1101,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(slot, self.context.bool_type().const_int(enabled as u64, false))
                 .map_err(|e| e.to_string())?;
         }
-        let binding_slot = self.catch_native_text.get(&handler.catch_binding)
-            .map(|(binding, _)| *binding)
-            .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
-        self.builder.build_store(binding_slot, pending).map_err(|e| e.to_string())?;
-        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 7] = [
-            ("native_text", PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, ptr_ty.into()),
-            ("object", PENDING_EXCEPTION_OBJECT_SYMBOL, ptr_ty.into()),
-            ("aggregate", PENDING_EXCEPTION_AGGREGATE_SYMBOL, ptr_ty.into()),
-            ("tag", PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
-            ("f64", PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
-            ("i64", PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
-            ("bool", PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
-        ];
-        for (suffix, symbol, ty) in pending_metadata {
-            let name = if suffix == "native_text" {
-                Self::async_catch_native_name(&handler.catch_binding)
-            } else {
-                format!("{}__thaw_exception_{suffix}", handler.catch_binding)
-            };
-            let index = plan.locals.iter().position(|(local, _)| local == &name)
-                .ok_or_else(|| format!("missing async catch metadata `{name}`"))?;
-            let slot = self.async_frame_field(
-                frame,
-                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
-                "caught_sync_metadata",
-            )?;
-            let global = self.module.get_global(symbol)
-                .ok_or_else(|| format!("missing pending exception metadata `{symbol}`"))?;
-            let value = self.builder.build_load(ty, global.as_pointer_value(), "pending_sync_metadata")
-                .map_err(|e| e.to_string())?;
-            self.builder.build_store(slot, value).map_err(|e| e.to_string())?;
-        }
+        self.capture_pending_async_catch(frame, plan, handler, pending)?;
         self.builder.build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
         self.clear_pending_native_text()?;
