@@ -1,3 +1,23 @@
+#[test]
+fn bundled_json_preserves_proto_keys_and_other_json_values() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("bundle_json_proto_keys");
+    fs::write(dir.join("index.js"), "module.exports = [require('./top.json'), require('./nested.json'), require('./scalar.json'), require('./array.json')];").unwrap();
+    fs::write(dir.join("top.json"), r#"{"__proto__":{"marker":7},"plain":1}"#).unwrap();
+    fs::write(dir.join("nested.json"), r#"{"outer":{"__proto__":"inner","value":2}}"#).unwrap();
+    fs::write(dir.join("scalar.json"), "42").unwrap();
+    fs::write(dir.join("array.json"), r#"[1,{"__proto__":"item"}]"#).unwrap();
+    let modules = temp_registry("bundle_json_proto_keys_modules");
+    let (bundle, _, count, _) = bundle_commonjs_package(&modules, "json-pkg", &dir, "index.js").unwrap();
+    assert_eq!(count, 5);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.jsonModuleCheck = function() {{ var values = module.exports, top = values[0], nested = values[1].outer, array = values[3]; return [Object.prototype.hasOwnProperty.call(top, '__proto__'), Object.getPrototypeOf(top) === Object.prototype, Object.keys(top).indexOf('__proto__') >= 0, top['__proto__'].marker, Object.prototype.hasOwnProperty.call(nested, '__proto__'), Object.getPrototypeOf(nested) === Object.prototype, nested.value, nested['__proto__'], values[2], Array.isArray(array), array[0], Object.prototype.hasOwnProperty.call(array[1], '__proto__'), array[1]['__proto__']]; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"jsonModuleCheck".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true,7,true,true,2,\"inner\",42,true,1,true,\"item\"]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
 /// The exact shape found in a real npm package (`qs`): `main` requires
 /// two sibling files by relative path, each with no further requires
 /// of their own.
