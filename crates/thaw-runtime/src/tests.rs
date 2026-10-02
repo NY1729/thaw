@@ -1755,3 +1755,47 @@ fn surfaces_http_error_status_as_an_error() {
     assert!(err.contains("500"));
     server.join().unwrap();
 }
+
+#[test]
+fn idle_drain_includes_work_created_by_rejection_reporters() {
+    thread_local! {
+        static MODE: Cell<u8> = const { Cell::new(0) };
+        static CALLS: Cell<u32> = const { Cell::new(0) };
+        static RAN: Cell<bool> = const { Cell::new(false) };
+        static CHILDREN: RefCell<Vec<*mut ThawPromise>> = const { RefCell::new(Vec::new()) };
+    }
+    extern "C" fn resume(_: *mut u8, _: *const u8) {
+        RAN.with(|ran| ran.set(true));
+    }
+    extern "C" fn report(_: *const u8) -> u8 {
+        let first = CALLS.with(|calls| { let first = calls.get() == 0; calls.set(calls.get() + 1); first });
+        if first {
+            let child = thaw_promise_new();
+            if MODE.with(Cell::get) == 0 {
+                assert_eq!(unsafe { thaw_promise_subscribe(child, resume, std::ptr::null_mut()) }, 1);
+                thaw_promise_resolve(child, std::ptr::null());
+            } else {
+                thaw_promise_reject(child, c"listener-created".as_ptr().cast());
+            }
+            CHILDREN.with(|children| children.borrow_mut().push(child));
+        }
+        1
+    }
+    for mode in [0, 1] {
+        MODE.with(|value| value.set(mode));
+        CALLS.with(|calls| calls.set(0));
+        RAN.with(|ran| ran.set(false));
+        thaw_promise_set_unhandled_reporter(Some(report));
+        let original = thaw_promise_new();
+        thaw_promise_reject(original, c"original".as_ptr().cast());
+        assert!(thaw_runtime_run_until_idle() > 0);
+        assert_eq!(RAN.with(Cell::get), mode == 0);
+        assert_eq!(CALLS.with(Cell::get), if mode == 0 { 1 } else { 2 });
+        assert_eq!(thaw_runtime_poll_one(), 0);
+        thaw_promise_set_unhandled_reporter(None);
+        unsafe { thaw_promise_destroy(original) };
+        for child in CHILDREN.with(|children| children.take()) {
+            unsafe { thaw_promise_destroy(child) };
+        }
+    }
+}
