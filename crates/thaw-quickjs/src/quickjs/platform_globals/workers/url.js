@@ -110,6 +110,7 @@
       if (trailing && result !== '/') result += '/';
       return result || (absolute ? '/' : '');
     };
+    const validPort = port => port === '' || (/^\d+$/.test(port) && Number(port) <= 65535);
     const parseAuthority = authority => {
       let userinfo = '', host = authority;
       const at = authority.lastIndexOf('@');
@@ -128,7 +129,7 @@
         const hostColon = host.lastIndexOf(':');
         if (hostColon >= 0) { hostname = host.substring(0, hostColon); port = host.substring(hostColon + 1); }
       }
-      if (port !== '' && !/^\d+$/.test(port)) throw new TypeError('Invalid URL');
+      if (!validPort(port)) throw new TypeError('Invalid URL');
       return { username, password, hostname: hostname.toLowerCase(), port };
     };
     globalThis.URL = class URL {
@@ -185,9 +186,9 @@
       get hostname() { return this.__thawHostname; }
       set hostname(value) { this.__thawHostname = String(value).toLowerCase(); }
       get port() { return this.__thawPort; }
-      set port(value) { const port = String(value); if (port !== '' && !/^\d+$/.test(port)) return; this.__thawPort = port; this.__thawNormalizePort(); }
+      set port(value) { const port = String(value); if (!validPort(port)) return; this.__thawPort = port; this.__thawNormalizePort(); }
       get host() { return this.hostname + (this.port ? ':' + this.port : ''); }
-      set host(value) { const parsed = parseAuthority(String(value)); this.__thawHostname = parsed.hostname; this.__thawPort = parsed.port; this.__thawNormalizePort(); }
+      set host(value) { const host = String(value); let parsed; try { parsed = parseAuthority(host); } catch (_) { return; } this.__thawHostname = parsed.hostname; this.__thawPort = parsed.port; this.__thawNormalizePort(); }
       get pathname() { return this.__thawPathname; }
       set pathname(value) { this.__thawPathname = normalizePath(String(value).charAt(0) === '/' ? String(value) : '/' + String(value)); }
       get search() { return this.__thawSearch; }
