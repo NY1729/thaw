@@ -5928,3 +5928,27 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
     assert_eq!(take_tls_stream_handle(&mut last_server), None);
     assert_eq!(last_server, u32::MAX - 1);
 }
+
+#[test]
+fn worker_transport_codec_preserves_sparse_array_slots_and_graph_references() {
+    assert_eq!(
+        load(r#"function sparseWorkerTransport() {
+            const sparse = new Array(6);
+            sparse[1] = undefined;
+            sparse[3] = sparse;
+            const source = { sparse, map: new Map([['value', sparse]]), set: new Set([sparse]) };
+            const copy = __thaw_worker_decode(__thaw_worker_encode(source));
+            const empty = __thaw_worker_decode(__thaw_worker_encode(new Array(3)));
+            return [copy.sparse.length, 0 in copy.sparse, 1 in copy.sparse,
+                2 in copy.sparse, 3 in copy.sparse, 4 in copy.sparse, 5 in copy.sparse,
+                copy.sparse[1] === undefined, copy.sparse[3] === copy.sparse,
+                copy.map.get('value') === copy.sparse, copy.set.has(copy.sparse),
+                empty.length, Object.keys(empty).length];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("sparseWorkerTransport", "[]"),
+        "[6,false,true,false,true,false,false,true,true,true,true,3,0]"
+    );
+}

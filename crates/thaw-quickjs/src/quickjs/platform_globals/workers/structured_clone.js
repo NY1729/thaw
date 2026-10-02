@@ -9,7 +9,13 @@
       if (typeof input === 'function') throw new DOMException('value cannot be cloned', 'DataCloneError');
       const id = nodes.length; seen.set(input, id); nodes.push(null);
       let node;
-      if (Array.isArray(input)) node = { t: 'Array', v: input.map(encode) };
+      if (Array.isArray(input)) {
+        const length = input.length, entries = [];
+        for (let index = 0; index < length; index++) {
+          if (Object.prototype.hasOwnProperty.call(input, index)) entries.push([index, encode(input[index])]);
+        }
+        node = { t: 'Array', l: length, v: entries };
+      }
       else if (input instanceof Date) node = { t: 'Date', v: input.getTime() };
       else if (input instanceof RegExp) node = { t: 'RegExp', s: input.source, f: input.flags, i: input.lastIndex };
       else if (input instanceof Map) node = { t: 'Map', v: Array.from(input, entry => [encode(entry[0]), encode(entry[1])]) };
@@ -37,7 +43,7 @@
       return item.v;
     };
     graph.nodes.forEach((node, id) => {
-      if (node.t === 'Array') values[id] = [];
+      if (node.t === 'Array') values[id] = new Array(node.l);
       else if (node.t === 'Date') values[id] = new Date(node.v);
       else if (node.t === 'RegExp') { values[id] = new RegExp(node.s, node.f); values[id].lastIndex = node.i; }
       else if (node.t === 'Map') values[id] = new Map();
@@ -55,7 +61,7 @@
       else if (node.t === 'TypedArray') values[id] = new globalThis[node.c](decode(node.b), node.o, node.l);
     });
     graph.nodes.forEach((node, id) => {
-      if (node.t === 'Array') node.v.forEach(item => values[id].push(decode(item)));
+      if (node.t === 'Array') node.v.forEach(entry => { values[id][entry[0]] = decode(entry[1]); });
       else if (node.t === 'Map') node.v.forEach(entry => values[id].set(decode(entry[0]), decode(entry[1])));
       else if (node.t === 'Set') node.v.forEach(item => values[id].add(decode(item)));
       else if (node.t === 'Object') node.v.forEach(entry => { values[id][entry[0]] = decode(entry[1]); });
