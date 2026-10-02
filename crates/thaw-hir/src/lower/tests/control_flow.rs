@@ -467,3 +467,71 @@ fn promise_catch_direct_rethrow_uses_binding_snapshot_marker() {
     assert!(text.contains("@@thaw_rethrow_pending_exception"), "{text}");
     assert!(text.contains("@@thaw_promise_rejection:"), "{text}");
 }
+
+#[test]
+fn inferred_return_includes_undefined_for_fallthrough_and_bare_return() {
+    let program = lower(r#"
+        function fallthrough(flag: boolean) { if (flag) return 1; }
+        function bare(flag: boolean) { if (flag) return 2; return; }
+        function shadowed(undefined: number, flag: boolean) { if (flag) return 4; }
+        function switchBreak(mode: number) {
+            switch (mode) { case 1: break; return 5; default: return 6; }
+        }
+        function doBreak(flag: boolean) {
+            do { if (flag) return 7; break; } while (true);
+        }
+        function finalizer(flag: boolean) {
+            try {} finally { if (flag) return 8; }
+        }
+        class Choice { pick(flag: boolean) { if (flag) return 3; } }
+    "#);
+    let expected = HirType::Union(vec![HirType::F64, HirType::Undefined]);
+    for name in ["fallthrough", "bare", "shadowed", "switchBreak", "doBreak", "finalizer"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        assert_eq!(function.ret, expected, "{name}");
+    }
+    let method = program.functions.iter().find(|function| function.name.contains("pick")).unwrap();
+    assert_eq!(method.ret, expected);
+}
+
+#[test]
+fn inferred_return_distinguishes_breakable_and_unbreakable_infinite_loops() {
+    let program = lower(r#"
+        function breakable(flag: boolean) {
+            if (flag) return 1;
+            while (true) { if (flag) break; }
+        }
+        function unbreakable(flag: boolean) {
+            if (flag) return 1;
+            while (true) { return 2; }
+        }
+        function nestedSwitch(flag: boolean) {
+            if (flag) return 1;
+            while (true) { switch (1) { default: break; } }
+        }
+    "#);
+    let breakable = program.functions.iter().find(|function| function.name == "breakable").unwrap();
+    assert_eq!(breakable.ret, HirType::Union(vec![HirType::F64, HirType::Undefined]));
+    for name in ["unbreakable", "nestedSwitch"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        assert_eq!(function.ret, HirType::F64, "{name}");
+    }
+}
+
+#[test]
+fn inferred_block_arrow_includes_undefined_without_absorbing_nested_returns() {
+    let program = lower(r#"
+        function main(): void {
+            const callback = (flag: boolean) => {
+                const nested = () => "text";
+                if (flag) return 1;
+                return;
+            };
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let HirStmt::Let(_, _, HirExpr::Lambda(_, _, ret, _)) = &main.body[0] else {
+        panic!("expected inferred block arrow");
+    };
+    assert_eq!(ret, &HirType::Union(vec![HirType::F64, HirType::Undefined]));
+}

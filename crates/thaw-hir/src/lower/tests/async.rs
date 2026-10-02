@@ -537,3 +537,28 @@ fn iterator_from_rejects_async_generators_clearly() {
         "{error}"
     );
 }
+
+#[test]
+fn inferred_async_returns_include_undefined_for_fallthrough_and_bare_return() {
+    let program = lower(r#"
+        async function fallthrough(flag: boolean) { if (flag) return 1; }
+        async function bare(flag: boolean) { if (flag) return 2; return; }
+        function main(): void {
+            const callback = async (flag: boolean) => {
+                if (flag) return 3;
+                return;
+            };
+        }
+    "#);
+    let expected = HirType::Union(vec![HirType::F64, HirType::Undefined]);
+    for name in ["fallthrough", "bare"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        assert_eq!(function.ret, expected, "{name}");
+        assert!(function.is_async);
+    }
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let HirStmt::Let(_, HirType::Function(_, ret), _) = &main.body[0] else {
+        panic!("expected inferred async arrow binding");
+    };
+    assert_eq!(ret.as_ref(), &HirType::Promise(Box::new(expected)));
+}

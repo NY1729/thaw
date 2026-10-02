@@ -2049,6 +2049,17 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::Unary(unary) => {
+                // Implicit-return normalization inserts a dummy-span `void 0`
+                // to avoid resolving a user binding named `undefined`. Only
+                // that synthetic no-effect form is an Undefined HIR value;
+                // ordinary unary-void expressions retain their current ABI.
+                if unary.op == UnaryOp::Void
+                    && unary.span == swc_common::DUMMY_SP
+                    && matches!(unary.arg.as_ref(), Expr::Lit(Lit::Num(number))
+                        if number.span == swc_common::DUMMY_SP && number.value == 0.0)
+                {
+                    return Ok(HirExpr::Lit(HirLit::Undefined));
+                }
                 if unary.op == UnaryOp::Delete {
                     let Expr::Member(member) = unary.arg.as_ref() else {
                         return Err("native `delete` requires a JSON or dictionary property".into());
