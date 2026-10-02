@@ -1614,3 +1614,58 @@ module.exports = function() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn http2_destroy_completes_pending_ack_callbacks_once() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_pending_ack_destroy");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  var original = globalThis.__thaw_net_write, events = [], terminal = new Error('terminated'), removal = new Error('removal');
+  globalThis.__thaw_net_write = function() { return 'ok'; };
+  try {
+    var session = new http2.ClientHttp2Session(999985, 'tcp');
+    session.settings({ maxConcurrentStreams: 11 }, function(error) { events.push(error === terminal ? 'settings-failed' : 'settings-wrong'); });
+    session.ping(Buffer.from('12345678'), function(error) { events.push(error === terminal ? 'ping-failed' : 'ping-wrong'); });
+    session.on('removeListener', function(name) { if (name === 'localSettings') throw removal; });
+    session.on('error', function() { events.push('error'); });
+    session.on('close', function() { events.push('close'); });
+    var caught = false;
+    try { session.destroy(terminal); } catch (error) { caught = error === removal; events.push('caught-removal'); }
+    var dead = [session.destroyed, session._pendingAcks.length, session.listenerCount('localSettings'), session.listenerCount('_pingAck'), caught];
+
+    var settled = new http2.ClientHttp2Session(999986, 'tcp'), successes = 0, failures = 0, payload = Buffer.from('abcdefgh');
+    settled.settings({}, function(error) { if (error) failures++; else successes++; });
+    settled.ping(payload, function(error) { if (error) failures++; else successes++; });
+    settled._frame(4, 1, 0, Buffer.alloc(0));
+    settled._frame(6, 1, 0, payload);
+    settled.destroy();
+    var acked = [successes, failures, settled._pendingAcks.length, settled.listenerCount('localSettings'), settled.listenerCount('_pingAck')];
+    return Promise.resolve().then(function() { return [dead, acked, events]; });
+  } finally { globalThis.__thaw_net_write = original; }
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_pending_ack_destroy_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2PendingAckDestroy = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2PendingAckDestroy").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,0,0,0,true],[2,0,0,0,0],["error","close","caught-removal","settings-failed","ping-failed"]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
