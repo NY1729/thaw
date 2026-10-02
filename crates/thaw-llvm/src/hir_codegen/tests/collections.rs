@@ -1408,6 +1408,40 @@ fn compiles_native_array_from_a_map_or_set() {
     );
 }
 
+#[test]
+fn native_map_and_set_for_of_observe_mutations_during_iteration() {
+    let source = r#"
+        function main(): void {
+            const appended = new Set<number>([1]);
+            for (const value of appended) {
+                console.log("append", value);
+                if (value === 1) appended.add(2);
+            }
+            const set = new Set<number>([1, 2, 3]);
+            for (const value of set) {
+                console.log("set", value);
+                if (value === 1) { set.delete(2); set.add(4); }
+                if (value === 3) { set.clear(); set.add(5); }
+            }
+            const map = new Map<string, number>([["a", 1], ["b", 2], ["c", 3]]);
+            for (const [key, value] of map) {
+                console.log("map", key, value);
+                if (key === "a") { map.delete("b"); map.set("d", 4); }
+                if (key === "c") { map.clear(); map.set("e", 5); }
+            }
+            const appendedMap = new Map<string, number>([["a", 1]]);
+            for (const [key, value] of appendedMap) {
+                console.log("append-map", key, value);
+                if (key === "a") appendedMap.set("b", 2);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_set_live_for_of"),
+        "append 1\nappend 2\nset 1\nset 3\nset 5\nmap a 1\nmap c 3\nmap e 5\nappend-map a 1\nappend-map b 2\n"
+    );
+}
+
 /// `Map`/`Set` values used to reject `I64`/`JsValue` outright ("Map/Set
 /// values of type ... are not supported") -- both already fit the same
 /// opaque 64-bit storage word `F64`/`Bool` values decode from, with no

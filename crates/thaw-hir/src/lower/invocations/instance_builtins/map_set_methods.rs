@@ -788,7 +788,7 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 
-    fn lower_map_iterator(
+    pub(crate) fn lower_map_iterator(
         &mut self,
         receiver: HirExpr,
         receiver_type: HirType,
