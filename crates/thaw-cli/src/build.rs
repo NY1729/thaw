@@ -516,7 +516,10 @@ fn build_with_native_mode(
         &transform,
     )?;
     if !shim_source.is_empty() {
-        let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_source_map(&shim_source)?;
+        let (mut shim, shim_source_map) = thaw_parser::parse_typescript_with_source_map_named(
+            &shim_source,
+            thaw_parser::common::FileName::Custom("generated registry and bridge shims.ts".into()),
+        )?;
         for item in &mut shim.body {
             let thaw_parser::ast::ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement)) = item else {
                 continue;
