@@ -2278,6 +2278,42 @@ fn direct_namespace_function_and_class_capture_qualified_runtime_members() {
 }
 
 #[test]
+fn marked_private_support_values_do_not_capture_missing_runtime_members() {
+    // Unrun integration regression: typeof-only support value declarations
+    // exist for type resolution, but never name bundle.js properties.
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-private-support-values-{}", std::process::id(),
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("support-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        declare namespace __thaw_support_test {
+            type __thaw_private_support_marker__ = never;
+            export interface Id { value: string; }
+            export function missing(): Id;
+            export const absent: Id;
+        }
+        export interface Model { maker: typeof __thaw_support_test.missing; }
+        export declare function live(): string;
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "module.exports = { live: function() { return 'ok'; } };",
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { live } from "support-kit";
+        function main(): void { console.log(live()); }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn namespace_type_only_class_origin_does_not_capture_a_hidden_runtime_member() {
     // The type-only origin supplies the class shape; only its public value
     // alias exists on the JavaScript namespace object.

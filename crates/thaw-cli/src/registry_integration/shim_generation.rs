@@ -196,6 +196,12 @@ fn generate_registry_shims(
         let explicit_type_exports = thaw_bridge::exported_type_names_named(&package.dts_source, &dts_filename);
         let value_exports = thaw_bridge::exported_value_names_named(&package.dts_source, &dts_filename);
         let type_only_namespaces = thaw_bridge::type_only_namespace_names_named(&package.dts_source, &dts_filename);
+        let mut internal_support_namespaces = thaw_bridge::internal_support_namespace_names_named(&package.dts_source, &dts_filename);
+        internal_support_namespaces.extend(thaw_bridge::internal_owned_namespace_names_named(
+            &package.dts_source, &dts_filename,
+        ));
+        let internal_support_classes = classes.iter().filter(|class| internal_support_namespaces.iter().any(|namespace|
+            class.name.starts_with(&format!("{namespace}.")))).map(|class| class.name.clone()).collect::<std::collections::HashSet<_>>();
         let mut nested_namespaces = thaw_bridge::nested_namespace_members_named(&package.dts_source, &dts_filename);
         let live_namespace_origins = nested_namespaces.keys()
             .filter(|namespace| !type_only_namespaces.contains(*namespace))
@@ -208,6 +214,20 @@ fn generate_registry_shims(
             (name == namespace || name.starts_with(&format!("{namespace}.")))
                 && !(name.contains('.') && explicit_type_exports.contains(name))
         }));
+        type_only_value_names.extend(internal_support_namespaces.iter().cloned());
+        type_only_value_names.extend(internal_support_classes.iter().cloned());
+        // A type-only namespace nested under a live namespace may contain
+        // class declarations for type shape. Those classes have no runtime
+        // property at the nested public path.
+        type_only_value_names.extend(functions.iter().map(|function| &function.name)
+            .chain(classes.iter().map(|class| &class.name))
+            .chain(values.iter().map(|value| &value.name))
+            .filter(|name| type_only_namespaces.iter().any(|namespace|
+                name.starts_with(&format!("{namespace}.")))).cloned());
+        type_only_value_names.extend(functions.iter().map(|function| &function.name)
+            .chain(values.iter().map(|value| &value.name))
+            .filter(|name| internal_support_namespaces.iter().any(|namespace|
+                name.starts_with(&format!("{namespace}.")))).cloned());
         let hidden_namespaces = thaw_bridge::nonpublic_namespace_sources_named(&package.dts_source, &dts_filename);
         for name in classes.iter().map(|class| &class.name)
             .chain(values.iter().map(|value| &value.name)) {
@@ -270,7 +290,7 @@ fn generate_registry_shims(
         let namespace_self_aliases =
             thaw_bridge::self_referential_namespace_aliases_named(&package.dts_source, &dts_filename);
         let mut type_only_exports = explicit_type_exports;
-        type_only_exports.extend(classes.iter().map(|class| class.name.clone()));
+        type_only_exports.extend(classes.iter().filter(|class| !internal_support_classes.contains(&class.name)).map(|class| class.name.clone()));
         nested_namespaces.retain(|namespace, _| !type_only_namespaces.contains(namespace));
         for (namespace, members) in &mut nested_namespaces {
             for (member, target) in members {
@@ -305,6 +325,7 @@ fn generate_registry_shims(
             factory_class_returns,
             namespace_self_aliases,
             type_only_exports,
+            internal_support_classes,
             type_only_value_names,
             nested_namespaces,
         });
@@ -1888,6 +1909,7 @@ fn generate_registry_shims(
             package_exports.insert(name.clone(), target.clone());
         }
         for class in &pkg.classes {
+            if pkg.internal_support_classes.contains(&class.name) { continue; }
             // A value binding (see `bare_value_classes` above) always
             // wins over `class_targets`'s constructor-invocation symbol
             // for this bare-identifier mapping specifically: the two
