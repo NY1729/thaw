@@ -1053,16 +1053,12 @@ impl<'a> FnLowerer<'a> {
                         ],
                     )])
                 } else {
-                    let (result_payload, present) = match &return_type {
-                        HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
-                        output => (
-                            output.clone(),
-                            HirExpr::OptionalSome(Box::new(invoked), output.clone()),
-                        ),
-                    };
+                    let result_type = optional_parameter_type(return_type);
+                    let present = self.coerce_to_declared(&result_type, invoked)?;
+                    let absent = omitted_parameter_value(&result_type)?;
                     HirExpr::Block(vec![HirStmt::If(
                         is_none(bound),
-                        vec![HirStmt::Return(Some(HirExpr::OptionalNone(result_payload)))],
+                        vec![HirStmt::Return(Some(absent))],
                         vec![HirStmt::Return(Some(present))],
                     )])
                 };
@@ -1209,16 +1205,12 @@ impl<'a> FnLowerer<'a> {
                 ],
             )])
         } else {
-            let (result_payload, present) = match &return_type {
-                HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
-                output => (
-                    output.clone(),
-                    HirExpr::OptionalSome(Box::new(invoked), output.clone()),
-                ),
-            };
+            let result_type = optional_parameter_type(return_type);
+            let present = self.coerce_to_declared(&result_type, invoked)?;
+            let absent = omitted_parameter_value(&result_type)?;
             HirExpr::Block(vec![HirStmt::If(
                 is_none(bound),
-                vec![HirStmt::Return(Some(HirExpr::OptionalNone(result_payload)))],
+                vec![HirStmt::Return(Some(absent))],
                 vec![HirStmt::Return(Some(present))],
             )])
         };
