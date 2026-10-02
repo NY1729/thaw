@@ -973,6 +973,38 @@ impl Visit for GenericClassUseCollector<'_> {
 
 struct GenericClassTypeSubstituter<'a> {
     substitutions: &'a HashMap<Symbol, Box<TsType>>,
+    /// Type parameters declared by nested syntax hide an outer class/method
+    /// parameter of the same spelling only while visiting that syntax.
+    shadowed: Vec<HashSet<Symbol>>,
+}
+
+impl<'a> GenericClassTypeSubstituter<'a> {
+    fn new(substitutions: &'a HashMap<Symbol, Box<TsType>>) -> Self {
+        Self { substitutions, shadowed: Vec::new() }
+    }
+
+    fn enter(&mut self, params: Option<&swc_ecma_ast::TsTypeParamDecl>) {
+        self.shadowed.push(params.map_or_else(HashSet::new, |params| {
+            params.params.iter().map(|param| param.name.sym.to_string()).collect()
+        }));
+    }
+
+    fn leave(&mut self) {
+        self.shadowed.pop().expect("type parameter scope");
+    }
+}
+
+/// `infer U` in an `extends` type binds U in that conditional's true arm.
+/// A nested conditional's own infer bindings must not leak to the outer arm.
+#[derive(Default)]
+struct ConditionalInferBindings(HashSet<Symbol>);
+
+impl Visit for ConditionalInferBindings {
+    fn visit_ts_infer_type(&mut self, infer: &swc_ecma_ast::TsInferType) {
+        self.0.insert(infer.type_param.name.sym.to_string());
+    }
+
+    fn visit_ts_conditional_type(&mut self, _conditional: &swc_ecma_ast::TsConditionalType) {}
 }
 
 impl VisitMut for GenericClassTypeSubstituter<'_> {
@@ -980,14 +1012,104 @@ impl VisitMut for GenericClassTypeSubstituter<'_> {
         if let TsType::TsTypeRef(reference) = ty {
             if reference.type_params.is_none() {
                 if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
-                    if let Some(replacement) = self.substitutions.get(name.sym.as_ref()) {
-                        *ty = replacement.as_ref().clone();
-                        return;
+                    if !self.shadowed.iter().any(|scope| scope.contains(name.sym.as_ref())) {
+                        if let Some(replacement) = self.substitutions.get(name.sym.as_ref()) {
+                            *ty = replacement.as_ref().clone();
+                            return;
+                        }
                     }
                 }
             }
         }
         ty.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_class(&mut self, class: &mut swc_ecma_ast::Class) {
+        self.enter(class.type_params.as_deref());
+        class.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_function(&mut self, function: &mut swc_ecma_ast::Function) {
+        self.enter(function.type_params.as_deref());
+        function.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_arrow_expr(&mut self, arrow: &mut swc_ecma_ast::ArrowExpr) {
+        self.enter(arrow.type_params.as_deref());
+        arrow.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_fn_type(&mut self, function: &mut swc_ecma_ast::TsFnType) {
+        self.enter(function.type_params.as_deref());
+        function.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_constructor_type(&mut self, constructor: &mut swc_ecma_ast::TsConstructorType) {
+        self.enter(constructor.type_params.as_deref());
+        constructor.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_call_signature_decl(&mut self, signature: &mut swc_ecma_ast::TsCallSignatureDecl) {
+        self.enter(signature.type_params.as_deref());
+        signature.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_construct_signature_decl(&mut self, signature: &mut swc_ecma_ast::TsConstructSignatureDecl) {
+        self.enter(signature.type_params.as_deref());
+        signature.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_method_signature(&mut self, signature: &mut swc_ecma_ast::TsMethodSignature) {
+        self.enter(signature.type_params.as_deref());
+        signature.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_interface_decl(&mut self, interface: &mut swc_ecma_ast::TsInterfaceDecl) {
+        self.enter(interface.type_params.as_deref());
+        interface.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_type_alias_decl(&mut self, alias: &mut swc_ecma_ast::TsTypeAliasDecl) {
+        self.enter(alias.type_params.as_deref());
+        alias.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_mapped_type(&mut self, mapped: &mut swc_ecma_ast::TsMappedType) {
+        // `[K in keyof T]`: the source constraint sees the outer T, while K
+        // binds only the mapped property name and value types.
+        mapped.type_param.constraint.visit_mut_with(self);
+        mapped.type_param.default.visit_mut_with(self);
+        self.shadowed.push([mapped.type_param.name.sym.to_string()].into());
+        mapped.name_type.visit_mut_with(self);
+        mapped.type_ann.visit_mut_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_infer_type(&mut self, infer: &mut swc_ecma_ast::TsInferType) {
+        self.shadowed.push([infer.type_param.name.sym.to_string()].into());
+        infer.visit_mut_children_with(self);
+        self.leave();
+    }
+
+    fn visit_mut_ts_conditional_type(&mut self, conditional: &mut swc_ecma_ast::TsConditionalType) {
+        let mut inferred = ConditionalInferBindings::default();
+        conditional.extends_type.visit_with(&mut inferred);
+        conditional.check_type.visit_mut_with(self);
+        conditional.extends_type.visit_mut_with(self);
+        self.shadowed.push(inferred.0);
+        conditional.true_type.visit_mut_with(self);
+        self.leave();
+        conditional.false_type.visit_mut_with(self);
     }
 }
 
@@ -1033,9 +1155,7 @@ fn resolve_generic_class_type_tuple(
     for (index, parameter) in template.parameters.iter().enumerate() {
         let (argument, concrete) = if let Some(argument) = arguments.get(index) {
             let mut argument = argument.clone();
-            argument.visit_mut_with(&mut GenericClassTypeSubstituter {
-                substitutions: &ast_substitution,
-            });
+            argument.visit_mut_with(&mut GenericClassTypeSubstituter::new(&ast_substitution));
             let concrete = lower_ts_type(&argument, interfaces, generic_interfaces)?;
             (argument, concrete)
         } else if let Some(inferred) = inferred.get(parameter) {
@@ -1048,9 +1168,7 @@ fn resolve_generic_class_type_tuple(
                         "cannot infer generic class `{name}` type parameter `{parameter}` from its constructor arguments"
                     )
                 })?;
-            argument.visit_mut_with(&mut GenericClassTypeSubstituter {
-                substitutions: &ast_substitution,
-            });
+            argument.visit_mut_with(&mut GenericClassTypeSubstituter::new(&ast_substitution));
             let concrete = lower_ts_type(&argument, interfaces, generic_interfaces)?;
             (argument, concrete)
         };
@@ -1710,9 +1828,7 @@ fn specialize_generic_classes(
                 .retain(|member| !generic_class_static_member(member));
             declaration
                 .class
-                .visit_mut_with(&mut GenericClassTypeSubstituter {
-                    substitutions: &substitutions,
-                });
+                .visit_mut_with(&mut GenericClassTypeSubstituter::new(&substitutions));
             specialized
                 .body
                 .push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))));

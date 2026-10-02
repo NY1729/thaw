@@ -359,9 +359,7 @@ impl<'a> FnLowerer<'a> {
             .collect::<Result<HashMap<_, _>, String>>()?;
         let mut specialized_arrow = arrow.clone();
         specialized_arrow.type_params = None;
-        specialized_arrow.visit_mut_with(&mut GenericClassTypeSubstituter {
-            substitutions: &substitutions,
-        });
+        specialized_arrow.visit_mut_with(&mut GenericClassTypeSubstituter::new(&substitutions));
         let previous_receiver = std::mem::replace(
             &mut self.non_arrow_receiver,
             receiver,
