@@ -316,33 +316,50 @@ fn bundle_commonjs_package_cached(
         {
             let (resolution_spec, suffix) = split_module_suffix(&spec);
             if resolution_spec.starts_with('#') {
-                if let Some((_, resolved_abs)) =
-                    resolve_package_import(&abs_path, resolution_spec)
-                {
-                    let resolved_relative = resolved_abs
-                        .strip_prefix(&pkg_dir)
-                        .ok()
-                        .and_then(|path| path.to_str())
-                        .map(normalize_path_string)
-                        .unwrap_or_default();
-                    if resolved_relative.is_empty() {
+                let conditions: &[&str] = if analysis.import_condition_specs.contains(&spec) {
+                    &["import", "node", "default"]
+                } else {
+                    &["require", "node", "default"]
+                };
+                let resolved = resolve_package_import(
+                    node_modules_dir, &abs_path, resolution_spec, conditions,
+                );
+                let (name, relative, absolute, directory) = match resolved {
+                    Some(PackageImportResolution::Local(absolute)) => {
+                        let Some(relative) = absolute
+                            .strip_prefix(&pkg_dir)
+                            .ok()
+                            .and_then(|path| path.to_str())
+                            .map(normalize_path_string)
+                        else {
+                            continue;
+                        };
+                        (pkg_name.clone(), relative, absolute, pkg_dir.clone())
+                    }
+                    Some(PackageImportResolution::External(name, relative, absolute, directory)) => {
+                        (name, relative, absolute, directory)
+                    }
+                    Some(PackageImportResolution::Builtin(name)) => {
+                        let builtin_key = format!("node:{name}{suffix}");
+                        requires.push((spec.clone(), builtin_key.clone()));
+                        add_builtin_module(&name, builtin_key, &mut visited, &mut modules);
                         continue;
                     }
-                    let resolved_key = format!("{pkg_name}/{resolved_relative}{suffix}");
-                    requires.push((spec, resolved_key.clone()));
-                    if !visited.contains(&resolved_key) {
-                        visited.push(resolved_key.clone());
-                        worklist.push((
-                            resolved_key,
-                            resolved_abs,
-                            pkg_name.clone(),
-                            pkg_dir.clone(),
-                        ));
-                    }
+                    None => continue,
+                };
+                if relative.is_empty() {
+                    continue;
+                }
+                let resolved_key = format!("{name}/{relative}{suffix}");
+                requires.push((spec, resolved_key.clone()));
+                if !visited.contains(&resolved_key) {
+                    visited.push(resolved_key.clone());
+                    record_package_version(&mut dependency_versions, &name, &directory);
+                    worklist.push((resolved_key, absolute, name, directory));
                 }
                 continue;
             }
-            let resolved = if analysis.static_esm_specs.contains(&spec) {
+            let resolved = if analysis.import_condition_specs.contains(&spec) {
                 resolve_bare_import(node_modules_dir, &pkg_dir, resolution_spec)
             } else {
                 resolve_bare_require(node_modules_dir, &pkg_dir, resolution_spec)

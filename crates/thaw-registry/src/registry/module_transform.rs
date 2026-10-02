@@ -9,6 +9,7 @@
 struct ModuleAnalysis {
     specs: Vec<String>,
     static_esm_specs: Vec<String>,
+    import_condition_specs: Vec<String>,
     has_esm: bool,
     has_top_level_await: bool,
     attribute_error: Option<String>,
@@ -64,6 +65,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
 
     struct Calls {
         specs: Vec<String>,
+        dynamic_import_specs: Vec<String>,
         commonjs_exports: Vec<String>,
         has_nonliteral_module_load: bool,
         attribute_error: Option<String>,
@@ -252,6 +254,9 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
                     };
                 }
                 if let Some(specifiers) = specifiers {
+                    if is_import {
+                        self.dynamic_import_specs.extend(specifiers.iter().cloned());
+                    }
                     self.specs.extend(specifiers);
                 } else {
                     self.has_nonliteral_module_load = true;
@@ -375,6 +380,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     }
     let mut calls = Calls {
         specs: Vec::new(),
+        dynamic_import_specs: Vec::new(),
         commonjs_exports: Vec::new(),
         has_nonliteral_module_load: false,
         attribute_error: None,
@@ -418,9 +424,16 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     }
     calls.commonjs_exports.sort();
     calls.commonjs_exports.dedup();
+    let mut import_condition_specs = static_esm_specs.clone();
+    for spec in calls.dynamic_import_specs {
+        if !import_condition_specs.contains(&spec) {
+            import_condition_specs.push(spec);
+        }
+    }
     ModuleAnalysis {
         specs: unique,
         static_esm_specs,
+        import_condition_specs,
         has_esm: module
             .body
             .iter()

@@ -137,27 +137,63 @@ fn package_subpath_runtime_target(
     Some(capture.map_or_else(|| target.to_string(), |value| target.replace('*', value)))
 }
 
-fn resolve_package_import(path: &Path, spec: &str) -> Option<(String, PathBuf)> {
+enum PackageImportResolution {
+    Local(PathBuf),
+    External(String, String, PathBuf, PathBuf),
+    Builtin(String),
+}
+
+fn resolve_package_import(
+    node_modules_dir: &Path,
+    path: &Path,
+    spec: &str,
+    conditions: &[&str],
+) -> Option<PackageImportResolution> {
     let package_dir = path
         .ancestors()
         .find(|directory| read_manifest(directory).is_ok())?;
     let manifest = read_manifest(package_dir).ok()?;
     let imports = manifest.get("imports")?.as_object()?;
-    if let Some(value) = imports.get(spec) {
-        let target = select_export_condition(value, &["require", "node", "default"])?;
-        return resolve_module_path(package_dir, target).ok();
+    let (value, capture) = if let Some(value) = imports.get(spec) {
+        (value, None)
+    } else {
+        // A selected pattern with a null or unmatched condition blocks
+        // fallback to a less specific pattern.
+        let mut matches = imports.iter().filter_map(|(key, value)| {
+            let capture = wildcard_capture(key, spec)?;
+            let (prefix, suffix) = key.split_once('*')?;
+            Some((prefix.len(), suffix.len(), value, capture))
+        }).collect::<Vec<_>>();
+        matches.sort_by_key(|(prefix, suffix, _, _)| {
+            (std::cmp::Reverse(*prefix), std::cmp::Reverse(*suffix))
+        });
+        let (_, _, value, capture) = *matches.first()?;
+        (value, Some(capture))
+    };
+    let target = select_export_condition(value, conditions)?;
+    let target = capture.map_or_else(|| target.to_string(), |value| target.replace('*', value));
+    if target.starts_with("./") {
+        return resolve_module_path(package_dir, &target)
+            .ok()
+            .map(|(_, absolute)| PackageImportResolution::Local(absolute));
     }
-    for (pattern, value) in imports {
-        let Some(capture) = wildcard_capture(pattern, spec) else {
-            continue;
-        };
-        if let Some(target) =
-            select_export_condition(value, &["require", "node", "default"])
-        {
-            return resolve_module_path(package_dir, &target.replace('*', capture)).ok();
-        }
+    let builtin_name = target.strip_prefix("node:").unwrap_or(&target);
+    if builtin_module_source(builtin_name).is_some() {
+        return Some(PackageImportResolution::Builtin(builtin_name.to_string()));
     }
-    None
+    if target.starts_with("node:") {
+        return None;
+    }
+    if target.starts_with('.') || target.starts_with('/') || target.starts_with('#') {
+        return None;
+    }
+    let (name, relative, absolute, directory) = resolve_bare_specifier(
+        node_modules_dir,
+        package_dir,
+        &target,
+        conditions,
+    )?;
+    Some(PackageImportResolution::External(name, relative, absolute, directory))
 }
 
 /// Collapses `.`/`..` segments in a `/`-separated path string (npm
