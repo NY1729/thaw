@@ -124,7 +124,7 @@ jobs:
             index=$((index + 1))
           done
           if (( SHARD == 0 )); then
-            cargo test -p thaw-cli node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --exact --nocapture
+            cargo test -p thaw-cli tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --exact --nocapture
           fi
 
   runtime-comparison:
