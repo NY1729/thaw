@@ -935,6 +935,71 @@ fn promise_with_resolvers_exposes_settlement_functions() {
     );
 }
 
+/// Once `resolve(inner)` starts adoption, a later call to the paired reject
+/// function or an executor throw must not settle the outer promise first.
+#[test]
+fn promise_constructor_adoption_claims_both_resolvers_and_executor_throw() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const first = Promise.withResolvers<number>();
+            const rejectedLater = new Promise<number>((resolve, reject) => {
+                resolve(first.promise);
+                reject("late");
+            });
+            first.resolve(7);
+            console.log(await rejectedLater);
+
+            const second = Promise.withResolvers<number>();
+            const thrownLater = new Promise<number>((resolve, reject) => {
+                resolve(second.promise);
+                throw new Error("late throw");
+            });
+            second.resolve(8);
+            console.log(await thrownLater);
+
+            const third = Promise.withResolvers<number>();
+            const adoptedRejection = new Promise<number>((resolve, reject) => {
+                resolve(third.promise);
+                reject("late");
+            });
+            third.reject("inner");
+            console.log(await adoptedRejection.catch(error => {
+                console.log(error);
+                return 9;
+            }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_constructor_adoption_once"),
+        "7\n8\ninner\n9\n"
+    );
+}
+
+#[test]
+fn promise_resolver_first_call_wins_after_executor_returns() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const first = Promise.withResolvers<number>();
+            first.resolve(4);
+            first.reject("late");
+            first.resolve(5);
+            console.log(await first.promise);
+
+            const second = Promise.withResolvers<number>();
+            second.reject("first");
+            second.resolve(6);
+            console.log(await second.promise.catch(error => {
+                console.log(error);
+                return 0;
+            }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_resolver_first_call_wins"),
+        "4\nfirst\n0\n"
+    );
+}
+
 #[test]
 fn promise_try_wraps_values_promises_and_throws() {
     let source = r#"
