@@ -1249,6 +1249,9 @@ fn dns_resolution_completes_through_the_fd_event_loop() {
     let readiness = thaw_runtime_wait_fd_timeout(fd, THAW_FD_READABLE, 5_000);
     assert!(!thaw_runtime_run_until_resolved(readiness).is_null());
     assert_eq!(thaw_promise_state(readiness), 1);
+    let mut byte = [0u8; 1];
+    assert_eq!(unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) }, 1);
+    assert_eq!(byte, [1]);
     let resolved = result
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1260,6 +1263,25 @@ fn dns_resolution_completes_through_the_fd_event_loop() {
         thaw_promise_destroy(readiness);
         libc::close(fd);
     }
+}
+
+#[test]
+fn dns_completion_after_cancellation_does_not_raise_sigpipe() {
+    let mut ends = [-1; 2];
+    assert_eq!(
+        unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                0,
+                ends.as_mut_ptr(),
+            )
+        },
+        0
+    );
+    unsafe { libc::close(ends[0]) };
+    let error = notify_dns_completion(ends[1]).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
 }
 
 #[test]

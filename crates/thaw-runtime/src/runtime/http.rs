@@ -165,18 +165,44 @@ fn open_nonblocking_socket(address: SocketAddr) -> Result<RawFd, String> {
 
 type DnsResult = Arc<Mutex<Option<Result<Vec<SocketAddr>, String>>>>;
 
+fn notify_dns_completion(write_fd: RawFd) -> std::io::Result<()> {
+    let byte = [1u8];
+    let sent = unsafe {
+        libc::send(
+            write_fd,
+            byte.as_ptr().cast(),
+            byte.len(),
+            libc::MSG_NOSIGNAL,
+        )
+    };
+    let result = if sent == byte.len() as isize {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    };
+    unsafe { libc::close(write_fd) };
+    result
+}
+
 fn start_dns_resolution(host: String, port: u16) -> Result<(RawFd, DnsResult), String> {
-    let mut pipe = [-1; 2];
-    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } != 0 {
+    let mut ends = [-1; 2];
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+            ends.as_mut_ptr(),
+        )
+    } != 0 {
         return Err(format!(
-            "creating DNS completion pipe: {}",
+            "creating DNS completion socket pair: {}",
             std::io::Error::last_os_error()
         ));
     }
     let result = Arc::new(Mutex::new(None));
     let worker_result = result.clone();
-    let read_fd = pipe[0];
-    let write_fd = pipe[1];
+    let read_fd = ends[0];
+    let write_fd = ends[1];
     let spawn = thread::Builder::new()
         .name("thaw-dns".to_string())
         .spawn(move || {
@@ -194,11 +220,7 @@ fn start_dns_resolution(host: String, port: u16) -> Result<(RawFd, DnsResult), S
             *worker_result
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolved);
-            let byte = [1u8];
-            unsafe {
-                libc::write(write_fd, byte.as_ptr().cast(), byte.len());
-                libc::close(write_fd);
-            }
+            let _ = notify_dns_completion(write_fd);
         });
     if let Err(error) = spawn {
         unsafe {
