@@ -1758,6 +1758,31 @@ fn is_ecmascript_keyword(name: &str) -> bool {
     )
 }
 
+// Preserve one variable declarator and the statement modifiers for both
+// callable values and ordinary re-exported values.
+fn selected_var_declaration_snippet(
+    source_map: &thaw_parser::common::SourceMap,
+    var_decl: &thaw_parser::ast::VarDecl,
+    declarator: &thaw_parser::ast::VarDeclarator,
+    exported: bool,
+) -> Result<String, String> {
+    use thaw_parser::ast::VarDeclKind;
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let declarator_snippet = source_map.span_to_snippet(declarator.span())
+        .map_err(|error| format!("failed to read variable declarator: {error:?}"))?;
+    let kind = match var_decl.kind {
+        VarDeclKind::Const => "const",
+        VarDeclKind::Let => "let",
+        VarDeclKind::Var => "var",
+    };
+    Ok(format!(
+        "{}{}{kind} {declarator_snippet};",
+        if exported { "export " } else { "" },
+        if var_decl.declare { "declare " } else { "" },
+    ))
+}
+
 /// Given one `const`/`let`/`var` declarator, if its type annotation names
 /// a callable shape -- a same-file interface with a call signature
 /// (`SQLiteTableFn`-style), or a *direct* inline function type with no
@@ -1792,7 +1817,6 @@ fn callable_const_declaration_snippet(
 ) -> Result<Option<String>, String> {
     use thaw_parser::ast::{
         Decl, ModuleDecl, ModuleItem, TsEntityName, TsFnOrConstructorType, TsType, TsTypeElement,
-        VarDeclKind,
     };
     use thaw_parser::common::{SourceMapper, Spanned};
 
@@ -1875,19 +1899,7 @@ fn callable_const_declaration_snippet(
     let Some(annotation) = binding.type_ann.as_ref() else {
         return Ok(None);
     };
-    let declarator_snippet = source_map.span_to_snippet(declarator.span()).map_err(|error| {
-        format!("failed to read declaration for `{}`: {error:?}", binding.id.sym)
-    })?;
-    let kind = match var_decl.kind {
-        VarDeclKind::Const => "const",
-        VarDeclKind::Let => "let",
-        VarDeclKind::Var => "var",
-    };
-    let const_snippet = format!(
-        "{}{}{kind} {declarator_snippet};",
-        if exported { "export " } else { "" },
-        if var_decl.declare { "declare " } else { "" },
-    );
+    let const_snippet = selected_var_declaration_snippet(source_map, var_decl, declarator, exported)?;
     match annotation.type_ann.as_ref() {
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(_)) => {
             Ok(Some(const_snippet))
@@ -3481,10 +3493,20 @@ fn reexported_class_or_interface_declarations_inner(
             _ => false,
         };
         if matches {
-            let mut snippet =
+            let mut snippet = if let Decl::Var(var_decl) = declaration {
+                let declarator = var_decl.decls.iter().find(|declarator| {
+                    matches!(&declarator.name, thaw_parser::ast::Pat::Ident(binding)
+                        if binding.id.sym == local_name)
+                }).expect("matched variable declarator");
+                selected_var_declaration_snippet(
+                    &source_map, var_decl, declarator,
+                    matches!(item, ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(_))),
+                )?
+            } else {
                 source_map
                     .span_to_snippet(declaration.span())
-                    .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?;
+                    .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?
+            };
             if name != "default" && local_name != name {
                 snippet = imported_class_as_local_binding(vec![snippet], name, false, path)
                     .into_iter().next().unwrap();
