@@ -670,6 +670,32 @@ fn url_resolves_relative_paths_and_synchronizes_search_params() {
 }
 
 #[test]
+fn url_rejects_out_of_range_ports_without_mutating_setters() {
+    assert_eq!(
+        load(r#"function urlPortBounds() {
+            const url = new URL('https://example.test:8080/path');
+            const rejectedConstructor = URL.canParse('https://example.test:65536/') === false
+              && URL.parse('https://example.test:70000/') === null;
+            url.port = '65536';
+            const rejectedPort = url.href === 'https://example.test:8080/path';
+            url.port = '00070000';
+            const rejectedPaddedPort = url.port === '8080';
+            url.host = 'other.test:70000';
+            const rejectedHost = url.href === 'https://example.test:8080/path';
+            url.port = '65535';
+            const acceptedPort = url.port === '65535';
+            url.host = 'other.test:65535';
+            const acceptedHost = url.href === 'https://other.test:65535/path';
+            url.port = '';
+            return [rejectedConstructor, rejectedPort, rejectedPaddedPort,
+              rejectedHost, acceptedPort, acceptedHost, url.port === ''];
+        }"#),
+        1
+    );
+    assert_eq!(call("urlPortBounds", "[]"), "[true,true,true,true,true,true,true]");
+}
+
+#[test]
 fn event_target_dispatches_listeners_and_cancellation() {
     assert_eq!(
             load(
