@@ -800,3 +800,25 @@ fn namespace_alias_construct_signature_uses_target_scope() {
     assert_eq!(maker.constructors[0].params[0].1,
         DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
 }
+
+#[test]
+fn named_declaration_helpers_keep_one_source_map_identity_through_reparses() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let source = "declare namespace N { export function make(): number; } export { N as Public };";
+    let filename = FileName::Real(std::path::PathBuf::from("/fixture/package.d.ts"));
+    let (module, map) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).unwrap();
+    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &filename);
+    assert_eq!(parse_dts_named(source, filename.clone()).unwrap(), parse_dts(source).unwrap());
+    assert_eq!(parse_dts_classes_named(source, &filename).unwrap(), parse_dts_classes(source).unwrap());
+    assert_eq!(parse_dts_values_named(source, &filename).unwrap(), parse_dts_values(source).unwrap());
+    assert_eq!(nested_namespace_members_named(source, &filename), nested_namespace_members(source));
+    assert_eq!(exported_value_names_named(source, &filename), exported_value_names(source));
+    assert_eq!(nonpublic_namespace_sources_named(source, &filename), nonpublic_namespace_sources(source));
+
+    let malformed = "declare function ;";
+    assert!(parse_dts_named(malformed, filename.clone()).is_err());
+    assert!(parse_dts_values_named(malformed, &filename).is_err());
+    assert!(type_only_namespace_names_named(malformed, &filename).is_empty());
+    assert!(nested_namespace_members_named(malformed, &filename).is_empty());
+}

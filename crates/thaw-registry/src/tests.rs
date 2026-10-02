@@ -1101,3 +1101,28 @@ fn registry_bundle_javascript_source_maps_keep_exact_or_generated_names() {
     assert_eq!(path_builtin.source_name, FileName::Custom("node:path (generated builtin module)".into()));
     let _ = fs::remove_dir_all(node_modules);
 }
+
+#[test]
+fn resolved_declaration_origin_distinguishes_installed_file_and_builtin_text() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let registry = temp_registry("resolved_declaration_source_names");
+    let dir = registry.join("pkg");
+    fs::create_dir_all(&dir).unwrap();
+    let dts_path = dir.join("package.d.ts");
+    fs::write(&dts_path, "export declare function make(): number;").unwrap();
+    let installed = resolve(&registry, "pkg").unwrap();
+    assert_eq!(installed.dts_path.as_deref(), Some(dts_path.as_path()));
+    let file_name = FileName::Real(installed.dts_path.clone().unwrap());
+    let (module, map) = thaw_parser::parse_declarations_with_source_map_named(
+        &installed.dts_source, file_name.clone()).unwrap();
+    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &file_name);
+
+    let builtin = resolve_builtin("node:path").unwrap();
+    assert!(builtin.dts_path.is_none());
+    let generated = FileName::Custom(format!("{} generated declarations", builtin.name).into());
+    let (module, map) = thaw_parser::parse_declarations_with_source_map_named(
+        &builtin.dts_source, generated.clone()).unwrap();
+    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &generated);
+    let _ = fs::remove_dir_all(registry);
+}
