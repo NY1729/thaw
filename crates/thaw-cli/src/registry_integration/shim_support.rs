@@ -932,11 +932,17 @@ fn observed_bare_member_object_identifiers_named(
 /// `external_exports`'s `"default"` key is a package with *exactly one*
 /// function total, a fallback this bypasses entirely once it names one.
 fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
+    commonjs_export_name_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+fn commonjs_export_name_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> Result<Option<String>, String> {
     use thaw_parser::ast::{
         DefaultDecl, ExportSpecifier, Expr, ModuleDecl, ModuleExportName, ModuleItem,
     };
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
             if let Expr::Ident(identifier) = export.expr.as_ref() {
@@ -999,9 +1005,15 @@ fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
 /// default export's namespace object is not constructible. Real example:
 /// koa's own `@types` barrel.
 fn commonjs_export_assignment(source: &str) -> Result<Option<String>, String> {
+    commonjs_export_assignment_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+fn commonjs_export_assignment_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> Result<Option<String>, String> {
     use thaw_parser::ast::{Expr, ModuleDecl, ModuleItem};
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
             if let Expr::Ident(identifier) = export.expr.as_ref() {
@@ -1025,12 +1037,23 @@ fn called_commonjs_namespace_properties(
     namespace: Option<&str>,
     observed: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
 ) -> Result<Vec<String>, String> {
+    called_commonjs_namespace_properties_named(
+        source, &thaw_parser::common::FileName::Custom("input.ts".into()), namespace, observed,
+    )
+}
+
+fn called_commonjs_namespace_properties_named(
+    source: &str,
+    filename: &thaw_parser::common::FileName,
+    namespace: Option<&str>,
+    observed: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+) -> Result<Vec<String>, String> {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat, Stmt, TsModuleName, TsNamespaceBody, TsType};
 
     let Some(namespace) = namespace else {
         return Ok(Vec::new());
     };
-    let module = thaw_parser::parse_typescript(source)?;
+    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
     let mut names = Vec::new();
     for item in &module.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {

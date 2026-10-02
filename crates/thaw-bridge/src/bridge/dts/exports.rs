@@ -15,9 +15,9 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
 pub fn parse_dts_named(
     source: &str, filename: thaw_parser::common::FileName,
 ) -> Result<Vec<DtsFunction>, String> {
-    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename)?.0;
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     let generated_internals = generated_public_alias_internals(&module);
-    let type_only_namespaces = type_only_namespace_names(source);
+    let type_only_namespaces = type_only_namespace_names_named(source, &filename);
     let export_assignment = export_assignment_namespace(&module);
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let mut functions = scoped_fn_decls(&module)
@@ -45,7 +45,7 @@ pub fn parse_dts_named(
         }).collect::<Vec<_>>();
         functions.extend(aliases);
     }
-    let hidden_namespaces = nonpublic_namespace_sources(source);
+    let hidden_namespaces = nonpublic_namespace_sources_named(source, &filename);
     functions.retain(|function| !namespace_member_is_type_only(&function.name, &hidden_namespaces));
     if let Some(target) = export_assignment_interface_name(&module) {
         functions.extend(export_assignment_interface_methods(&module, &target)
@@ -182,8 +182,12 @@ fn namespace_value_aliases(module: &Module) -> Vec<(String, String)> {
 /// Original bindings that have a live namespace alias but are not themselves
 /// public runtime properties. Their declarations still supply type context.
 pub fn nonpublic_namespace_sources(source: &str) -> HashSet<String> {
-    let Ok(module) = thaw_parser::parse_declarations(source) else { return HashSet::new(); };
-    let public = exported_value_names(source);
+    nonpublic_namespace_sources_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn nonpublic_namespace_sources_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else { return HashSet::new(); };
+    let public = exported_value_names_named(source, filename);
     let assigned = export_assignment_namespace(&module);
     namespace_value_aliases(&module).into_iter().filter_map(|(original, _)| {
         (!public.contains(&original) && assigned != Some(original.as_str())).then_some(original)
@@ -194,9 +198,13 @@ pub fn nonpublic_namespace_sources(source: &str) -> HashSet<String> {
 /// alias (`export { Source as Live }`) keeps Source live even if another
 /// edge exports Source only as a type.
 pub fn type_only_namespace_names(source: &str) -> HashSet<String> {
+    type_only_namespace_names_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn type_only_namespace_names_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
     use swc_ecma_ast::{ExportSpecifier, ModuleExportName, TsModuleName};
 
-    let Ok(module) = thaw_parser::parse_declarations(source) else {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashSet::new();
     };
     let mut candidates = HashSet::new();
@@ -282,7 +290,11 @@ fn generated_public_alias_internals(module: &Module) -> HashSet<String> {
 /// Extracts typed, non-callable top-level value declarations. Callable
 /// `const`s are already returned by [`parse_dts`] and are excluded here.
 pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
-    let module = thaw_parser::parse_declarations(source)?;
+    parse_dts_values_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn parse_dts_values_named(source: &str, filename: &thaw_parser::common::FileName) -> Result<Vec<DtsValue>, String> {
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module)?;
     let generated_internals = generated_public_alias_internals(&module);
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let interface_declarations = all_interface_decls_by_name(&module);
@@ -300,11 +312,11 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
         })
         .map(|interface| interface.id.sym.to_string())
         .collect::<HashSet<_>>();
-    let callable = parse_dts(source)?
+    let callable = parse_dts_named(source, filename.clone())?
         .into_iter()
         .map(|function| function.name)
         .collect::<HashSet<_>>();
-    let class_names = parse_dts_classes(source)?
+    let class_names = parse_dts_classes_named(source, filename)?
         .into_iter()
         .map(|class| class.name)
         .collect::<HashSet<_>>();
@@ -451,7 +463,7 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
     if values.is_empty()
         && callable.is_empty()
         && class_names.is_empty()
-        && self_referential_namespace_aliases(source).contains("default")
+        && self_referential_namespace_aliases_named(source, filename).contains("default")
     {
         values.push(DtsValue {
             name: "default".to_string(),
@@ -1248,7 +1260,11 @@ fn lower_dts_fn_type(
 /// shape -- its members are declared *inside* it, not a star-import of
 /// an already-flattened sibling module -- and isn't recognized here.
 pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
-    let Ok(module) = thaw_parser::parse_declarations(source) else {
+    self_referential_namespace_aliases_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn self_referential_namespace_aliases_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashSet::new();
     };
     let namespace_imports: HashSet<String> = module
@@ -1324,7 +1340,11 @@ pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
 /// Names explicitly exported only as TypeScript types. Registry imports of
 /// these names are erased at runtime but still need a local type binding.
 pub fn exported_type_names(source: &str) -> HashSet<String> {
-    let Ok(module) = thaw_parser::parse_declarations(source) else {
+    exported_type_names_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn exported_type_names_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashSet::new();
     };
     module
@@ -1358,7 +1378,11 @@ pub fn exported_type_names(source: &str) -> HashSet<String> {
 /// `exported_type_names`: the same class can be exported as a type through
 /// one edge and as a value through another.
 pub fn exported_value_names(source: &str) -> HashSet<String> {
-    let Ok(module) = thaw_parser::parse_declarations(source) else {
+    exported_value_names_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn exported_value_names_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashSet::new();
     };
     let mut value_bindings = HashSet::new();
@@ -1484,9 +1508,13 @@ pub fn exported_value_names(source: &str) -> HashSet<String> {
 /// Paths can be nested (`Outer -> Inner.make`) and the CLI preserves each
 /// qualified function's own binding rather than collapsing equal bare names.
 pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String, String>> {
+    nested_namespace_members_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn nested_namespace_members_named(source: &str, filename: &thaw_parser::common::FileName) -> HashMap<String, HashMap<String, String>> {
     use thaw_parser::ast::{ExportSpecifier, ModuleExportName, Stmt, TsModuleName};
 
-    let Ok(module) = thaw_parser::parse_declarations(source) else {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashMap::new();
     };
     let mut namespaces: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -1556,7 +1584,7 @@ pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String,
             namespaces.entry(public).or_default().extend(members);
         }
     }
-    for original in nonpublic_namespace_sources(source) {
+    for original in nonpublic_namespace_sources_named(source, filename) {
         namespaces.remove(&original);
     }
     namespaces
@@ -1615,10 +1643,14 @@ fn resolve_bare_type_alias_chain(
 }
 
 pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
-    let Ok(module) = thaw_parser::parse_declarations(source) else {
+    function_return_named_types_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn function_return_named_types_named(source: &str, filename: &thaw_parser::common::FileName) -> HashMap<String, String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
         return HashMap::new();
     };
-    let type_only_namespaces = type_only_namespace_names(source);
+    let type_only_namespaces = type_only_namespace_names_named(source, filename);
     let export_assignment = export_assignment_namespace(&module);
     let class_names = scoped_class_names(&module).into_iter()
         .map(|(qualified, _)| qualified).collect::<HashSet<_>>();
@@ -1668,7 +1700,7 @@ pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
         }).collect::<Vec<_>>();
         returns.extend(aliases);
     }
-    let hidden = nonpublic_namespace_sources(source);
+    let hidden = nonpublic_namespace_sources_named(source, filename);
     returns.retain(|name, _| !namespace_member_is_type_only(name, &hidden));
     returns
 }

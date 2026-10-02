@@ -1,5 +1,11 @@
 pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
-    let module = thaw_parser::parse_declarations(source)?;
+    parse_dts_classes_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn parse_dts_classes_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> Result<Vec<DtsClass>, String> {
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let scoped_class_decls = scoped_class_decls(&module);
     let scoped_classes = scoped_class_decls.iter().map(|(qualified, bare, _)|
@@ -88,6 +94,7 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
     }
     for class in self_constructible_interface_classes(
         source,
+        filename,
         &module,
         &interfaces,
         &generic_interfaces,
@@ -281,11 +288,12 @@ fn constructor_interface_classes(
 /// `thaw_js_get_global` looks up for a Fallback `$new$` constructor.
 fn self_constructible_interface_classes(
     source: &str,
+    filename: &thaw_parser::common::FileName,
     module: &Module,
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Vec<DtsClass> {
-    let namespace_members = nested_namespace_members(source);
+    let namespace_members = nested_namespace_members_named(source, filename);
     if namespace_members.is_empty() {
         return Vec::new();
     }

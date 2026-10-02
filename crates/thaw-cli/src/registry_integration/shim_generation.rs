@@ -158,7 +158,13 @@ fn generate_registry_shims(
         } else {
             thaw_registry::resolve(registry_dir, name)?
         };
-        let mut functions = thaw_bridge::parse_dts(&package.dts_source)
+        let dts_filename = package.dts_path.as_ref().map_or_else(
+            || thaw_parser::common::FileName::Custom(
+                format!("{} generated declarations", package.name).into(),
+            ),
+            |path| thaw_parser::common::FileName::Real(path.clone()),
+        );
+        let mut functions = thaw_bridge::parse_dts_named(&package.dts_source, dts_filename.clone())
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
         // This mutating API returns the exact Buffer handle it receives.
         if name == "node:crypto" {
@@ -167,14 +173,14 @@ fn generate_registry_shims(
                 function.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue);
             }
         }
-        let mut classes = thaw_bridge::parse_dts_classes(&package.dts_source)
+        let mut classes = thaw_bridge::parse_dts_classes_named(&package.dts_source, &dts_filename)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
-        let mut values = thaw_bridge::parse_dts_values(&package.dts_source)
+        let mut values = thaw_bridge::parse_dts_values_named(&package.dts_source, &dts_filename)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
-        let explicit_type_exports = thaw_bridge::exported_type_names(&package.dts_source);
-        let value_exports = thaw_bridge::exported_value_names(&package.dts_source);
-        let type_only_namespaces = thaw_bridge::type_only_namespace_names(&package.dts_source);
-        let mut nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
+        let explicit_type_exports = thaw_bridge::exported_type_names_named(&package.dts_source, &dts_filename);
+        let value_exports = thaw_bridge::exported_value_names_named(&package.dts_source, &dts_filename);
+        let type_only_namespaces = thaw_bridge::type_only_namespace_names_named(&package.dts_source, &dts_filename);
+        let mut nested_namespaces = thaw_bridge::nested_namespace_members_named(&package.dts_source, &dts_filename);
         let live_namespace_origins = nested_namespaces.keys()
             .filter(|namespace| !type_only_namespaces.contains(*namespace))
             .cloned().collect::<Vec<_>>();
@@ -183,7 +189,7 @@ fn generate_registry_shims(
         type_only_value_names.retain(|name| !live_namespace_origins.iter().any(|namespace| {
             name == namespace || name.starts_with(&format!("{namespace}."))
         }));
-        let hidden_namespaces = thaw_bridge::nonpublic_namespace_sources(&package.dts_source);
+        let hidden_namespaces = thaw_bridge::nonpublic_namespace_sources_named(&package.dts_source, &dts_filename);
         for name in classes.iter().map(|class| &class.name)
             .chain(values.iter().map(|value| &value.name)) {
             if hidden_namespaces.iter().any(|namespace| name.starts_with(&format!("{namespace}."))) {
@@ -193,12 +199,13 @@ fn generate_registry_shims(
         functions.retain(|function| !type_only_value_names.contains(&function.name));
         values.retain(|value| !type_only_value_names.contains(&value.name));
         restrict_type_only_class_values(&mut classes, &type_only_value_names);
-        let commonjs_export_name = commonjs_export_name(&package.dts_source)
+        let commonjs_export_name = commonjs_export_name_named(&package.dts_source, &dts_filename)
             .map_err(|e| format!("failed to parse `{name}`'s CommonJS export: {e}"))?;
-        let commonjs_export_assignment = commonjs_export_assignment(&package.dts_source)
+        let commonjs_export_assignment = commonjs_export_assignment_named(&package.dts_source, &dts_filename)
             .map_err(|e| format!("failed to parse `{name}`'s CommonJS export assignment: {e}"))?;
-        let called_commonjs_namespace_properties = called_commonjs_namespace_properties(
+        let called_commonjs_namespace_properties = called_commonjs_namespace_properties_named(
             &package.dts_source,
+            &dts_filename,
             commonjs_export_name.as_deref(),
             &observed_arities,
         )
@@ -237,12 +244,12 @@ fn generate_registry_shims(
         let native_lib_available = package.native_lib.is_some() || is_native_builtin(&package.name);
         let classifications =
             thaw_bridge::effective_classifications(&functions, native_lib_available);
-        let factory_class_returns = thaw_bridge::function_return_named_types(&package.dts_source)
+        let factory_class_returns = thaw_bridge::function_return_named_types_named(&package.dts_source, &dts_filename)
             .into_iter()
             .filter(|(_, class_name)| classes.iter().any(|class| &class.name == class_name))
             .collect();
         let namespace_self_aliases =
-            thaw_bridge::self_referential_namespace_aliases(&package.dts_source);
+            thaw_bridge::self_referential_namespace_aliases_named(&package.dts_source, &dts_filename);
         let mut type_only_exports = explicit_type_exports;
         type_only_exports.extend(classes.iter().map(|class| class.name.clone()));
         nested_namespaces.retain(|namespace, _| !type_only_namespaces.contains(namespace));
