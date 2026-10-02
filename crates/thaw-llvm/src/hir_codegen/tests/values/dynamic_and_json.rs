@@ -1585,3 +1585,183 @@ fn non_arrow_function_expression_boxes_scalar_this_arguments() {
     assert_eq!(compile_and_run(source, "non_arrow_scalar_this"),
         "undefined\nobject\nboolean\nnumber\nstring\nstring\n");
 }
+
+#[test]
+fn decodes_typed_js_tuple_union_values_without_overwriting_next_slot() {
+    let source = r#"
+        declare function __thaw_typed_js_7475706c654e756d626572(): [number | string, number];
+        declare function __thaw_typed_js_7475706c65537472696e67(): [number | string, number];
+        function main(): void {
+            loadScript("globalThis.tupleNumber = () => [7, 99]; globalThis.tupleString = () => ['x', 88];");
+            const numeric = __thaw_typed_js_7475706c654e756d626572();
+            const numberOrText = numeric[0];
+            if (typeof numberOrText === "number") console.log(numberOrText + 1);
+            console.log(numeric[1]);
+            const textual = __thaw_typed_js_7475706c65537472696e67();
+            const textOrNumber = textual[0];
+            if (typeof textOrNumber === "string") console.log(textOrNumber + "!");
+            console.log(textual[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_js_tuple_scalar_union"), "8\n99\nx!\n88\n");
+}
+
+#[test]
+fn decodes_object_and_array_union_members_in_typed_js_tuple() {
+    let source = r#"
+        declare function __thaw_typed_js_7475706c654f626a656374(): [{ value: number } | number[], number];
+        declare function __thaw_typed_js_7475706c654172726179(): [{ value: number } | number[], number];
+        function main(): void {
+            loadScript("globalThis.tupleObject = () => [{value:4}, 17]; globalThis.tupleArray = () => [[1,2], 18];");
+            const object = __thaw_typed_js_7475706c654f626a656374();
+            console.log(JSON.stringify(object[0]), object[1]);
+            const array = __thaw_typed_js_7475706c654172726179();
+            console.log(JSON.stringify(array[0]), array[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_js_tuple_aggregate_union"),
+        "{\"value\":4} 17\n[1,2] 18\n");
+}
+
+
+#[test]
+fn tuple_union_promise_scalar_cleanup_does_not_double_destroy_json() {
+    let source = r#"
+        declare function __thaw_typed_js_7475706c6550726f6d6973654e756d626572(): [string | Promise<number>, number];
+        declare function __thaw_typed_js_7475706c6550726f6d69736554657874(): [string | Promise<number>, number];
+        function main(): void {
+            loadScript("globalThis.tuplePromiseNumber = () => [4, 19]; globalThis.tuplePromiseText = () => ['ok', 23];");
+            const numeric = __thaw_typed_js_7475706c6550726f6d6973654e756d626572();
+            const textual = __thaw_typed_js_7475706c6550726f6d69736554657874();
+            console.log(numeric[1], textual[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_js_tuple_union_promise_cleanup"), "19 23\n");
+}
+
+#[test]
+fn object_and_array_union_children_remain_live_after_json_wrapper_cleanup() {
+    let source = r#"
+        declare function __thaw_typed_js_6f626a656374556e696f6e(): { choice: number | string };
+        declare function __thaw_typed_js_6172726179556e696f6e(): (number | string)[];
+        function main(): void {
+            loadScript("globalThis.objectUnion = () => ({choice:'kept'}); globalThis.arrayUnion = () => [9, 'live'];");
+            const object = __thaw_typed_js_6f626a656374556e696f6e();
+            const array = __thaw_typed_js_6172726179556e696f6e();
+            console.log(JSON.stringify(object), JSON.stringify(array));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_js_nested_union_json_cleanup"), "{\"choice\":\"kept\"} [9,\"live\"]\n");
+}
+
+#[test]
+fn borrowed_union_callback_argument_keeps_its_json_owner_until_adapter_cleanup() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b65556e696f6e(
+            callback: (value: string | Promise<number>) => number,
+        ): number;
+        function main(): void {
+            loadScript("globalThis.invokeUnion = callback => callback(7);");
+            console.log(__thaw_typed_js_696e766f6b65556e696f6e(
+                (value: string | Promise<number>): number => 42,
+            ));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "borrowed_union_callback_json"), "42\n");
+}
+
+#[test]
+fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
+    fn ir(source: &str) -> String {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "union_json_ownership");
+        compiler.compile_program(&program).unwrap();
+        compiler.print_to_string()
+    }
+    // LLVM void calls have no result name. Match each owned JSON producer's
+    // SSA value to the actual thaw_json_destroy argument instead.
+    fn owned_result_ids(ir: &str, callee: &str) -> Vec<String> {
+        ir.lines()
+            .filter(|line| line.contains(" = call ") && line.contains(callee))
+            .filter_map(|line| line.split_once(" = call ").map(|(name, _)| name.trim().to_string()))
+            .collect()
+    }
+    fn tuple_slot_ids(ir: &str) -> Vec<String> {
+        ir.lines()
+            .filter(|line| line.contains(" = getelementptr") && line.contains("json_tuple_slot"))
+            .filter_map(|line| line.split_once(" = ").map(|(name, _)| name.trim().to_string()))
+            .collect()
+    }
+    fn destroy_sites(ir: &str, owned: &str) -> Vec<(usize, String)> {
+        let mut block = String::new();
+        let mut sites = Vec::new();
+        for (index, line) in ir.lines().enumerate() {
+            if !line.chars().next().is_some_and(char::is_whitespace) {
+                if let Some((label, _)) = line.split_once(':') {
+                    block = label.to_string();
+                }
+            }
+            if let Some((_, args)) = line.split_once("call void @thaw_json_destroy(") {
+                if args.split(')').next().and_then(|args| args.split_whitespace().last()) == Some(owned) {
+                    sites.push((index, block.clone()));
+                }
+            }
+        }
+        sites
+    }
+    fn assert_one_normal_destroy(ir: &str, owned: &str, failure: &str, after: usize) {
+        let sites = destroy_sites(ir, owned);
+        // The host-error/invalid-graph edge and the normal edge are
+        // mutually exclusive: each owns precisely one destruction.
+        assert_eq!(sites.len(), 2, "owner {owned}: {ir}");
+        assert_eq!(sites.iter().filter(|(_, block)| block.starts_with(failure)).count(), 1,
+            "owner {owned}: {ir}");
+        let normal = sites.iter().find(|(_, block)| !block.starts_with(failure)).unwrap();
+        assert!(normal.0 > after, "owner {owned}: {ir}");
+    }
+    fn tuple_store_line(ir: &str, slot: &str) -> usize {
+        ir.lines().position(|line| line.trim_start().starts_with("store ")
+            && line.contains(&format!("ptr {slot}"))).expect(ir)
+    }
+    // A two-position tuple owns one wrapper per indexed position; the
+    // Union's wrapper and its adjacent number each have one destroy.
+    let plain = ir(r#"
+        declare function __thaw_typed_js_7475706c654e756d626572(): [number | string, number];
+        function main(): void { const value = __thaw_typed_js_7475706c654e756d626572(); console.log(value[1]); }
+    "#);
+    let plain_children = owned_result_ids(&plain, "@thaw_json_index(");
+    let plain_slots = tuple_slot_ids(&plain);
+    assert_eq!(plain_children.len(), 2, "{plain}");
+    assert_eq!(plain_slots.len(), 2, "{plain}");
+    for (child, slot) in plain_children.iter().zip(&plain_slots) {
+        assert_one_normal_destroy(&plain, child, "json_host_failed", tuple_store_line(&plain, slot));
+    }
+    // Promise<number> now reads borrowed JSON when building the resolved
+    // native Promise, leaving the one owned indexed wrapper for its caller.
+    let promised = ir(r#"
+        declare function __thaw_typed_js_7475706c6550726f6d6973654e756d626572(): [string | Promise<number>, number];
+        function main(): void { const value = __thaw_typed_js_7475706c6550726f6d6973654e756d626572(); console.log(value[1]); }
+    "#);
+    assert!(promised.contains("dynamic_union_promise"), "{promised}");
+    let promised_children = owned_result_ids(&promised, "@thaw_json_index(");
+    let promised_slots = tuple_slot_ids(&promised);
+    assert_eq!(promised_children.len(), 2, "{promised}");
+    assert_eq!(promised_slots.len(), 2, "{promised}");
+    for (child, slot) in promised_children.iter().zip(&promised_slots) {
+        // A Promise decoder-side destroy would add a third site for the
+        // same input, beyond the mutually exclusive host-error and owner sites.
+        assert_one_normal_destroy(&promised, child, "json_host_failed", tuple_store_line(&promised, slot));
+    }
+    // The top-level typed-result Union is also an owned JSON wrapper.
+    let top_level = ir(r#"
+        declare function __thaw_typed_js_746f70556e696f6e(): number | string;
+        function main(): void { const value = __thaw_typed_js_746f70556e696f6e(); console.log(value); }
+    "#);
+    let top_level_owned = owned_result_ids(&top_level, "@thaw_json_graph_decode(");
+    assert_eq!(top_level_owned.len(), 1, "{top_level}");
+    let union_loaded = top_level.lines().position(|line| line.contains("dynamic_union_value = load"))
+        .expect(&top_level);
+    assert_one_normal_destroy(&top_level, &top_level_owned[0], "quickjs_graph_invalid", union_loaded);
+}
