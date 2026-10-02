@@ -849,3 +849,39 @@ fn generic_object_inference_matches_required_field_names() {
     lower(r#"function get<T>(value: { a: T }): T { return value.a; }
         function main(): void { const value = { a: 3, b: true }; const result: number = get(value); console.log(result); }"#);
 }
+
+#[test]
+fn collection_type_arguments_keep_generic_substitutions() {
+    let module = thaw_parser::parse_typescript("type M<T> = Map<string, T>; type S<T> = Set<T>; type W<T> = WeakMap<T, number>; type V<T> = WeakSet<T>;").unwrap();
+    let mut substitution = HashMap::new();
+    substitution.insert("T".into(), HirType::F64);
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) = item else { continue; };
+        let result = resolve_ts_type_with_substitution(&alias.type_ann, &substitution, &HashMap::new(), &GenericInterfaces::new(), &mut Vec::new());
+        match alias.id.sym.as_ref() {
+            "M" => assert_eq!(result.unwrap(), HirType::Map(Box::new(HirType::Str), Box::new(HirType::F64))),
+            "S" => assert_eq!(result.unwrap(), HirType::Set(Box::new(HirType::F64))),
+            _ => {
+                assert!(result.is_err(), "weak keys must remain validated");
+                let key = HirType::Object(vec![("x".into(), HirType::F64)]);
+                substitution.insert("T".into(), key.clone());
+                let valid = resolve_ts_type_with_substitution(&alias.type_ann, &substitution, &HashMap::new(), &GenericInterfaces::new(), &mut Vec::new()).unwrap();
+                assert_eq!(valid, if alias.id.sym == *"W" { HirType::WeakMap(Box::new(key), Box::new(HirType::F64)) } else { HirType::WeakSet(Box::new(key)) });
+                substitution.insert("T".into(), HirType::F64);
+            }
+        }
+    }
+    lower(r#"type X<T> = Map<string, T>; function main(): void { const m: X<number> = new Map<string, number>(); console.log(m.size); }"#);
+}
+
+#[test]
+fn substituted_collection_names_keep_plain_interface_shadowing() {
+    let module = thaw_parser::parse_typescript("type M = Map; type S = Set; type W = WeakMap; type V = WeakSet;").unwrap();
+    let shape = HirType::Object(vec![("custom".into(), HirType::Bool)]);
+    let interfaces = ["Map", "Set", "WeakMap", "WeakSet"].into_iter()
+        .map(|name| (name.to_string(), shape.clone())).collect::<HashMap<_, _>>();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) = item else { continue; };
+        assert_eq!(resolve_ts_type_with_substitution(&alias.type_ann, &HashMap::new(), &interfaces, &GenericInterfaces::new(), &mut Vec::new()).unwrap(), shape);
+    }
+}
