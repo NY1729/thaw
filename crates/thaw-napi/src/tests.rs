@@ -1388,7 +1388,7 @@ fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
         Some(literal_date), Some(nested), Some(nan), Some(infinity), Some(minus_infinity),
         Some(numeric_key_object),
     ]));
-    let wire = unsafe { quickjs_reference_wire(&env, root, true) }.unwrap();
+    let wire = unsafe { quickjs_reference_wire(&mut env as NapiEnv, root, true) }.unwrap();
     assert_eq!(wire.value[0]["timestamp"], 0);
     assert_eq!(wire.value[2], JsonValue::Null);
     assert!(wire.origins.contains(&serde_json::json!([[0], "plain"])));
@@ -1401,13 +1401,17 @@ fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
     assert!(wire.origins.contains(&serde_json::json!([[5, "0"], "nonfinite", "NaN"])));
     assert!(!wire.origins.contains(&serde_json::json!([[5, 0], "nonfinite", "NaN"])));
     env.quickjs_references.insert(77, date);
-    let referenced = unsafe { quickjs_reference_wire(&env, root, true) }.unwrap();
+    let referenced = unsafe { quickjs_reference_wire(&mut env as NapiEnv, root, true) }.unwrap();
     assert_eq!(referenced.value[1]["__proto__"]["__thaw_napi_ref__"], serde_json::json!(77));
     assert!(!referenced.origins.iter().any(|entry| entry[0] == serde_json::json!([1, "__proto__"])));
     // Public plain JSON keeps its existing lossy value contract.
     assert_eq!(unsafe { json_from_value_with_undefined(date, true) }.unwrap(), JsonValue::Null);
     assert_eq!(unsafe { json_from_value_with_undefined(nan, true) }.unwrap(), JsonValue::Null);
+    // Public result walkers resolve the live owner before invoking accessors.
+    let env = Box::new(env);
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
     assert_eq!(unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"], 0);
+    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
 }
 
 // Proposed thaw-napi/src/tests.rs integration test. UNRUN; source-only.
@@ -1470,4 +1474,356 @@ fn value_callback_reentry_cannot_begin_shutdown() {
         new_target: ptr::null_mut(), data: Arc::as_ptr(&bridge) as *mut c_void };
     let result = unsafe { thaw_compiled_callback(&mut env, &mut info) };
     assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Null)));
+}
+
+#[test]
+fn snapshot_walkers_read_own_getters_with_original_receiver() {
+    unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        let info = info.as_ref().unwrap();
+        assert_eq!(info.this_arg as usize, info.data as usize);
+        env_mut(env).unwrap().alloc(Value::String("from getter".into()))
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let child = env.alloc(Value::Object(HashMap::new()));
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
+        getter: Some(getter), setter: None, value: ptr::null_mut(),
+        attributes: 0, data: child.cast(),
+    };
+    unsafe { assert_eq!(napi_define_properties(env_ptr, child, 1, &descriptor), NAPI_OK); }
+    let number = env.alloc(Value::Number(42.0));
+    let Value::Object(fields) = (unsafe { child.as_mut() }).unwrap() else { unreachable!() };
+    fields.insert(PropertyKey::String("a\0b".into()), number);
+    let array = env.alloc(Value::Array(vec![None]));
+    let index_descriptor = NapiPropertyDescriptor {
+        utf8name: c"0".as_ptr(), data: array.cast(), ..descriptor
+    };
+    unsafe { assert_eq!(napi_define_properties(env_ptr, array, 1, &index_descriptor), NAPI_OK); }
+    let root = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("nested".into()), child),
+        (PropertyKey::String("items".into()), array),
+    ])));
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    let before_keys = unsafe { (*env_ptr).values.len() };
+    for _ in 0..3 {
+        let keys = unsafe { snapshot_own_string_keys(env_ptr, child) }.unwrap();
+        assert!(keys.items.iter().any(|(name, _)| name == "computed"));
+    }
+    assert_eq!(unsafe { (*env_ptr).values.len() }, before_keys);
+    let plain = unsafe { json_from_value_with_undefined(root, true) }.unwrap();
+    assert_eq!(plain["nested"]["computed"], "from getter");
+    assert_eq!(plain["nested"]["a\0b"], 42.0);
+    assert_eq!(plain["items"][0], "from getter");
+    let wire = unsafe { quickjs_reference_wire(env_ptr, root, true) }.unwrap();
+    assert_eq!(wire.value["nested"]["computed"], "from getter");
+    assert_eq!(wire.value["nested"]["a\0b"], 42.0);
+    assert_eq!(wire.value["items"][0], "from getter");
+    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+}
+
+#[test]
+fn snapshot_getter_exception_is_consumed_once() {
+    unsafe extern "C" fn getter(env: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
+        assert_eq!(napi_throw_type_error(env, ptr::null(), c"snapshot getter failed".as_ptr()), NAPI_OK);
+        ptr::null_mut()
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let object = env.alloc(Value::Object(HashMap::new()));
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
+        getter: Some(getter), setter: None, value: ptr::null_mut(),
+        attributes: 0, data: ptr::null_mut(),
+    };
+    unsafe { assert_eq!(napi_define_properties(env_ptr, object, 1, &descriptor), NAPI_OK); }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    let error = unsafe { json_from_value_with_undefined(object, true) }.unwrap_err();
+    assert!(error.contains("snapshot getter failed"), "{error}");
+    assert!(unsafe { (*env_ptr).exception.is_none() });
+    let error = unsafe { quickjs_reference_wire(env_ptr, object, true) }.err().unwrap();
+    assert!(error.contains("snapshot getter failed"), "{error}");
+    assert!(unsafe { (*env_ptr).exception.is_none() });
+    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+}
+
+#[test]
+fn getter_reentry_updates_later_snapshot_property() {
+    unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        let object = info.as_ref().unwrap().this_arg;
+        let nested = env_mut(env).unwrap().alloc(Value::Object(HashMap::new()));
+        assert!(json_from_value_with_undefined_for_env(env, nested, true).unwrap().is_object());
+        let changed = env_mut(env).unwrap().alloc(Value::Number(99.0));
+        assert_eq!(napi_set_named_property(env, object, c"second".as_ptr(), changed), NAPI_OK);
+        changed
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let old = env.alloc(Value::Number(1.0));
+    let object = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("second".into()), old),
+    ])));
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"first".as_ptr(), name: ptr::null_mut(), method: None,
+        getter: Some(getter), setter: None, value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: ptr::null_mut(),
+    };
+    unsafe { assert_eq!(napi_define_properties(env_ptr, object, 1, &descriptor), NAPI_OK); }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    let plain = unsafe { json_from_value_with_undefined(object, true) }.unwrap();
+    assert_eq!(plain["first"], 99.0);
+    assert_eq!(plain["second"], 99.0);
+    let private = unsafe { quickjs_reference_wire(env_ptr, object, true) }.unwrap();
+    assert_eq!(private.value["second"], 99.0);
+    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+}
+
+#[test]
+fn settled_promise_getter_can_retry_settlement_without_borrow_panic() {
+    unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        let deferred = info.as_ref().unwrap().data.cast::<Deferred>();
+        let retry_value = env_mut(env).unwrap().alloc(Value::Undefined);
+        assert_eq!(napi_resolve_deferred(env, deferred, retry_value), NAPI_GENERIC_FAILURE);
+        env_mut(env).unwrap().alloc(Value::Number(7.0))
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let object = env.alloc(Value::Object(HashMap::new()));
+    let mut deferred = ptr::null_mut();
+    let mut promise = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_create_promise(env_ptr, &mut deferred, &mut promise), NAPI_OK);
+        let descriptor = NapiPropertyDescriptor {
+            utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
+            getter: Some(getter), setter: None, value: ptr::null_mut(),
+            attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: deferred.cast(),
+        };
+        assert_eq!(napi_define_properties(env_ptr, object, 1, &descriptor), NAPI_OK);
+        assert_eq!(napi_resolve_deferred(env_ptr, deferred, object), NAPI_OK);
+    }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    let plain = unsafe { json_from_value_with_undefined_for_env(env_ptr, promise, true) }.unwrap();
+    assert_eq!(plain["computed"], 7.0);
+    #[cfg(feature = "quickjs")]
+    unsafe {
+        let target = CString::new((promise as u64).to_string()).unwrap();
+        let wire = thaw_napi_handle_bridge(c"promise_state".as_ptr(), target.as_ptr(), c"".as_ptr(), c"[]".as_ptr());
+        let result = CString::from_raw(wire.cast_mut()).into_string().unwrap();
+        assert!(result.contains("\"kind\":\"resolved\""), "{result}");
+        assert!(result.contains("\"computed\":7.0"), "{result}");
+    }
+    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+}
+
+#[test]
+fn rejected_promise_object_getter_can_retry_settlement_without_borrow_panic() {
+    unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        let deferred = info.as_ref().unwrap().data.cast::<Deferred>();
+        let retry_value = env_mut(env).unwrap().alloc(Value::Undefined);
+        assert_eq!(napi_reject_deferred(env, deferred, retry_value), NAPI_GENERIC_FAILURE);
+        env_mut(env).unwrap().alloc(Value::String("original rejection".into()))
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let object = env.alloc(Value::Object(HashMap::new()));
+    let mut deferred = ptr::null_mut();
+    let mut promise = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_create_promise(env_ptr, &mut deferred, &mut promise), NAPI_OK);
+        let descriptor = NapiPropertyDescriptor {
+            utf8name: c"message".as_ptr(), name: ptr::null_mut(), method: None,
+            getter: Some(getter), setter: None, value: ptr::null_mut(),
+            attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: deferred.cast(),
+        };
+        assert_eq!(napi_define_properties(env_ptr, object, 1, &descriptor), NAPI_OK);
+        assert_eq!(napi_reject_deferred(env_ptr, deferred, object), NAPI_OK);
+    }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    let error = unsafe { json_from_value_with_undefined_for_env(env_ptr, promise, true) }.unwrap_err();
+    assert!(error.contains("original rejection"), "{error}");
+    #[cfg(feature = "quickjs")]
+    unsafe {
+        let target = CString::new((promise as u64).to_string()).unwrap();
+        let wire = thaw_napi_handle_bridge(c"promise_state".as_ptr(), target.as_ptr(), c"".as_ptr(), c"[]".as_ptr());
+        let result = CString::from_raw(wire.cast_mut()).into_string().unwrap();
+        assert!(result.contains("\"kind\":\"rejected\""), "{result}");
+        assert!(result.contains("original rejection"), "{result}");
+    }
+    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+}
+
+#[test]
+fn exception_description_keeps_original_data_without_running_getter() {
+    static DESCRIPTION_GETTER_RAN: AtomicBool = AtomicBool::new(false);
+    unsafe extern "C" fn throwing_getter(env: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
+        DESCRIPTION_GETTER_RAN.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(napi_throw_type_error(env, ptr::null(), c"secondary getter failure".as_ptr()), NAPI_OK);
+        ptr::null_mut()
+    }
+    DESCRIPTION_GETTER_RAN.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut env = Env::new();
+    let env_ptr: NapiEnv = &mut env;
+    let message = env.alloc(Value::String("original failure".into()));
+    let thrown = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("message".into()), message),
+    ])));
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"danger".as_ptr(), name: ptr::null_mut(), method: None,
+        getter: Some(throwing_getter), setter: None, value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: ptr::null_mut(),
+    };
+    unsafe {
+        assert_eq!(napi_define_properties(env_ptr, thrown, 1, &descriptor), NAPI_OK);
+        assert_eq!(napi_throw(env_ptr, thrown), NAPI_OK);
+        let report = take_env_exception(env_ptr).unwrap_err();
+        assert!(report.contains("original failure"), "{report}");
+        assert!(!report.contains("secondary getter failure"), "{report}");
+        assert!(!DESCRIPTION_GETTER_RAN.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(env.exception.is_none());
+    }
+}
+
+#[test]
+fn snapshot_walkers_use_cross_environment_child_and_promise_owner() {
+    unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        assert_eq!(env as usize, info.as_ref().unwrap().data as usize);
+        env_mut(env).unwrap().alloc(Value::Number(9.0))
+    }
+    let mut first = Box::new(Env::new());
+    let mut second = Box::new(Env::new());
+    let first_env: NapiEnv = &mut *first;
+    let second_env: NapiEnv = &mut *second;
+    let root = first.alloc(Value::Object(HashMap::new()));
+    let child_undefined = second.alloc(Value::Undefined);
+    let child = second.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("optional".into()), child_undefined),
+    ])));
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
+        getter: Some(getter), setter: None, value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: second_env.cast(),
+    };
+    unsafe { assert_eq!(napi_define_properties(second_env, child, 1, &descriptor), NAPI_OK); }
+    let mut deferred = ptr::null_mut();
+    let mut promise = ptr::null_mut();
+    unsafe { assert_eq!(napi_create_promise(first_env, &mut deferred, &mut promise), NAPI_OK); }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.module_envs.push(first);
+        host.module_envs.push(second);
+    });
+    unsafe {
+        assert_eq!(napi_set_named_property(first_env, root, c"child".as_ptr(), child), NAPI_OK);
+        assert_eq!(napi_resolve_deferred(first_env, deferred, child), NAPI_OK);
+        let plain = json_from_value_with_undefined_for_env(first_env, root, true).unwrap();
+        assert_eq!(plain["child"]["computed"], 9.0);
+        assert_eq!(plain["child"]["optional"], serde_json::json!({ (TYPED_UNDEFINED_KEY): true }));
+        let settled = json_from_value_with_undefined_for_env(first_env, promise, true).unwrap();
+        assert_eq!(settled["computed"], 9.0);
+        assert_eq!(settled["optional"], serde_json::json!({ (TYPED_UNDEFINED_KEY): true }));
+        let private = quickjs_reference_wire(first_env, root, true).unwrap();
+        assert_eq!(private.value["child"]["computed"], 9.0);
+        #[cfg(feature = "quickjs")]
+        {
+            let target = CString::new((promise as u64).to_string()).unwrap();
+            let wire = thaw_napi_handle_bridge(c"promise_state".as_ptr(), target.as_ptr(), c"".as_ptr(), c"[]".as_ptr());
+            let result = CString::from_raw(wire.cast_mut()).into_string().unwrap();
+            assert!(result.contains("\"computed\":9.0"), "{result}");
+        }
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        drop(host.module_envs.pop());
+        drop(host.module_envs.pop());
+    });
+}
+
+#[test]
+fn cross_environment_registered_function_reference_survives_private_snapshot() {
+    unsafe extern "C" fn noop(env: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
+        env_mut(env).unwrap().alloc(Value::Undefined)
+    }
+    unsafe extern "C" fn returns_registered(_: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        info.as_ref().unwrap().data.cast::<Value>()
+    }
+    let mut first = Box::new(Env::new());
+    let mut second = Box::new(Env::new());
+    let first_env: NapiEnv = &mut *first;
+    let root = first.alloc(Value::Object(HashMap::new()));
+    let function = || Value::Function(Function {
+        callback: noop, data: ptr::null_mut(), properties: HashMap::new(), _thaw_bridge: None,
+    });
+    let registered = second.alloc(function());
+    let ordinary = second.alloc(function());
+    second.quickjs_references.insert(991, registered);
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"fromGetter".as_ptr(), name: ptr::null_mut(), method: None,
+        getter: Some(returns_registered), setter: None, value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: registered.cast(),
+    };
+    unsafe { assert_eq!(napi_define_properties(first_env, root, 1, &descriptor), NAPI_OK); }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.module_envs.push(first);
+        host.module_envs.push(second);
+    });
+    unsafe {
+        assert_eq!(napi_set_named_property(first_env, root, c"registered".as_ptr(), registered), NAPI_OK);
+        assert_eq!(napi_set_named_property(first_env, root, c"ordinary".as_ptr(), ordinary), NAPI_OK);
+        let wire = quickjs_reference_wire(first_env, root, true).unwrap();
+        assert_eq!(wire.value["registered"]["__thaw_napi_ref__"], 991);
+        assert_eq!(wire.value["fromGetter"]["__thaw_napi_ref__"], 991);
+        assert!(wire.value.get("ordinary").is_none());
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        drop(host.module_envs.pop());
+        drop(host.module_envs.pop());
+    });
+}
+
+#[test]
+fn cyclic_exception_data_reports_original_failure_without_recursing_forever() {
+    let mut env = Env::new();
+    let env_ptr: NapiEnv = &mut env;
+    let object = env.alloc(Value::Object(HashMap::new()));
+    let Value::Object(fields) = (unsafe { object.as_mut() }).unwrap() else { unreachable!() };
+    fields.insert(PropertyKey::String("self".into()), object);
+    let array = env.alloc(Value::Array(vec![None]));
+    let Value::Array(items) = (unsafe { array.as_mut() }).unwrap() else { unreachable!() };
+    items[0] = Some(array);
+    let mut deferred = ptr::null_mut();
+    let mut promise = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_create_promise(env_ptr, &mut deferred, &mut promise), NAPI_OK);
+        assert_eq!(napi_resolve_deferred(env_ptr, deferred, promise), NAPI_OK);
+        for thrown in [object, array, promise] {
+            assert_eq!(napi_throw(env_ptr, thrown), NAPI_OK);
+            let report = take_env_exception(env_ptr).unwrap_err();
+            assert_eq!(report, "native addon threw an unserializable exception value");
+            assert!(env.exception.is_none());
+        }
+    }
+}
+
+#[test]
+fn repeated_acyclic_exception_child_is_serialized_on_each_branch() {
+    let mut env = Env::new();
+    let env_ptr: NapiEnv = &mut env;
+    let code = env.alloc(Value::Number(5.0));
+    let shared = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("code".into()), code),
+    ])));
+    let root = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("left".into()), shared),
+        (PropertyKey::String("right".into()), shared),
+    ])));
+    unsafe {
+        assert_eq!(napi_throw(env_ptr, root), NAPI_OK);
+        let report = take_env_exception(env_ptr).unwrap_err();
+        let parsed: JsonValue = serde_json::from_str(&report).unwrap();
+        assert_eq!(parsed["left"]["code"], 5.0);
+        assert_eq!(parsed["right"]["code"], 5.0);
+        assert!(env.exception.is_none());
+    }
 }
