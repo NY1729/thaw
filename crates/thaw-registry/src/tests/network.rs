@@ -388,7 +388,7 @@ fn http_client_requests_and_parses_a_real_chunked_response() {
     let empty_node_modules = temp_registry("builtin_http_client_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpClient = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -448,6 +448,72 @@ fn http_incoming_pause_buffers_chunked_body_and_resume_waits_for_end() {
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(result, r#"[false,["a"],["a","b","end"],true]"#);
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_incoming_decodes_split_utf8_and_flushes_eof_before_end() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        for case in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            if case == 0 {
+                stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\nA\r\n1\r\n\xe9\r\n1\r\n\x9b\r\n1\r\n\xaa\r\n0\r\n\r\n").unwrap();
+            } else {
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n\xe9").unwrap();
+            }
+        }
+    });
+
+    let dir = temp_registry("builtin_http_incoming_decoder");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http = require('node:http'); module.exports = async function(port) {
+          function get(path, pauseFirst) { return new Promise(function(resolve, reject) {
+            var request = http.get({ hostname: '127.0.0.1', port: port, path: path }, function(response) {
+              var events = []; response.setEncoding('utf8');
+              response.on('data', function(chunk) {
+                events.push(chunk);
+                if (pauseFirst && chunk === 'A') { response.pause(); queueMicrotask(function() { response.resume(); }); }
+              });
+              response.on('end', function() { events.push('end'); resolve(events); });
+            }); request.on('error', reject);
+          }); }
+          var split = await get('/split', true), eof = await get('/eof', false);
+          var direct = new http.IncomingMessage({ destroy: function() {} }), switched = [];
+          direct.setEncoding('utf8');
+          direct.on('data', function(chunk) { switched.push(chunk); if (chunk === 'A') direct.setEncoding('hex'); });
+          direct.on('end', function() { switched.push('end'); });
+          direct._queueBody(Buffer.from([65, 233])); direct._queueBody(Buffer.from([66])); direct._finishBody();
+          await new Promise(function(resolve) { direct.once('end', resolve); });
+          return [split, eof, switched];
+        };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_incoming_decoder_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpIncomingDecoder = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpIncomingDecoder").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["A","雪","end"],["�","end"],["A","�","42","end"]]"#);
     server.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -612,7 +678,7 @@ fn http_client_emits_informational_responses_and_parses_trailers() {
     let empty_node_modules = temp_registry("builtin_http_information_trailers_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpInformation = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -851,7 +917,7 @@ fn http_agents_and_header_validators_share_across_https() {
     let empty_node_modules = temp_registry("builtin_http_agents_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 6);
+    assert_eq!(file_count, 7);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpAgents = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1032,7 +1098,7 @@ fn http_server_parses_and_replies_to_a_real_tcp_client() {
     let empty_node_modules = temp_registry("builtin_http_server_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServer = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1563,7 +1629,7 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     let empty_node_modules = temp_registry("builtin_https_client_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 6);
+    assert_eq!(file_count, 7);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpsClient = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1620,7 +1686,7 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     let (server_bundle, _, server_file_count, _) =
         bundle_commonjs_package(&server_node_modules, "secure-pkg", &server_dir, "index.js")
             .unwrap();
-    assert_eq!(server_file_count, 6);
+    assert_eq!(server_file_count, 7);
     let server_script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {server_bundle} globalThis.exerciseHttpsServer = module.exports;");
     let server_source = CString::new(server_script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(server_source.as_ptr()), 1);
