@@ -115,7 +115,12 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
         run: |
-          mapfile -t tests < <(cargo test -p thaw-cli registry_add -- --list | sed -n 's/: test$//p')
+          listing=$(cargo test -p thaw-cli registry_add -- --list) || exit 1
+          mapfile -t tests < <(sed -n 's/: test$//p' <<< "$listing")
+          if (( ${#tests[@]} == 0 )); then
+            echo 'No registry tests were listed' >&2
+            exit 1
+          fi
           index=0
           for test in "${tests[@]}"; do
             if [[ "$test" != *postgres* ]] && (( index % 4 == SHARD )); then
