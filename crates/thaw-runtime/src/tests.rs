@@ -1450,6 +1450,17 @@ fn incrementally_decodes_chunked_response() {
 }
 
 #[test]
+fn chunk_size_near_address_limit_does_not_overflow_terminator_offset() {
+    // Unrun regression for the shared decoder's chunk_end + CRLF boundary.
+    let header_len = format!("{:x}", usize::MAX).len() + 2;
+    let size = usize::MAX - header_len;
+    let chunk = format!("{size:x}\r\n");
+    assert!(decode_chunked(chunk.as_bytes())
+        .unwrap_err()
+        .contains("overflows address space"));
+}
+
+#[test]
 fn async_http_rejects_unsupported_scheme_without_blocking() {
     let url = CString::new("ftp://example.com/").unwrap();
     let promise = thaw_http_get_async(url.as_ptr());
@@ -1949,6 +1960,109 @@ fn polls_an_invocation_and_posts_the_handler_result() {
     let post_request = rx.recv().unwrap();
     assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/req-123/response"));
     assert!(post_request.ends_with("echo:\"hello\""));
+}
+
+#[test]
+fn lambda_decodes_chunked_utf8_event_before_handler_and_post_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        conn.read_to_end(&mut request).unwrap();
+        let body = "{\"name\":\"é\"}".as_bytes();
+        let split = body.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
+        let mut response = b"HTTP/1.1 200 OK\r\nlambda-runtime-aws-request-id: chunk-utf8\r\nTransfer-Encoding: ChUnKeD\r\nConnection: close\r\n\r\n".to_vec();
+        for chunk in [&body[..split], &body[split..]] {
+            response.extend_from_slice(format!("{:x};part=test\r\n", chunk.len()).as_bytes());
+            response.extend_from_slice(chunk);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\nX-End: yes\r\n\r\n");
+        conn.write_all(&response).unwrap();
+        drop(conn);
+
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        conn.read_to_end(&mut request).unwrap();
+        tx.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
+        conn.write_all(b"HTTP/1.1 202 Accepted\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n").unwrap();
+    });
+    handle_one_invocation(&addr, echo_handler, std::ptr::null_mut()).unwrap();
+    server.join().unwrap();
+    let posted = rx.recv().unwrap();
+    assert!(posted.starts_with("POST /2018-06-01/runtime/invocation/chunk-utf8/response"));
+    assert!(posted.ends_with("echo:{\"name\":\"é\"}"));
+}
+
+#[test]
+fn lambda_rejects_incomplete_and_malformed_chunked_responses() {
+    for (wire, expected) in [
+        (b"4\r\nWi".as_slice(), "incomplete chunked HTTP response"),
+        (b"4\r\nWikiX\n0\r\n\r\n".as_slice(), "missing its CRLF terminator"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            conn.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
+            conn.write_all(wire).unwrap();
+        });
+        let error = http_request(&addr, "GET", "/2018-06-01/runtime/invocation/next", None)
+            .err()
+            .expect("malformed chunked response must fail");
+        assert!(error.contains(expected), "{error}");
+        server.join().unwrap();
+    }
+}
+
+thread_local! {
+    static LAMBDA_TAGGED_ERROR: Cell<*const c_char> = const { Cell::new(std::ptr::null()) };
+    static LAMBDA_TAGGED_SLOT: Cell<*mut *const c_char> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+extern "C" fn tagged_lambda_error_handler(_: *const c_char) -> *const c_char {
+    let error = LAMBDA_TAGGED_ERROR.with(Cell::get);
+    LAMBDA_TAGGED_SLOT.with(|slot| unsafe { *slot.get() = error });
+    std::ptr::null()
+}
+
+#[test]
+fn lambda_error_type_uses_public_name_instead_of_internal_ancestry() {
+    for (raw, expected) in [
+        (b"\x01\x1eSub\x1fMyError\x1fError\x01boom\0".as_slice(), "Sub"),
+        (b"\x01\x1eSub\x1fMyError\x1fError\x01boom\x04Visible\0".as_slice(), "Visible"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            conn.write_all(b"HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: tagged-error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            tx.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
+            conn.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let mut error_slot = std::ptr::null();
+        LAMBDA_TAGGED_ERROR.with(|value| value.set(raw.as_ptr().cast()));
+        LAMBDA_TAGGED_SLOT.with(|value| value.set(&raw mut error_slot));
+        handle_one_invocation(&addr, tagged_lambda_error_handler, &raw mut error_slot).unwrap();
+        LAMBDA_TAGGED_SLOT.with(|value| value.set(std::ptr::null_mut()));
+        server.join().unwrap();
+        let posted = rx.recv().unwrap();
+        assert!(posted.starts_with("POST /2018-06-01/runtime/invocation/tagged-error/error"));
+        assert!(posted.contains(&format!("{{\"errorMessage\":\"boom\",\"errorType\":\"{expected}\"}}")));
+        assert!(!posted.contains("MyError"));
+    }
 }
 
 #[test]

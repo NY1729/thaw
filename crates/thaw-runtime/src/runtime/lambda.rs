@@ -84,8 +84,8 @@ fn handle_one_invocation(
             )
         } else {
             let raw = unsafe { CStr::from_ptr(*error_slot) }.to_string_lossy();
-            let (name, message) = split_error_tag(&raw);
-            (name.to_string(), message.to_string())
+            let (_, message) = split_error_tag(&raw);
+            (resolved_error_name(&raw), message.to_string())
         };
         let error_path = format!("/2018-06-01/runtime/invocation/{request_id}/error");
         let body = format!(
@@ -174,11 +174,10 @@ fn http_request(
     stream
         .read_to_end(&mut raw)
         .map_err(|e| format!("reading response: {e}"))?;
-    let raw = String::from_utf8_lossy(&raw);
-
-    let (head, body) = raw
-        .split_once("\r\n\r\n")
+    let header_end = find_bytes(&raw, b"\r\n\r\n")
         .ok_or("malformed HTTP response (no header/body separator)")?;
+    let head = String::from_utf8_lossy(&raw[..header_end]);
+    let body = &raw[header_end + 4..];
 
     let mut lines = head.lines();
     let status_line = lines.next().ok_or("empty HTTP response")?;
@@ -188,15 +187,27 @@ fn http_request(
         .and_then(|s| s.parse::<u32>().ok())
         .ok_or_else(|| format!("malformed status line: {status_line}"))?;
 
-    let headers = lines
+    let headers: Vec<(String, String)> = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect();
 
+    let chunked = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+    });
+    let body = if chunked {
+        decode_chunked(body)?.ok_or("incomplete chunked HTTP response")?
+    } else {
+        body.to_vec()
+    };
+
     let response = HttpResponse {
         status,
         headers,
-        body: body.to_string(),
+        body: String::from_utf8_lossy(&body).into_owned(),
     };
 
     if response.status >= 400 {
