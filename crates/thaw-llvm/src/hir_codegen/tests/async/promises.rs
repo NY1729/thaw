@@ -965,3 +965,61 @@ fn promise_try_wraps_values_promises_and_throws() {
         "42\n42\n7\nboom\n"
     );
 }
+
+#[test]
+fn synchronous_main_values_are_not_treated_as_promises() {
+    for (name, source, expected) in [
+        (
+            "sync_main_number_result",
+            "function main(): number { console.log('number'); return 42; }",
+            "number\n",
+        ),
+        (
+            "sync_main_string_result",
+            "function main(): string { console.log('string'); return 'done'; }",
+            "string\n",
+        ),
+        (
+            "sync_main_boolean_result",
+            "function main(): boolean { console.log('boolean'); return true; }",
+            "boolean\n",
+        ),
+        (
+            "sync_main_object_result",
+            "function main(): { value: number } { console.log('object'); return { value: 42 }; }",
+            "object\n",
+        ),
+    ] {
+        assert_eq!(compile_and_run(source, name), expected, "{name}");
+    }
+}
+
+#[test]
+fn promise_returning_main_values_still_drive_completion() {
+    let synchronous = r#"
+        function main(): Promise<number> {
+            console.log("sync-start");
+            return Promise.resolve(42).then((value: number): number => {
+                console.log(value);
+                return value;
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(synchronous, "sync_promise_main_result"),
+        "sync-start\n42\n"
+    );
+
+    let asynchronous = r#"
+        async function main(): Promise<number> {
+            console.log("async-start");
+            await sleep(1);
+            console.log("async-done");
+            return 42;
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(asynchronous, "async_promise_main_result"),
+        "async-start\nasync-done\n"
+    );
+}
