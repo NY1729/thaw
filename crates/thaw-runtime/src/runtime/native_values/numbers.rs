@@ -311,7 +311,7 @@ pub extern "C" fn thaw_jit_format_number(
 
 fn javascript_string_number(text: &str) -> f64 {
     let text =
-        text.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+        text.trim_matches(is_javascript_whitespace);
     if text.is_empty() {
         return 0.0;
     }
@@ -426,7 +426,7 @@ pub unsafe extern "C" fn thaw_string_to_number(value: *const c_char) -> f64 {
 
 fn javascript_parse_float(text: &str) -> f64 {
     let text = text
-        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+        .trim_start_matches(is_javascript_whitespace);
     let bytes = text.as_bytes();
     let mut index = usize::from(matches!(bytes.first(), Some(b'+') | Some(b'-')));
     if text
@@ -473,7 +473,7 @@ fn javascript_parse_float(text: &str) -> f64 {
 
 fn javascript_parse_int(text: &str, radix: f64) -> f64 {
     let mut text = text
-        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+        .trim_start_matches(is_javascript_whitespace);
     let negative = text.starts_with('-');
     if matches!(text.as_bytes().first(), Some(b'+') | Some(b'-')) {
         text = &text[1..];
@@ -1405,6 +1405,31 @@ pub unsafe extern "C" fn thaw_math_sum_precise(
         });
     }
     1
+}
+
+#[cfg(test)]
+mod numeric_whitespace_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_parsers_use_ecmascript_whitespace() {
+        for whitespace in ['\u{00a0}', '\u{2028}', '\u{3000}', '\u{feff}'] {
+            let wrapped = format!("{whitespace}1{whitespace}");
+            assert_eq!(javascript_string_number(&wrapped), 1.0);
+            assert_eq!(javascript_parse_float(&wrapped), 1.0);
+            assert_eq!(javascript_parse_int(&wrapped, 10.0), 1.0);
+        }
+        for non_whitespace in ['\u{0085}', '\u{180e}', '\u{200b}'] {
+            let leading = format!("{non_whitespace}1");
+            let trailing = format!("1{non_whitespace}");
+            assert!(javascript_string_number(&leading).is_nan());
+            assert!(javascript_string_number(&trailing).is_nan());
+            assert!(javascript_parse_float(&leading).is_nan());
+            assert!(javascript_parse_int(&leading, 10.0).is_nan());
+            assert_eq!(javascript_parse_float(&trailing), 1.0);
+            assert_eq!(javascript_parse_int(&trailing, 10.0), 1.0);
+        }
+    }
 }
 
 #[cfg(test)]
