@@ -8185,6 +8185,41 @@ fn compiles_large_bigint_literals() {
     );
 }
 
+#[test]
+fn large_bigint_zero_division_and_bounded_right_shift() {
+    let source = r#"
+        function main(): void {
+            const large = 123456789012345678901234567890n;
+            try {
+                try { throw 13n; }
+                finally { console.log(7n / 0n); }
+            } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            try { console.log(7n / 0n); } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            try { console.log(7n % 0n); } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            try { large / 0n; } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            try { large % BigInt("0"); } catch (error) {
+                console.log(error instanceof RangeError, (error as Error).name);
+            }
+            console.log((large >> 1000000n).toString());
+            console.log(((-large) >> 1000000n).toString());
+            console.log((large << -1000000n).toString());
+            console.log((large >> 8n).toString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bigint_zero_division_right_shift"),
+        "true RangeError\ntrue RangeError\ntrue RangeError\ntrue RangeError\ntrue RangeError\n0\n-1\n0\n482253082079475308207947530\n"
+    );
+}
+
 /// The native `Temporal` slice: `Now`, `Instant`, `PlainDate`/`PlainDateTime`/
 /// `PlainTime`/`PlainYearMonth`/`PlainMonthDay`, and `Duration`, on the
 /// epoch-millisecond `f64` `Date` uses plus a sub-millisecond nanoseconds

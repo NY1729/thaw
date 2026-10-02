@@ -553,6 +553,20 @@ impl<'ctx> HirCompiler<'ctx> {
         {
             let lhs = lhs_value.into_int_value();
             let rhs = rhs_value.into_int_value();
+            if matches!(op, BinOp::Div | BinOp::Mod) {
+                let zero = rhs.get_type().const_zero();
+                let invalid = self.builder
+                    .build_int_compare(IntPredicate::EQ, rhs, zero, "bigint_zero_divisor")
+                    .map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let error_bb = self.context.append_basic_block(function, "bigint_division_error");
+                let continue_bb = self.context.append_basic_block(function, "bigint_division_ok");
+                self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error_bb);
+                self.compile_throw_builtin_error("RangeError", "Division by zero")?;
+                self.builder.position_at_end(continue_bb);
+            }
             return match op {
                 BinOp::Add => self.builder.build_int_add(lhs, rhs, "bigint_add"),
                 BinOp::Sub => self.builder.build_int_sub(lhs, rhs, "bigint_sub"),
