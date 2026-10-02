@@ -4319,3 +4319,124 @@ fn callable_const_alias_extracts_only_its_own_declarator() {
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
+
+#[test]
+fn reexported_type_records_preserve_terminal_origin_without_changing_output() {
+    // Unrun precursor regression: wildcard and type namespace formatting
+    // retain the source-owned children for the later private closure pass.
+    let dir = temp_registry("owned-type-reexports");
+    fs::write(dir.join("leaf.d.ts"),
+        "export interface Model { id: Id; }\nexport type Id = string;\n").unwrap();
+    fs::write(dir.join("entry.d.ts"),
+        "export * from './leaf.js';\nexport type * as Types from './leaf.js';\n").unwrap();
+    let entry = dir.join("entry.d.ts");
+    let mut owned_visited = std::collections::BTreeSet::new();
+    let owned = all_reexported_type_declarations_owned(&entry, &mut owned_visited).unwrap();
+    assert!(thaw_parser::parse_declarations(&owned.iter().map(|declaration|
+        declaration.snippet.as_str()).collect::<Vec<_>>().join("\n")).is_ok());
+    let leaf = dir.join("leaf.d.ts").canonicalize().unwrap();
+    assert!(owned.iter().any(|declaration| declaration.origin == leaf
+        && declaration.local_name.as_deref() == Some("Model")));
+    let namespace = owned.iter().find(|declaration| declaration.local_name.as_deref() == Some("Types")).unwrap();
+    assert!(namespace.children.iter().any(|child| child.origin == leaf
+        && child.local_name.as_deref() == Some("Model")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn named_reexport_records_keep_original_owner_and_selected_alias_order() {
+    // Unrun precursor regression: the selected class and imported Base
+    // retain separate owners even though the returned text is unchanged.
+    let dir = temp_registry("owned-named-reexports");
+    fs::write(dir.join("base.d.ts"),
+        "export declare class Base { inherited(): string; }\n").unwrap();
+    fs::write(dir.join("leaf.d.ts"),
+        "import { Base as LocalBase } from './base.js';\nexport declare class Model extends LocalBase {}\n").unwrap();
+    let leaf = dir.join("leaf.d.ts");
+    let owned = reexported_class_or_interface_declarations_owned(&leaf, "Model").unwrap();
+    assert!(owned.first().unwrap().snippet.contains("class Model extends LocalBase"));
+    assert_eq!(owned.first().and_then(|declaration| declaration.local_name.as_deref()), Some("Model"));
+    assert_eq!(owned.first().unwrap().origin, leaf.canonicalize().unwrap());
+    assert!(owned.iter().skip(1).any(|declaration| declaration.origin == dir.join("base.d.ts").canonicalize().unwrap()
+        && declaration.local_name.as_deref() == Some("Base")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn function_reexport_records_keep_leaf_owner_through_named_and_namespace_paths() {
+    // Unrun precursor regression: public alias spelling does not replace
+    // the leaf identity needed to resolve private signature types.
+    let dir = temp_registry("owned-function-reexports");
+    fs::write(dir.join("leaf.d.ts"),
+        "export interface Options { value: string; }\n\
+         export declare function make(options: Options): string;\n").unwrap();
+    fs::write(dir.join("entry.d.ts"),
+        "export { make as create } from './leaf.js';\n\
+         export * as api from './leaf.js';\n").unwrap();
+    let leaf = dir.join("leaf.d.ts").canonicalize().unwrap();
+    let mut visited = std::collections::BTreeSet::new();
+    let named = all_reexported_function_declarations_owned(&dir.join("entry.d.ts"), &mut visited).unwrap();
+    let (public, selected) = named.iter().find(|(public, _)| public == "create").unwrap();
+    assert_eq!(public, "create");
+    assert_eq!(selected.origin, leaf);
+    assert_eq!(selected.local_name.as_deref(), Some("make"));
+    assert!(selected.snippet.contains("function create(options: Options): string"));
+    let mut visited = std::collections::BTreeSet::new();
+    let namespaced = all_reexported_function_declarations_owned(&dir.join("leaf.d.ts"), &mut visited).unwrap();
+    assert!(namespaced.iter().any(|(name, declaration)| name == "make"
+        && declaration.origin == leaf && declaration.local_name.as_deref() == Some("make")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn namespace_renderer_keeps_function_and_type_member_sources() {
+    // Unrun precursor regression: exercise the same owner-aware renderer
+    // used by an ordinary `export * as api` entry, not just its collector.
+    let dir = temp_registry("owned-namespace-renderer");
+    fs::write(dir.join("leaf.d.ts"),
+        "export interface Options { value: string; }\n\
+         export declare function make(options: Options): string;\n").unwrap();
+    fs::write(dir.join("entry.d.ts"), "export * as api from './leaf.js';\n").unwrap();
+    let entry = dir.join("entry.d.ts");
+    let leaf = dir.join("leaf.d.ts").canonicalize().unwrap();
+    let flattened = dts_source_with_reexported_functions(&entry,
+        &fs::read_to_string(&entry).unwrap()).unwrap();
+    assert!(flattened.contains("declare namespace api {"), "{flattened}");
+    assert!(flattened.contains("export interface Options"), "{flattened}");
+    assert!(flattened.contains("export function make(options: Options): string"), "{flattened}");
+    assert!(thaw_parser::parse_declarations(&flattened).is_ok(), "{flattened}");
+    let mut visited = std::collections::BTreeSet::new();
+    let functions = all_reexported_function_declarations_owned(&leaf, &mut visited).unwrap();
+    let rendered = namespace_member_declarations_owned(functions.into_iter().next().unwrap().1).unwrap();
+    assert!(rendered.iter().any(|member| member.origin == leaf
+        && member.local_name.as_deref() == Some("make")
+        && member.snippet.contains("function make(options: Options): string")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn import_equals_export_assignment_records_keep_terminal_owner() {
+    // Unrun precursor regression: `export =` function/class targets keep
+    // the target file, while the barrel retains its public alias.
+    let dir = temp_registry("owned-import-equals");
+    fs::write(dir.join("function.d.ts"),
+        "declare function make(value: string): string;\nexport = make;\n").unwrap();
+    fs::write(dir.join("class.d.ts"),
+        "declare class Client { read(): string; }\nexport = Client;\n").unwrap();
+    fs::write(dir.join("entry.d.ts"),
+        "import Maker = require('./function.js');\n\
+         import Client = require('./class.js');\n\
+         export { Maker as create, Client };\n").unwrap();
+    let entry = dir.join("entry.d.ts");
+    let flattened = dts_source_with_reexported_functions(&entry,
+        &fs::read_to_string(&entry).unwrap()).unwrap();
+    assert!(flattened.contains("function create(value: string): string"), "{flattened}");
+    assert!(flattened.contains("class Client"), "{flattened}");
+    let function = export_assignment_function_declarations_owned(&dir.join("function.d.ts")).unwrap();
+    assert_eq!(function[0].origin, dir.join("function.d.ts").canonicalize().unwrap());
+    assert_eq!(function[0].local_name.as_deref(), Some("make"));
+    let class = export_assignment_class_or_interface_declarations_owned(&dir.join("class.d.ts")).unwrap();
+    assert_eq!(class[0].origin, dir.join("class.d.ts").canonicalize().unwrap());
+    assert_eq!(class[0].local_name.as_deref(), Some("Client"));
+    let _ = fs::remove_dir_all(dir);
+}

@@ -707,7 +707,7 @@ fn dts_source_with_reexported_functions_inner(
     let named_import_targets = named_import_targets(entry_path, &module);
     let named_type_import_targets = named_type_import_targets(entry_path, &module);
     let mut local_export_visited = std::collections::BTreeSet::new();
-    let local_exports = all_reexported_function_declarations(
+    let local_exports = all_reexported_function_declarations_owned(
         entry_path,
         &mut local_export_visited,
     )?;
@@ -778,26 +778,26 @@ fn dts_source_with_reexported_functions_inner(
                 Some(target_path) => {
                     let mut visited = std::collections::BTreeSet::new();
                     let functions =
-                        reexported_function_declarations(target_path, &original, &mut visited)?;
+                        reexported_function_declarations_owned(target_path, &original, &mut visited)?;
                     if !functions.is_empty() {
                         functions
                     } else {
-                        reexported_class_or_interface_declarations(target_path, &original)?
+                        reexported_class_or_interface_declarations_owned(target_path, &original)?
                     }
                 }
                 None => match import_equals_targets.get(&original) {
                     Some(target_path) => {
-                        let functions = export_assignment_function_declarations(target_path)?;
+                        let functions = export_assignment_function_declarations_owned(target_path)?;
                         if !functions.is_empty() {
                             functions
                         } else {
-                            export_assignment_class_or_interface_declarations(target_path)?
+                            export_assignment_class_or_interface_declarations_owned(target_path)?
                         }
                     }
                     None => match named_import_targets.get(&original) {
                         Some((target_path, target_name)) => {
                             let mut visited = std::collections::BTreeSet::new();
-                            let functions = reexported_function_declarations(
+                            let functions = reexported_function_declarations_owned(
                                 target_path,
                                 target_name,
                                 &mut visited,
@@ -805,7 +805,7 @@ fn dts_source_with_reexported_functions_inner(
                             if !functions.is_empty() {
                                 functions
                             } else {
-                                reexported_class_or_interface_declarations(
+                                reexported_class_or_interface_declarations_owned(
                                     target_path,
                                     target_name,
                                 )?
@@ -822,12 +822,12 @@ fn dts_source_with_reexported_functions_inner(
             if !declarations.is_empty() {
                 seen.insert(exported.clone());
             }
-            for snippet in reexported_declarations_as(declarations, &exported, entry_path, false) {
-                if is_type_declaration_snippet(&snippet) {
-                    append_flattened_type(&mut output, snippet);
+            for declaration in reexported_owned_declarations_as(declarations, &exported, entry_path, false) {
+                if is_type_declaration_snippet(&declaration.snippet) {
+                    append_flattened_type(&mut output, declaration.snippet);
                 } else {
                     output.push('\n');
-                    output.push_str(&snippet);
+                    output.push_str(&declaration.snippet);
                 }
             }
         }
@@ -1000,18 +1000,18 @@ fn dts_source_with_reexported_functions_inner(
         collect_namespace_reexports(entry_path, &module, &mut namespace_visited)?
     {
         let mut visited_functions = std::collections::BTreeSet::new();
-        let functions = all_reexported_function_declarations(&target_path, &mut visited_functions)?;
+        let functions = all_reexported_function_declarations_owned(&target_path, &mut visited_functions)?;
         let mut visited_types = std::collections::BTreeSet::new();
-        let types = all_reexported_type_declarations(&target_path, &mut visited_types)?;
+        let types = all_reexported_type_declarations_owned(&target_path, &mut visited_types)?;
         if functions.is_empty() && types.is_empty() {
             continue;
         }
         output.push_str(&format!("\ndeclare namespace {alias} {{\n"));
         let mut seen_members = std::collections::BTreeSet::new();
-        for snippet in types.into_iter().chain(functions.into_iter().map(|(_, snippet)| snippet)) {
-            for member in namespace_member_declarations(&snippet)? {
-                if seen_members.insert(member.clone()) {
-                    output.push_str(&member);
+        for declaration in types.into_iter().chain(functions.into_iter().map(|(_, declaration)| declaration)) {
+            for member in namespace_member_declarations_owned(declaration)? {
+                if seen_members.insert(member.snippet.clone()) {
+                    output.push_str(&member.snippet);
                     output.push('\n');
                 }
             }
@@ -1207,10 +1207,54 @@ fn builtin_class_and_ancestor_declarations(
     Ok(declarations)
 }
 
+// The terminal source identity survives alias and wildcard traversal.
+#[derive(Clone)]
+struct OwnedDeclaration {
+    origin: PathBuf,
+    local_name: Option<String>,
+    snippet: String,
+    children: Vec<OwnedDeclaration>,
+}
+
+impl OwnedDeclaration {
+    fn new(origin: &Path, snippet: String) -> Self {
+        Self {
+            origin: origin.canonicalize().unwrap_or_else(|_| origin.to_path_buf()),
+            local_name: declaration_identity(&snippet),
+            snippet,
+            children: Vec::new(),
+        }
+    }
+
+    fn with_snippet(mut self, snippet: String) -> Self {
+        self.snippet = snippet;
+        self
+    }
+}
+
+fn reexported_owned_declarations_as(
+    declarations: Vec<OwnedDeclaration>, exported: &str, origin: &Path, type_only: bool,
+) -> Vec<OwnedDeclaration> {
+    let rewritten = reexported_declarations_as(
+        declarations.iter().map(|declaration| declaration.snippet.clone()).collect(),
+        exported, origin, type_only,
+    );
+    declarations.into_iter().zip(rewritten).map(|(declaration, snippet)|
+        declaration.with_snippet(snippet)).collect()
+}
+
 fn all_reexported_type_declarations(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<Vec<String>, String> {
+    Ok(all_reexported_type_declarations_owned(path, visited)?
+        .into_iter().map(|declaration| declaration.snippet).collect())
+}
+
+fn all_reexported_type_declarations_owned(
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Vec<OwnedDeclaration>, String> {
     use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
     use thaw_parser::common::{SourceMapper, Spanned};
 
@@ -1241,16 +1285,16 @@ fn all_reexported_type_declarations(
                         | Decl::TsModule(_)
                 ) =>
             {
-                declarations.push(source_map.span_to_snippet(export.span()).map_err(|error| {
+                declarations.push(OwnedDeclaration::new(path, source_map.span_to_snippet(export.span()).map_err(|error| {
                     format!("failed to read type declaration in `{}`: {error:?}", path.display())
-                })?);
+                })?));
             }
             ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) => {
                 if let Some(source) = export.src.value.as_str() {
                     if let Some(target) = declaration_reexport_path(path, source) {
-                        for snippet in all_reexported_type_declarations(&target, visited)? {
+                        for snippet in all_reexported_type_declarations_owned(&target, visited)? {
                             declarations.push(if export.type_only {
-                                type_only_declaration(snippet, None)
+                                snippet.clone().with_snippet(type_only_declaration(snippet.snippet, None))
                             } else {
                                 snippet
                             });
@@ -1283,9 +1327,9 @@ fn all_reexported_type_declarations(
                     let mut status_visited = std::collections::BTreeSet::new();
                     let inherited_type_only = imported_only_as_type
                         || reexport_is_type_only(&target, target_name, &mut status_visited)? == Some(true);
-                    let resolved = reexported_class_or_interface_declarations(&target, target_name)?
-                        .into_iter().filter(|snippet| is_type_declaration_snippet(snippet)).collect();
-                    declarations.extend(reexported_declarations_as(
+                    let resolved = reexported_class_or_interface_declarations_owned(&target, target_name)?
+                        .into_iter().filter(|declaration| is_type_declaration_snippet(&declaration.snippet)).collect();
+                    declarations.extend(reexported_owned_declarations_as(
                         resolved, exported.sym.as_ref(), path,
                         export.type_only || named.is_type_only || inherited_type_only,
                     ));
@@ -1296,8 +1340,12 @@ fn all_reexported_type_declarations(
                     let ModuleExportName::Ident(alias) = &namespace.name else { continue };
                     let Some(source) = export.src.as_ref().and_then(|source| source.value.as_str()) else { continue };
                     let Some(target) = declaration_reexport_path(path, source) else { continue };
-                    let snippets = all_reexported_type_declarations(&target, visited)?;
-                    declarations.push(type_only_namespace_declaration(alias.sym.as_ref(), snippets));
+                    let children = all_reexported_type_declarations_owned(&target, visited)?;
+                    let snippet = type_only_namespace_declaration(alias.sym.as_ref(),
+                        children.iter().map(|child| child.snippet.clone()).collect());
+                    let mut owned = OwnedDeclaration::new(path, snippet);
+                    owned.children = children;
+                    declarations.push(owned);
                 }
             }
             _ => {}
@@ -1400,6 +1448,13 @@ fn type_only_namespace_declaration(alias: &str, snippets: Vec<String>) -> String
             .map_or_else(|| snippet.to_string(), |rest| format!("export {rest}"))
     }).collect::<Vec<_>>().join("\n");
     format!("declare namespace {alias} {{\n{body}\n}}\nexport type {{ {alias} }};")
+}
+
+fn namespace_member_declarations_owned(
+    declaration: OwnedDeclaration,
+) -> Result<Vec<OwnedDeclaration>, String> {
+    Ok(namespace_member_declarations(&declaration.snippet)?
+        .into_iter().map(|snippet| declaration.clone().with_snippet(snippet)).collect())
 }
 
 fn namespace_member_declarations(snippet: &str) -> Result<Vec<String>, String> {
@@ -2241,6 +2296,14 @@ fn all_reexported_function_declarations(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<Vec<(String, String)>, String> {
+    Ok(all_reexported_function_declarations_owned(path, visited)?
+        .into_iter().map(|(name, declaration)| (name, declaration.snippet)).collect())
+}
+
+fn all_reexported_function_declarations_owned(
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Vec<(String, OwnedDeclaration)>, String> {
     use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
     use thaw_parser::common::{SourceMapper, Spanned};
 
@@ -2262,14 +2325,14 @@ fn all_reexported_function_declarations(
             if let Decl::Fn(function) = &declaration.decl {
                 declarations.push((
                     function.ident.sym.to_string(),
-                    source_map
+                    OwnedDeclaration::new(path, source_map
                         .span_to_snippet(declaration.span())
                         .map_err(|error| {
                             format!(
                                 "failed to read declaration for `{}`: {error:?}",
                                 function.ident.sym
                             )
-                        })?,
+                        })?),
                 ));
             }
         }
@@ -2285,7 +2348,7 @@ fn all_reexported_function_declarations(
     // Without this, `_enum` (and thus `z.enum(...)`) was silently
     // missing from the flattened `package.d.ts` entirely, not even
     // present under its own internal name.
-    let mut local_declarations: std::collections::HashMap<String, Vec<String>> =
+    let mut local_declarations: std::collections::HashMap<String, Vec<OwnedDeclaration>> =
         std::collections::HashMap::new();
     for item in &module.body {
         let function = match item {
@@ -2307,7 +2370,7 @@ fn all_reexported_function_declarations(
         local_declarations
             .entry(function.ident.sym.to_string())
             .or_default()
-            .push(snippet);
+            .push(OwnedDeclaration::new(path, snippet));
     }
     // A *local*, non-exported callable `const` -- the `Decl::Var`
     // counterpart to the bare `Decl::Fn` loop just above, for the exact
@@ -2339,7 +2402,7 @@ fn all_reexported_function_declarations(
                 local_declarations
                     .entry(binding.id.sym.to_string())
                     .or_default()
-                    .push(snippet);
+                    .push(OwnedDeclaration::new(path, snippet));
             }
         }
     }
@@ -2374,7 +2437,7 @@ fn all_reexported_function_declarations(
                 snippets.clone()
             } else if let Some((target, target_name)) = named_import_targets.get(&original) {
                 let mut nested_visited = visited.clone();
-                all_reexported_function_declarations(target, &mut nested_visited)?
+                all_reexported_function_declarations_owned(target, &mut nested_visited)?
                     .into_iter()
                     .filter_map(|(name, snippet)| (name == *target_name).then_some(snippet))
                     .collect()
@@ -2382,11 +2445,11 @@ fn all_reexported_function_declarations(
                 continue;
             };
             for snippet in snippets {
-                if exported == original && snippet.trim_start().starts_with("export ") {
+                if exported == original && snippet.snippet.trim_start().starts_with("export ") {
                     continue;
                 }
-                let snippet = export_function_as(snippet, &exported, path);
-                declarations.push((exported.clone(), snippet));
+                let text = export_function_as(snippet.snippet.clone(), &exported, path);
+                declarations.push((exported.clone(), snippet.with_snippet(text)));
             }
         }
     }
@@ -2395,7 +2458,7 @@ fn all_reexported_function_declarations(
             ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) if !export.type_only => {
                 if let Some(source) = export.src.value.as_str() {
                     if let Some(target) = declaration_reexport_path(path, source) {
-                        declarations.extend(all_reexported_function_declarations(
+                        declarations.extend(all_reexported_function_declarations_owned(
                             &target, visited,
                         )?);
                     }
@@ -2431,13 +2494,14 @@ fn all_reexported_function_declarations(
                         .and_then(export_name)
                         .unwrap_or_else(|| original.clone());
                     let mut named_visited = std::collections::BTreeSet::new();
-                    for mut snippet in reexported_function_declarations(
+                    for mut snippet in reexported_function_declarations_owned(
                         &target,
                         &original,
                         &mut named_visited,
                     )? {
                         if exported != original {
-                            snippet = export_function_as(snippet, &exported, path);
+                            let text = export_function_as(snippet.snippet.clone(), &exported, path);
+                            snippet = snippet.with_snippet(text);
                         }
                         declarations.push((exported.clone(), snippet));
                     }
@@ -2446,7 +2510,8 @@ fn all_reexported_function_declarations(
             _ => {}
         }
     }
-    declarations.extend(callable_const_declarations(&module, &source_map, path)?);
+    declarations.extend(callable_const_declarations(&module, &source_map, path)?
+        .into_iter().map(|(name, snippet)| (name, OwnedDeclaration::new(path, snippet))));
     Ok(declarations)
 }
 
@@ -2455,6 +2520,15 @@ fn reexported_function_declarations(
     name: &str,
     visited: &mut std::collections::BTreeSet<(PathBuf, String)>,
 ) -> Result<Vec<String>, String> {
+    Ok(reexported_function_declarations_owned(path, name, visited)?
+        .into_iter().map(|declaration| declaration.snippet).collect())
+}
+
+fn reexported_function_declarations_owned(
+    path: &Path,
+    name: &str,
+    visited: &mut std::collections::BTreeSet<(PathBuf, String)>,
+) -> Result<Vec<OwnedDeclaration>, String> {
     use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
     use thaw_parser::common::{SourceMapper, Spanned};
 
@@ -2480,18 +2554,18 @@ fn reexported_function_declarations(
         };
         if function.ident.sym == name {
             declarations.push(
-                source_map
+                OwnedDeclaration::new(path, source_map
                     .span_to_snippet(declaration.span())
                     .map_err(|error| {
                         format!("failed to read declaration for `{name}`: {error:?}")
-                    })?,
+                    })?),
             );
         }
     }
     if declarations.is_empty() {
         for (const_name, snippet) in callable_const_declarations(&module, &source_map, path)? {
             if const_name == name {
-                declarations.push(snippet);
+                declarations.push(OwnedDeclaration::new(path, snippet));
             }
         }
     }
@@ -2539,7 +2613,8 @@ fn reexported_function_declarations(
                         let snippet = source_map.span_to_snippet(span).map_err(|error| {
                             format!("failed to read declaration for `{local_name}`: {error:?}")
                         })?;
-                        declarations.push(export_function_as(snippet, name, path));
+                        declarations.push(OwnedDeclaration::new(path, snippet.clone())
+                            .with_snippet(export_function_as(snippet, name, path)));
                     }
                 }
                 let ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Var(var_decl))) = item
@@ -2560,7 +2635,8 @@ fn reexported_function_declarations(
                             binding,
                             path,
                         )? {
-                            declarations.push(export_function_as(snippet, name, path));
+                            declarations.push(OwnedDeclaration::new(path, snippet.clone())
+                            .with_snippet(export_function_as(snippet, name, path)));
                         }
                     }
                 }
@@ -2594,9 +2670,9 @@ fn reexported_function_declarations(
                             continue;
                         };
                         if function.ident.sym.as_ref() == resolved {
-                            declarations.push(source_map.span_to_snippet(function.span()).map_err(
+                            declarations.push(OwnedDeclaration::new(path, source_map.span_to_snippet(function.span()).map_err(
                                 |error| format!("failed to read declaration for `{resolved}`: {error:?}"),
-                            )?);
+                            )?));
                         }
                     }
                     // A bare data *constant*, not a function -- real
@@ -2639,9 +2715,9 @@ fn reexported_function_declarations(
                             ) {
                                 continue;
                             }
-                            declarations.push(source_map.span_to_snippet(var_decl.span()).map_err(
+                            declarations.push(OwnedDeclaration::new(path, source_map.span_to_snippet(var_decl.span()).map_err(
                                 |error| format!("failed to read declaration for `{resolved}`: {error:?}"),
-                            )?);
+                            )?));
                         }
                     }
                 }
@@ -2650,14 +2726,14 @@ fn reexported_function_declarations(
                         let body = source_map.span_to_snippet(fn_expr.function.span()).map_err(
                             |error| format!("failed to read default function declaration: {error:?}"),
                         )?;
-                        declarations.push(reexported_default_declaration(
+                        declarations.push(OwnedDeclaration::new(path, reexported_default_declaration(
                             &body,
                             "function",
                             path,
                             fn_expr.ident.as_ref().map(|ident| ident.sym.as_ref()),
                             fn_expr.function.is_async,
                             false,
-                        )?);
+                        )?));
                     }
                 }
                 _ => {}
@@ -2695,13 +2771,16 @@ fn reexported_function_declarations(
             let original = export_name(&named.orig);
             let exported = named.exported.as_ref().and_then(export_name).or_else(|| original.clone());
             if exported.as_deref() == Some(name) {
-                let snippets = reexported_function_declarations(
+                let snippets = reexported_function_declarations_owned(
                     &target_path,
                     original.as_deref().unwrap_or(name),
                     visited,
                 )?;
                 if !snippets.is_empty() {
-                    return Ok(snippets.into_iter().map(|snippet| export_function_as(snippet, name, path)).collect());
+                    return Ok(snippets.into_iter().map(|snippet| {
+                        let text = export_function_as(snippet.snippet.clone(), name, path);
+                        snippet.with_snippet(text)
+                    }).collect());
                 }
             }
         }
@@ -2712,7 +2791,7 @@ fn reexported_function_declarations(
             if export.type_only { continue; }
             let Some(target) = export.src.value.as_str()
                 .and_then(|source| declaration_reexport_path(path, source)) else { continue; };
-            let snippets = reexported_function_declarations(&target, name, visited)?;
+            let snippets = reexported_function_declarations_owned(&target, name, visited)?;
             if !snippets.is_empty() { return Ok(snippets); }
         }
     }
@@ -2728,6 +2807,11 @@ fn reexported_function_declarations(
 /// own to follow beyond this (unlike `reexported_function_declarations`,
 /// which also handles `export { X } from another`), so this only ever
 /// looks inside `path` itself.
+fn export_assignment_function_declarations_owned(path: &Path) -> Result<Vec<OwnedDeclaration>, String> {
+    Ok(export_assignment_function_declarations(path)?
+        .into_iter().map(|snippet| OwnedDeclaration::new(path, snippet)).collect())
+}
+
 fn export_assignment_function_declarations(path: &Path) -> Result<Vec<String>, String> {
     use thaw_parser::ast::{Decl, Expr, ModuleDecl, ModuleItem, Stmt};
     use thaw_parser::common::{SourceMapper, Spanned};
@@ -2780,6 +2864,11 @@ fn export_assignment_function_declarations(path: &Path) -> Result<Vec<String>, S
 /// function_declarations` returns empty for a class-shaped target,
 /// with nothing to try next), so `import { SemVer } from "semver"`
 /// failed outright: `` `semver` has no export named `SemVer` ``.
+fn export_assignment_class_or_interface_declarations_owned(path: &Path) -> Result<Vec<OwnedDeclaration>, String> {
+    Ok(export_assignment_class_or_interface_declarations(path)?
+        .into_iter().map(|snippet| OwnedDeclaration::new(path, snippet)).collect())
+}
+
 fn export_assignment_class_or_interface_declarations(path: &Path) -> Result<Vec<String>, String> {
     use thaw_parser::ast::{Decl, Expr, ModuleDecl, ModuleItem, Stmt};
     use thaw_parser::common::{SourceMapper, Spanned};
@@ -3114,8 +3203,27 @@ fn reexported_class_or_interface_declarations(
     path: &Path,
     name: &str,
 ) -> Result<Vec<String>, String> {
+    Ok(reexported_class_or_interface_declarations_owned(path, name)?
+        .into_iter().map(|declaration| declaration.snippet).collect())
+}
+
+fn reexported_class_or_interface_declarations_owned(
+    path: &Path,
+    name: &str,
+) -> Result<Vec<OwnedDeclaration>, String> {
     let mut visited = std::collections::BTreeSet::new();
     reexported_class_or_interface_declarations_inner(path, name, &mut visited)
+}
+
+fn imported_owned_class_as_local_binding(
+    declarations: Vec<OwnedDeclaration>, local: &str, type_only: bool, origin: &Path,
+) -> Vec<OwnedDeclaration> {
+    let rewritten = imported_class_as_local_binding(
+        declarations.iter().map(|declaration| declaration.snippet.clone()).collect(),
+        local, type_only, origin,
+    );
+    declarations.into_iter().zip(rewritten).map(|(declaration, snippet)|
+        declaration.with_snippet(snippet)).collect()
 }
 
 /// An imported class is flattened without its import statement. Give its
@@ -3343,7 +3451,7 @@ fn reexported_class_or_interface_declarations_inner(
     path: &Path,
     name: &str,
     visited: &mut std::collections::BTreeSet<(PathBuf, String)>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<OwnedDeclaration>, String> {
     use thaw_parser::ast::{
         Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, Stmt, TsModuleName,
     };
@@ -3428,20 +3536,20 @@ fn reexported_class_or_interface_declarations_inner(
             let body = source_map.span_to_snippet(class_expr.class.span()).map_err(|error| {
                 format!("failed to read default class declaration in `{}`: {error:?}", path.display())
             })?;
-            declarations.push(reexported_default_declaration(
+            declarations.push(OwnedDeclaration::new(path, reexported_default_declaration(
                 &body,
                 "class",
                 path,
                 class_expr.ident.as_ref().map(|ident| ident.sym.as_ref()),
                 false,
                 class_expr.class.is_abstract,
-            )?);
+            )?));
         }
         if let Some(superclass) = superclass {
             if let Some((target_path, target_name)) =
                 named_import_targets(path, &module).get(&superclass)
             {
-                declarations.extend(imported_class_as_local_binding(
+                declarations.extend(imported_owned_class_as_local_binding(
                     reexported_class_or_interface_declarations_inner(
                         target_path, target_name, visited,
                     )?, &superclass, true, target_path,
@@ -3534,13 +3642,15 @@ fn reexported_class_or_interface_declarations_inner(
             if !snippet.trim_start().starts_with("export ") {
                 snippet = format!("export {snippet}");
             }
-            declarations.push(snippet);
+            let mut owned = OwnedDeclaration::new(path, snippet);
+            owned.local_name = Some(local_name.clone());
+            declarations.push(owned);
         }
     }
     if let Some(superclass) = superclass {
         if let Some((target_path, target_name)) = named_import_targets(path, &module).get(&superclass)
         {
-            declarations.extend(imported_class_as_local_binding(
+            declarations.extend(imported_owned_class_as_local_binding(
                 reexported_class_or_interface_declarations_inner(
                     target_path, target_name, visited,
                 )?, &superclass, true, target_path,
