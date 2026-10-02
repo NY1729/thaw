@@ -9633,3 +9633,25 @@ fn date_set_year_truncates_before_two_digit_year_adjustment() {
     assert_eq!(compile_and_run_with_env(source, "date_set_year_fractional", &[("TZ", "UTC")]),
         "1900\n1900\n-1\n1999\n100\nNaN\nNaN\n");
 }
+
+#[test]
+fn math_extremes_of_sparse_runtime_array_propagate_nan() {
+    let source = r#"
+        function main(): void {
+            const sparse: number[] = [1];
+            sparse.length = 2;
+            console.log(Number.isNaN(Math.min(...sparse)),
+                        Number.isNaN(Math.max(...sparse)));
+            const explicit: number[] = [undefined];
+            console.log(Number.isNaN(Math.min(...explicit)),
+                        Number.isNaN(Math.max(...explicit)));
+            const empty: number[] = [];
+            console.log(Math.min(...empty) === Infinity,
+                        Math.max(...empty) === -Infinity);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "math_extremes_sparse_runtime_array"),
+        "true true\ntrue true\ntrue true\n"
+    );
+}
