@@ -1742,7 +1742,7 @@ fn http_server_emits_websocket_upgrade_with_head_bytes() {
     let dir = temp_registry("builtin_http_server_upgrade");
     fs::write(
         dir.join("index.js"),
-        "var http = require('node:http'); module.exports = async function(port) { var observed, server = http.createServer(); server.on('upgrade', function(request, socket, head) { observed = [request.method, request.url, request.headers.upgrade, head.toString()]; socket.end('HTTP/1.1 101 Switching Protocols\\r\\nConnection: Upgrade\\r\\nUpgrade: websocket\\r\\n\\r\\n', function() { server.close(); }); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return observed; };",
+        "var http = require('node:http'); module.exports = async function(port) { var observed, requests = 0, server = http.createServer(); server.on('request', function() { requests++; }); server.on('upgrade', function(request, socket, head) { observed = [request.method, request.url, request.headers.upgrade, head.toString(), request.complete]; socket.end('HTTP/1.1 101 Switching Protocols\\r\\nConnection: Upgrade\\r\\nUpgrade: websocket\\r\\n\\r\\n', function() { server.close(); }); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return observed.concat(requests); };",
     )
     .unwrap();
     let empty_node_modules = temp_registry("builtin_http_server_upgrade_node_modules");
@@ -1760,7 +1760,7 @@ fn http_server_emits_websocket_upgrade_with_head_bytes() {
         ))
     }
     .to_string_lossy();
-    assert_eq!(result, r#"["GET","/socket","websocket","head"]"#);
+    assert_eq!(result, r#"["GET","/socket","websocket","head",true,0]"#);
     assert!(client
         .join()
         .unwrap()
@@ -2094,6 +2094,211 @@ fn node_dns_lookup_resolves_a_real_hostname_when_network_integration_is_enabled(
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(result, r#"["ok",true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_server_emits_headers_before_body_and_keeps_early_response_body_framed() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream.write_all(b"POST /one HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\n").unwrap();
+        let mut received = Vec::new();
+        let mut scratch = [0; 512];
+        while !received.windows(5).any(|part| part == b"ready") {
+            match stream.read(&mut scratch) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => received.extend_from_slice(&scratch[..count]),
+            }
+        }
+        let saw_ready = received.windows(5).any(|part| part == b"ready");
+        stream.write_all(b"bo").unwrap();
+        stream.write_all(b"dyGET /two HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        loop { match stream.read(&mut scratch) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => received.extend_from_slice(&scratch[..count]),
+        } }
+        (saw_ready, String::from_utf8_lossy(&received).into_owned())
+    });
+
+    let dir = temp_registry("builtin_http_server_streaming_pipeline");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'); module.exports = function(port) { return new Promise(function(resolve, reject) {
+      var server = http.createServer(), first = { headersComplete: null, data: '', ends: 0, endComplete: null }, second = [], sockets = [];
+      var timeout = setTimeout(function() { sockets.forEach(function(socket) { socket.destroy(); }); server.close(); }, 2000);
+      server.on('connection', function(socket) { sockets.push(socket); });
+      server.on('request', function(req, res) {
+        if (req.url === '/one') {
+          first.headersComplete = req.complete;
+          req.on('data', function(chunk) { first.data += chunk.toString(); });
+          req.on('end', function() { first.ends++; first.endComplete = req.complete; });
+          res.write('ready'); res.end('first');
+        } else {
+          second.push([req.method, req.url, req.complete]);
+          res.end('second', function() { server.close(); });
+        }
+      });
+      server.on('error', reject);
+      server.on('close', function() { clearTimeout(timeout); resolve([first.headersComplete, first.data, first.ends, first.endComplete, second]); });
+      server.listen(port, '127.0.0.1');
+    }); };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_server_streaming_pipeline_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerStreamingPipeline = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpServerStreamingPipeline").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[false,"body",1,true,[["GET","/two",true]]]"#);
+    let (saw_ready, wire) = client.join().unwrap();
+    assert!(saw_ready, "handler did not respond before body: {wire}");
+    assert!(wire.contains("first") && wire.contains("second"), "{wire}");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_server_streams_chunked_body_and_rejects_short_content_length() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.write_all(b"POST /chunks HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n").unwrap();
+        for part in [&b"2\r"[..], &b"\nAB\r\n1\r\nC\r\n0\r\nX-Trail: yes\r"[..], &b"\n\r\n"[..]] {
+            stream.write_all(part).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        stream.write_all(b"POST /short HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\nConnection: close\r\n\r\nx").unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut received = String::new();
+        let _ = stream.read_to_string(&mut received);
+        received
+    });
+
+    let dir = temp_registry("builtin_http_server_streaming_chunked");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'); module.exports = function(port) { return new Promise(function(resolve, reject) {
+      var server = http.createServer(), chunks = [], short = [], faults = 0, before = [], after = [], sockets = [];
+      var timeout = setTimeout(function() { sockets.forEach(function(socket) { socket.destroy(); }); server.close(); }, 2000);
+      server.on('connection', function(socket) { sockets.push(socket); });
+      server.on('request', function(req, res) {
+        if (req.url === '/chunks') {
+          before.push(req.complete);
+          req.on('data', function(chunk) { chunks.push(chunk.toString()); });
+          req.on('end', function() { after.push(req.complete); res.end('ok'); });
+        } else {
+          short.push(req.complete);
+          req.on('end', function() { short.push('unexpected-end'); });
+        }
+      });
+      server.on('clientError', function(error, socket) { faults++; socket.destroy(); server.close(); });
+      server.on('error', reject);
+      server.on('close', function() { clearTimeout(timeout); resolve([before, chunks.join(''), after, short, faults]); });
+      server.listen(port, '127.0.0.1');
+    }); };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_server_streaming_chunked_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerStreamingChunked = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpServerStreamingChunked").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[false],"ABC",[true],[false],1]"#);
+    let _wire = client.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_server_short_body_client_error_throw_still_aborts_and_destroys_socket() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_server_streaming_error_cleanup");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events'); module.exports = function() {
+      var accept, network = new EventEmitter(), socket = new EventEmitter(), marker = new Error('client error listener'), request, ended = 0, destroyed = false, caught = false;
+      network.createServer = function(options, callback) { accept = callback; return network; };
+      socket.destroy = function() { destroyed = true; socket.destroyed = true; };
+      var server = http.createServer({ _transport: network });
+      server.on('request', function(value) { request = value; request.on('end', function() { ended++; }); });
+      server.on('clientError', function() { throw marker; });
+      accept(socket);
+      socket.emit('data', Buffer.from('POST /short HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nx'));
+      try { socket.emit('end'); } catch (error) { caught = error === marker; }
+      return [caught, destroyed, request.aborted, request.complete, request._bodyQueue.length, ended];
+    };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_server_streaming_error_cleanup_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerStreamingErrorCleanup = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpServerStreamingErrorCleanup").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[true,true,true,false,0,0]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_server_reuse_callback_stays_bound_to_its_own_request() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_server_reuse_record");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events'); module.exports = function() {
+      var accept, network = new EventEmitter(), socket = new EventEmitter(), first, second, seen = [];
+      network.createServer = function(options, callback) { accept = callback; return network; };
+      socket.write = function() { return true; };
+      socket.destroy = function() { socket.destroyed = true; };
+      var server = http.createServer({ _transport: network });
+      server.on('request', function(request, response) {
+        seen.push(request.url);
+        if (request.url === '/one') { first = response; response.end('one'); }
+        else if (request.url === '/two') { second = response; first._reuse(); }
+      });
+      accept(socket);
+      socket.emit('data', Buffer.from('GET /one HTTP/1.1\r\nHost: localhost\r\n\r\nGET /two HTTP/1.1\r\nHost: localhost\r\n\r\nGET /three HTTP/1.1\r\nHost: localhost\r\n\r\n'));
+      return [seen, Boolean(second), second && second.writableEnded];
+    };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_server_reuse_record_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpServerReuseRecord = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpServerReuseRecord").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["/one","/two"],true,false]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
