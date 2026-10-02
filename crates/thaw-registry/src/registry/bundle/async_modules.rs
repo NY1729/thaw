@@ -20,7 +20,7 @@ fn prepare_async_modules(
             }
             if module.static_esm_specs.iter().any(|specifier| {
                 module
-                    .requires
+                    .imports
                     .iter()
                     .any(|(source, target)| source == specifier && async_keys.contains(target))
             }) {
@@ -54,7 +54,7 @@ fn prepare_async_modules(
             return Ok(());
         };
         visiting.push(key.to_string());
-        for (specifier, target) in &module.requires {
+        for (specifier, target) in &module.imports {
             if module.static_esm_specs.contains(specifier)
                 && modules
                     .iter()

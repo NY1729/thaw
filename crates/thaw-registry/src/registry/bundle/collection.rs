@@ -75,6 +75,8 @@ fn add_builtin_module(
         export_graph: None,
         origin_parameter: None,
         requires,
+        imports: Vec::new(),
+        known_packages: Vec::new(),
         static_esm_specs: Vec::new(),
         has_esm: false,
         has_top_level_await: false,
@@ -184,6 +186,20 @@ fn bundle_commonjs_package_cached(
         let requiring_dir = Path::new(relative_in_pkg).parent().unwrap_or(Path::new(""));
 
         let mut requires = Vec::new();
+        let mut imports = Vec::new();
+        let mut known_packages = Vec::new();
+        for spec in &module_specs {
+            let (resolution_spec, _) = split_module_suffix(spec);
+            if resolution_spec.starts_with('#') || matches!(resolution_spec, "." | "..")
+                || resolution_spec.starts_with("./") || resolution_spec.starts_with("../") {
+                continue;
+            }
+            let (package_name, _) = split_bare_spec(resolution_spec);
+            let directory = resolve_dependency_dir(node_modules_dir, &pkg_dir, package_name);
+            if read_manifest(&directory).is_ok() && !known_packages.contains(&package_name.to_string()) {
+                known_packages.push(package_name.to_string());
+            }
+        }
 
         if analysis.has_nonliteral_module_load {
             let mut candidates = Vec::new();
@@ -205,6 +221,9 @@ fn bundle_commonjs_package_cached(
                 if !requires.iter().any(|(source, _)| source == &specifier) {
                     requires.push((specifier.clone(), target_key.clone()));
                 }
+                if !imports.iter().any(|(source, _)| source == &specifier) {
+                    imports.push((specifier.clone(), target_key.clone()));
+                }
                 if let Some(extensionless) = specifier
                     .strip_suffix(".js")
                     .or_else(|| specifier.strip_suffix(".mjs"))
@@ -212,6 +231,9 @@ fn bundle_commonjs_package_cached(
                 {
                     if !requires.iter().any(|(source, _)| source == extensionless) {
                         requires.push((extensionless.to_string(), target_key.clone()));
+                    }
+                    if !imports.iter().any(|(source, _)| source == extensionless) {
+                        imports.push((extensionless.to_string(), target_key.clone()));
                     }
                 }
                 if !visited.contains(&target_key) {
@@ -225,28 +247,49 @@ fn bundle_commonjs_package_cached(
                 }
             }
             for specifier in declared_runtime_dependencies(&pkg_dir) {
-                if requires.iter().any(|(source, _)| source == &specifier) {
-                    continue;
+                let (dep_name, _) = split_bare_spec(&specifier);
+                let dep_dir = resolve_dependency_dir(node_modules_dir, &pkg_dir, dep_name);
+                if read_manifest(&dep_dir).is_ok() && !known_packages.contains(&dep_name.to_string()) {
+                    known_packages.push(dep_name.to_string());
                 }
-                if let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
-                    resolve_bare_require(node_modules_dir, &pkg_dir, &specifier)
-                {
-                    let dep_key = format!("{dep_name}/{dep_relative}");
-                    requires.push((specifier.clone(), dep_key.clone()));
-                    if !visited.contains(&dep_key) {
-                        visited.push(dep_key.clone());
-                        record_package_version(&mut dependency_versions, &dep_name, &dep_dir);
-                        worklist.push((dep_key, dep_abs, dep_name.clone(), dep_dir.clone()));
+                for import_condition in [false, true] {
+                    let conditions: &[&str] = if import_condition {
+                        &["import", "node", "default"]
+                    } else {
+                        &["require", "node", "default"]
+                    };
+                    let subpaths = runtime_export_specifiers_with_conditions(
+                        &specifier, &dep_dir, conditions,
+                    )?;
+                    let targets = if import_condition { &mut imports } else { &mut requires };
+                    if !targets.iter().any(|(source, _)| source == &specifier) {
+                        let resolved = if import_condition {
+                            resolve_bare_import(node_modules_dir, &pkg_dir, &specifier)
+                        } else {
+                            resolve_bare_require(node_modules_dir, &pkg_dir, &specifier)
+                        };
+                        if let Some((name, relative, absolute, directory)) = resolved {
+                            let target = format!("{name}/{relative}");
+                            targets.push((specifier.clone(), target.clone()));
+                            if !visited.contains(&target) {
+                                visited.push(target.clone());
+                                record_package_version(&mut dependency_versions, &name, &directory);
+                                worklist.push((target, absolute, name, directory));
+                            }
+                        }
                     }
-                    for subpath in runtime_export_specifiers(&specifier, &dep_dir)? {
-                        if requires.iter().any(|(source, _)| source == &subpath) {
+                    for subpath in &subpaths {
+                        if targets.iter().any(|(source, _)| source == subpath) {
                             continue;
                         }
-                        if let Some((sub_name, relative, absolute, directory)) =
-                            resolve_bare_require(node_modules_dir, &pkg_dir, &subpath)
-                        {
+                        let resolved = if import_condition {
+                            resolve_bare_import(node_modules_dir, &pkg_dir, subpath)
+                        } else {
+                            resolve_bare_require(node_modules_dir, &pkg_dir, subpath)
+                        };
+                        if let Some((sub_name, relative, absolute, directory)) = resolved {
                             let target = format!("{sub_name}/{relative}");
-                            requires.push((subpath, target.clone()));
+                            targets.push((subpath.clone(), target.clone()));
                             if !visited.contains(&target) {
                                 visited.push(target.clone());
                                 record_package_version(
@@ -294,7 +337,12 @@ fn bundle_commonjs_package_cached(
                 resolve_module_path(&pkg_dir, &resolution_path)
             {
                 let resolved_key = format!("{pkg_name}/{resolved_relative}{suffix}");
-                requires.push((spec, resolved_key.clone()));
+                if analysis.require_condition_specs.contains(&spec) {
+                    requires.push((spec.clone(), resolved_key.clone()));
+                }
+                if analysis.import_condition_specs.contains(&spec) {
+                    imports.push((spec, resolved_key.clone()));
+                }
                 if !visited.contains(&resolved_key) {
                     visited.push(resolved_key.clone());
                     worklist.push((
@@ -317,8 +365,17 @@ fn bundle_commonjs_package_cached(
             .cloned()
         {
             let (resolution_spec, suffix) = split_module_suffix(&spec);
+            for import_condition in [false, true] {
+                if !(if import_condition {
+                    analysis.import_condition_specs.contains(&spec)
+                } else {
+                    analysis.require_condition_specs.contains(&spec)
+                }) {
+                    continue;
+                }
+                let targets = if import_condition { &mut imports } else { &mut requires };
             if resolution_spec.starts_with('#') {
-                let conditions: &[&str] = if analysis.import_condition_specs.contains(&spec) {
+                let conditions: &[&str] = if import_condition {
                     &["import", "node", "default"]
                 } else {
                     &["require", "node", "default"]
@@ -343,7 +400,7 @@ fn bundle_commonjs_package_cached(
                     }
                     Some(PackageImportResolution::Builtin(name)) => {
                         let builtin_key = format!("node:{name}{suffix}");
-                        requires.push((spec.clone(), builtin_key.clone()));
+                        targets.push((spec.clone(), builtin_key.clone()));
                         add_builtin_module(&name, builtin_key, &mut visited, &mut modules);
                         continue;
                     }
@@ -353,7 +410,7 @@ fn bundle_commonjs_package_cached(
                     continue;
                 }
                 let resolved_key = format!("{name}/{relative}{suffix}");
-                requires.push((spec, resolved_key.clone()));
+                targets.push((spec.clone(), resolved_key.clone()));
                 if !visited.contains(&resolved_key) {
                     visited.push(resolved_key.clone());
                     record_package_version(&mut dependency_versions, &name, &directory);
@@ -361,14 +418,14 @@ fn bundle_commonjs_package_cached(
                 }
                 continue;
             }
-            let resolved = if analysis.import_condition_specs.contains(&spec) {
+            let resolved = if import_condition {
                 resolve_bare_import(node_modules_dir, &pkg_dir, resolution_spec)
             } else {
                 resolve_bare_require(node_modules_dir, &pkg_dir, resolution_spec)
             };
             if let Some((dep_name, dep_relative, dep_abs, dep_dir)) = resolved {
                 let dep_key = format!("{dep_name}/{dep_relative}{suffix}");
-                requires.push((spec, dep_key.clone()));
+                targets.push((spec.clone(), dep_key.clone()));
                 if !visited.contains(&dep_key) {
                     visited.push(dep_key.clone());
                     record_package_version(&mut dependency_versions, &dep_name, &dep_dir);
@@ -383,13 +440,14 @@ fn bundle_commonjs_package_cached(
                 .unwrap_or(resolution_spec);
             if builtin_module_source(builtin_name).is_some() {
                 let builtin_key = format!("node:{builtin_name}{suffix}");
-                requires.push((spec.clone(), builtin_key.clone()));
+                targets.push((spec.clone(), builtin_key.clone()));
                 if !visited.contains(&builtin_key) {
                     add_builtin_module(builtin_name, builtin_key, &mut visited, &mut modules);
                 }
             }
             // Otherwise left unresolved -- falls through to the runtime
             // external-require stub, same as always.
+            }
         }
 
         modules.push(BundledModule {
@@ -398,6 +456,8 @@ fn bundle_commonjs_package_cached(
             origin_parameter: esm_origin_parameter(&source),
             source,
             requires,
+            imports,
+            known_packages,
             static_esm_specs: analysis.static_esm_specs,
             has_esm: analysis.has_esm,
             has_top_level_await: analysis.has_top_level_await,
