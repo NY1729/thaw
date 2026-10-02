@@ -8899,6 +8899,59 @@ fn compiles_set_and_map_any_key() {
     );
 }
 
+/// Math.sumPrecise rejects holes through the shared numeric-array presence
+/// sidecar and preserves the special-value states. Source-only, unrun.
+#[test]
+fn math_sum_precise_sparse_and_special_values() {
+    let source = r#"
+        function main(): void {
+            const deleted: number[] = [1, 2];
+            delete deleted[0];
+            try { Math.sumPrecise(deleted); console.log("deleted accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+            const grown: number[] = [1];
+            grown.length = 2;
+            try { Math.sumPrecise(grown); console.log("grown accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+            console.log(Object.is(Math.sumPrecise([]), -0));
+            console.log(Object.is(Math.sumPrecise([-0, -0]), -0));
+            console.log(Object.is(Math.sumPrecise([0]), 0));
+            console.log(Object.is(Math.sumPrecise([1, -1]), 0));
+            console.log(Math.sumPrecise([Infinity]));
+            console.log(Math.sumPrecise([-Infinity]));
+            console.log(Number.isNaN(Math.sumPrecise([Infinity, -Infinity])));
+            console.log(Number.isNaN(Math.sumPrecise([NaN])));
+            console.log(Math.sumPrecise([1e16, 1, -1e16]));
+            const late: number[] = [Infinity, 1];
+            delete late[1];
+            try { Math.sumPrecise(late); console.log("late accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "math_sum_precise_sparse_special"),
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\nInfinity\n-Infinity\ntrue\ntrue\n1\ntrue\n");
+}
+
+#[test]
+fn math_sum_precise_sparse_async_rejects_type_error() {
+    let source = r#"
+        async function fail(): Promise<void> {
+            const values: number[] = [1];
+            values.length = 2;
+            Math.sumPrecise(values);
+        }
+        async function main(): Promise<void> {
+            const values: number[] = [1];
+            values.length = 2;
+            try { Math.sumPrecise(values); console.log("accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { await fail(); console.log("uncaught accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "math_sum_precise_sparse_async"), "true\ntrue\n");
+}
+
 /// `Math.sumPrecise` and the deprecated `Date.getYear`/`setYear`.
 #[test]
 fn compiles_math_sum_precise_and_date_year() {

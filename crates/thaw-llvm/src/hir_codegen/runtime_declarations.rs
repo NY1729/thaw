@@ -76,7 +76,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_math_sum_precise",
-            self.context.f64_type().fn_type(&[i8_ptr.into()], false),
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         for name in [

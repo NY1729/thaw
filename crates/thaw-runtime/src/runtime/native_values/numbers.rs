@@ -1306,29 +1306,69 @@ pub extern "C" fn thaw_i64_to_radix_string(value: i64, radix: f64) -> *const c_c
 }
 
 #[no_mangle]
-/// `Math.sumPrecise(numbers)`: a Neumaier-compensated sum over the native
-/// `number[]` layout (`[len: u64][value: f64]...`). A null pointer yields
-/// `0`.
+/// `Math.sumPrecise(numbers)` for the native `number[]` buffer and its
+/// presence sidecar. Returns 1 after writing `out`, or 0 for a hole or an
+/// explicit `undefined` element. A null sidecar means every slot is present.
 ///
 /// # Safety
-/// `array` must be null or point to a valid native `number[]` block.
-pub unsafe extern "C" fn thaw_math_sum_precise(array: *const u8) -> f64 {
-    if array.is_null() {
-        return 0.0;
+/// `array` must point to a valid native `number[]` block, `presence` must be
+/// null or its matching readable sidecar, and `out` must be writable.
+pub unsafe extern "C" fn thaw_math_sum_precise(
+    array: *const u8,
+    presence: *const u8,
+    out: *mut f64,
+) -> u8 {
+    if array.is_null() || out.is_null() {
+        return 0;
     }
     let length = unsafe { array.cast::<u64>().read_unaligned() } as usize;
     let values = unsafe { array.add(8) }.cast::<f64>();
+    // Special values must not enter Neumaier's finite compensation: an
+    // Infinity - Infinity intermediate would otherwise turn one infinity
+    // into NaN. Continue scanning after NaN/Infinity to reject later holes.
+    #[derive(Clone, Copy)]
+    enum State { MinusZero, Finite, PlusInfinity, MinusInfinity, NaN }
+    let mut state = State::MinusZero;
     let mut sum = 0.0f64;
     let mut compensation = 0.0f64;
     for index in 0..length {
-        let value = unsafe { values.add(index).read_unaligned() };
-        let total = sum + value;
-        if sum.abs() >= value.abs() {
-            compensation += (sum - total) + value;
-        } else {
-            compensation += (value - total) + sum;
+        if !unsafe { array_index_present(presence, index) } {
+            return 0;
         }
-        sum = total;
+        let value = unsafe { values.add(index).read_unaligned() };
+        if value.is_nan() {
+            state = State::NaN;
+        } else if value == f64::INFINITY {
+            state = match state {
+                State::MinusInfinity | State::NaN => State::NaN,
+                _ => State::PlusInfinity,
+            };
+        } else if value == f64::NEG_INFINITY {
+            state = match state {
+                State::PlusInfinity | State::NaN => State::NaN,
+                _ => State::MinusInfinity,
+            };
+        } else if !matches!(state, State::NaN | State::PlusInfinity | State::MinusInfinity)
+            && !(value == 0.0 && value.is_sign_negative())
+        {
+            state = State::Finite;
+            let total = sum + value;
+            if sum.abs() >= value.abs() {
+                compensation += (sum - total) + value;
+            } else {
+                compensation += (value - total) + sum;
+            }
+            sum = total;
+        }
     }
-    sum + compensation
+    unsafe {
+        out.write(match state {
+            State::MinusZero => -0.0,
+            State::Finite => sum + compensation,
+            State::PlusInfinity => f64::INFINITY,
+            State::MinusInfinity => f64::NEG_INFINITY,
+            State::NaN => f64::NAN,
+        });
+    }
+    1
 }

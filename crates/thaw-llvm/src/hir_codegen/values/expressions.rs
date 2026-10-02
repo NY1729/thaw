@@ -51,10 +51,37 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception_native_text().as_pointer_value(), value)
             .map_err(|error| error.to_string())?;
-        if let Some(catch_bb) = self.catch_stack.last().copied() {
-            self.builder
-                .build_unconditional_branch(catch_bb)
+        // A synthetic error has no typed thrown scalar or object. Clearing
+        // these shared channels prevents a previous catch from leaking into
+        // this TypeError's own catch or Promise rejection.
+        self.builder.build_store(
+            self.pending_exception_object().as_pointer_value(),
+            self.context.ptr_type(AddressSpace::default()).const_null(),
+        ).map_err(|error| error.to_string())?;
+        for (symbol, zero) in [
+            (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().const_zero().into()),
+            (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
+            (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
+            (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
+        ] {
+            self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
                 .map_err(|error| error.to_string())?;
+        }
+        if let Some(catch_bb) = self.catch_stack.last().copied() {
+            self.builder.build_unconditional_branch(catch_bb)
+                .map_err(|error| error.to_string())?;
+        } else if let Some(completion) = self.active_async_completion {
+            self.reject_promise_with_pending_exception(completion, value, "reject_synthetic_error")?;
+            self.builder.build_store(
+                self.pending_exception().as_pointer_value(),
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            ).map_err(|error| error.to_string())?;
+            self.clear_pending_native_text()?;
+            if self.current_function().get_type().get_return_type().is_some() {
+                self.builder.build_return(Some(&completion)).map_err(|error| error.to_string())?;
+            } else {
+                self.builder.build_return(None).map_err(|error| error.to_string())?;
+            }
         } else {
             self.build_default_return()?;
         }
