@@ -36,14 +36,18 @@ fn register_loaded_exports(
     exported_values: Vec<(String, NapiValue)>,
 ) {
     if let Some(package) = package_name {
+        host.qualified_packages.insert(package.into());
         host.functions.extend(functions.iter().map(|(name, function)|
             (format!("{package}::{name}"), function.clone())));
         host.exports.extend(exported_values.iter().map(|(name, value)|
             (format!("{package}::{name}"), (env_ptr, *value))));
+    } else {
+        // Legacy unqualified loaders keep their public names. A qualified
+        // load must not overwrite another package's bare export.
+        host.functions.extend(functions);
+        host.exports.extend(exported_values.into_iter().map(|(name, value)|
+            (name, (env_ptr, value))));
     }
-    host.functions.extend(functions);
-    host.exports.extend(exported_values.into_iter().map(|(name, value)|
-        (name, (env_ptr, value))));
 }
 
 unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&str>) -> Result<(), String> {
@@ -193,8 +197,14 @@ unsafe extern "C" fn thaw_napi_call_typed_bridge(
 
 #[cfg(feature = "quickjs")]
 unsafe extern "C" fn thaw_napi_export_names() -> *const c_char {
-    let names = HOST.with(|host| host.borrow().functions.keys().cloned().collect::<Vec<_>>());
-    CString::new(serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()))
+    let exports = HOST.with(|host| {
+        let host = host.borrow();
+        serde_json::json!({
+            "names": host.functions.keys().collect::<Vec<_>>(),
+            "qualifiedPackages": host.qualified_packages.iter().collect::<Vec<_>>(),
+        })
+    });
+    CString::new(exports.to_string())
         .unwrap_or_default()
         .into_raw()
 }
@@ -581,6 +591,7 @@ pub extern "C" fn thaw_napi_unload_all() -> u8 {
         host.unloading = true;
         host.functions.clear();
         host.exports.clear();
+        host.qualified_packages.clear();
         host.compiled_callbacks.clear();
         Some((std::mem::take(&mut host.pending_call_envs), std::mem::take(&mut host.module_envs)))
     }) else {

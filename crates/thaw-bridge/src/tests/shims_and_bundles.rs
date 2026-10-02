@@ -347,7 +347,7 @@ fn large_module_init_preserves_intl_requirements_as_metadata() {
 #[test]
 fn wraps_a_default_exported_class_and_binds_its_name() {
     let js_source = "function PQueue(options) { this.size = 0; }\nmodule.exports = PQueue;\nmodule.exports.default = PQueue;";
-    let wrapped = wrap_as_commonjs_module(js_source, &[], &["PQueue".to_string()], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &[], &["PQueue".to_string()], &[], "");
     assert!(wrapped.contains("globalThis.PQueue = module.exports;"));
 }
 
@@ -356,8 +356,8 @@ fn wraps_real_commonjs_source_and_binds_default_export() {
     // The exact shape of left-pad's actual published `index.js`:
     // `module.exports = leftPad;`, no named exports object.
     let js_source = "module.exports = function leftPad(str) { return str; };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["leftPad".to_string()], &[], &[]);
-    assert!(wrapped.contains("globalThis.module = { exports: {} };"));
+    let wrapped = wrap_as_commonjs_module(js_source, &["leftPad".to_string()], &[], &[], "");
+    assert!(wrapped.contains("globalThis.module = { exports: {}, filename: \"/thaw_modules//index.js\" };"));
     assert!(wrapped.contains("globalThis.require ="));
     assert!(wrapped.contains(js_source));
     assert!(wrapped.contains("globalThis.leftPad = module.exports;"));
@@ -368,7 +368,7 @@ fn function_modules_do_not_replace_globals_with_their_named_methods() {
     use std::ffi::{CStr, CString};
 
     let js_source = "module.exports = function lodash() {}; module.exports.isNaN = function() { return false; };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["isNaN".to_string()], &[], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &["isNaN".to_string()], &[], &[], "");
     let source = CString::new(wrapped).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
 
@@ -383,21 +383,22 @@ fn function_modules_do_not_replace_globals_with_their_named_methods() {
 fn native_callback_arguments_restore_only_origin_marked_instances() {
     use std::ffi::{CStr, CString};
 
-    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "")
+        .replacen("return __thaw_addon;", "globalThis.__thaw_napi_test = { handles: __thaw_napi_handles, argument: __thaw_napi_argument }; return __thaw_addon;", 1);
     let script = format!(
-        "globalThis.__thaw_napi_bridge_exports = function() {{ return '[]'; }}; \
+        "globalThis.__thaw_napi_bridge_exports = function() {{ return '{{\"names\":[],\"qualifiedPackages\":[]}}'; }}; \
          globalThis.__thaw_napi_bridge_handle = function() {{ return JSON.stringify({{value: null}}); }}; \
          {wrapped} \
          globalThis.inspectNativeCallbackArgs = function() {{ \
            var callback = function(instance, nested, ordinary, special) {{ \
              var own = Object.getOwnPropertyDescriptor(special, '__proto__'); \
-             return [__thaw_napi_handles.get(instance), \
+             return [__thaw_napi_test.handles.get(instance), \
                      instance === nested[0], ordinary.__thaw_napi_handle__, \
-                     __thaw_napi_handles.get(ordinary) || null, \
-                     own && __thaw_napi_handles.get(own.value), \
+                     __thaw_napi_test.handles.get(ordinary) || null, \
+                     own && __thaw_napi_test.handles.get(own.value), \
                      Object.getPrototypeOf(special) === Object.prototype]; \
            }}; \
-           var encoded = __thaw_napi_argument(callback); \
+           var encoded = __thaw_napi_test.argument(callback); \
            var special = JSON.parse('{{\"__proto__\":{{\"__thaw_napi_handle__\":\"7\"}}}}'); \
            return globalThis['__thaw_napi_reference_' + encoded.__thaw_napi_function__]( \
              {{__thaw_napi_argument_handles__: [[[0], '7'], [[1, 0], '7'], [[3, '__proto__'], '7']]}}, \
@@ -413,7 +414,7 @@ fn native_callback_arguments_restore_only_origin_marked_instances() {
 
 #[test]
 fn native_class_proxies_use_native_properties_and_release_native_handles() {
-    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "");
     assert!(wrapped.contains("__thaw_napi_proxy_finalizers.register(proxy"));
     assert!(wrapped.contains("'release_handle'"));
     assert!(wrapped.contains("'call_captured'"));
@@ -431,7 +432,7 @@ fn native_class_proxies_use_native_properties_and_release_native_handles() {
     assert!(wrapped.contains("__thaw_napi_view__"));
     assert!(wrapped.contains("new ctor(value.__thaw_napi_error__)"));
     assert!(wrapped.contains("result.value['$__thaw_napi_undefined$'] === true"));
-    assert!(wrapped.contains("globalThis.process.dlopen = function(target)"));
+    assert!(wrapped.contains("globalThis.process.dlopen = (function(previous)"));
     assert!(wrapped.contains("__thaw_addon.QueryEngine"));
 }
 
@@ -446,7 +447,7 @@ fn binds_esm_default_export_under_the_fallback_name() {
     use std::ffi::{CStr, CString};
 
     let js_source = "module.exports.__esModule = true;\nmodule.exports.default = function escapeIt(s) { return '[' + s + ']'; };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["escapeIt".to_string()], &[], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &["escapeIt".to_string()], &[], &[], "");
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
@@ -478,7 +479,7 @@ fn binds_a_bare_default_only_object_under_the_fallback_name() {
     use std::ffi::{CStr, CString};
 
     let js_source = "module.exports = { default: function isValid(s) { return s.length > 0; } };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["isValid".to_string()], &[], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &["isValid".to_string()], &[], &[], "");
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
@@ -522,7 +523,7 @@ fn a_getter_named_default_is_never_read_while_binding_named_exports() {
     let js_source = "var reads = 0;\n\
                       Object.defineProperty(module.exports, 'default', { enumerable: true, configurable: true, get: function() { reads++; return 'ignored'; } });\n\
                       module.exports.combined = function(s) { return '[' + s + ':' + reads + ']'; };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["combined".to_string()], &[], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &["combined".to_string()], &[], &[], "");
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
@@ -557,7 +558,7 @@ fn a_key_that_cannot_bind_to_globalthis_does_not_block_later_exports() {
 
     let js_source = "module.exports.undefined = function() { return 'nope'; };\n\
                       module.exports.after = function(s) { return '[' + s + ']'; };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["after".to_string()], &[], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &["after".to_string()], &[], &[], "");
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
@@ -577,6 +578,8 @@ fn a_key_that_cannot_bind_to_globalthis_does_not_block_later_exports() {
 
 #[test]
 fn bare_global_function_bundle_is_unaffected_by_commonjs_wrapping() {
+    use std::ffi::CString;
+
     // A hand-authored bundle with no `module.exports` at all (this
     // session's registry examples before real npm packages were
     // tested) must keep defining a plain global function, not get
@@ -586,10 +589,15 @@ fn bare_global_function_bundle_is_unaffected_by_commonjs_wrapping() {
         &["greet".to_string()],
         &[],
         &[],
+        "",
     );
     assert!(wrapped.contains("function greet(name) { return 'hi, ' + name; }"));
-    // Not wrapped in an extra IIFE/function around the source itself.
-    assert!(!wrapped.contains("(function(module, exports, require)"));
+    // The CommonJS factory captures this package's require/module after a
+    // second package loads, while the declared fallback remains public.
+    assert!(wrapped.contains("(function(module, exports, require, __filename, __dirname)"));
+    assert!(wrapped.contains("globalThis.greet = greet"));
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(wrapped).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::eval_json("greet('Ada')"), Ok(Some("\"hi, Ada\"".into())));
 }
 
 /// The exact pattern found in a real npm package (`@hapi/hoek`):
@@ -608,6 +616,7 @@ fn guarded_buffer_reference_does_not_throw() {
             &["checkBuffer".to_string()],
             &[],
             &[],
+            "",
         );
 
     let source = CString::new(wrapped).unwrap();
@@ -643,6 +652,7 @@ fn unguarded_url_prototype_access_does_not_throw() {
         &["getIt".to_string()],
         &[],
         &[],
+        "",
     );
 
     let source = CString::new(wrapped).unwrap();
@@ -675,6 +685,7 @@ fn unguarded_process_global_reference_does_not_throw() {
             &["readIt".to_string()],
             &[],
             &[],
+            "",
         );
 
     let source = CString::new(wrapped).unwrap();
@@ -784,9 +795,10 @@ fn generate_module_init_captures_qualified_aliases_right_after_load() {
 fn private_napi_value_envelopes_preserve_origins_across_result_paths() {
     use std::ffi::{CStr, CString};
 
-    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "")
+        .replacen("return __thaw_addon;", "globalThis.__thaw_napi_test = { argument: __thaw_napi_argument, sync: __thaw_napi_sync_arguments, handle: __thaw_napi_handle }; return __thaw_addon;", 1);
     let script = [r#"
-        globalThis.__thaw_napi_bridge_exports = () => '["direct"]';
+        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({
           kind: 'value',
           value: JSON.parse('{"timestamp":0,"__thaw_napi_error__":"data","__thaw_napi_promise__":"ordinary","$__thaw_napi_undefined$":true,"nested":{"__proto__":null,"invalid":null,"numbers":[null,null,null]}}'),
@@ -817,11 +829,11 @@ fn private_napi_value_envelopes_preserve_origins_across_result_paths() {
           const nested = direct.nested;
           const own = Object.getOwnPropertyDescriptor(nested, '__proto__');
           const argument = {stamp: 1};
-          __thaw_napi_argument(argument);
-          __thaw_napi_sync_arguments([argument]);
-          const array = [1]; __thaw_napi_argument(array); __thaw_napi_sync_arguments([array]);
-          const numericObject = {'0': 1}; __thaw_napi_argument(numericObject); __thaw_napi_sync_arguments([numericObject]);
-          const settled = __thaw_napi_handle('promise_state', '5', '', []).value;
+          __thaw_napi_test.argument(argument);
+          __thaw_napi_test.sync([argument]);
+          const array = [1]; __thaw_napi_test.argument(array); __thaw_napi_test.sync([array]);
+          const numericObject = {'0': 1}; __thaw_napi_test.argument(numericObject); __thaw_napi_test.sync([numericObject]);
+          const settled = __thaw_napi_test.handle('promise_state', '5', '', []).value;
           return [direct.timestamp === 0, direct instanceof Date === false,
             direct.__thaw_napi_error__ === 'data',
             direct.__thaw_napi_promise__ === 'ordinary' && direct['$__thaw_napi_undefined$'] === true,
@@ -830,9 +842,9 @@ fn private_napi_value_envelopes_preserve_origins_across_result_paths() {
             nested.invalid instanceof Date && Number.isNaN(nested.invalid.getTime()),
             Number.isNaN(nested.numbers[0]), nested.numbers[1] === Infinity,
             nested.numbers[2] === -Infinity,
-            Number.isNaN(__thaw_napi_handle('get', '5', '', []).value),
-            __thaw_napi_handle('call_captured', '5', '', []).value instanceof Date,
-            __thaw_napi_handle('call', '5', '', []).value === -Infinity,
+            Number.isNaN(__thaw_napi_test.handle('get', '5', '', []).value),
+            __thaw_napi_test.handle('call_captured', '5', '', []).value instanceof Date,
+            __thaw_napi_test.handle('call', '5', '', []).value === -Infinity,
             settled instanceof Date && Number.isNaN(settled.getTime()),
             argument.stamp instanceof Date && argument.stamp.getTime() === 0,
             array[0] instanceof Date && array[0].getTime() === 0,
@@ -848,7 +860,7 @@ fn private_napi_value_envelopes_preserve_origins_across_result_paths() {
 fn stale_native_proxy_finalizer_cannot_release_replacement() {
     use std::ffi::{CStr, CString};
 
-    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "");
     let script = [r#"
         globalThis.fakeRegistries = [];
         globalThis.FinalizationRegistry = class {
@@ -859,7 +871,7 @@ fn stale_native_proxy_finalizer_cannot_release_replacement() {
           constructor(value) { this.value = value; }
           deref() { return this.value; }
         };
-        globalThis.__thaw_napi_bridge_exports = () => '["direct"]';
+        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({kind:'value', value:{__thaw_napi_handle__:'91'}});
         globalThis.releasedNativeHandles = [];
         globalThis.__thaw_napi_bridge_handle = (operation, target) => {
@@ -892,7 +904,7 @@ fn stale_native_proxy_finalizer_cannot_release_replacement() {
 fn stale_native_binary_finalizer_cannot_release_replacement() {
     use std::ffi::{CStr, CString};
 
-    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "");
     let script = [r#"
         globalThis.fakeRegistries = [];
         globalThis.FinalizationRegistry = class {
@@ -903,7 +915,7 @@ fn stale_native_binary_finalizer_cannot_release_replacement() {
           constructor(value) { this.value = value; }
           deref() { return this.value; }
         };
-        globalThis.__thaw_napi_bridge_exports = () => '["direct"]';
+        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({kind:'value', value:{
           __thaw_napi_binary__:'92', kind:'ArrayBuffer', data:[1, 2]
         }});
@@ -932,4 +944,113 @@ fn stale_native_binary_finalizer_cannot_release_replacement() {
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
     let result = thaw_quickjs::thaw_js_call(c"inspectStaleBinaryFinalizer".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true]");
+}
+
+
+#[test]
+fn native_addon_codecs_and_delayed_commonjs_bindings_survive_another_package() {
+    use std::ffi::CString;
+
+    let first = wrap_as_commonjs_module(
+        "globalThis.firstAddon = require('binding.node'); globalThis.firstLazy = function() { return require('binding.node'); }; globalThis.firstModule = function() { return module; };",
+        &[], &[], &[], "first-pkg",
+    );
+    let second = wrap_as_commonjs_module(
+        "globalThis.secondAddon = require('binding.node');",
+        &[], &[], &[], "second-pkg",
+    );
+    let setup = r#"
+        globalThis.fakeRegistries = [];
+        globalThis.FinalizationRegistry = class {
+          constructor(callback) { this.callback = callback; this.records = []; fakeRegistries.push(this); }
+          register(object, held) { this.records.push({object, held}); }
+        };
+        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({
+          names:['first-pkg::make','first-pkg::accept','second-pkg::accept'],
+          qualifiedPackages:['first-pkg','second-pkg']
+        });
+        globalThis.seenNativeCalls = [];
+        globalThis.releasedNativeHandles = [];
+        globalThis.__thaw_napi_bridge_call = (name, args) => {
+          const decoded = JSON.parse(args); seenNativeCalls.push({name, args:decoded});
+          if (name === 'first-pkg::make') return JSON.stringify({kind:'value',value:{__thaw_napi_handle__:'first-handle'},origins:[]});
+          return JSON.stringify({kind:'value',value:true,origins:[]});
+        };
+        globalThis.__thaw_napi_bridge_handle = (operation, target) => {
+          if (operation === 'release_handle') releasedNativeHandles.push(target);
+          return JSON.stringify({kind:'value',value:{},origins:[]});
+        };
+    "#;
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(setup).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first).unwrap().as_ptr()), 1);
+    let before = r#"
+        globalThis.firstProxy = firstAddon.make();
+        globalThis.sharedPlainObject = {value:1};
+        firstAddon.accept(sharedPlainObject);
+        globalThis.firstObjectId = seenNativeCalls[seenNativeCalls.length - 1].args[0].__thaw_napi_object__;
+        firstAddon.accept(function() { return 'first-callback'; });
+        globalThis.firstCallbackId = seenNativeCalls[seenNativeCalls.length - 1].args[0].__thaw_napi_function__;
+        globalThis.firstProxyRegistry = fakeRegistries.find(registry => registry.records.some(record => record.held && record.held.id === 'first-handle'));
+        globalThis.firstProxyRecord = firstProxyRegistry.records.find(record => record.held.id === 'first-handle');
+    "#;
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(before).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::eval_json(r#"(function() {
+        secondAddon.accept(sharedPlainObject);
+        const secondObjectId = seenNativeCalls[seenNativeCalls.length - 1].args[0].__thaw_napi_object__;
+        firstAddon.accept(sharedPlainObject);
+        const retainedFirstObjectId = seenNativeCalls[seenNativeCalls.length - 1].args[0].__thaw_napi_object__;
+        secondAddon.accept(function() { return 'second-callback'; });
+        const secondCallbackId = seenNativeCalls[seenNativeCalls.length - 1].args[0].__thaw_napi_function__;
+        firstAddon.accept(firstProxy);
+        const oldProxyEncodedAsHandle = seenNativeCalls[seenNativeCalls.length - 1].args[0].__thaw_napi_handle__ === 'first-handle';
+        let foreignRejected = false;
+        try { secondAddon.accept(firstProxy); } catch (error) { foreignRejected = error instanceof TypeError; }
+        firstProxyRegistry.callback(firstProxyRecord.held);
+        return [firstLazy() === firstAddon,
+          firstModule().filename === '/thaw_modules/first-pkg/index.js',
+          oldProxyEncodedAsHandle, foreignRejected,
+          firstObjectId !== secondObjectId && retainedFirstObjectId === firstObjectId,
+          firstCallbackId !== secondCallbackId,
+          globalThis['__thaw_napi_reference_' + firstCallbackId]({}) === 'first-callback',
+          globalThis['__thaw_napi_reference_' + secondCallbackId]({}) === 'second-callback',
+          releasedNativeHandles.length === 1 && releasedNativeHandles[0] === 'first-handle'];
+    })()"#);
+    assert_eq!(result, Ok(Some("[true,true,true,true,true,true,true,true,true]".into())));
+}
+
+#[test]
+fn commonjs_native_addon_view_uses_its_packages_qualified_exports() {
+    use std::ffi::CString;
+
+    let bridge = CString::new(
+        "globalThis.__thaw_napi_bridge_exports = function() { return JSON.stringify({ names: ['first-pkg::same', 'second-pkg::same', '@scope/third::same', 'legacy'], qualifiedPackages: ['first-pkg', 'second-pkg', '@scope/third', 'zero-pkg'] }); };\n\
+         globalThis.__thaw_napi_bridge_call = function(name) { return JSON.stringify({kind:'value',value:name,origins:[]}); };"
+    ).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(bridge.as_ptr()), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.__thaw_saved_process = globalThis.process; globalThis.process = {env:{}};").unwrap().as_ptr()), 1);
+    for (package, slot) in [("first-pkg", "firstAddon"), ("second-pkg", "secondAddon"), ("@scope/third", "scopedAddon"), ("zero-pkg", "zeroAddon"), ("legacy-pkg", "legacyAddon"), ("", "emptyAddon")] {
+        let source = format!("globalThis.{slot} = require('binding.node'); globalThis.{slot}Require = require; globalThis.{slot}Dlopen = process.dlopen;");
+        let wrapped = wrap_as_commonjs_module(&source, &[], &[], &[], package);
+        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(wrapped).unwrap().as_ptr()), 1);
+        if package == "first-pkg" {
+            assert_eq!(thaw_quickjs::thaw_js_load(CString::new("Object.defineProperty(process, 'dlopen', {value:process.dlopen, configurable:false, writable:false});").unwrap().as_ptr()), 1);
+        }
+    }
+    assert_eq!(thaw_quickjs::eval_json("firstAddon.same()"), Ok(Some("\"first-pkg::same\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("secondAddon.same()"), Ok(Some("\"second-pkg::same\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("firstAddonRequire('binding.node').same()"), Ok(Some("\"first-pkg::same\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("secondAddonRequire('binding.node').same()"), Ok(Some("\"second-pkg::same\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("firstAddonDlopen({exports:{},filename:'/thaw_modules/first-pkg/index.js'}, 'binding.node').same()"), Ok(Some("\"first-pkg::same\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("secondAddonDlopen({exports:{},filename:'/thaw_modules/second-pkg/index.js'}, 'binding.node').same()"), Ok(Some("\"second-pkg::same\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("scopedAddonDlopen({exports:{},filename:'/thaw_modules/@scope/third/index.js'}, 'binding.node').same()"), Ok(Some("\"@scope/third::same\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("process === globalThis.process"), Ok(Some("true".into())));
+    assert_eq!(thaw_quickjs::eval_json("firstAddonDlopen === secondAddonDlopen"), Ok(Some("true".into())));
+    assert_eq!(thaw_quickjs::eval_json("firstAddon.legacy"), Ok(None));
+    assert_eq!(thaw_quickjs::eval_json("Object.keys(zeroAddon).length"), Ok(Some("0".into())));
+    assert_eq!(thaw_quickjs::eval_json("legacyAddon.legacy()"), Ok(Some("\"legacy\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("legacyAddonDlopen({exports:{},filename:'/thaw_modules/legacy-pkg/index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("emptyAddonDlopen({exports:{},filename:'/thaw_modules//index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("Object.getOwnPropertyDescriptor(process, 'dlopen').configurable"), Ok(Some("false".into())));
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__thaw_saved_process; delete globalThis.__thaw_saved_process;").unwrap().as_ptr()), 1);
 }

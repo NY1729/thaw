@@ -189,15 +189,80 @@ fn package_qualified_exports_survive_opposite_load_orders() {
         unsafe {
             assert_eq!(get_export_result(c"first-test::Client".as_ptr()).unwrap(), first_client as u64);
             assert_eq!(get_export_result(c"second-test::Client".as_ptr()).unwrap(), second_client as u64);
+            assert_eq!(get_export_result(c"Client".as_ptr()).unwrap(), 0);
         }
         HOST.with(|host| {
             let mut host = host.borrow_mut();
             for name in ["Client", "first-test::Client", "second-test::Client"] {
                 host.exports.remove(name);
             }
+            host.qualified_packages.remove("first-test");
+            host.qualified_packages.remove("second-test");
             host.module_envs.retain(|entry| {
                 let pointer = (&**entry as *const Env).cast_mut();
                 pointer != first_env && pointer != second_env
+            });
+        });
+    }
+}
+
+#[test]
+fn package_qualified_functions_do_not_publish_colliding_bare_names() {
+    unsafe extern "C" fn first(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        env_mut(env).unwrap().alloc(Value::Number(1.0))
+    }
+    unsafe extern "C" fn second(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        env_mut(env).unwrap().alloc(Value::Number(2.0))
+    }
+    unsafe extern "C" fn legacy(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        env_mut(env).unwrap().alloc(Value::Number(3.0))
+    }
+    for reverse in [false, true] {
+        let mut first_env = Box::new(Env::new());
+        let mut second_env = Box::new(Env::new());
+        let mut legacy_env = Box::new(Env::new());
+        let first_ptr = (&mut *first_env) as NapiEnv;
+        let second_ptr = (&mut *second_env) as NapiEnv;
+        let legacy_ptr = (&mut *legacy_env) as NapiEnv;
+        let first_fn = Function { callback: first, data: ptr::null_mut(), properties: HashMap::new(), _thaw_bridge: None };
+        let second_fn = Function { callback: second, data: ptr::null_mut(), properties: HashMap::new(), _thaw_bridge: None };
+        let legacy_fn = Function { callback: legacy, data: ptr::null_mut(), properties: HashMap::new(), _thaw_bridge: None };
+        let first_value = first_env.alloc(Value::Function(first_fn.clone()));
+        let second_value = second_env.alloc(Value::Function(second_fn.clone()));
+        let legacy_value = legacy_env.alloc(Value::Function(legacy_fn.clone()));
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            register_loaded_exports(&mut host, legacy_ptr as usize, None, vec![("same".into(), legacy_fn)], vec![("same".into(), legacy_value)]);
+            let entries = if reverse {
+                [("second-test", second_ptr, second_fn, second_value), ("first-test", first_ptr, first_fn, first_value)]
+            } else {
+                [("first-test", first_ptr, first_fn, first_value), ("second-test", second_ptr, second_fn, second_value)]
+            };
+            for (package, env, function, value) in entries {
+                register_loaded_exports(&mut host, env as usize, Some(package), vec![("same".into(), function)], vec![("same".into(), value)]);
+            }
+            host.module_envs.push(first_env);
+            host.module_envs.push(second_env);
+            host.module_envs.push(legacy_env);
+        });
+        unsafe {
+            for (name, expected) in [(c"first-test::same", "1.0"), (c"second-test::same", "2.0"), (c"same", "3.0")] {
+                let result = thaw_napi_call_result(name.as_ptr(), c"[]".as_ptr());
+                assert!(result.error.is_null());
+                assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), expected);
+            }
+        }
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            for name in ["same", "first-test::same", "second-test::same"] {
+                host.functions.remove(name);
+                host.exports.remove(name);
+            }
+            host.qualified_packages.remove("first-test");
+            host.qualified_packages.remove("second-test");
+            host.module_envs.retain(|entry| {
+                let pointer = (&**entry as *const Env).cast_mut();
+                pointer != first_ptr && pointer != second_ptr && pointer != legacy_ptr
             });
         });
     }
