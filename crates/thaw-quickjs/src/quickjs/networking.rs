@@ -809,13 +809,9 @@ pub(super) fn tls_poll_read(handle: u32) -> String {
             let result = stream.read(&mut value);
             let _ = stream.sock.set_nonblocking(false);
             match result {
-                Ok(0) => {
-                    streams.1.remove(&handle);
-                    TLS_SERVER_CERTIFICATES.with(|certificates| {
-                        certificates.borrow_mut().remove(&handle);
-                    });
-                    "eof".to_string()
-                }
+                // Preserve the write half: an HTTP handler may reply after request EOF.
+                // The JS socket retires this handle on end() or destroy().
+                Ok(0) => "eof".to_string(),
                 Ok(length) => {
                     value.truncate(length);
                     format!("ok:{}", hex_encode(&value))
