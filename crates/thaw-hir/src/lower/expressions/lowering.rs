@@ -1869,35 +1869,9 @@ impl<'a> FnLowerer<'a> {
                     BinaryOp::Gt => self.lower_relational(lhs, rhs, BinOp::Gt)?,
                     BinaryOp::LtEq => self.lower_relational(lhs, rhs, BinOp::LtEq)?,
                     BinaryOp::GtEq => self.lower_relational(lhs, rhs, BinOp::GtEq)?,
-                    BinaryOp::EqEqEq => {
-                        if let Some(result) =
-                            self.lower_mixed_bigint_equality(lhs.clone(), rhs.clone())?
-                        {
-                            result
-                        } else {
-                            let (lhs, rhs) = self.coerce_strict_equality_operands(lhs, rhs)?;
-                            self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
-                                .unwrap_or(HirExpr::BinOp(
-                                    BinOp::EqEqEq,
-                                    Box::new(lhs),
-                                    Box::new(rhs),
-                                ))
-                        }
-                    }
+                    BinaryOp::EqEqEq => self.lower_strict_equality(lhs, rhs)?,
                     BinaryOp::NotEqEq => {
-                        let equality = if let Some(result) =
-                            self.lower_mixed_bigint_equality(lhs.clone(), rhs.clone())?
-                        {
-                            result
-                        } else {
-                            let (lhs, rhs) = self.coerce_strict_equality_operands(lhs, rhs)?;
-                            self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
-                                .unwrap_or(HirExpr::BinOp(
-                                    BinOp::EqEqEq,
-                                    Box::new(lhs),
-                                    Box::new(rhs),
-                                ))
-                        };
+                        let equality = self.lower_strict_equality(lhs, rhs)?;
                         HirExpr::BinOp(
                             BinOp::EqEqEq,
                             Box::new(equality),

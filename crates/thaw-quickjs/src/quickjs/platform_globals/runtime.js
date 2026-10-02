@@ -29,6 +29,13 @@
     }
     return bound;
   };
+  globalThis.__thaw_strict_equal_dynamic = (left, right) => left === right;
+  globalThis.__thaw_strict_equal_bigint_dynamic = (digits, value) =>
+    typeof value === 'bigint' && value === BigInt(digits);
+  globalThis.__thaw_strict_equal_number_dynamic = (text, value) =>
+    typeof value === 'number' && value === Number(text);
+  globalThis.__thaw_strict_equal_null_dynamic = value => value === null;
+  globalThis.__thaw_strict_equal_undefined_dynamic = value => value === undefined;
   globalThis.__thaw_typeof_dynamic_value = value => typeof value;
   globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   globalThis.__thaw_is_null_dynamic_value = value => value === null;

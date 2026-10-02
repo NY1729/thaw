@@ -2118,9 +2118,9 @@ impl<'a> FnLowerer<'a> {
                             continue;
                         };
                         let test = self.lower_expr(test)?;
-                        let test = self
-                            .coerce_to_declared(&discriminant_type, test)
-                            .map_err(|error| format!("switch case: {error}"))?;
+                        let equality = self.lower_strict_equality(
+                            HirExpr::Var(value_name.clone()), test,
+                        ).map_err(|error| format!("switch case: {error}"))?;
                         out.push(HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::EqEqEq,
@@ -2128,11 +2128,7 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(none.clone()),
                             ),
                             vec![HirStmt::If(
-                                HirExpr::BinOp(
-                                    BinOp::EqEqEq,
-                                    Box::new(HirExpr::Var(value_name.clone())),
-                                    Box::new(test),
-                                ),
+                                equality,
                                 vec![HirStmt::Expr(HirExpr::Assign(
                                     selected_name.clone(),
                                     Box::new(HirExpr::Lit(HirLit::F64(index as f64))),

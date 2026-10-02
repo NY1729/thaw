@@ -998,40 +998,216 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
-    /// `===`/`!==` between a live `JsValue` and a native scalar
-    /// (`Str`/`F64`/`Bool`) -- a very common shape once a value comes from
-    /// a dynamic getter (real example: koa's own `ctx.path === "/json"` or
-    /// `ctx.method === "GET"`, where `ctx.path` reads as a `JsValue`).
-    /// Coerces the `JsValue` side to the scalar's own native type via
-    /// `coerce_to_declared` (which already maps `JsValue` -> scalar through
-    /// `readDynamicValue` + `JsonAsString`/`JsonAsNumber`/`JsonAsBool`), so
-    /// the ordinary strict-equality emit applies unchanged. Without this,
-    /// the strict-equality type check rejected the mismatched pair outright.
-    fn coerce_strict_equality_operands(
-        &mut self,
-        lhs: HirExpr,
-        rhs: HirExpr,
-    ) -> Result<(HirExpr, HirExpr), String> {
-        let scalar = |ty: &HirType| matches!(ty, HirType::Str | HirType::F64 | HirType::Bool);
-        // A dynamic operand -- live `JsValue` handle, or a `Json` value
-        // (a Fallback/QuickJS method call's own result, e.g. cheerio's
-        // `$("p").text()`) -- against a concrete scalar is decoded to that
-        // scalar so the comparison is well-typed. Without the `Json` half,
-        // `$("p").text() === "W"` failed outright with "strict equality
-        // compares incompatible types Json and Str", even though the bound
-        // form (`const t = ...; t === "W"`) worked once annotated.
-        let dynamic = |ty: &HirType| matches!(ty, HirType::Json | HirType::JsValue);
+    /// Shared by ordinary strict operators and switch case tests. Both source
+    /// operands are bound before any kind dispatch, including a static false.
+    fn lower_strict_equality(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
-        if dynamic(&lhs_type) && scalar(&rhs_type) {
-            let lhs = self.coerce_to_declared(&rhs_type, lhs)?;
-            return Ok((lhs, rhs));
+        // The sparse-array index check needs the original TypedIndex shape.
+        // Its helper binds the index expression first and then the undefined
+        // operand, so it remains a separate source-order-preserving path.
+        let sparse_index = |value: &HirExpr, other: &HirType, this: &Self| -> Result<bool, String> {
+            let HirExpr::TypedIndex(array, _, _) = value else { return Ok(false); };
+            if *other != HirType::Undefined { return Ok(false); }
+            let HirType::Array(element) = this.infer_expr_type(array)? else { return Ok(false); };
+            Ok(!matches!(element.as_ref(), HirType::Optional(_) | HirType::Nullish(_) | HirType::Undefined)
+                && !matches!(element.as_ref(), HirType::Union(members) if members.contains(&HirType::Undefined)))
+        };
+        if sparse_index(&lhs, &rhs_type, self)? {
+            if let Some(result) = self.lower_optional_undefined_equality(lhs.clone(), rhs.clone())? {
+                return Ok(result);
+            }
         }
-        if dynamic(&rhs_type) && scalar(&lhs_type) {
-            let rhs = self.coerce_to_declared(&lhs_type, rhs)?;
-            return Ok((lhs, rhs));
+        if sparse_index(&rhs, &lhs_type, self)? {
+            let result = self.lower_optional_undefined_equality(
+                rhs.clone(), HirExpr::Lit(HirLit::Undefined))?
+                .ok_or("sparse index equality did not lower")?;
+            let name = format!("__thaw_strict_undefined_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), lhs_type.clone());
+            return self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)]);
         }
-        Ok((lhs, rhs))
+        let lhs_name = format!("__thaw_strict_left_{}", self.next_binding);
+        self.next_binding += 1;
+        let rhs_name = format!("__thaw_strict_right_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(lhs_name.clone(), lhs_type.clone());
+        self.scope.insert(rhs_name.clone(), rhs_type.clone());
+        let left = HirExpr::Var(lhs_name.clone());
+        let right = HirExpr::Var(rhs_name.clone());
+        let result = if let Some(result) =
+            self.lower_optional_undefined_equality(left.clone(), right.clone())? {
+            result
+        } else if lhs_type == HirType::Json && rhs_type == HirType::Json {
+            self.strict_json_pair(left, right)?
+        } else if lhs_type == HirType::JsValue && rhs_type == HirType::JsValue {
+            self.call_dynamic_strict_comparator("__thaw_strict_equal_dynamic", Vec::new(), vec![left, right])?
+        } else if lhs_type == HirType::JsValue {
+            self.strict_handle_vs_native(left, right, &rhs_type)?
+        } else if rhs_type == HirType::JsValue {
+            self.strict_handle_vs_native(right, left, &lhs_type)?
+        } else if lhs_type == HirType::Json {
+            self.strict_json_vs_native(left, right, &rhs_type)?
+        } else if rhs_type == HirType::Json {
+            self.strict_json_vs_native(right, left, &lhs_type)?
+        } else if matches!((&lhs_type, &rhs_type),
+            (HirType::StrLiteral(_), HirType::Str)
+            | (HirType::Str, HirType::StrLiteral(_))
+            | (HirType::StrLiteral(_), HirType::StrLiteral(_))) {
+            HirExpr::BinOp(BinOp::EqEqEq,
+                Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(left))),
+                Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(right))))
+        } else if lhs_type == rhs_type {
+            HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right))
+        } else if Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type) {
+            HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right))
+        } else {
+            HirExpr::Lit(HirLit::Bool(false))
+        };
+        self.wrap_call_argument_bindings(result, &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)])
+    }
+
+    fn strict_if(condition: HirExpr, yes: HirExpr, no: HirExpr) -> HirExpr {
+        HirExpr::Conditional(Box::new(condition), Box::new(yes), Box::new(no), HirType::Bool)
+    }
+
+    fn strict_json_handle(json: HirExpr) -> HirExpr {
+        HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())), vec![json])
+    }
+
+    fn strict_has_handle(handle: HirExpr) -> HirExpr {
+        Self::strict_if(
+            HirExpr::BinOp(BinOp::EqEqEq, Box::new(handle), Box::new(HirExpr::Lit(HirLit::I64(0)))),
+            HirExpr::Lit(HirLit::Bool(false)),
+            HirExpr::Lit(HirLit::Bool(true)),
+        )
+    }
+
+    fn strict_handle_value(handle: HirExpr) -> HirExpr {
+        HirExpr::TypedClosure(HirType::JsValue, Box::new(handle))
+    }
+
+    fn strict_json_pair(&mut self, left: HirExpr, right: HirExpr) -> Result<HirExpr, String> {
+        let left_handle = Self::strict_json_handle(left.clone());
+        let right_handle = Self::strict_json_handle(right.clone());
+        let both_handles = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_dynamic", Vec::new(),
+            vec![Self::strict_handle_value(left_handle.clone()), Self::strict_handle_value(right_handle.clone())],
+        )?;
+        let left_to_right = self.strict_handle_vs_json(Self::strict_handle_value(left_handle.clone()), right.clone())?;
+        let right_to_left = self.strict_handle_vs_json(Self::strict_handle_value(right_handle.clone()), left.clone())?;
+        let native = HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right));
+        Ok(Self::strict_if(Self::strict_has_handle(left_handle),
+            Self::strict_if(Self::strict_has_handle(right_handle.clone()), both_handles, left_to_right),
+            Self::strict_if(Self::strict_has_handle(right_handle), right_to_left, native)))
+    }
+
+    fn strict_json_vs_native(&mut self, json: HirExpr, native: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+        let handle = Self::strict_json_handle(json.clone());
+        let live = self.strict_handle_vs_native(Self::strict_handle_value(handle.clone()), native.clone(), ty)?;
+        let plain = match ty {
+            HirType::Dictionary(_) => HirExpr::BinOp(
+                BinOp::EqEqEq, Box::new(json),
+                Box::new(HirExpr::TypedClosure(HirType::Json, Box::new(native))),
+            ),
+            HirType::I64 => HirExpr::BinOp(
+                BinOp::EqEqEq, Box::new(json),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_receiver_bigint".into())),
+                    vec![native],
+                )),
+            ),
+            HirType::StrLiteral(_) => {
+                let boxed = self.wrap_native_value_as_json(
+                    HirExpr::TypedClosure(HirType::Str, Box::new(native)), HirType::Str)?;
+                HirExpr::BinOp(BinOp::EqEqEq, Box::new(json), Box::new(boxed))
+            }
+            HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined => {
+                let boxed = self.wrap_native_value_as_json(native, ty.clone())?;
+                HirExpr::BinOp(BinOp::EqEqEq, Box::new(json), Box::new(boxed))
+            }
+            _ => HirExpr::Lit(HirLit::Bool(false)),
+        };
+        Ok(Self::strict_if(Self::strict_has_handle(handle), live, plain))
+    }
+
+    fn strict_handle_vs_json(&mut self, handle: HirExpr, json: HirExpr) -> Result<HirExpr, String> {
+        let borrowed = Self::strict_json_handle(json.clone());
+        let both_handles = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_dynamic", Vec::new(),
+            vec![handle.clone(), Self::strict_handle_value(borrowed.clone())],
+        )?;
+        let kind = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![json.clone()]);
+        let test_kind = |name: &str| HirExpr::BinOp(BinOp::EqEqEq,
+            Box::new(kind.clone()), Box::new(HirExpr::Lit(HirLit::Str(name.into()))));
+        let string = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_dynamic", vec![json.clone()], vec![handle.clone()])?;
+        let number = self.strict_handle_vs_native(handle.clone(),
+            HirExpr::JsonAsNumber(Box::new(json.clone())), &HirType::F64)?;
+        let boolean = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_dynamic", vec![json.clone()], vec![handle.clone()])?;
+        let bigint_digits = self.coerce_to_declared(
+            &HirType::Json, HirExpr::JsonAsString(Box::new(json.clone())))?;
+        let bigint = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_bigint_dynamic", vec![bigint_digits], vec![handle.clone()])?;
+        let undefined = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_undefined_dynamic", Vec::new(), vec![handle.clone()])?;
+        let null = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_null_dynamic", Vec::new(), vec![handle])?;
+        let false_value = HirExpr::Lit(HirLit::Bool(false));
+        let object = Self::strict_if(
+            HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_null".into())), vec![json]),
+            null, false_value);
+        let native = Self::strict_if(test_kind("string"), string,
+            Self::strict_if(test_kind("number"), number,
+            Self::strict_if(test_kind("boolean"), boolean,
+            Self::strict_if(test_kind("bigint"), bigint,
+            Self::strict_if(test_kind("undefined"), undefined, object)))));
+        Ok(Self::strict_if(Self::strict_has_handle(borrowed), both_handles, native))
+    }
+
+    fn strict_handle_vs_native(&mut self, handle: HirExpr, native: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+        let (helper, json) = match ty {
+            HirType::F64 => {
+                let text = self.coerce_primitive_to_string(native)?;
+                let json = self.coerce_to_declared(&HirType::Json, text)?;
+                ("__thaw_strict_equal_number_dynamic", vec![json])
+            }
+            HirType::I64 => {
+                let text = self.bigint_decimal_string(native, ty)?;
+                let json = self.coerce_to_declared(&HirType::Json, text)?;
+                ("__thaw_strict_equal_bigint_dynamic", vec![json])
+            }
+            HirType::Str => ("__thaw_strict_equal_dynamic", vec![self.coerce_to_declared(&HirType::Json, native)?]),
+            HirType::StrLiteral(_) => ("__thaw_strict_equal_dynamic", vec![self.coerce_to_declared(&HirType::Json,
+                HirExpr::TypedClosure(HirType::Str, Box::new(native)))?]),
+            HirType::Bool => ("__thaw_strict_equal_dynamic", vec![self.coerce_to_declared(&HirType::Json, native)?]),
+            HirType::Null => ("__thaw_strict_equal_null_dynamic", Vec::new()),
+            HirType::Undefined => ("__thaw_strict_equal_undefined_dynamic", Vec::new()),
+            HirType::Json => return self.strict_handle_vs_json(handle, native),
+            HirType::Dictionary(_) => return self.strict_handle_vs_json(handle,
+                HirExpr::TypedClosure(HirType::Json, Box::new(native))),
+            _ => return Ok(HirExpr::Lit(HirLit::Bool(false))),
+        };
+        self.call_dynamic_strict_comparator(helper, json, vec![handle])
+    }
+
+    fn strict_reference_type(ty: &HirType) -> bool {
+        matches!(ty, HirType::Object(_) | HirType::Dictionary(_) | HirType::Array(_)
+            | HirType::Tuple(_) | HirType::Bytes | HirType::Map(_, _)
+            | HirType::WeakMap(_, _) | HirType::Set(_) | HirType::WeakSet(_)
+            | HirType::Promise(_) | HirType::Function(_, _) | HirType::CallableFunction(..))
+    }
+
+    fn call_dynamic_strict_comparator(&mut self, name: &str,
+        json_values: Vec<HirExpr>, handles: Vec<HirExpr>) -> Result<HirExpr, String> {
+        let json_args = self.wrap_native_value_as_json(
+            HirExpr::ArrayLit(json_values), HirType::Array(Box::new(HirType::Json)))?;
+        let callable = HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(name.into()))]);
+        Ok(HirExpr::JsonAsBool(Box::new(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixed".into())),
+            vec![callable, json_args, HirExpr::ArrayLit(handles)]))))
     }
 
     fn lower_loose_equality(
@@ -1713,12 +1889,20 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         missing
                     };
+                    let undefined_name = format!("__thaw_index_undefined_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(undefined_name.clone(), HirType::Undefined);
+                    let snapshot_name = format!("__thaw_index_missing_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(snapshot_name.clone(), HirType::Bool);
                     return self
                         .wrap_call_argument_bindings(
-                            missing,
+                            HirExpr::Var(snapshot_name.clone()),
                             &[
                                 (array_name, array_type, array_expr),
                                 (index_name, HirType::F64, index_expr),
+                                (snapshot_name, HirType::Bool, missing),
+                                (undefined_name, HirType::Undefined, rhs),
                             ],
                         )
                         .map(Some);
