@@ -1,6 +1,20 @@
+#[cfg(test)]
 fn rewrite_static_worker_urls(
     source: &str,
     module_path: &Path,
+    package_instance: &str,
+    package_dir: &Path,
+) -> Result<String, String> {
+    rewrite_static_worker_urls_named(
+        source, module_path, thaw_parser::common::FileName::Real(module_path.to_path_buf()),
+        package_instance, package_dir,
+    )
+}
+
+fn rewrite_static_worker_urls_named(
+    source: &str,
+    module_path: &Path,
+    source_name: thaw_parser::common::FileName,
     package_instance: &str,
     package_dir: &Path,
 ) -> Result<String, String> {
@@ -325,7 +339,7 @@ fn rewrite_static_worker_urls(
         }
     }
 
-    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
+    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map_named(source, source_name) else {
         return Ok(source.to_string());
     };
     let mut bindings = WorkerBindings::default();
