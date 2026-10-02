@@ -201,6 +201,9 @@ pub struct HirCompiler<'ctx> {
     catch_native_text: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
     arena_variables: HashSet<String>,
+    /// Only prepromoted JsValue cells have a pending first-capture retain.
+    /// Key by the exact LLVM cell value so branch/function map swaps need no mirror.
+    pending_js_capture_claims: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
     global_variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>, HirType)>,
     module_exception_roots: Vec<PointerValue<'ctx>>,
@@ -244,6 +247,7 @@ impl<'ctx> HirCompiler<'ctx> {
             catch_native_text: HashMap::new(),
             variable_hir_types: HashMap::new(),
             arena_variables: HashSet::new(),
+            pending_js_capture_claims: HashMap::new(),
             async_frame_cells: HashSet::new(),
             global_variables: HashMap::new(),
             module_exception_roots: Vec::new(),

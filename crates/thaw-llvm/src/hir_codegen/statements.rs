@@ -1,4 +1,18 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn prepromote_branch_captures(
+        &mut self,
+        condition: &HirExpr,
+        branches: &[HirStmt],
+    ) -> Result<(), String> {
+        // Allocation and the initial copy must both dominate dispatch.
+        for name in thaw_hir::closure_captured_names_in_while(condition, branches) {
+            if let Some(ty) = self.variable_hir_types.get(&name).cloned() {
+                self.prepromote_variable_to_arena_cell(&name, &ty)?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_conditional_value(
         &mut self,
         test: &HirExpr,
@@ -6,6 +20,10 @@ impl<'ctx> HirCompiler<'ctx> {
         alternate: &HirExpr,
         ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.prepromote_branch_captures(test, &[
+            HirStmt::Expr(consequent.clone()),
+            HirStmt::Expr(alternate.clone()),
+        ])?;
         let function = self.current_function();
         let consequent_block = self.context.append_basic_block(function, "conditional_then");
         let alternate_block = self.context.append_basic_block(function, "conditional_else");
@@ -250,6 +268,9 @@ impl<'ctx> HirCompiler<'ctx> {
         then_branch: &[HirStmt],
         else_branch: &[HirStmt],
     ) -> Result<bool, String> {
+        let mut branches = then_branch.to_vec();
+        branches.extend_from_slice(else_branch);
+        self.prepromote_branch_captures(cond, &branches)?;
         let function = self.current_function();
         let cond_val = self.compile_expr(cond)?.into_int_value();
 
@@ -339,7 +360,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let Some(hir_ty) = self.variable_hir_types.get(&name).cloned() else {
                 continue;
             };
-            self.promote_variable_to_arena_cell(&name, &hir_ty)?;
+            self.prepromote_variable_to_arena_cell(&name, &hir_ty)?;
         }
 
         self.builder
