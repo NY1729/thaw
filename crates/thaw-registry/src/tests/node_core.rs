@@ -952,7 +952,7 @@ module.exports = function() {
     session._sendHeaders(1, { 'x-repeat': 'value' }, false);
     var firstSize = session._encoderTable.length;
     session._sendHeaders(1, { 'x-repeat': 'value' }, false);
-    return [frames[0].equals(frames[1]), firstSize, session._encoderTable.length, frames[0].length > frames[1].length];
+    return [limit === 0 ? frames[0][0] === 0x20 && frames[0].subarray(1).equals(frames[1]) : frames[0].equals(frames[1]), firstSize, session._encoderTable.length, frames[0].length > frames[1].length];
   }
   function decode(limit, update) {
     var session = new http2.ServerHttp2Session(999976, 'tcp'), status;
@@ -983,6 +983,177 @@ module.exports = function() {
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(result, r#"[[true,0,0,false],[false,1,1,true],[false,1,1,true],"HPACK table size exceeds SETTINGS limit",["200",0],["200",1],["200",1]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_hpack_wire_size_updates_follow_settings_ack() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_hpack_wire_size");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  function settings(values) { return Buffer.concat(values.map(function(value) { return Buffer.from([0, 1, 0, 0, 0, value]); })); }
+  function wire(frames, prime) {
+    var session = new http2.ClientHttp2Session(999974, 'tcp'), sent = [];
+    session._send = function(value) { sent.push([value[3], Buffer.from(value.subarray(9)).toString('hex')]); return true; };
+    var stream = new http2.ClientHttp2Stream(session, 1);
+    session._streams.set(1, stream);
+    if (prime) { session._sendHeaders(1, { 'x-prime': 'value' }, false); sent.length = 0; }
+    frames.forEach(function(values) { session._frame(4, 0, 0, settings(values)); });
+    session._sendHeaders(1, { ':method': 'GET' }, false);
+    session._sendHeaders(1, { ':method': 'GET' }, false);
+    return [sent.map(function(item) { return item[0]; }), sent.slice(-2).map(function(item) { return item[1]; }), session._encoderTable.length];
+  }
+  var response = new http2.ServerHttp2Session(999973, 'tcp'), responseFrames = [];
+  response._send = function(frame) { responseFrames.push([frame[3], Buffer.from(frame.subarray(9)).toString('hex')]); return true; };
+  var stream = new http2.ServerHttp2Stream(response, 2);
+  response._streams.set(2, stream);
+  response._frame(4, 0, 0, settings([0]));
+  stream.respond({ ':status': 200 });
+  stream.additionalHeaders({ ':status': 200 });
+  var order = new http2.ClientHttp2Session(999972, 'tcp'), ordered = [];
+  order._send = function(frame) { ordered.push(frame[3]); return true; };
+  order.on('remoteSettings', function() { order.request({ ':path': '/' }); });
+  order._frame(4, 0, 0, settings([0]));
+  var blocked = new http2.ClientHttp2Session(999971, 'tcp'), blockedEvents = [];
+  blocked._send = function(frame) { blockedEvents.push(frame[3]); return frame[3] !== 4; };
+  blocked.on('remoteSettings', function() { blockedEvents.push('event'); });
+  blocked._frame(4, 0, 0, settings([0]));
+  var flow = new http2.ClientHttp2Session(999964, 'tcp'), flowTypes = [], flowStream = new http2.Http2Stream(flow, 1), marker = new Error('finish'), caught = false, notified = false;
+  flow._send = function(frame) { flowTypes.push(frame[3]); return true; };
+  flow._streams.set(1, flowStream);
+  flow._nextStream = 3;
+  flowStream._sendWindow = 0;
+  flowStream.end('a');
+  flowStream.on('finish', function() { flow.request({ ':path': '/after' }); throw marker; });
+  flow.on('remoteSettings', function() { notified = true; });
+  try { flow._frame(4, 0, 0, Buffer.from([0, 4, 0, 1, 0, 0])); } catch (error) { caught = error === marker; }
+  return [wire([[0]], false), wire([[0], [128]], false), wire([[128], [0]], false), wire([[128], [64], [128]], false), wire([[0, 128]], true), responseFrames, ordered, blockedEvents, [flowTypes, caught, notified]];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_hpack_wire_size_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2HpackWireSize = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2HpackWireSize").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[[4,1,1],["2082","82"],0],[[4,4,1,1],["203f6182","82"],0],[[4,4,1,1],["2082","82"],0],[[4,4,4,1,1],["3f213f6182","82"],0],[[4,1,1],["203f6182","82"],0],[[4,""],[1,"2088"],[1,"88"]],[4,1],[4],[[4,0,1],true,true]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_hpack_pending_update_survives_throw_and_reentry_fails_closed() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_hpack_wire_reentry");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  var setting = Buffer.from([0, 1, 0, 0, 0, 0]);
+  var session = new http2.ClientHttp2Session(999970, 'tcp'), sent = [], marker = new Error('getter'), caught = false;
+  session._send = function(frame) { sent.push([frame[3], Buffer.from(frame.subarray(9)).toString('hex')]); return true; };
+  session._frame(4, 0, 0, setting);
+  var stream = new http2.ClientHttp2Stream(session, 1);
+  session._streams.set(1, stream);
+  var headers = { ':method': 'GET' };
+  Object.defineProperty(headers, 'x-throw', { enumerable: true, get: function() { throw marker; } });
+  try { session._sendHeaders(1, headers, false); } catch (error) { caught = error === marker; }
+  var retained = [caught, session._encoderPendingMinimum, session._encoderTable.length, sent.length];
+  session._sendHeaders(1, { ':method': 'GET' }, false);
+  var recovered = [sent[sent.length - 1][1], session._encoderPendingMinimum];
+  function reenter(fromAck) {
+    var owner = new http2.ClientHttp2Session(fromAck ? 999969 : 999968, 'tcp'), types = [], caughtCode;
+    owner.on('error', function() {});
+    owner._send = function(frame) {
+      types.push(frame[3]);
+      if (frame[3] === (fromAck ? 4 : 1)) {
+        try { owner.request({ ':path': '/nested' }); } catch (error) { caughtCode = error.code; }
+      }
+      return true;
+    };
+    if (fromAck) owner._frame(4, 0, 0, setting);
+    else owner.request({ ':path': '/outer' });
+    return [owner.destroyed, caughtCode, types];
+  }
+  var client = new http2.ClientHttp2Session(999967, 'tcp'), clientFrames = [], inner, outer;
+  client._send = function(frame) { if (frame[3] === 1) clientFrames.push([frame[8], Buffer.from(frame.subarray(9)).toString('hex')]); return true; };
+  var coerced = { toString: function() { inner = client.request({ ':path': '/inner', 'x-shared': 'v' }); return 'v'; } };
+  outer = client.request({ ':path': '/outer', 'x-shared': [coerced] });
+  var clientNested = [client.destroyed, inner.id, outer.id, clientFrames.map(function(frame) { return frame[0]; }), clientFrames[1][1].endsWith('be'), client._encoderTable.length];
+  var server = new http2.ServerHttp2Session(999963, 'tcp'), serverFrames = [];
+  server._send = function(frame) { if (frame[3] === 1) serverFrames.push([frame[8], Buffer.from(frame.subarray(9)).toString('hex')]); return true; };
+  var outerResponse = new http2.ServerHttp2Stream(server, 1), innerResponse = new http2.ServerHttp2Stream(server, 3);
+  server._streams.set(1, outerResponse); server._streams.set(3, innerResponse);
+  server._frame(4, 0, 0, Buffer.from([0, 1, 0, 0, 0, 128]));
+  var serverHeaders = { ':status': 200 };
+  Object.defineProperty(serverHeaders, 'x-shared', { enumerable: true, get: function() { innerResponse.additionalHeaders({ ':status': 200, 'x-shared': 'v' }); return 'v'; } });
+  outerResponse.additionalHeaders(serverHeaders);
+  var serverNested = [server.destroyed, serverFrames.map(function(frame) { return frame[0]; }), serverFrames[0][1].startsWith('3f61'), serverFrames[1][1], server._encoderPendingMinimum, server._encoderTable.length];
+  var recursive = new http2.ServerHttp2Session(999962, 'tcp'), recursiveFrames = [], recursiveCaught;
+  recursive._send = function(frame) { if (frame[3] === 1) recursiveFrames.push(frame); return true; };
+  var recursiveStream = new http2.ServerHttp2Stream(recursive, 1);
+  recursive._streams.set(1, recursiveStream);
+  var recursiveHeaders = {};
+  Object.defineProperty(recursiveHeaders, 'x-trigger', { enumerable: true, get: function() { recursiveStream.respond({ ':status': 204 }); return 'outer'; } });
+  try { recursiveStream.respond(recursiveHeaders); } catch (error) { recursiveCaught = error.message; }
+  var sameStream = [recursiveCaught, recursiveFrames.length, recursiveStream.sentHeaders[':status'], recursive._encoderTable.length];
+  var optionClient = new http2.ClientHttp2Session(999961, 'tcp'), optionFrames = [], optionReads = 0, optionInner;
+  optionClient._send = function(frame) { if (frame[3] === 1) optionFrames.push([frame[8], frame[4]]); return true; };
+  var optionOuter = optionClient.request({ ':path': '/outer' }, { get endStream() { optionReads++; optionInner = optionClient.request({ ':path': '/inner' }); return true; } });
+  var clientOptions = [optionInner.id, optionOuter.id, optionFrames, optionReads, optionOuter.writableEnded];
+  var optionServer = new http2.ServerHttp2Session(999960, 'tcp'), optionServerFrames = [], optionServerReads = 0, optionServerCaught;
+  optionServer._send = function(frame) { if (frame[3] === 1) optionServerFrames.push([frame[8], frame[4]]); return true; };
+  var optionStream = new http2.ServerHttp2Stream(optionServer, 1);
+  optionServer._streams.set(1, optionStream);
+  try { optionStream.respond({ ':status': 200 }, { get endStream() { optionServerReads++; optionStream.respond({ ':status': 204 }); return true; } }); } catch (error) { optionServerCaught = error.message; }
+  var serverOptions = [optionServerCaught, optionServerFrames, optionServerReads, optionStream.sentHeaders[':status'], optionStream.writableEnded];
+  function closeDuringSend(fragmented) {
+    var owner = new http2.ClientHttp2Session(fragmented ? 999966 : 999965, 'tcp'), frames = [], stream = new http2.ClientHttp2Stream(owner, 1);
+    owner.on('error', function() {});
+    owner._streams.set(1, stream);
+    owner._send = function(frame) { frames.push([frame[3], frame[4]]); if (frame[3] === 1) stream._markClosed(); return true; };
+    owner._frame(4, 0, 0, Buffer.from([0, 1, 0, 0, 0, 128]));
+    var accepted = owner._sendHeaders(1, fragmented ? { 'x-long': 'A'.repeat(40000) } : { 'x-short': 'v' }, false);
+    return [accepted, owner.destroyed, owner._encoderPendingMinimum, owner._encoderTable.length, frames];
+  }
+  return [retained, recovered, reenter(true), reenter(false), clientNested, serverNested, sameStream, clientOptions, serverOptions, closeDuringSend(false), closeDuringSend(true)];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_hpack_wire_reentry_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2HpackWireReentry = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2HpackWireReentry").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,0,0,1],["2082",null],[true,"ERR_HTTP2_ERROR",[4]],[true,"ERR_HTTP2_ERROR",[1]],[false,1,3,[1,3],true,1],[false,[3,1],true,"88be",null,1],["Response has already been initiated",1,204,0],[1,3,[[1,4],[3,5]],1,true],["Response has already been initiated",[[1,4]],1,204,false],[false,false,null,1,[[4,1],[1,4]]],[false,true,null,0,[[4,1],[1,0]]]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
