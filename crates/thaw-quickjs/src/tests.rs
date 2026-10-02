@@ -5594,3 +5594,137 @@ fn uncaught_result_reads_owned_native_text_past_embedded_nul() {
     assert!(result.error.is_null());
     assert_eq!(eval_json("nativeNulError"), Ok(Some("\"left\\u0000right\"".into())));
 }
+
+#[cfg(feature = "tls")]
+#[test]
+fn tls_client_and_accepted_server_handles_remain_independent() {
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw_tls_handle_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let cert_pem = dir.join("cert.pem");
+    let key_pem = dir.join("key.pem");
+    let cert_der_path = dir.join("cert.der");
+    let key_der_path = dir.join("key.der");
+    assert!(Command::new("openssl")
+        .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature,keyEncipherment", "-addext", "extendedKeyUsage=serverAuth", "-keyout"])
+        .arg(&key_pem).arg("-out").arg(&cert_pem).output().unwrap().status.success());
+    assert!(Command::new("openssl")
+        .args(["x509", "-in"]).arg(&cert_pem)
+        .args(["-outform", "DER", "-out"]).arg(&cert_der_path)
+        .status().unwrap().success());
+    assert!(Command::new("openssl")
+        .args(["pkcs8", "-topk8", "-nocrypt", "-in"]).arg(&key_pem)
+        .args(["-outform", "DER", "-out"]).arg(&key_der_path)
+        .status().unwrap().success());
+    let cert_der = std::fs::read(&cert_der_path).unwrap();
+    let key_der = std::fs::read(&key_der_path).unwrap();
+    let cert_hex = hex_encode(&cert_der);
+    let key_hex = hex_encode(&key_der);
+    let certificate = CertificateDer::from(cert_der.clone());
+    let mut external_server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate.clone()], PrivatePkcs8KeyDer::from(key_der.clone()).into())
+        .unwrap();
+    external_server_config.alpn_protocols = vec![b"h2".to_vec()];
+    let external_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let external_port = external_listener.local_addr().unwrap().port();
+    let external_server = std::thread::spawn(move || {
+        let (socket, _) = external_listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let connection = rustls::ServerConnection::new(Arc::new(external_server_config)).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut received = [0];
+        stream.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"C");
+        stream.write_all(b"X").unwrap();
+        stream.conn.send_close_notify();
+        stream.flush().unwrap();
+    });
+    let client_result = tls_connect(TlsClientOptions {
+        host: "127.0.0.1", port: external_port, server_name: "localhost",
+        ca_spec: &cert_hex, cert_spec: "", key_spec: "", alpn_spec: "6832",
+        report_alpn: true, reject_unauthorized: true,
+    });
+    assert!(client_result.starts_with("ok:"), "{client_result}");
+    let client_handle: u32 = client_result.split(':').nth(1).unwrap().parse().unwrap();
+
+    let listener_result = tls_server_listen(TlsServerOptions {
+        host: "127.0.0.1", port: 0, cert_spec: &cert_hex, key_spec: &key_hex,
+        ca_spec: "", request_cert: false, reject_unauthorized: true, alpn_spec: "687474702f312e31",
+    });
+    assert!(listener_result.starts_with("ok:"), "{listener_result}");
+    let listener_handle: u32 = listener_result.split(':').nth(1).unwrap().parse().unwrap();
+    let listener_port: u16 = listener_result.split(':').nth(2).unwrap().parse().unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).unwrap();
+    let mut external_client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots).with_no_client_auth();
+    external_client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let external_client = std::thread::spawn(move || {
+        let socket = TcpStream::connect(("127.0.0.1", listener_port)).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let connection = rustls::ClientConnection::new(
+            Arc::new(external_client_config), ServerName::try_from("localhost".to_string()).unwrap()
+        ).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut received = [0];
+        stream.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"S");
+        stream.write_all(b"Y").unwrap();
+        stream.conn.send_close_notify();
+        stream.flush().unwrap();
+    });
+    let accepted = tls_server_accept(listener_handle);
+    assert!(accepted.starts_with("ok:"), "{accepted}");
+    let server_handle: u32 = accepted.split(':').nth(1).unwrap().parse().unwrap();
+    assert!(client_handle > 0 && server_handle > 0 && client_handle != server_handle);
+    assert_eq!(client_handle % 2, 1);
+    assert_eq!(server_handle % 2, 0);
+    assert_eq!(tls_alpn(client_handle), "6832");
+    assert_eq!(tls_alpn(server_handle), "687474702f312e31");
+    assert_eq!(tls_certificate(client_handle, true), cert_hex);
+    assert_eq!(tls_certificate(server_handle, false), cert_hex);
+    assert_eq!(tls_certificate(server_handle, true), "");
+    assert_eq!(tls_write(client_handle, b"C"), "ok");
+    assert_eq!(tls_write(server_handle, b"S"), "ok");
+    fn read_byte(handle: u32) -> String {
+        for _ in 0..1000 {
+            let result = tls_poll_read(handle);
+            if result != "pending" { return result; }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("TLS read timed out");
+    }
+    assert_eq!(read_byte(client_handle), "ok:58");
+    assert_eq!(read_byte(server_handle), "ok:59");
+    tls_destroy(client_handle);
+    assert_eq!(tls_certificate(server_handle, false), cert_hex);
+    assert_eq!(tls_alpn(server_handle), "687474702f312e31");
+    tls_destroy(server_handle);
+    tls_server_close_listener(listener_handle);
+    external_server.join().unwrap();
+    external_client.join().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+
+    let mut last_client = u32::MAX - 2;
+    assert_eq!(take_tls_stream_handle(&mut last_client), Some(u32::MAX - 2));
+    assert_eq!(take_tls_stream_handle(&mut last_client), None);
+    assert_eq!(last_client, u32::MAX);
+    let mut last_server = u32::MAX - 3;
+    assert_eq!(take_tls_stream_handle(&mut last_server), Some(u32::MAX - 3));
+    assert_eq!(take_tls_stream_handle(&mut last_server), None);
+    assert_eq!(last_server, u32::MAX - 1);
+}
