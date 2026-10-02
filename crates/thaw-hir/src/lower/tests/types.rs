@@ -1921,3 +1921,58 @@ fn non_arrow_nested_receiver_wrappers_lower_to_leaf_abi() {
             console.log(native(), native.call(new Carrier(1)), native.call("x"));
         }"#);
 }
+
+#[test]
+fn byte_method_receiver_binding_precedes_normal_and_spread_arguments() {
+    for operation in [
+        "receiver().readUInt16LE(offset())",
+        "receiver().writeUInt16LE(value(), offset())",
+        "receiver().readUIntLE(offset(), width())",
+        "receiver().writeUIntLE(value(), offset(), width())",
+        "receiver().readBigUInt64LE(offset())",
+        "receiver().writeBigUInt64LE(big(), offset())",
+        "receiver().copy(target(), offset())",
+        "receiver().set(target(), offset())",
+        "receiver().indexOf(text(), offset())",
+        "receiver().setFromHex(text())",
+        "receiver().setFromBase64(text())",
+        "receiver().writeUInt16LE(...[value(), offset()])",
+        "receiver().set(...[target(), offset()])",
+    ] {
+        let program = lower(&format!(
+            r#"
+            declare function receiver(): Buffer;
+            declare function target(): Buffer;
+            declare function value(): number;
+            declare function offset(): number;
+            declare function width(): number;
+            declare function big(): bigint;
+            declare function text(): string;
+            function main(): void {{ {operation}; }}
+            "#,
+        ));
+        let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+        let body = format!("{:?}", main.body);
+        let receiver_at = body.find("__thaw_bytes_receiver_").expect("missing byte receiver binding");
+        let argument_at = body.find("__thaw_native_arg_").expect("missing argument binding");
+        assert!(receiver_at < argument_at, "{operation}: receiver must evaluate before arguments: {body}");
+    }
+}
+
+#[test]
+fn throwing_byte_receiver_is_bound_before_side_effecting_spread_arguments() {
+    let program = lower(
+        r#"
+        declare function sideEffect(): number;
+        function throwingReceiver(): Buffer { throw new Error("receiver"); }
+        function main(): void {
+            throwingReceiver().writeUInt16LE(...[sideEffect(), sideEffect()]);
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    let receiver_at = body.find("__thaw_bytes_receiver_").unwrap();
+    let argument_at = body.find("__thaw_native_arg_").unwrap();
+    assert!(receiver_at < argument_at, "a throwing receiver must prevent argument evaluation: {body}");
+}
