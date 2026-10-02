@@ -5435,3 +5435,71 @@ fn crypto_buffer_regressions() {
         "[true,true,true,true,true,2,1,33,true,80,80,80,80,true,true,true,2,true]"
     );
 }
+
+#[test]
+fn dynamic_property_receiver_rejects_null_and_undefined_but_boxes_strings() {
+    let null = CString::new("null").unwrap();
+    let null_handle = thaw_js_retain_json_result(null.as_ptr());
+    assert!(null_handle.error.is_null());
+    let property = CString::new("length").unwrap();
+    let null_result = thaw_js_get_property_result(null_handle.value, property.as_ptr());
+    assert_eq!(null_result.value, 0);
+    assert!(!null_result.error.is_null());
+    assert!(unsafe { CStr::from_ptr(null_result.error) }.to_string_lossy().starts_with("\u{1}TypeError\u{1}"));
+
+    assert_eq!(load("globalThis.__thaw_undefined_receiver = () => undefined"), 1);
+    let function = CString::new("__thaw_undefined_receiver").unwrap();
+    let function_handle = thaw_js_get_global(function.as_ptr());
+    let empty = CString::new("[]").unwrap();
+    let undefined_handle = thaw_js_call_handle_handle_result(function_handle, empty.as_ptr(), true);
+    assert!(undefined_handle.error.is_null());
+    let method = CString::new("toString").unwrap();
+    let undefined_result = thaw_js_call_method_result(undefined_handle.value, method.as_ptr(), empty.as_ptr());
+    assert!(!undefined_result.error.is_null());
+    assert!(unsafe { CStr::from_ptr(undefined_result.error) }.to_string_lossy().starts_with("\u{1}TypeError\u{1}"));
+
+    let text = CString::new("\"abc\"").unwrap();
+    let string_handle = thaw_js_retain_json_result(text.as_ptr());
+    let length = thaw_js_get_property_result(string_handle.value, property.as_ptr());
+    assert!(length.error.is_null());
+    assert_eq!(load("globalThis.__thaw_is_three = value => value === 3"), 1);
+    let predicate = CString::new("__thaw_is_three").unwrap();
+    let predicate_handle = thaw_js_get_global(predicate.as_ptr());
+    let checked = thaw_js_call_handle_value_result(predicate_handle, length.value);
+    assert!(checked.error.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(checked.value) }.to_str().unwrap(), "true");
+    unsafe {
+        thaw_arena::destroy_string(null_result.error.cast_mut());
+        thaw_arena::destroy_string(undefined_result.error.cast_mut());
+        thaw_arena::destroy_string(checked.value.cast_mut());
+    }
+    assert_eq!(thaw_js_release_handle(null_handle.value), 1);
+    assert_eq!(thaw_js_release_handle(function_handle), 1);
+    assert_eq!(thaw_js_release_handle(undefined_handle.value), 1);
+    assert_eq!(thaw_js_release_handle(string_handle.value), 1);
+    assert_eq!(thaw_js_release_handle(length.value), 1);
+    assert_eq!(thaw_js_release_handle(predicate_handle), 1);
+}
+
+#[test]
+fn dynamic_reflect_predicates_preserve_thrown_error_class() {
+    assert_eq!(load("globalThis.__thaw_predicate_receiver = new Proxy({}, { has() { const error = new TypeError('has marker'); error.code = 'HAS_TRAP'; throw error; }, deleteProperty() { throw new RangeError('delete marker'); } })"), 1);
+    let name = CString::new("__thaw_predicate_receiver").unwrap();
+    let handle = thaw_js_get_global(name.as_ptr());
+    let key = CString::new("key").unwrap();
+    let has = thaw_js_has_property_result(handle, key.as_ptr());
+    assert_eq!(has.value, 0);
+    assert!(!has.error.is_null());
+    let has_error = unsafe { CStr::from_ptr(has.error) }.to_string_lossy();
+    assert!(has_error.starts_with("\u{1}TypeError\u{1}has marker"));
+    assert!(has_error.contains("\u{5}{\"code\":\"HAS_TRAP\"}"));
+    let delete = thaw_js_delete_property_result(handle, key.as_ptr());
+    assert_eq!(delete.value, 0);
+    assert!(!delete.error.is_null());
+    assert!(unsafe { CStr::from_ptr(delete.error) }.to_string_lossy().starts_with("\u{1}RangeError\u{1}delete marker"));
+    unsafe {
+        thaw_arena::destroy_string(has.error.cast_mut());
+        thaw_arena::destroy_string(delete.error.cast_mut());
+    }
+    assert_eq!(thaw_js_release_handle(handle), 1);
+}
