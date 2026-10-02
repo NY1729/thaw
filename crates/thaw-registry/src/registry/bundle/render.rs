@@ -321,7 +321,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(importMap, spec);\n\
          \x20\x20\x20\x20\x20\x20if (!target) return Promise.resolve().then(function() { if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); });\n\
-         \x20\x20\x20\x20\x20\x20return Promise.resolve().then(function() { var value = __thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready.then(function() { return value; }); });\n\
+         \x20\x20\x20\x20\x20\x20return Promise.resolve().then(function() { __thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready; });\n\
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20var filename = '/thaw_modules/' + factoryKey, slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash);\n\
          \x20\x20\x20\x20var initialized;\n\
@@ -347,7 +347,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          }\n\
          function __thaw_bundle_create_import_async(base) {\n\
          \x20\x20var importModule = __thaw_bundle_create_import(base);\n\
-         \x20\x20return function(spec) { return Promise.resolve().then(function() { var target = __thaw_bundle_target(__thaw_bundle_import_maps[String(base)] || {}, String(spec)); var value = importModule(spec); return target ? __thaw_bundle_cache[target.key].ready.then(function() { return value; }) : value; }); };\n\
+         \x20\x20return function(spec) { return Promise.resolve().then(function() { var target = __thaw_bundle_target(__thaw_bundle_import_maps[String(base)] || {}, String(spec)); var value = importModule(spec); return target ? __thaw_bundle_cache[target.key].ready : value; }); };\n\
          }\n\
          function __thaw_bundle_register_worker_main(key, mod) {\n\
          \x20\x20if (Object.prototype.hasOwnProperty.call(__thaw_bundle_cache, key)) throw new Error('Worker entry already initialized');\n\
