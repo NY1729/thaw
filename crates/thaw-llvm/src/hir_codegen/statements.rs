@@ -54,6 +54,38 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(false)
     }
 
+    fn compile_throw_text(&mut self, expr: &HirExpr) -> Result<PointerValue<'ctx>, String> {
+        // This marker is created by source lowering only after conversion to
+        // native text. Its name cannot occur in a TypeScript identifier.
+        let trusted_text = if let HirExpr::Call(callee, args) = expr {
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "@@thaw_trusted_exception_text")
+                && args.len() == 1
+            {
+                Some(&args[0])
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let val = self.compile_expr(trusted_text.unwrap_or(expr))?.into_pointer_value();
+        self.clear_pending_native_text()?;
+        if trusted_text.is_some() || matches!(expr, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))) {
+            self.mark_pending_native_text(val)?;
+        } else if let HirExpr::Var(name) = expr {
+            if let Some((catch_slot, native_slot)) = self.catch_native_text.get(name) {
+                if self.variables.get(name).map(|(slot, _)| slot) == Some(catch_slot) {
+                    let provenance = self.builder.build_load(
+                        self.context.ptr_type(AddressSpace::default()), *native_slot,
+                        "rethrown_native_text_provenance",
+                    ).map_err(|error| error.to_string())?;
+                    self.mark_pending_native_text(provenance)?;
+                }
+            }
+        }
+        Ok(val)
+    }
+
     fn compile_stmt(&mut self, stmt: &HirStmt) -> Result<bool, String> {
         match stmt {
             HirStmt::Expr(expr) => {
@@ -192,22 +224,10 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirStmt::Throw(expr) => {
-                let val = self.compile_expr(expr)?;
+                let val = self.compile_throw_text(expr)?;
                 self.builder
                     .build_store(self.pending_exception().as_pointer_value(), val)
                     .map_err(|e| e.to_string())?;
-                self.clear_pending_native_text()?;
-                if let HirExpr::Var(name) = expr {
-                    if let Some((catch_slot, native_slot)) = self.catch_native_text.get(name) {
-                        if self.variables.get(name).map(|(slot, _)| slot) == Some(catch_slot) {
-                            let provenance = self.builder.build_load(
-                                self.context.ptr_type(AddressSpace::default()), *native_slot,
-                                "rethrown_native_text_provenance",
-                            ).map_err(|error| error.to_string())?;
-                            self.mark_pending_native_text(provenance)?;
-                        }
-                    }
-                }
                 if let Some(catch_bb) = self.catch_stack.last().copied() {
                     self.builder
                         .build_unconditional_branch(catch_bb)

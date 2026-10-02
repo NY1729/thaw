@@ -627,6 +627,60 @@ fn rejected_promise_preserves_typed_exception_metadata() {
 }
 
 #[test]
+fn detached_rejection_report_owns_text_and_never_reads_opaque_results() {
+    let mut pending = std::ptr::null();
+    let opaque = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_detach_for_report(opaque, &mut pending) }, 1);
+    assert_eq!(thaw_promise_reject(opaque, 1usize as *const u8), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(), b"Unhandled opaque Promise rejection");
+
+    let later = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_detach_for_report(later, &mut pending) }, 1);
+    assert_eq!(unsafe { thaw_promise_reject_typed(later, 1usize as *const u8, 2, 0.0, 42, false, std::ptr::null()) }, 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(), b"Unhandled opaque Promise rejection");
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+
+    let mut pending = std::ptr::null();
+    let typed = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_detach_for_report(typed, &mut pending) }, 1);
+    assert_eq!(unsafe { thaw_promise_reject_typed(typed, 1usize as *const u8, 2, 0.0, 42, false, std::ptr::null()) }, 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(), b"42");
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+
+    let mut pending = std::ptr::null();
+    let native = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_detach_for_report(native, &mut pending) }, 1);
+    let text = b"native source\0".to_vec();
+    assert_eq!(unsafe { thaw_promise_reject_native_text(native, text.as_ptr()) }, 1);
+    thaw_runtime_run_until_idle();
+    drop(text);
+    assert_eq!(unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(), b"native source");
+    unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+}
+
+#[test]
+fn compiler_text_reporter_snapshots_opaque_and_typed_rejections() {
+    thread_local! { static SEEN: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) }; }
+    extern "C" fn reporter(text: *const u8) -> PromiseReportResult {
+        SEEN.with(|seen| seen.borrow_mut().push(unsafe { CStr::from_ptr(text.cast()) }.to_bytes().to_vec()));
+        PromiseReportResult { value: 1, error: std::ptr::null() }
+    }
+    SEEN.with(|seen| seen.borrow_mut().clear());
+    thaw_promise_set_unhandled_reporter_text_result(Some(reporter));
+    let opaque = thaw_promise_new();
+    assert_eq!(thaw_promise_reject(opaque, 1usize as *const u8), 1);
+    let typed = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_reject_typed(typed, 1usize as *const u8, 2, 0.0, 42, false, std::ptr::null()) }, 1);
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    SEEN.with(|seen| assert_eq!(&*seen.borrow(), &[b"Unhandled opaque Promise rejection".to_vec(), b"42".to_vec()]));
+    thaw_promise_set_unhandled_reporter_text_result(None);
+    unsafe { thaw_promise_destroy(opaque); thaw_promise_destroy(typed) };
+}
+
+#[test]
 fn promise_forwarders_preserve_typed_exception_metadata() {
     fn rejected(error: &u8, object: &u8) -> *mut ThawPromise {
         let promise = thaw_promise_new();
@@ -2034,4 +2088,82 @@ fn finally_adopt_snapshots_original_native_text_before_source_destruction() {
     assert_eq!(unsafe { thaw_promise_state(output) }, 2);
     assert_eq!(unsafe { (*output).rejection_text.as_deref() }, Some(error.to_bytes()));
     unsafe { thaw_promise_destroy(output) };
+}
+
+#[test]
+fn terminal_reporting_activity_is_distinct_from_work_and_failure() {
+    thaw_promise_take_report_activity();
+    thaw_promise_take_unhandled_failure();
+    thaw_promise_set_unhandled_reporter(Some(record_unhandled_rejection));
+    let promise = thaw_promise_new();
+    thaw_promise_reject(promise, c"reported".as_ptr().cast());
+    // Reporting a settled rejection need not run a continuation.
+    assert_eq!(thaw_runtime_run_until_idle(), 0);
+    assert_eq!(thaw_promise_take_report_activity(), 1);
+    assert_eq!(thaw_promise_take_report_activity(), 0);
+    assert_eq!(thaw_promise_take_unhandled_failure(), 0);
+    unsafe { thaw_promise_destroy(promise) };
+    thaw_promise_set_unhandled_reporter(None);
+}
+
+#[test]
+fn future_native_timer_remains_pending_after_an_idle_drain() {
+    let timer = thaw_sleep_ms(5);
+    assert_eq!(thaw_runtime_run_until_idle(), 0);
+    assert_eq!(thaw_runtime_async_work_pending(), 1);
+    thaw_runtime_run_until_resolved(timer);
+    assert_eq!(thaw_runtime_async_work_pending(), 0);
+    unsafe { thaw_promise_destroy(timer) };
+}
+
+#[test]
+fn terminal_exception_report_uses_provenance_or_typed_scalar_without_reading_opaque_pointer() {
+    let opaque = 1usize as *const std::os::raw::c_char;
+    let scalar = unsafe { thaw_runtime_exception_report_text(
+        opaque, std::ptr::null(), 2, 0.0, 42, false,
+    ) };
+    assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(scalar) }.to_bytes(), b"42");
+    unsafe { thaw_arena::destroy_string(scalar) };
+
+    let native = thaw_arena::owned_string(b"a\0b");
+    let copy = unsafe { thaw_runtime_exception_report_text(
+        native, native, 4, 0.0, 0, false,
+    ) };
+    assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(copy) }.to_bytes(), b"a\0b");
+    unsafe {
+        thaw_arena::destroy_string(copy);
+        thaw_arena::destroy_string(native);
+    }
+}
+
+#[test]
+fn terminal_and_detached_f64_reports_use_javascript_number_spelling() {
+    let cases = [
+        (f64::INFINITY, "Infinity"),
+        (f64::NEG_INFINITY, "-Infinity"),
+        (-0.0, "0"),
+        (1e20, "100000000000000000000"),
+        (1e21, "1e+21"),
+        (1e-6, "0.000001"),
+        (1e-7, "1e-7"),
+    ];
+    for (value, expected) in cases {
+        let opaque = 1usize as *const u8;
+        let terminal = unsafe { thaw_runtime_exception_report_text(
+            opaque.cast(), std::ptr::null(), 1, value, 0, false,
+        ) };
+        assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(terminal) }.to_bytes(), expected.as_bytes());
+        unsafe { thaw_arena::destroy_string(terminal) };
+
+        let promise = thaw_promise_new();
+        assert_eq!(unsafe { thaw_promise_reject_typed(
+            promise, opaque, 1, value, 0, false, std::ptr::null(),
+        ) }, 1);
+        assert_eq!(promise_report_bytes(unsafe { &*promise }).as_slice(), expected.as_bytes());
+        let mut pending: *const u8 = std::ptr::null();
+        assert_eq!(unsafe { thaw_promise_detach_for_report(promise, &mut pending) }, 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(pending.cast()) }.to_bytes(), expected.as_bytes());
+        unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
+    }
 }

@@ -375,6 +375,7 @@
     }
     nextTickQueue.push({ callback, args });
   };
+  globalThis.__thaw_next_tick_queue_pending = () => nextTickQueue.length > 0;
   // Returns whether it actually ran anything -- callers that poll "is
   // some condition met yet, else give up" (`finish_with_platform_events`,
   // `thaw_js_run_until_native_resolved` in api.rs) need to re-check that
@@ -387,17 +388,24 @@
       ranAny = true;
       const batch = nextTickQueue;
       nextTickQueue = [];
-      for (const { callback, args } of batch) {
-        try {
-          callback(...args);
-        } catch (error) {
-          // Matches `__thaw_run_due_timers`'s own uncaught-exception
-          // handling (workers/abort_timers.js) -- a nextTick callback's
-          // thrown error is exactly as fatal as a timer callback's.
-          if (typeof process === 'undefined' || !process.emit) throw error;
-          process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
-          if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
+      let index = 0;
+      try {
+        for (; index < batch.length; index++) {
+          const { callback, args } = batch[index];
+          try {
+            callback(...args);
+          } catch (error) {
+            // Matches `__thaw_run_due_timers`'s uncaught handling.
+            if (typeof process === 'undefined' || !process.emit) throw error;
+            process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
+            if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
+          }
         }
+      } catch (error) {
+        // The batch was removed from the queue before dispatch. Keep its
+        // unrun callbacks ahead of newly queued ticks for the next pass.
+        nextTickQueue = batch.slice(index + 1).concat(nextTickQueue);
+        throw error;
       }
     }
     return ranAny;

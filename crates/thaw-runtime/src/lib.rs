@@ -94,6 +94,38 @@ pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
     }
 }
 
+/// Copies a terminal exception into owned report text before a listener can
+/// reenter generated code. The public Promise rejection ABI permits opaque
+/// pointers, so only an exact producer-supplied native-text pointer is read.
+/// Typed primitive payloads remain printable even when that text is absent.
+/// The caller must destroy the returned string exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_runtime_exception_report_text(
+    error: *const c_char,
+    native_text: *const c_char,
+    tag: u64,
+    f64_value: f64,
+    i64_value: i64,
+    bool_value: bool,
+) -> *mut c_char {
+    if error.is_null() {
+        return std::ptr::null_mut();
+    }
+    let text: Vec<u8> = if error == native_text {
+        unsafe { CStr::from_ptr(error) }.to_bytes().to_vec()
+    } else {
+        match tag {
+            1 => javascript_number_string(f64_value).into_bytes(),
+            2 => i64_value.to_string().into_bytes(),
+            3 => bool_value.to_string().into_bytes(),
+            5 => b"undefined".to_vec(),
+            4 => b"Uncaught opaque string exception".to_vec(),
+            _ => b"Uncaught opaque exception".to_vec(),
+        }
+    };
+    thaw_arena::owned_string(text)
+}
+
 #[derive(Clone, Copy)]
 struct PromiseSubscription {
     resume: PromiseResumeFn,
@@ -110,10 +142,12 @@ thread_local! {
     static ACTIVE_PROMISES: RefCell<Vec<*mut ThawPromise>> = const { RefCell::new(Vec::new()) };
     static UNHANDLED_REPORTER: Cell<Option<PromiseUnhandledFn>> = const { Cell::new(None) };
     static UNHANDLED_REPORTER_RESULT: Cell<Option<PromiseUnhandledResultFn>> = const { Cell::new(None) };
+    static UNHANDLED_REPORTER_TEXT_RESULT: Cell<Option<PromiseUnhandledResultFn>> = const { Cell::new(None) };
     static REJECTION_HANDLED_REPORTER: Cell<Option<PromiseRejectionHandledFn>> = const { Cell::new(None) };
     static REJECTION_HANDLED_REPORTER_RESULT: Cell<Option<PromiseRejectionHandledResultFn>> = const { Cell::new(None) };
     static PENDING_REJECTION_HANDLED: Cell<usize> = const { Cell::new(0) };
     static UNHANDLED_FAILURE: Cell<bool> = const { Cell::new(false) };
+    static PROMISE_REPORT_ACTIVITY: Cell<usize> = const { Cell::new(0) };
     // The current Lambda invocation's wall-clock deadline, derived from the
     // Runtime API's `Lambda-Runtime-Deadline-Ms` header, paired with the
     // countdown it started from (kept only to phrase the timeout message).
@@ -170,6 +204,7 @@ fn purge_pending_async_state() {
     TIMERS.with(|timers| timers.borrow_mut().clear());
     FD_WAITS.with(|waits| waits.borrow_mut().clear());
     ACTIVE_PROMISE_JOINS.with(|count| count.set(0));
+    PROMISE_REPORT_ACTIVITY.with(|activity| activity.set(0));
     set_invocation_deadline(None);
 }
 
@@ -511,6 +546,21 @@ pub extern "C" fn thaw_runtime_run_until_idle() -> usize {
         count += 1;
     }
     count
+}
+
+/// Timers and fd waits can become ready after an idle drain returns zero.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_async_work_pending() -> u8 {
+    u8::from(
+        READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
+            || TIMERS.with(|timers| !timers.borrow().is_empty())
+            || has_fd_waits(),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_runtime_shutdown_wait() {
+    std::thread::sleep(Duration::from_millis(1));
 }
 
 /// Drives detached Promise combinator children to completion. A rejected

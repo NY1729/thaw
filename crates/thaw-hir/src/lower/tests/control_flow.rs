@@ -391,7 +391,10 @@ fn lowers_try_catch() {
                     )),
                     vec![HirExpr::Lit(HirLit::I64(4))],
                 )),
-                HirStmt::Throw(HirExpr::Lit(HirLit::Str("boom".into()))),
+                HirStmt::Throw(HirExpr::Call(
+                    Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
+                    vec![HirExpr::Lit(HirLit::Str("boom".into()))],
+                )),
             ],
             "e".into(),
             vec![HirStmt::Expr(HirExpr::Call(

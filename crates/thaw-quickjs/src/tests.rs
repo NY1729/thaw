@@ -107,6 +107,47 @@ fn unhandled_timer_exception_fails_the_event_loop() {
 }
 
 #[test]
+fn terminal_pending_work_is_separate_from_failure_and_exit_code() {
+    unsafe extern "C" fn fail_job(
+        ctx: *mut rquickjs::qjs::JSContext, _argc: i32, _argv: *mut rquickjs::qjs::JSValue,
+    ) -> rquickjs::qjs::JSValue {
+        unsafe { rquickjs::qjs::JS_ThrowTypeError(ctx, c"first job".as_ptr()) }
+    }
+    unsafe extern "C" fn later_job(
+        ctx: *mut rquickjs::qjs::JSContext, _argc: i32, _argv: *mut rquickjs::qjs::JSValue,
+    ) -> rquickjs::qjs::JSValue {
+        let source = c"globalThis.afterFailedJob = 1";
+        unsafe { rquickjs::qjs::JS_Eval(
+            ctx, source.as_ptr(), source.to_bytes().len(), c"<terminal-test>".as_ptr(),
+            rquickjs::qjs::JS_EVAL_TYPE_GLOBAL as i32,
+        ) }
+    }
+    assert_eq!(load("globalThis.afterFailedJob = 0"), 1);
+    with_context(|ctx| unsafe {
+        let raw = ctx.as_raw().as_ptr();
+        assert!(rquickjs::qjs::JS_EnqueueJob(raw, Some(fail_job), 0, std::ptr::null_mut()) >= 0);
+        assert!(rquickjs::qjs::JS_EnqueueJob(raw, Some(later_job), 0, std::ptr::null_mut()) >= 0);
+    });
+    assert_eq!(thaw_js_run_event_loop(), 1);
+    assert_eq!(thaw_js_terminal_work_pending(), 1);
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(eval_json("afterFailedJob"), Ok(Some("1".into())));
+    assert_eq!(thaw_js_terminal_work_pending(), 0);
+
+    assert_eq!(load("globalThis.afterFailedTick = 0; process.nextTick(() => { throw new Error('first tick'); }); process.nextTick(() => { afterFailedTick = 1; });"), 1);
+    assert_eq!(thaw_js_run_event_loop(), 1);
+    assert_eq!(thaw_js_terminal_work_pending(), 1);
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(eval_json("afterFailedTick"), Ok(Some("1".into())));
+    assert_eq!(thaw_js_terminal_work_pending(), 0);
+
+    assert_eq!(load("process.exitCode = 7"), 1);
+    assert_eq!(thaw_js_run_event_loop(), 7);
+    assert_eq!(thaw_js_terminal_work_pending(), 0);
+    assert_eq!(load("process.exitCode = 0"), 1);
+}
+
+#[test]
 fn standalone_event_loop_ignores_only_unreferenced_timers() {
     assert_eq!(
         load(
@@ -5541,4 +5582,15 @@ fn process_report_result_keeps_embedded_nul_from_thrown_listener() {
     assert!(bytes.windows(b"ERR_NUL".len()).any(|part| part == b"ERR_NUL"), "{bytes:?}");
     unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
     assert_eq!(load("process.off('unhandledRejection', globalThis.__thawNulListener); delete globalThis.__thawNulListener;"), 1);
+}
+
+#[test]
+fn uncaught_result_reads_owned_native_text_past_embedded_nul() {
+    assert_eq!(load("globalThis.nativeNulError = ''; process.once('uncaughtException', error => { nativeNulError = error.message; });"), 1);
+    let message = thaw_arena::owned_string(b"left\0right");
+    let result = thaw_js_emit_uncaught_result(message);
+    unsafe { thaw_arena::destroy_string(message) };
+    assert_eq!(result.value, 1);
+    assert!(result.error.is_null());
+    assert_eq!(eval_json("nativeNulError"), Ok(Some("\"left\\u0000right\"".into())));
 }
