@@ -253,8 +253,17 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
                 Callee::Expr(callee)
                     if matches!(callee.as_ref(), Expr::Ident(ident) if self.require_functions.iter().any(|name| name == ident.sym.as_ref()))
             );
+            let is_require_resolve = matches!(
+                &call.callee,
+                Callee::Expr(callee)
+                    if matches!(callee.as_ref(), Expr::Member(member)
+                        if matches!(member.obj.as_ref(), Expr::Ident(ident)
+                            if self.require_functions.iter().any(|name| name == ident.sym.as_ref()))
+                        && property_name(&member.prop).as_deref() == Some("resolve"))
+            );
             let is_import = matches!(&call.callee, Callee::Import(_));
-            if ((is_require && call.args.len() == 1) || (is_import && !call.args.is_empty()))
+            if (((is_require || is_require_resolve) && call.args.len() == 1)
+                || (is_import && !call.args.is_empty()))
                 && call.args[0].spread.is_none()
             {
                 let specifiers = static_module_specifiers(&call.args[0].expr);
