@@ -1315,3 +1315,302 @@ fn timer_modules_share_the_runtime_queue_and_support_abort() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn http2_failed_host_write_does_not_complete_queued_data() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_failed_write");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+           module.exports = function () {
+             var original = globalThis.__thaw_net_write, events = [];
+             globalThis.__thaw_net_write = function () { return 'err:forced write failure'; };
+             try {
+               var session = new http2.Http2Session(999999, false, 'tcp'), stream = new http2.Http2Stream(session, 1);
+               session._streams.set(1, stream);
+               session.on('error', function (error) { events.push('session:' + error.code); });
+               session.on('close', function () { events.push('session-close'); });
+               stream.on('close', function () { events.push('stream-close'); });
+               stream.on('finish', function () { events.push('finish'); });
+               session._sendWindow = 0;
+               var immediate = stream.write('abc', function (error) { events.push('write:' + error.code); });
+               stream.end('z', function (error) { events.push('end:' + error.code); });
+               var item = stream._writeQueue[0];
+               session._sendWindow = 10;
+               session._flushStream(stream);
+               var state = [immediate, item.offset, session._sendWindow, stream._sendWindow, stream._writeQueue.length, !!stream.writableEnded, session.destroyed, stream.destroyed];
+               var emptyEvents = [], emptySession = new http2.Http2Session(999998, false, 'tcp'), empty = new http2.Http2Stream(emptySession, 3);
+               emptySession._streams.set(3, empty);
+               emptySession.on('error', function (error) { emptyEvents.push('session:' + error.code); });
+               empty.on('finish', function () { emptyEvents.push('finish'); });
+               empty.end(function (error) { emptyEvents.push('end:' + error.code); });
+               var emptyState = [emptySession._sendWindow, empty._sendWindow, empty._writeQueue.length, !!empty.writableEnded, emptySession.destroyed];
+               var directEvents = [], directSession = new http2.Http2Session(999996, false, 'tcp'), direct = new http2.Http2Stream(directSession, 5);
+               directSession._streams.set(5, direct);
+               directSession.on('error', function (error) { directEvents.push('session:' + error.code); });
+               direct.on('finish', function () { directEvents.push('finish'); });
+               var accepted = direct.write('now', function (error) { directEvents.push('write:' + error.code); });
+               var directState = [accepted, direct._writeQueue.length, directSession._sendWindow, direct._sendWindow, directSession.destroyed, !!direct.writableEnded];
+               return Promise.resolve().then(function () { return [state, events, emptyState, emptyEvents, directState, directEvents]; });
+             } finally { globalThis.__thaw_net_write = original; }
+           };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_failed_write_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2FailedWrite = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2FailedWrite").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[[false,0,10,65535,0,false,true,true],["stream-close","session:ERR_HTTP2_ERROR","session-close","write:ERR_HTTP2_ERROR","end:ERR_HTTP2_ERROR"],[65535,65535,0,false,true],["session:ERR_HTTP2_ERROR","end:ERR_HTTP2_ERROR"],[false,0,65535,65535,true,false],["session:ERR_HTTP2_ERROR","write:ERR_HTTP2_ERROR"]]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_failed_write_drains_peer_queues_despite_throwing_listeners() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_failed_write_reentry");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function () {
+  var original = globalThis.__thaw_net_write, events = [];
+  globalThis.__thaw_net_write = function () { return 'err:forced write failure'; };
+  try {
+    var session = new http2.ClientHttp2Session(999997, 'tcp'), first = new http2.Http2Stream(session, 1), second = new http2.Http2Stream(session, 3);
+    session._streams.set(1, first); session._streams.set(3, second);
+    session._sendWindow = 0;
+    first.write('a', function(error) { events.push('first:' + error.code); });
+    second.write('b', function(error) { events.push('second:' + error.code); });
+    first.on('close', function() {
+      events.push('first-close');
+      try { session.request({ ':path': '/reentrant' }); } catch (error) { events.push('request-blocked'); }
+      throw new Error('close listener threw');
+    });
+    second.on('close', function() { events.push('second-close'); });
+    session.on('error', function() { events.push('session-error'); throw new Error('error listener threw'); });
+    session.on('close', function() { events.push('session-close'); });
+    session._sendWindow = 10;
+    try { session._flushStream(first); } catch (error) { events.push('caught:' + error.message); }
+    var stray = new http2.Http2Stream(session, 5);
+    var strayWrite = stray.write('c', function(error) { events.push('stray:' + error.code); });
+    var state = [first.destroyed, second.destroyed, first._writeQueue.length, second._writeQueue.length, session._streams.size, strayWrite, stray._writeQueue.length, session._sendWindow];
+    return Promise.resolve().then(function() { return [state, events]; });
+  } finally { globalThis.__thaw_net_write = original; }
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_failed_write_reentry_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2FailedWriteReentry = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2FailedWriteReentry").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[[true,true,0,0,0,false,0,10],["first-close","request-blocked","second-close","session-error","session-close","caught:close listener threw","first:ERR_HTTP2_ERROR","second:ERR_HTTP2_ERROR","stray:ERR_HTTP2_ERROR"]]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_failed_control_sends_complete_callbacks_after_listener_throws() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_failed_controls");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function () {
+  var original = globalThis.__thaw_net_write, states = [];
+  globalThis.__thaw_net_write = function() { return 'err:forced write failure'; };
+  try {
+    ['settings', 'ping', 'stream-close', 'session-close'].forEach(function(kind, index) {
+      var session = new http2.ClientHttp2Session(999990 + index, 'tcp'), stream = new http2.Http2Stream(session, 1);
+      session._streams.set(1, stream);
+      var state = { kind: kind, callbacks: 0, closes: 0, thrown: false, lateWrites: 0 };
+      session.on('error', function() { throw new Error('error listener threw'); });
+      session.on('close', function() { state.closes++; if (kind === 'session-close') throw new Error('close listener threw'); });
+      try {
+        if (kind === 'settings') session.settings({ initialWindowSize: 1 }, function(error) { if (error.code === 'ERR_HTTP2_ERROR') state.callbacks++; });
+        else if (kind === 'ping') session.ping(function(error) { if (error.code === 'ERR_HTTP2_ERROR') state.callbacks++; });
+        else if (kind === 'stream-close') stream.close(0, function(error) { if (error.code === 'ERR_HTTP2_ERROR') state.callbacks++; });
+        else session.close(function(error) { if (error.code === 'ERR_HTTP2_ERROR') state.callbacks++; });
+      } catch (error) { state.thrown = error.message === 'error listener threw'; }
+      if (kind === 'settings') {
+        var accepted = stream.write('late', function(error) { if (error.code === 'ERR_HTTP2_ERROR') state.lateWrites++; });
+        stream.end(function(error) { if (error.code === 'ERR_HTTP2_ERROR') state.lateWrites++; });
+        state.accepted = accepted;
+        state.queueLength = stream._writeQueue.length;
+      }
+      states.push(state);
+    });
+    return Promise.resolve().then(function() { return states.map(function(state) { return [state.kind, state.callbacks, state.closes, state.thrown, state.lateWrites, state.accepted === undefined ? null : state.accepted, state.queueLength === undefined ? null : state.queueLength]; }); });
+  } finally { globalThis.__thaw_net_write = original; }
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_failed_controls_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2FailedControls = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2FailedControls").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[["settings",1,1,true,2,false,0],["ping",1,1,true,0,null,null],["stream-close",1,1,true,0,null,null],["session-close",1,1,true,0,null,null]]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_failed_ack_does_not_parse_coalesced_headers_after_destroy() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_failed_ack_parse");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  var original = globalThis.__thaw_net_write, results = [];
+  try {
+    globalThis.__thaw_net_write = function() { return 'err:forced ACK failure'; };
+    var session = new http2.ServerHttp2Session(999981, 'tcp'), events = [];
+    session._preface = true;
+    session.on('stream', function() { events.push('stream'); });
+    session.on('error', function() { events.push('error'); });
+    session.on('close', function() { events.push('close'); });
+    var settings = Buffer.from('000000040000000000', 'hex');
+    var headers = Buffer.from('00000101050000000182', 'hex');
+    session._buffer = Buffer.concat([settings, headers]);
+    session._parse(); session._parse();
+    results.push([session.destroyed, session._streams.size, session._buffer.length, events]);
+
+    globalThis.__thaw_net_write = function() { return 'ok'; };
+    var prefaceSession = new http2.ServerHttp2Session(999982, 'tcp'), prefaceEvents = [];
+    prefaceSession.on('connect', function() { prefaceEvents.push('connect'); prefaceSession.destroy(); });
+    prefaceSession.on('stream', function() { prefaceEvents.push('stream'); });
+    prefaceSession.on('close', function() { prefaceEvents.push('close'); });
+    prefaceSession._buffer = Buffer.concat([Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'), headers]);
+    prefaceSession._parse();
+    results.push([prefaceSession.destroyed, prefaceSession._streams.size, prefaceEvents]);
+
+    var reentrySession = new http2.ServerHttp2Session(999984, 'tcp'), reentryEvents = [];
+    reentrySession._preface = true;
+    reentrySession.on('stream', function(stream) {
+      reentryEvents.push('stream');
+      stream.on('end', function() { reentryEvents.push('end'); });
+      reentrySession.destroy();
+    });
+    reentrySession._buffer = headers;
+    reentrySession._parse();
+    results.push([reentrySession.destroyed, reentrySession._streams.size, reentryEvents]);
+    return results;
+  } finally { globalThis.__thaw_net_write = original; }
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_failed_ack_parse_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2FailedAckParse = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2FailedAckParse").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,0,10,["error","close"]],[true,0,["connect","close"]],[true,0,["stream"]]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_failed_ping_callback_survives_remove_listener_throw() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_ping_remove_throw");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  var original = globalThis.__thaw_net_write, marker = new Error('remove listener threw');
+  globalThis.__thaw_net_write = function() { return 'err:forced PING failure'; };
+  try {
+    var session = new http2.ClientHttp2Session(999983, 'tcp'), errors = 0, callbacks = 0, thrown = false;
+    session.on('error', function() { errors++; });
+    session.on('removeListener', function(name) { if (name === '_pingAck') throw marker; });
+    try { session.ping(function(error) { if (error.code === 'ERR_HTTP2_ERROR') callbacks++; }); }
+    catch (error) { thrown = error === marker; }
+    return Promise.resolve().then(function() {
+      return [session.destroyed, errors, thrown, callbacks, session.listenerCount('_pingAck')];
+    });
+  } finally { globalThis.__thaw_net_write = original; }
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_ping_remove_throw_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2PingRemoveThrow = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2PingRemoveThrow").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[true,1,true,1,0]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
