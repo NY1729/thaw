@@ -9618,3 +9618,18 @@ fn regex_javascript_ascii_digit_and_word_classes() {
     "#;
     assert_eq!(compile_and_run(source, "regex_ascii_classes"), "false false\ntrue true\n");
 }
+
+#[test]
+fn date_set_year_truncates_before_two_digit_year_adjustment() {
+    let source = r#"
+        function main(): void {
+            for (const year of [-0.5, 0.5, -1.5, 99.9, 100.1, NaN, Infinity]) {
+                const date = new Date(0);
+                date.setYear(year);
+                console.log(date.getFullYear());
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run_with_env(source, "date_set_year_fractional", &[("TZ", "UTC")]),
+        "1900\n1900\n-1\n1999\n100\nNaN\nNaN\n");
+}
