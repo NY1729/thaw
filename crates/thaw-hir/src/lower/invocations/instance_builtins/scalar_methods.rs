@@ -463,7 +463,9 @@ impl<'a> FnLowerer<'a> {
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     };
-                    let precision = self.coerce_primitive_to_number(argument.clone())?;
+                    let argument_type = self.infer_expr_type(argument)?;
+                    let missing = self.number_format_is_undefined(argument.clone(), &argument_type);
+                    let precision = self.number_format_to_number(argument.clone(), &argument_type)?;
                     let precision_name =
                         format!("__thaw_to_precision_digits_{}", self.next_binding);
                     self.next_binding += 1;
@@ -482,6 +484,15 @@ impl<'a> FnLowerer<'a> {
                         )))
                     };
                     let body = HirExpr::Block(vec![
+                        HirStmt::If(
+                            missing,
+                            vec![HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                vec![var(&receiver_name)],
+                            )))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Let(precision_name.clone(), HirType::F64, precision),
                         HirStmt::Let(normalized_name.clone(), HirType::F64, var(&precision_name)),
                         HirStmt::If(
                             HirExpr::BinOp(
@@ -521,7 +532,6 @@ impl<'a> FnLowerer<'a> {
                     ]);
                     let mut bindings = vec![(receiver_name, HirType::F64, receiver)];
                     bindings.extend(spread_bindings);
-                    bindings.push((precision_name, HirType::F64, precision));
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if property.sym == *"toExponential" {
@@ -550,7 +560,9 @@ impl<'a> FnLowerer<'a> {
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     };
-                    let digits = self.coerce_primitive_to_number(argument.clone())?;
+                    let argument_type = self.infer_expr_type(argument)?;
+                    let missing = self.number_format_is_undefined(argument.clone(), &argument_type);
+                    let digits = self.number_format_to_number(argument.clone(), &argument_type)?;
                     let digits_name = format!("__thaw_to_exponential_digits_{}", self.next_binding);
                     self.next_binding += 1;
                     let normalized_name =
@@ -568,6 +580,15 @@ impl<'a> FnLowerer<'a> {
                         )))
                     };
                     let body = HirExpr::Block(vec![
+                        HirStmt::If(
+                            missing,
+                            vec![HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_exponential".into())),
+                                vec![var(&receiver_name), HirExpr::Lit(HirLit::F64(-1.0))],
+                            )))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Let(digits_name.clone(), HirType::F64, digits),
                         HirStmt::Let(normalized_name.clone(), HirType::F64, var(&digits_name)),
                         HirStmt::If(
                             HirExpr::BinOp(
@@ -607,7 +628,6 @@ impl<'a> FnLowerer<'a> {
                     ]);
                     let mut bindings = vec![(receiver_name, HirType::F64, receiver)];
                     bindings.extend(spread_bindings);
-                    bindings.push((digits_name, HirType::F64, digits));
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if matches!(

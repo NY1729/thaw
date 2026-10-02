@@ -1,4 +1,143 @@
 impl<'a> FnLowerer<'a> {
+    // The argument has already been bound by lower_native_spread_values. Keep
+    // this check on that binding so a formatting method can decide whether
+    // to use its omitted-argument branch before running ToNumber.
+    fn number_format_is_undefined(&mut self, value: HirExpr, ty: &HirType) -> HirExpr {
+        let boolean = |value| HirExpr::Lit(HirLit::Bool(value));
+        match ty {
+            HirType::Undefined => boolean(true),
+            HirType::Json => HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                vec![value],
+            ),
+            HirType::JsValue => self.dynamic_value_is_undefined(value),
+            HirType::Optional(payload) => {
+                let absent = HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                HirExpr::Conditional(
+                    Box::new(absent),
+                    Box::new(boolean(true)),
+                    Box::new(self.number_format_is_undefined(
+                        HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
+                        payload,
+                    )),
+                    HirType::Bool,
+                )
+            }
+            HirType::Nullable(payload) => {
+                let absent = HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                HirExpr::Conditional(
+                    Box::new(absent),
+                    Box::new(boolean(false)),
+                    Box::new(self.number_format_is_undefined(
+                        HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()),
+                        payload,
+                    )),
+                    HirType::Bool,
+                )
+            }
+            HirType::Nullish(payload) => {
+                let undefined = HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone());
+                let null = HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone());
+                HirExpr::Conditional(
+                    Box::new(undefined),
+                    Box::new(boolean(true)),
+                    Box::new(HirExpr::Conditional(
+                        Box::new(null),
+                        Box::new(boolean(false)),
+                        Box::new(self.number_format_is_undefined(
+                            HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()),
+                            payload,
+                        )),
+                        HirType::Bool,
+                    )),
+                    HirType::Bool,
+                )
+            }
+            HirType::Union(members) => {
+                let mut result = boolean(false);
+                for (index, member) in members.iter().enumerate().rev() {
+                    result = HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        )),
+                        Box::new(self.number_format_is_undefined(
+                            HirExpr::UnionValue(Box::new(value.clone()), index, members.clone()),
+                            member,
+                        )),
+                        Box::new(result),
+                        HirType::Bool,
+                    );
+                }
+                result
+            }
+            _ => boolean(false),
+        }
+    }
+
+    // Coerce only after the missing check. Projection is needed because the
+    // existing primitive coercer does not accept an unprojected general union.
+    fn number_format_to_number(&mut self, value: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+        match ty {
+            HirType::Union(members) => {
+                let mut branches = Vec::with_capacity(members.len());
+                for (index, member) in members.iter().enumerate() {
+                    branches.push(self.number_format_to_number(
+                        HirExpr::UnionValue(Box::new(value.clone()), index, members.clone()),
+                        member,
+                    )?);
+                }
+                let mut result = branches.pop().ok_or("numeric format argument union is empty")?;
+                for index in (0..branches.len()).rev() {
+                    result = HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        )),
+                        Box::new(branches[index].clone()),
+                        Box::new(result),
+                        HirType::F64,
+                    );
+                }
+                Ok(result)
+            }
+            HirType::Undefined => Ok(HirExpr::Lit(HirLit::F64(f64::NAN))),
+            HirType::Null => Ok(HirExpr::Lit(HirLit::F64(0.0))),
+            HirType::Optional(payload) => Ok(HirExpr::Conditional(
+                Box::new(HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone())),
+                Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
+                Box::new(self.number_format_to_number(
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()), payload,
+                )?),
+                HirType::F64,
+            )),
+            HirType::Nullable(payload) => Ok(HirExpr::Conditional(
+                Box::new(HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone())),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                Box::new(self.number_format_to_number(
+                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()), payload,
+                )?),
+                HirType::F64,
+            )),
+            HirType::Nullish(payload) => Ok(HirExpr::Conditional(
+                Box::new(HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone())),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                Box::new(HirExpr::Conditional(
+                    Box::new(HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
+                    Box::new(self.number_format_to_number(
+                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()), payload,
+                    )?),
+                    HirType::F64,
+                )),
+                HirType::F64,
+            )),
+            _ => self.coerce_primitive_to_number(value),
+        }
+    }
+
     fn lower_native_conversion_method(
         &mut self,
         member: &MemberExpr,
@@ -241,14 +380,25 @@ impl<'a> FnLowerer<'a> {
                     if receiver_type == HirType::F64 && !call.args.is_empty() {
                         let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, "Number.toString")?;
+                        if arguments.is_empty() {
+                            let receiver_name =
+                                format!("__thaw_to_string_receiver_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(receiver_name.clone(), HirType::F64);
+                            let mut bindings = vec![(receiver_name.clone(), HirType::F64, receiver)];
+                            bindings.extend(spread_bindings);
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                vec![HirExpr::Var(receiver_name)],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let [radix] = arguments.as_slice() else {
                             return Err("native `.toString()` expects zero or one argument".into());
                         };
-                        let radix = if self.infer_expr_type(radix)? == HirType::Undefined {
-                            HirExpr::Lit(HirLit::F64(10.0))
-                        } else {
-                            self.coerce_primitive_to_number(radix.clone())?
-                        };
+                        let radix_type = self.infer_expr_type(radix)?;
+                        let missing = self.number_format_is_undefined(radix.clone(), &radix_type);
+                        let radix = self.number_format_to_number(radix.clone(), &radix_type)?;
                         let receiver_name =
                             format!("__thaw_to_string_radix_receiver_{}", self.next_binding);
                         self.next_binding += 1;
@@ -272,6 +422,15 @@ impl<'a> FnLowerer<'a> {
                             )))
                         };
                         let body = HirExpr::Block(vec![
+                            HirStmt::If(
+                                missing,
+                                vec![HirStmt::Return(Some(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                    vec![var(&receiver_name)],
+                                )))],
+                                Vec::new(),
+                            ),
+                            HirStmt::Let(radix_name.clone(), HirType::F64, radix),
                             HirStmt::Let(normalized_name.clone(), HirType::F64, var(&radix_name)),
                             HirStmt::If(
                                 HirExpr::BinOp(
@@ -343,7 +502,6 @@ impl<'a> FnLowerer<'a> {
                         );
                         let mut bindings = vec![(receiver_name, HirType::F64, receiver)];
                         bindings.extend(spread_bindings);
-                        bindings.push((radix_name, HirType::F64, radix));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if receiver_type == HirType::I64 && !call.args.is_empty() {

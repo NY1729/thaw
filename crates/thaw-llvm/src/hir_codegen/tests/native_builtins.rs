@@ -1,4 +1,55 @@
 #[test]
+fn number_format_explicit_undefined_uses_omitted_branch() {
+    let source = r#"
+        function receiver(): number { console.log("receiver"); return 10; }
+        function missing(): undefined { console.log("argument"); return undefined; }
+        function precision(value: number | string | undefined): string {
+            return (10).toPrecision(value);
+        }
+        function exponential(value: number | string | undefined): string {
+            return (10).toExponential(value);
+        }
+        function radix(value: number | string | undefined): string {
+            return (10).toString(value);
+        }
+        function optionalPrecision(value: number | undefined): string {
+            return (10).toPrecision(value);
+        }
+        function nullishExponential(value: number | null | undefined): string {
+            return (12.5).toExponential(value);
+        }
+        function main(): void {
+            console.log(receiver().toPrecision(missing()));
+            console.log((10).toExponential(undefined));
+            console.log((10).toString(undefined));
+            console.log((10).toString(...[]));
+            console.log(optionalPrecision(undefined));
+            console.log(optionalPrecision(2));
+            console.log(precision(undefined));
+            console.log(precision("2"));
+            console.log(exponential(undefined));
+            console.log(exponential("2"));
+            console.log(radix(undefined));
+            console.log(radix("2"));
+            const dynamicMissing: any = undefined;
+            console.log((10).toPrecision(dynamicMissing));
+            console.log((10).toExponential(dynamicMissing));
+            console.log((10).toString(dynamicMissing));
+            console.log(nullishExponential(undefined));
+            console.log(nullishExponential(null));
+            try { (10).toPrecision(-1); } catch (error) { console.log("caught-precision"); }
+            try { (10).toExponential(-1); } catch (error) { console.log("caught-exponential"); }
+            try { (10).toString(1); } catch (error) { console.log("caught-radix"); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_format_explicit_undefined"),
+        "receiver\nargument\n10\n1e+1\n10\n10\n10\n10\n10\n10\n1e+1\n1.00e+1\n10\n1010\n10\n1e+1\n10\n1.25e+1\n1e+1\ncaught-precision\ncaught-exponential\ncaught-radix\n"
+    );
+}
+
+
+#[test]
 fn compiles_variadic_string_concat() {
     let source = r#"
         function receiver(): string {
