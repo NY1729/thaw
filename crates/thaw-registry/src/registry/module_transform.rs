@@ -596,9 +596,10 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
     use std::collections::{BTreeMap, BTreeSet};
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowExpr, ArrowFunctionBody, BlockStmt, CatchClause, Class, Decl, Expr, FnExpr,
-        ForHead, ForInStmt, ForOfStmt, ForStmt, Function, ImportSpecifier, ModuleDecl,
-        ModuleExportName, ModuleItem, Prop, StaticBlock, Stmt, SwitchStmt, VarDecl,
+        ArrowExpr, ArrowFunctionBody, BlockStmt, CallExpr, Callee, CatchClause, Class, Decl, Expr,
+        FnExpr, ForHead, ForInStmt, ForOfStmt, ForStmt, Function, ImportSpecifier, ModuleDecl,
+        ModuleExportName, ModuleItem, OptChainBase, OptChainExpr, Prop, StaticBlock, Stmt,
+        SwitchStmt, TaggedTpl, VarDecl,
         VarDeclKind, VarDeclOrExpr,
     };
     use thaw_parser::common::Spanned;
@@ -659,6 +660,7 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
         ModuleExportName::Str(value) => value.value.to_string_lossy().into_owned(),
     };
     let mut bindings = BTreeMap::<String, String>::new();
+    let mut named_bindings = BTreeSet::new();
     let origin_name = format!("__thaw_esm_origin_{synthetic_offset}");
     let mut synthetic_count = synthetic_offset;
     for item in &module.body {
@@ -670,6 +672,7 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
                     match specifier {
                         ImportSpecifier::Named(named) => {
                             let local = named.local.sym.to_string();
+                            named_bindings.insert(local.clone());
                             let imported = named
                                 .imported
                                 .as_ref()
@@ -706,12 +709,30 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
 
     struct References<'a> {
         bindings: &'a BTreeMap<String, String>,
+        named_bindings: &'a BTreeSet<String>,
         shadowed: Vec<BTreeSet<String>>,
         replacements: Vec<(u32, u32, String)>,
     }
     impl References<'_> {
         fn is_shadowed(&self, name: &str) -> bool {
             self.shadowed.iter().rev().any(|scope| scope.contains(name))
+        }
+        fn detach_named_import(&mut self, expression: &Expr) -> bool {
+            let identifier = match expression {
+                Expr::Ident(identifier) => identifier,
+                Expr::Paren(parenthesized) => return self.detach_named_import(&parenthesized.expr),
+                _ => return false,
+            };
+            let name = identifier.sym.as_str();
+            if self.is_shadowed(name) || !self.named_bindings.contains(name) {
+                return false;
+            }
+            let Some(replacement) = self.bindings.get(name) else {
+                return false;
+            };
+            let span = identifier.span();
+            self.replacements.push((span.lo.0, span.hi.0, format!("(0, {replacement})")));
+            true
         }
         fn push_function_scope(&mut self, function: &Function) {
             let mut names = BTreeSet::new();
@@ -732,6 +753,34 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
         }
     }
     impl Visit for References<'_> {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                if self.detach_named_import(callee) {
+                    call.args.visit_with(self);
+                    return;
+                }
+            }
+            call.visit_children_with(self);
+        }
+
+        fn visit_opt_chain_expr(&mut self, chain: &OptChainExpr) {
+            if let OptChainBase::Call(call) = chain.base.as_ref() {
+                if self.detach_named_import(&call.callee) {
+                    call.args.visit_with(self);
+                    return;
+                }
+            }
+            chain.visit_children_with(self);
+        }
+
+        fn visit_tagged_tpl(&mut self, tagged: &TaggedTpl) {
+            if self.detach_named_import(&tagged.tag) {
+                tagged.tpl.visit_with(self);
+                return;
+            }
+            tagged.visit_children_with(self);
+        }
+
         fn visit_fn_expr(&mut self, expression: &FnExpr) {
             let mut names = BTreeSet::new();
             if let Some(name) = &expression.ident {
@@ -869,6 +918,7 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
 
     let mut references = References {
         bindings: &bindings,
+        named_bindings: &named_bindings,
         shadowed: vec![BTreeSet::new()],
         replacements: Vec::new(),
     };
