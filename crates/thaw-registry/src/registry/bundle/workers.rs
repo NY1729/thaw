@@ -156,6 +156,20 @@ fn rewrite_static_worker_urls_named(
         true
     }
 
+    fn normalize_worker_relative_path(path: &str) -> String {
+        let mut parts = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." if parts.last().is_some_and(|previous| *previous != "..") => {
+                    parts.pop();
+                }
+                _ => parts.push(part),
+            }
+        }
+        parts.join("/")
+    }
+
     fn static_worker_path(
         expression: &Expr,
         constants: &BTreeMap<String, String>,
@@ -219,8 +233,14 @@ fn rewrite_static_worker_urls_named(
                         path_namespaces,
                     )?);
                 }
-                let normalized = normalize_path_string(&parts.join("/"));
-                (!normalized.is_empty()).then(|| format!("./{normalized}"))
+                let normalized = normalize_worker_relative_path(&parts.join("/"));
+                if normalized.is_empty() {
+                    None
+                } else if normalized == ".." || normalized.starts_with("../") {
+                    Some(normalized)
+                } else {
+                    Some(format!("./{normalized}"))
+                }
             }
             _ => None,
         }
@@ -388,13 +408,6 @@ fn rewrite_static_worker_urls_named(
             }
         }
         let worker_path = directory.join(&relative);
-        let worker_source = fs::read_to_string(&worker_path).map_err(|error| {
-            format!(
-                "failed to read Worker source `{}` referenced by `{}`: {error}",
-                worker_path.display(),
-                module_path.display()
-            )
-        })?;
         let worker_relative = worker_path.strip_prefix(package_dir).map_err(|_| {
             format!(
                 "Worker source `{}` is outside package `{}`",
@@ -402,7 +415,21 @@ fn rewrite_static_worker_urls_named(
                 package_dir.display()
             )
         })?;
-        let worker_relative = normalize_path_string(&worker_relative.to_string_lossy());
+        let worker_relative = normalize_worker_relative_path(&worker_relative.to_string_lossy());
+        if worker_relative == ".." || worker_relative.starts_with("../") {
+            return Err(format!(
+                "Worker source `{}` is outside package `{}`",
+                worker_path.display(),
+                package_dir.display()
+            ));
+        }
+        let worker_source = fs::read_to_string(&worker_path).map_err(|error| {
+            format!(
+                "failed to read Worker source `{}` referenced by `{}`: {error}",
+                worker_path.display(),
+                module_path.display()
+            )
+        })?;
         let worker_key = format!("{package_instance}/{worker_relative}");
         let worker_source_name = thaw_parser::common::FileName::Real(worker_path.clone());
         let origin_parameter = esm_origin_parameter_named(&worker_source, &worker_source_name);
