@@ -61,6 +61,11 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.setYear()` expects exactly one argument".into());
                     };
                     let year = self.coerce_primitive_to_number(year.clone())?;
+                    // Annex B applies the 0..99 adjustment to the integer year.
+                    let year = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                        vec![year],
+                    );
                     let receiver_name = format!("__thaw_date_setyear_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     let year_name = format!("__thaw_date_setyear_year_{}", self.next_binding);
