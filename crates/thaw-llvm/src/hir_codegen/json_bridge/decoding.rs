@@ -73,7 +73,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(pointer, field)
                 .map_err(|error| error.to_string())?;
-            self.compile_destroy_json_if_native_scalar(field_json, field_ty)?;
+            self.compile_destroy_decoded_owned_json(field_json, field_ty)?;
         }
         Ok(object.into())
     }
@@ -180,17 +180,21 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
-    fn compile_destroy_json_if_native_scalar(
+    /// Only the container's owned `thaw_json_get`/`thaw_json_index` result is
+    /// released here. A decoded scalar or Union has detached native storage;
+    /// a Json/Dictionary result retains the wrapper itself. The Union
+    /// decoder (including Promise members) only borrows its JSON input.
+    fn compile_destroy_decoded_owned_json(
         &mut self,
         json: BasicValueEnum<'ctx>,
         ty: &HirType,
     ) -> Result<(), String> {
-        if matches!(ty, HirType::F64 | HirType::Str | HirType::Bool) {
+        if matches!(ty, HirType::F64 | HirType::Str | HirType::Bool | HirType::Union(_)) {
             self.builder
                 .build_call(
                     self.module.get_function("thaw_json_destroy").unwrap(),
                     &[json.into()],
-                    "destroy_decoded_json_scalar",
+                    "destroy_decoded_owned_json",
                 )
                 .map_err(|error| error.to_string())?;
         }
@@ -592,7 +596,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(pointer, value)
             .map_err(|error| error.to_string())?;
-        self.compile_destroy_json_if_native_scalar(element_json, element)?;
+        self.compile_destroy_decoded_owned_json(element_json, element)?;
         let next = self
             .builder
             .build_int_add(
@@ -698,9 +702,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     let (object, key) = self.compile_napi_optional_result_container(element_json)?;
                     self.compile_json_to_nullish_field(object, key, element_json, payload)?
                 }
-                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
-                    self.compile_json_to_native(element_json, element)?
-                }
+                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                | HirType::Union(_) => self.compile_json_to_native(element_json, element)?,
                 other => return Err(format!("unsupported JSON tuple element {other:?}")),
             };
             let offset = i64_type.const_int(
@@ -720,7 +723,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(pointer, value)
                 .map_err(|error| error.to_string())?;
-            self.compile_destroy_json_if_native_scalar(element_json, element)?;
+            self.compile_destroy_decoded_owned_json(element_json, element)?;
         }
         // `tuple` is a freshly built raw buffer; wrap it in a handle before
         // treating it as this call's tuple-typed return value (see
