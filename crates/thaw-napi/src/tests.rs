@@ -1453,3 +1453,21 @@ fn library_destructor_cannot_reenter_shutdown_or_load() {
     assert_eq!(std::fs::read_to_string(&trace).unwrap(), "0,0,0\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// Source-only regression: a callback may ask to shut down its Host, but the
+// surrounding conversion/dispatch must keep the Env live until return.
+#[test]
+fn value_callback_reentry_cannot_begin_shutdown() {
+    unsafe extern "C" fn callback(_: *mut c_void, _: *const c_char) -> *const c_char {
+        assert_eq!(thaw_napi_begin_shutdown(), 0);
+        CString::new("null").unwrap().into_raw()
+    }
+    let mut env = Env::new();
+    let bridge = Arc::new(ThawCallbackBridge {
+        callback: ThawCallback::Value(callback), context: 0,
+    });
+    let mut info = CallbackInfo { args: Vec::new(), this_arg: ptr::null_mut(),
+        new_target: ptr::null_mut(), data: Arc::as_ptr(&bridge) as *mut c_void };
+    let result = unsafe { thaw_compiled_callback(&mut env, &mut info) };
+    assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Null)));
+}
