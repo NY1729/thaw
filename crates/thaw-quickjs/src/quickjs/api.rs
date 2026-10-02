@@ -245,7 +245,9 @@ pub extern "C" fn thaw_js_emit_uncaught_result(message: *const c_char) -> ThawHa
     if message.is_null() {
         return ThawHandleResult { value: 0, error: std::ptr::null() };
     }
-    let raw = to_str(message);
+    let raw = unsafe { thaw_arena::NativeStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned();
     let (name, message) = tagged_error_parts(&raw);
     let name = json_escape_string(name);
     let message = json_escape_string(message);
@@ -265,7 +267,9 @@ pub extern "C" fn thaw_js_emit_unhandled_rejection_result(message: *const c_char
     if message.is_null() {
         return ThawHandleResult { value: 0, error: std::ptr::null() };
     }
-    let raw = to_str(message);
+    let raw = unsafe { thaw_arena::NativeStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned();
     let (name, message) = tagged_error_parts(&raw);
     let name = json_escape_string(name);
     let message = json_escape_string(message);
@@ -691,7 +695,26 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
                     return 1;
                 }
             }
-            if ctx.execute_pending_job() {
+            let ran_job = ctx.execute_pending_job();
+            if ctx.has_exception() {
+                let message = describe_exception_with_stack(&ctx);
+                let text = thaw_arena::owned_string(message.as_bytes());
+                let _active = ActiveNapiContext::enter(&ctx);
+                let result = thaw_js_emit_uncaught_result(text);
+                unsafe { thaw_arena::destroy_string(text) };
+                let listener_failed = !result.error.is_null();
+                if listener_failed {
+                    eprintln!("{}", unsafe { thaw_arena::NativeStr::from_ptr(result.error) }.to_string_lossy());
+                    unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+                }
+                if result.value == 0 || listener_failed {
+                    eprintln!("{message}");
+                    return 1;
+                }
+                drained_any = true;
+                continue;
+            }
+            if ran_job {
                 drained_any = true;
             } else {
                 break;
@@ -728,6 +751,23 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
             eprintln!("{message}");
             return 1;
         }
+    })
+}
+
+/// Reports queued work independently of `thaw_js_run_event_loop`'s exit
+/// status. A failed job can leave later jobs queued, while `exitCode` can
+/// remain nonzero after all work is complete.
+#[no_mangle]
+pub extern "C" fn thaw_js_terminal_work_pending() -> u8 {
+    with_context(|ctx| {
+        let runtime = unsafe { rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
+        let jobs = unsafe { rquickjs::qjs::JS_IsJobPending(runtime) };
+        let globals = ctx.globals();
+        let ticks = globals.get::<_, Function>("__thaw_next_tick_queue_pending")
+            .ok().and_then(|pending| pending.call::<_, bool>(()).ok()).unwrap_or(false);
+        let timers = globals.get::<_, Function>("__thaw_next_timer_delay")
+            .ok().and_then(|delay| delay.call::<_, i64>(()).ok()).is_some_and(|delay| delay >= 0);
+        u8::from(jobs || ticks || timers || platform_activity_pending(&ctx))
     })
 }
 

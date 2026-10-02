@@ -867,7 +867,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .build_conditional_branch(condition, reject, continue_block)
                         .map_err(|e| e.to_string())?;
                     self.builder.position_at_end(reject);
-                    let error = self.compile_expr(error_expr)?.into_pointer_value();
+                    let error = self.compile_throw_text(error_expr)?;
                     if let Some(handler) = enclosing_handler {
                         let catch_index = plan
                             .locals
@@ -958,7 +958,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(AsyncBlockExit::Returned);
             }
             if let HirStmt::Throw(expr) = stmt {
-                let error = self.compile_expr(expr)?.into_pointer_value();
+                let error = self.compile_throw_text(expr)?;
                 self.reject_promise_with_pending_exception(
                     completion,
                     error,
