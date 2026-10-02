@@ -1,8 +1,34 @@
+/// Visit declarations under their lexical namespace while keeping the
+/// original module order. Functions, callable constants, and aliases share
+/// this traversal so a member cannot silently lose its owner namespace.
+fn scoped_module_items<'a>(module: &'a Module) -> Vec<(String, &'a ModuleItem)> {
+    fn walk<'a>(item: &'a ModuleItem, scope: &str, found: &mut Vec<(String, &'a ModuleItem)>) {
+        found.push((scope.to_string(), item));
+        let decl = match item {
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => decl,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+            _ => return,
+        };
+        if let Decl::TsModule(namespace) = decl {
+            let swc_ecma_ast::TsModuleName::Ident(name) = &namespace.id else { return; };
+            let scope = if scope.is_empty() { name.sym.to_string() }
+                else { format!("{scope}.{}", name.sym) };
+            if let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body {
+                for item in &block.body { walk(item, &scope, found); }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for item in &module.body { walk(item, "", &mut found); }
+    found
+}
+
 /// Retains each declaration's full namespace path while returning its bare
 /// identifier separately. `parse_dts` keeps ordinary namespace identities
 /// distinct and preserves the bare CommonJS method ABI for `export = NS`.
 fn scoped_fn_decls<'a>(module: &'a Module) -> Vec<(String, String, &'a Function)> {
-    fn walk<'a>(item: &'a ModuleItem, scope: &str, found: &mut Vec<(String, String, &'a Function)>) {
+    let mut found = Vec::new();
+    for (scope, item) in scoped_module_items(module) {
         if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) = item {
             if let DefaultDecl::Fn(function) = &export.decl {
                 if let Some(name) = &function.ident {
@@ -10,32 +36,19 @@ fn scoped_fn_decls<'a>(module: &'a Module) -> Vec<(String, String, &'a Function)
                     found.push((name.clone(), name, &function.function));
                 }
             }
-            return;
+            continue;
         }
         let decl = match item {
             ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => decl,
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
-            _ => return,
+            _ => continue,
         };
-        match decl {
-            Decl::Fn(function) => {
-                let bare = function.ident.sym.to_string();
-                let full = if scope.is_empty() { bare.clone() } else { format!("{scope}.{bare}") };
-                found.push((full, bare, &function.function));
-            }
-            Decl::TsModule(namespace) => {
-                let swc_ecma_ast::TsModuleName::Ident(name) = &namespace.id else { return; };
-                let scope = if scope.is_empty() { name.sym.to_string() }
-                    else { format!("{scope}.{}", name.sym) };
-                if let Some(TsNamespaceBody::TsModuleBlock(block)) = &namespace.body {
-                    for item in &block.body { walk(item, &scope, found); }
-                }
-            }
-            _ => {}
+        if let Decl::Fn(function) = decl {
+            let bare = function.ident.sym.to_string();
+            let full = if scope.is_empty() { bare.clone() } else { format!("{scope}.{bare}") };
+            found.push((full, bare, &function.function));
         }
     }
-    let mut found = Vec::new();
-    for item in &module.body { walk(item, "", &mut found); }
     found
 }
 

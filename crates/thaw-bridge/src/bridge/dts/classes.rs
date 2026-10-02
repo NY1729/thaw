@@ -122,6 +122,24 @@ pub fn parse_dts_classes_named(
             }
         }
     }
+    for (scope, item) in scoped_module_items(&module) {
+        if scope.is_empty() { continue; }
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
+        if export.src.is_some() { continue; }
+        for specifier in &export.specifiers {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else { continue };
+            let (swc_ecma_ast::ModuleExportName::Ident(original),
+                Some(swc_ecma_ast::ModuleExportName::Ident(public))) =
+                (&named.orig, &named.exported) else { continue };
+            if original.sym == public.sym { continue; }
+            let source_name = format!("{scope}.{}", original.sym);
+            let public_name = format!("{scope}.{}", public.sym);
+            aliases.push((source_name.clone(), public_name));
+            if original.sym.as_str().starts_with("__thaw_public_") {
+                generated_internals.insert(source_name);
+            }
+        }
+    }
     loop {
         let mut changed = false;
         for (original, public) in &aliases {
