@@ -863,6 +863,25 @@ fn nested_dynamic_import_rewrites_without_overlapping_ranges() {
 }
 
 #[test]
+fn dynamic_import_uses_final_exports_after_async_factory_and_keeps_rejections() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("dynamic_import_final_exports");
+    fs::write(dir.join("index.js"), "module.exports = async function() { var results = await Promise.all([import('./late.js'), globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./late.js')]); var direct = results[0], created = results[1]; var directThrow, createdThrow, directReject, createdReject, threwSynchronously = false; try { directThrow = import('./throw.js'); createdThrow = globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./throw.js'); directReject = import('./reject.js'); createdReject = globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./reject.js'); } catch (error) { threwSynchronously = true; } if (threwSynchronously) return [false]; var failures = await Promise.all([directThrow, createdThrow, directReject, createdReject].map(function(promise) { return promise.then(function() { return 'resolved'; }, function(error) { return error.message; }); })); return [direct.value, created.value, direct === created].concat(failures); };").unwrap();
+    fs::write(dir.join("late.js"), "await Promise.resolve(); module.exports = { value: 42 };").unwrap();
+    fs::write(dir.join("throw.js"), "throw new Error('sync-fail');").unwrap();
+    fs::write(dir.join("reject.js"), "await Promise.reject(new Error('async-fail'));").unwrap();
+    let modules = temp_registry("dynamic_import_final_exports_modules");
+    let (bundle, _, file_count, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.runFinalExports = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"runFinalExports".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[42,42,true,\"sync-fail\",\"sync-fail\",\"async-fail\",\"async-fail\"]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
 fn nonliteral_dynamic_import_resolves_candidates_and_reuses_namespace() {
     use std::ffi::{CStr, CString};
 
