@@ -93,10 +93,34 @@ fn fetch_and_copy(
     let node_modules_dir = scratch.join("node_modules");
     let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
-    if select_prebuilt_addon(&package_dir)?.is_none()
-        && select_optional_dependency_addon(&node_modules_dir, &manifest)?.is_none()
-    {
-        download_prebuild_install_addon(&package_dir, &manifest)?;
+    let main_field = package_export_target(&manifest, None, &["require", "node", "default"])
+        .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
+        .unwrap_or("index.js");
+    // The main may itself be a .node file supplied by the download below.
+    // Defer an early bundle error until after that opportunity, while using
+    // an available JS bundle to discover hidden generated addon packages.
+    let early_bundle = bundle_commonjs_package_cached(
+        &node_modules_dir,
+        name,
+        &package_dir,
+        main_field,
+        &mut SourceCache::default(),
+    );
+    let js_source = early_bundle.as_ref().ok().map(|(source, _, _, _)| source.as_str());
+    let mut candidate_diagnostics = Vec::new();
+    if select_installed_addon(
+        &package_dir,
+        &node_modules_dir,
+        &manifest,
+        js_source,
+        &mut candidate_diagnostics,
+    )?.is_none() {
+        if let Err(download_error) = download_prebuild_install_addon(&package_dir, &manifest) {
+            return Err(match early_bundle {
+                Err(source_error) => format!("{source_error}; prebuild download also failed: {download_error}"),
+                Ok(_) => download_error,
+            });
+        }
     }
     let fallback_dts = if find_own_dts(&manifest, &package_dir).is_none() {
         Some(fetch_types_package_dts(scratch, name)?)
@@ -172,6 +196,36 @@ fn add_installed_inner(
         })?,
     };
 
+    let mut candidate_diagnostics = Vec::new();
+    let selected_addon = select_installed_addon(
+        &package_dir,
+        node_modules_dir,
+        &manifest,
+        Some(js_source.as_str()),
+        &mut candidate_diagnostics,
+    )?;
+    // Inspect and read the chosen binary before touching a previous install.
+    let prepared_addon = selected_addon.map(|selected| {
+        let bytes = fs::read(&selected.path).map_err(|error| {
+            format!("failed to read native addon `{}`: {error}", selected.path.display())
+        })?;
+        let metadata = NativeAddonMetadata {
+            source: selected.source,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            platform: selected.platform,
+            arch: selected.arch,
+            libc: selected.libc,
+        };
+        let metadata_json = serde_json::to_string_pretty(&metadata)
+            .map_err(|error| format!("failed to serialize native addon metadata: {error}"))?;
+        Ok::<_, String>((bytes, metadata, metadata_json))
+    }).transpose()?;
+    let native_diagnostic = if prepared_addon.is_none() && !candidate_diagnostics.is_empty() {
+        Some(candidate_diagnostics.join("; "))
+    } else {
+        None
+    };
+
     let dest_dir = registry_dir.join(name);
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("failed to create `{}`: {e}", dest_dir.display()))?;
@@ -188,47 +242,17 @@ fn add_installed_inner(
             })?;
         }
     }
-    let selected_addon = select_prebuilt_addon(&package_dir).and_then(|selected| match selected {
-        Some(selected) => Ok(Some(selected)),
-        None => select_optional_dependency_addon(node_modules_dir, &manifest)
-            .and_then(|selected| match selected {
-                Some(selected) => Ok(Some(selected)),
-                None => select_generated_addon(node_modules_dir, &js_source),
-            }),
-    });
-    let (native_addon, native_diagnostic) = match selected_addon {
-        Ok(Some(selected)) => {
-            let bytes = fs::read(&selected.path).map_err(|error| {
-                format!(
-                    "failed to read native addon `{}`: {error}",
-                    selected.path.display()
-                )
-            })?;
+    let native_addon = match prepared_addon {
+        Some((bytes, metadata, metadata_json)) => {
             fs::write(dest_dir.join("native.node"), &bytes).map_err(|error| {
-                format!(
-                    "failed to write `{}`: {error}",
-                    dest_dir.join("native.node").display()
-                )
+                format!("failed to write `{}`: {error}", dest_dir.join("native.node").display())
             })?;
-            let metadata = NativeAddonMetadata {
-                source: selected.source,
-                sha256: format!("{:x}", Sha256::digest(&bytes)),
-                platform: selected.platform,
-                arch: selected.arch,
-                libc: selected.libc,
-            };
-            let metadata_json = serde_json::to_string_pretty(&metadata)
-                .map_err(|error| format!("failed to serialize native addon metadata: {error}"))?;
             fs::write(dest_dir.join("native-addon.json"), metadata_json).map_err(|error| {
-                format!(
-                    "failed to write `{}`: {error}",
-                    dest_dir.join("native-addon.json").display()
-                )
+                format!("failed to write `{}`: {error}", dest_dir.join("native-addon.json").display())
             })?;
-            (Some(metadata), None)
+            Some(metadata)
         }
-        Ok(None) => (None, None),
-        Err(diagnostic) => (None, Some(diagnostic)),
+        None => None,
     };
     let dependencies = dest_dir.join("native-dependencies");
     if dependencies.is_dir() {
