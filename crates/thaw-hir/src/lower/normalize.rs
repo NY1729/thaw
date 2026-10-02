@@ -1077,6 +1077,33 @@ fn constructor_class(
     })
 }
 
+/// A break at the current loop level can reach the statement after a
+/// `while (true)`. Breaks inside nested loops or switches target those
+/// constructs instead; a labeled break may leave the outer loop.
+fn ast_loop_body_may_break(statement: &swc_ecma_ast::Stmt, nested: usize) -> bool {
+    use swc_ecma_ast::Stmt;
+    match statement {
+        Stmt::Break(value) => value.label.is_some() || nested == 0,
+        Stmt::Block(block) => block.stmts.iter().any(|stmt| ast_loop_body_may_break(stmt, nested)),
+        Stmt::If(branch) => ast_loop_body_may_break(&branch.cons, nested)
+            || branch.alt.as_ref().is_some_and(|alt| ast_loop_body_may_break(alt, nested)),
+        Stmt::Switch(switch) => switch.cases.iter().any(|case| case.cons.iter()
+            .any(|stmt| ast_loop_body_may_break(stmt, nested + 1))),
+        Stmt::While(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::DoWhile(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::For(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::ForIn(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::ForOf(loop_stmt) => ast_loop_body_may_break(&loop_stmt.body, nested + 1),
+        Stmt::Try(try_stmt) => try_stmt.block.stmts.iter().any(|stmt| ast_loop_body_may_break(stmt, nested))
+            || try_stmt.handler.as_ref().is_some_and(|handler| handler.body.stmts.iter()
+                .any(|stmt| ast_loop_body_may_break(stmt, nested)))
+            || try_stmt.finalizer.as_ref().is_some_and(|finalizer| finalizer.stmts.iter()
+                .any(|stmt| ast_loop_body_may_break(stmt, nested))),
+        Stmt::Labeled(labeled) => ast_loop_body_may_break(&labeled.body, nested),
+        _ => false,
+    }
+}
+
 /// True if `statement` always transfers control away (a `return`/`throw` on
 /// every path) -- a conservative AST-level approximation, enough to decide
 /// whether a function body can fall off its end.
@@ -1098,20 +1125,38 @@ fn ast_statement_terminates(statement: &swc_ecma_ast::Stmt) -> bool {
                     .all(|case| ast_block_terminates(&case.cons))
         }
         Stmt::Try(try_statement) => {
-            ast_block_terminates(&try_statement.block.stmts)
-                && try_statement.handler.as_ref().is_none_or(|handler| {
-                    ast_block_terminates(&handler.body.stmts)
-                })
+            try_statement.finalizer.as_ref().is_some_and(|finalizer|
+                ast_block_terminates(&finalizer.stmts))
+                || (ast_block_terminates(&try_statement.block.stmts)
+                    && try_statement.handler.as_ref().is_none_or(|handler|
+                        ast_block_terminates(&handler.body.stmts)))
         }
         Stmt::While(while_statement) => {
             matches!(while_statement.test.as_ref(), Expr::Lit(Lit::Bool(b)) if b.value)
+                && !ast_loop_body_may_break(&while_statement.body, 0)
         }
+        Stmt::For(for_statement) => {
+            for_statement.test.as_ref().is_none_or(|test|
+                matches!(test.as_ref(), Expr::Lit(Lit::Bool(b)) if b.value))
+                && !ast_loop_body_may_break(&for_statement.body, 0)
+        }
+        Stmt::DoWhile(do_while) => ast_statement_terminates(&do_while.body),
         _ => false,
     }
 }
 
 fn ast_block_terminates(statements: &[swc_ecma_ast::Stmt]) -> bool {
-    statements.iter().any(ast_statement_terminates)
+    for statement in statements {
+        // A break before an apparent later return reaches the enclosing
+        // switch/loop instead; that later return cannot prove termination.
+        if ast_loop_body_may_break(statement, 0) {
+            return false;
+        }
+        if ast_statement_terminates(statement) {
+            return true;
+        }
+    }
+    false
 }
 
 /// True if the block contains a `return <value>` somewhere (so the function
@@ -1138,8 +1183,11 @@ fn ast_block_has_value_return(statements: &[swc_ecma_ast::Stmt]) -> bool {
                     .handler
                     .as_ref()
                     .is_some_and(|handler| ast_block_has_value_return(&handler.body.stmts))
+                || try_statement.finalizer.as_ref().is_some_and(|finalizer|
+                    ast_block_has_value_return(&finalizer.stmts))
         }
         Stmt::While(while_statement) => ast_block_has_value_return(std::slice::from_ref(&*while_statement.body)),
+        Stmt::DoWhile(do_while) => ast_block_has_value_return(std::slice::from_ref(&*do_while.body)),
         Stmt::For(for_statement) => ast_block_has_value_return(std::slice::from_ref(&*for_statement.body)),
         Stmt::ForIn(for_in) => ast_block_has_value_return(std::slice::from_ref(&*for_in.body)),
         Stmt::ForOf(for_of) => ast_block_has_value_return(std::slice::from_ref(&*for_of.body)),
@@ -1258,12 +1306,47 @@ fn arguments_binding(function: &swc_ecma_ast::Function) -> Option<Stmt> {
     }))))
 }
 
-/// Gives a function without a declared return type that can fall through an
-/// explicit trailing `return undefined;`, so a *value-returning* function's
-/// inferred return type becomes `T | undefined` (matching JavaScript's
-/// implicit `undefined`) instead of failing codegen's "does not return a value
-/// on all paths". A `void` function, one that already returns on all paths, a
-/// generator, or an async function is left alone.
+/// Normalize inferred value-returning callable bodies before signatures are
+/// inferred. A bare return and a path that reaches the end both yield
+/// `undefined`; generators use a separate completion channel.
+fn normalize_inferred_return_body(statements: &mut Vec<Stmt>) {
+    use swc_ecma_ast::*;
+    if !ast_block_has_value_return(statements) {
+        return;
+    }
+    fn undefined_expr() -> Box<Expr> {
+        // The inserted value must not resolve a user binding named `undefined`.
+        // This synthetic void-zero is recognized as an Undefined value during
+        // lowering; ordinary unary-void expressions keep their existing ABI.
+        Box::new(Expr::Unary(UnaryExpr {
+            span: swc_common::DUMMY_SP,
+            op: UnaryOp::Void,
+            arg: Box::new(Expr::Lit(Lit::Num(Number {
+                span: swc_common::DUMMY_SP,
+                value: 0.0,
+                raw: None,
+            }))),
+        }))
+    }
+    struct BareReturns;
+    impl swc_ecma_visit::VisitMut for BareReturns {
+        fn visit_mut_function(&mut self, _: &mut Function) {}
+        fn visit_mut_arrow_expr(&mut self, _: &mut ArrowExpr) {}
+        fn visit_mut_return_stmt(&mut self, ret: &mut ReturnStmt) {
+            if ret.arg.is_none() {
+                ret.arg = Some(undefined_expr());
+            }
+        }
+    }
+    statements.visit_mut_with(&mut BareReturns);
+    if !ast_block_terminates(statements) {
+        statements.push(Stmt::Return(ReturnStmt {
+            span: swc_common::DUMMY_SP,
+            arg: Some(undefined_expr()),
+        }));
+    }
+}
+
 pub fn normalize_implicit_returns(module: &Module) -> Module {
     use swc_ecma_ast::*;
     struct Rewriter;
@@ -1277,20 +1360,19 @@ pub fn normalize_implicit_returns(module: &Module) -> Module {
                     }
                 }
             }
-            if function.return_type.is_some() || function.is_generator || function.is_async {
-                return;
+            if function.return_type.is_none() && !function.is_generator {
+                if let Some(body) = &mut function.body {
+                    normalize_inferred_return_body(&mut body.stmts);
+                }
             }
-            let Some(body) = &mut function.body else {
-                return;
-            };
-            if ast_block_has_value_return(&body.stmts) && !ast_block_terminates(&body.stmts) {
-                body.stmts.push(Stmt::Return(ReturnStmt {
-                    span: swc_common::DUMMY_SP,
-                    arg: Some(Box::new(Expr::Ident(Ident::new_no_ctxt(
-                        "undefined".into(),
-                        swc_common::DUMMY_SP,
-                    )))),
-                }));
+        }
+
+        fn visit_mut_arrow_expr(&mut self, arrow: &mut ArrowExpr) {
+            arrow.visit_mut_children_with(self);
+            if arrow.return_type.is_none() && !arrow.is_generator {
+                if let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_mut() {
+                    normalize_inferred_return_body(&mut body.stmts);
+                }
             }
         }
     }
