@@ -303,8 +303,69 @@ fn rewrites_named_import_to_a_require_call() {
     let rewritten =
         rewrite_esm_to_commonjs("import { add } from './math';\nconsole.log(add(1, 2));").unwrap();
     assert!(rewritten.contains("require(\"./math\")"));
-    assert!(rewritten.contains("console.log(__thaw_esm_import_0[\"add\"](1, 2));"));
+    assert!(rewritten.contains("console.log((0, __thaw_esm_import_0[\"add\"])(1, 2));"));
     assert!(!rewritten.contains("var add ="));
+}
+
+#[test]
+fn named_import_calls_and_tags_detach_the_module_receiver() {
+    // Unrun regression: a named import stays live but is never invoked as a
+    // method on the generated module namespace.
+    let rewritten = rewrite_esm_to_commonjs(
+        "import { fn, tag } from './dep.js'; \
+         const direct = fn(); const optional = fn?.(); const parenthesized = (fn)(); \
+         const tagged = tag`ok`; const read = fn; const props = { fn }; \
+         function shadow(fn) { return fn(); }",
+    )
+    .unwrap();
+    assert!(rewritten.contains("(0, __thaw_esm_import_0[\"fn\"])()"), "{rewritten}");
+    assert!(rewritten.contains("(0, __thaw_esm_import_0[\"fn\"])?.()"), "{rewritten}");
+    assert!(rewritten.contains("((0, __thaw_esm_import_0[\"fn\"]))()"), "{rewritten}");
+    assert!(rewritten.contains("(0, __thaw_esm_import_0[\"tag\"])`ok`"), "{rewritten}");
+    assert!(rewritten.contains("const read = __thaw_esm_import_0[\"fn\"]"), "{rewritten}");
+    assert!(rewritten.contains("const props = { fn: __thaw_esm_import_0[\"fn\"] }"), "{rewritten}");
+    assert!(rewritten.contains("function shadow(fn) { return fn(); }"), "{rewritten}");
+}
+
+#[test]
+fn named_import_calls_keep_unbound_this_and_live_export_values() {
+    use std::ffi::{CStr, CString};
+
+    // Unrun bundle regression: both the receiver and a later export update
+    // must be visible through the generated import reference.
+    let dir = temp_registry("named_import_receiver");
+    let node_modules = temp_registry("named_import_receiver_modules");
+    fs::write(
+        dir.join("dep.js"),
+        "export let fn = function() { 'use strict'; return this === undefined ? 1 : -1; }; \
+         export function change() { fn = function() { 'use strict'; return this === undefined ? 2 : -2; }; } \
+         export function tag(strings) { 'use strict'; return this === undefined ? strings[0] : 'bound'; }",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("index.js"),
+        "import { fn, tag, change } from './dep.js'; \
+         export function run() { const first = fn(); const tagged = tag`ok`; const optional = fn?.(); \
+         change(); function shadow(fn) { return fn(); } \
+         return [first, tagged, optional, fn(), (fn)(), shadow(function() { 'use strict'; return this === undefined ? 3 : -3; })]; }",
+    )
+    .unwrap();
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.__thaw_named_import_receiver = module.exports.run;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("__thaw_named_import_receiver").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[1,\"ok\",1,2,2,3]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
 }
 
 #[test]
