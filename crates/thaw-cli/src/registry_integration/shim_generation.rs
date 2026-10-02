@@ -1000,8 +1000,9 @@ fn generate_registry_shims(
                     .filter(|_| pkg.native_addon.is_none())
                     .and_then(|source| {
                         if function.name.contains('.') { return None; }
-                        jit_export(
+                        jit_export_named(
                             source,
+                            &registry_bundle_js_source_name(&pkg.name, true),
                             &function.name,
                             pkg.commonjs_export_name.as_deref() == Some(&function.name)
                                 || pkg.functions.len() == 1,
@@ -1016,8 +1017,9 @@ fn generate_registry_shims(
                                 "native addon call requires its N-API/JavaScript wrapper boundary"
                                     .into()
                             } else {
-                                jit_rejection_reason(
+                                jit_rejection_reason_named(
                                     pkg.bundle_js.as_deref().unwrap_or_default(),
+                                    &registry_bundle_js_source_name(&pkg.name, pkg.bundle_js.is_some()),
                                     function,
                                 )
                             }

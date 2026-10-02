@@ -47,6 +47,18 @@ fn jit_rejection_reason(
     source: &str,
     function: &thaw_bridge::DtsFunction,
 ) -> String {
+    jit_rejection_reason_named(
+        source,
+        &thaw_parser::common::FileName::Custom("input.js".into()),
+        function,
+    )
+}
+
+fn jit_rejection_reason_named(
+    source: &str,
+    source_name: &thaw_parser::common::FileName,
+    function: &thaw_bridge::DtsFunction,
+) -> String {
     if function.generic.is_some() {
         return "generic function specialization is not available for this declaration".into();
     }
@@ -62,7 +74,7 @@ fn jit_rejection_reason(
     {
         return format!("return value has unsupported JIT type {:?}", function.ret);
     }
-    if thaw_parser::parse_javascript(source).is_err() {
+    if thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).is_err() {
         return "package JavaScript could not be parsed for specialization".into();
     }
     "function body uses an expression, closure, external state, or control flow outside the specialization JIT IR".into()

@@ -50,7 +50,10 @@ fn compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
             .as_str()
             .ok_or_else(|| format!("case `{name}` is missing `source`"))?;
         let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            thaw_parser::parse_typescript_with_source_map(source).and_then(
+            thaw_parser::parse_typescript_with_source_map_named(
+                source,
+                compat_case_source_name(name),
+            ).and_then(
                 |(module, source_map)| {
                     thaw_hir::lower_module_with_source_map(&module, &source_map, name)
                         .map(|_| ())
@@ -112,4 +115,8 @@ fn compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
         },
         "results": results,
     }))
+}
+
+fn compat_case_source_name(name: &str) -> thaw_parser::common::FileName {
+    thaw_parser::common::FileName::Custom(format!("compat case {name}").into())
 }
