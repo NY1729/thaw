@@ -677,9 +677,9 @@ fn wrap_as_commonjs_module(
          \x20\x20var __thaw_napi_proxies = new Map();\n\
          \x20\x20var __thaw_napi_symbol_values = new Map(), __thaw_napi_symbol_ids = new Map();\n\
          \x20\x20var __thaw_napi_binary_values = new Map();\n\
-         \x20\x20var __thaw_napi_binary_finalizers = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(function(held) {{ if (__thaw_napi_binary_values.get(held.id) === held.entry) __thaw_napi_binary_values.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }}) : null;\n\
+         \x20\x20var __thaw_napi_binary_finalizers = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(function(held) {{ if (__thaw_napi_binary_values.get(held.id) !== held.entry) return; __thaw_napi_binary_values.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }}) : null;\n\
          \x20\x20var __thaw_napi_finalizers = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(function(id) {{ __thaw_napi_reference_values.delete(id); __thaw_napi_handle('release', id, '', []); }}) : null;\n\
-         \x20\x20var __thaw_napi_proxy_finalizers = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(function(handle) {{ __thaw_napi_proxies.delete(String(handle)); __thaw_napi_handle('release_handle', handle, '', []); }}) : null;\n\
+         \x20\x20var __thaw_napi_proxy_finalizers = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(function(held) {{ if (__thaw_napi_proxies.get(held.id) !== held.entry) return; __thaw_napi_proxies.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }}) : null;\n\
          \x20\x20var __thaw_napi_reference_value = function(id, active) {{ var stored = __thaw_napi_reference_values.get(id), value = stored && typeof stored.deref === 'function' ? stored.deref() : stored, properties = {{}}; if (!value) return properties; Object.keys(value).forEach(function(key) {{ properties[key] = __thaw_napi_argument(value[key], active); }}); return properties; }};\n\
          \x20\x20var __thaw_napi_argument = function(value, active) {{\n\
          \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
@@ -739,7 +739,7 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20ownKeys: function(_) {{ var keys = __thaw_napi_handle('own_keys', handle, '', []).value; Reflect.ownKeys(_).forEach(function(key) {{ if (keys.indexOf(key) < 0) keys.push(key); }}); keys.forEach(function(key) {{ descriptor(key); }}); return keys; }},\n\
          \x20\x20\x20\x20getOwnPropertyDescriptor: function(_, name) {{ return descriptor(name) || Reflect.getOwnPropertyDescriptor(_, name); }},\n\
          \x20\x20\x20\x20preventExtensions: function() {{ return false; }}\n\
-         \x20\x20}}); __thaw_napi_handles.set(proxy, handle); __thaw_napi_proxies.set(String(handle), typeof WeakRef === 'function' ? new WeakRef(proxy) : proxy); if (__thaw_napi_proxy_finalizers) __thaw_napi_proxy_finalizers.register(proxy, String(handle)); return proxy; }};\n\
+         \x20\x20}}); __thaw_napi_handles.set(proxy, handle); var entry = typeof WeakRef === 'function' ? new WeakRef(proxy) : proxy, id = String(handle); __thaw_napi_proxies.set(id, entry); if (__thaw_napi_proxy_finalizers) __thaw_napi_proxy_finalizers.register(proxy, {{ id: id, entry: entry }}); return proxy; }};\n\
          \x20\x20JSON.parse(globalThis.__thaw_napi_bridge_exports()).forEach(function(name) {{\n\
          \x20\x20\x20\x20__thaw_addon[name] = function() {{\n\
          \x20\x20\x20\x20\x20\x20if (new.target) {{ var created = __thaw_napi_handle('construct', name, '', Array.prototype.slice.call(arguments)), prototype = new.target.prototype; Object.keys(prototype).forEach(function(key) {{ __thaw_napi_handle('set', created.value, key, [prototype[key]]); }}); return __thaw_napi_proxy(created.value, prototype); }}\n\
