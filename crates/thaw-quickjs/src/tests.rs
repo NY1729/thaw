@@ -731,6 +731,48 @@ fn text_decoder_streaming_retains_incomplete_utf8() {
 }
 
 #[test]
+fn text_decoder_rejects_invalid_second_bytes_without_consuming_them() {
+    assert_eq!(
+        load(
+            r#"function decodeContinuationBounds() {
+                 const malformed = [
+                   [0xe0, 0x80, 0x80], [0xed, 0xa0, 0x80],
+                   [0xf0, 0x80, 0x80, 0x80], [0xf4, 0x90, 0x80, 0x80]
+                 ].map(bytes => new TextDecoder().decode(Uint8Array.from(bytes)));
+                 const boundaries = [
+                   [0xe0, 0xa0, 0x80], [0xed, 0x9f, 0xbf],
+                   [0xf0, 0x90, 0x80, 0x80], [0xf4, 0x8f, 0xbf, 0xbf]
+                 ].map(bytes => new TextDecoder().decode(Uint8Array.from(bytes)).codePointAt(0));
+                 const decoder = new TextDecoder();
+                 const split = [
+                   decoder.decode(Uint8Array.from([0xe0]), { stream: true }),
+                   decoder.decode(Uint8Array.from([0x80]), { stream: true }),
+                   decoder.decode(Uint8Array.from([0x80]), { stream: true }),
+                   decoder.decode()
+                 ];
+                 const valid = new TextDecoder();
+                 const validFirst = valid.decode(Uint8Array.from([0xf4, 0x8f]), { stream: true });
+                 const validLast = valid.decode(Uint8Array.from([0xbf, 0xbf]), { stream: true }).codePointAt(0);
+                 const strict = new TextDecoder('utf-8', { fatal: true });
+                 strict.decode(Uint8Array.from([0xe0]), { stream: true });
+                 let fatalSplit = false;
+                 try { strict.decode(Uint8Array.from([0x80]), { stream: true }); }
+                 catch (error) { fatalSplit = error instanceof TypeError; }
+                 let fatalCurrent = false;
+                 try { new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from([0xed, 0xa0]), { stream: true }); }
+                 catch (error) { fatalCurrent = error instanceof TypeError; }
+                 return { malformed, boundaries, split, validFirst, validLast, fatalSplit, fatalCurrent };
+               }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("decodeContinuationBounds", "[]"),
+        r#"{"malformed":["���","���","����","����"],"boundaries":[2048,55295,65536,1114111],"split":["","��","�",""],"validFirst":"","validLast":1114111,"fatalSplit":true,"fatalCurrent":true}"#
+    );
+}
+
+#[test]
 fn buffer_supports_encodings_views_search_and_numeric_access() {
     assert_eq!(
             load(
