@@ -348,6 +348,8 @@ unsafe fn map_delete<K: KeyKind>(map: *mut u8, key: u64) -> bool {
     };
     unsafe {
         (*header.entries.add(entry_index)).state = ENTRY_TOMBSTONE;
+        (*header.entries.add(entry_index)).key = 0;
+        (*header.entries.add(entry_index)).value = 0;
         header.buckets.add(bucket_index).write(BUCKET_TOMBSTONE);
     }
     header.live -= 1;
@@ -404,7 +406,12 @@ pub unsafe extern "C" fn thaw_map_clear(map: *mut u8) {
     }
     let header = unsafe { header_of(map) };
     for index in 0..header.entries_len {
-        unsafe { (*header.entries.add(index as usize)).state = ENTRY_TOMBSTONE };
+        unsafe {
+            let entry = &mut *header.entries.add(index as usize);
+            entry.state = ENTRY_TOMBSTONE;
+            entry.key = 0;
+            entry.value = 0;
+        }
     }
     for index in 0..header.buckets_len {
         unsafe { header.buckets.add(index as usize).write(BUCKET_EMPTY) };
@@ -743,6 +750,31 @@ key_kind_functions!(
 #[cfg(test)]
 mod map_native_tests {
     use super::*;
+
+    #[test]
+    fn deleted_entries_release_words_and_keep_iterator_positions() {
+        let map = unsafe { thaw_map_new() };
+        unsafe {
+            assert!(map_set::<NumKey>(map, canonical_num_key(1.0), 123));
+            assert!(map_set::<NumKey>(map, canonical_num_key(2.0), 456));
+            assert!(map_delete::<NumKey>(map, canonical_num_key(1.0)));
+            let header = header_of(map);
+            let deleted = *header.entries;
+            assert_eq!((deleted.state, deleted.key, deleted.value), (ENTRY_TOMBSTONE, 0, 0));
+            assert_eq!(header.entries_len, 2);
+            assert_eq!((*header.entries.add(1)).value, 456);
+            thaw_map_clear(map);
+            let header = header_of(map);
+            assert_eq!(header.entries_len, 2);
+            for index in 0..header.entries_len {
+                let entry = *header.entries.add(index as usize);
+                assert_eq!((entry.state, entry.key, entry.value), (ENTRY_TOMBSTONE, 0, 0));
+            }
+            assert!(map_set::<NumKey>(map, canonical_num_key(3.0), 789));
+            assert_eq!(header_of(map).entries_len, 3);
+            assert_eq!(map_get::<NumKey>(map, canonical_num_key(3.0)), Some(789));
+        }
+    }
 
     fn value(bits: f64) -> u64 {
         bits.to_bits()
