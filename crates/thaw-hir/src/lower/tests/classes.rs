@@ -2007,3 +2007,69 @@ fn shadowed_class_name_keeps_instance_generic_method_call_apply_bind_and_saved_t
         assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
     }
 }
+
+#[test]
+fn infers_generic_method_types_from_expanded_tuple_spread_positions() {
+    let program = lower(r#"
+        class Mapper {
+            pair<T, U, V>(first: T, second: U, third: V): [T, U, V] {
+                return [first, second, third];
+            }
+            collect<T>(first: T, ...rest: T[]): T { return first; }
+            keep<T, U = string>(value: T): T { return value; }
+        }
+        function main(): void {
+            const mapper = new Mapper();
+            const prefix: [number, string] = [1, "two"];
+            const numbers: [number, number] = [3, 4];
+            const singleton: [number] = [5];
+            const result: [number, string, boolean] = mapper.pair(...prefix, true);
+            const collected: number = mapper.collect(...numbers);
+            const kept: number = mapper.keep(...singleton);
+            console.log(result, collected, kept);
+        }
+    "#);
+    for symbol in [
+        class_method_symbol("Mapper", &specialized_generic_name("pair", &[HirType::F64, HirType::Str, HirType::Bool])),
+        class_method_symbol("Mapper", &specialized_generic_name("collect", &[HirType::F64])),
+        class_method_symbol("Mapper", &specialized_generic_name("keep", &[HirType::F64, HirType::Str])),
+    ] {
+        assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
+    }
+}
+
+#[test]
+fn rejects_tuple_spread_that_exceeds_generic_method_parameters() {
+    let module = thaw_parser::parse_typescript(r#"
+        class Mapper { pair<T, U>(first: T, second: U): T { return first; } }
+        function main(): void {
+            const mapper = new Mapper();
+            const values: [number, string, boolean] = [1, "two", true];
+            mapper.pair(...values);
+        }
+    "#).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("too many arguments"), "{error}");
+}
+
+#[test]
+fn tuple_spread_shifts_contextual_generic_callback_position() {
+    let program = lower(r#"
+        class Mapper {
+            map<T, U, V>(first: T, second: U, callback: (value: T) => V): V {
+                return callback(first);
+            }
+        }
+        function main(): void {
+            const mapper = new Mapper();
+            const prefix: [number, string] = [7, "seven"];
+            const result: string = mapper.map(...prefix, value => String(value * 2));
+            console.log(result);
+        }
+    "#);
+    let symbol = class_method_symbol(
+        "Mapper",
+        &specialized_generic_name("map", &[HirType::F64, HirType::Str, HirType::Str]),
+    );
+    assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
+}

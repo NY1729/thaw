@@ -251,23 +251,33 @@ impl GenericClassMethodUseCollector<'_, '_> {
             .parameter_patterns
             .len()
             .saturating_sub(usize::from(template.rest_pattern.is_some()));
-        for (index, argument) in call.args.iter().enumerate() {
+        for argument in &call.args {
+            if argument.spread.is_some() {
+                let ty = self.infer_actual_type(&argument.expr)?;
+                let HirType::Tuple(elements) = ty else {
+                    return Err(format!(
+                        "generic class method inference requires a statically sized tuple spread, got {ty:?}"
+                    ));
+                };
+                for element in elements {
+                    let index = actual.len();
+                    let pattern = (index < fixed_count)
+                        .then(|| &template.parameter_patterns[index])
+                        .or(template.rest_pattern.as_ref())
+                        .ok_or("generic method received too many arguments")?;
+                    match_generic_pattern(pattern, &element, &mut inferred)?;
+                    actual.push(element);
+                }
+                continue;
+            }
+            let index = actual.len();
             let pattern = (index < fixed_count)
                 .then(|| &template.parameter_patterns[index])
                 .or(template.rest_pattern.as_ref())
                 .ok_or("generic method received too many arguments")?;
             let ty = self.contextual_argument_type(&argument.expr, pattern, &inferred)?;
-            if argument.spread.is_none() {
-                match_generic_pattern(pattern, &ty, &mut inferred)?;
-                actual.push(ty);
-                continue;
-            }
-            let HirType::Tuple(elements) = ty else {
-                return Err(format!(
-                    "generic class method inference requires a statically sized tuple spread, got {ty:?}"
-                ));
-            };
-            actual.extend(elements);
+            match_generic_pattern(pattern, &ty, &mut inferred)?;
+            actual.push(ty);
         }
         Ok(actual)
     }
