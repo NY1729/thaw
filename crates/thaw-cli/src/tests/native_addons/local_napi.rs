@@ -922,3 +922,63 @@ fn native_addon_async_and_tsfn_complete_in_worker_before_natural_exit() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "async1,tsfn2|exit0\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// Unlike the unit-level pointer-injection check, this executes from the
+// generated process main thread and proves the loader's actual default-loop
+// receipt keeps libuv mapped and drives both the timer and its close callback.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_addon_main_default_uv_loop_timer_progresses_through_close() {
+    let dir = std::env::temp_dir().join(format!("thaw-main-uv-addon-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("main-uv-native");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"),
+        "export declare function schedule(): void;\n").unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(&addon_c, r#"
+        #include <stddef.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+        typedef int napi_status;
+        extern napi_status napi_get_undefined(napi_env,napi_value*);
+        extern napi_status napi_create_function(napi_env,const char*,size_t,napi_value(*)(napi_env,napi_callback_info),void*,napi_value*);
+        extern napi_status napi_set_named_property(napi_env,napi_value,const char*,napi_value);
+        extern void* uv_default_loop(void);
+        extern size_t uv_handle_size(int);
+        extern int uv_timer_init(void*,void*);
+        extern int uv_timer_start(void*,void (*)(void*),unsigned long long,unsigned long long);
+        extern void uv_close(void*,void (*)(void*));
+        static void closed(void* handle) { puts("main-default-loop-closed"); fflush(stdout); free(handle); }
+        static void fired(void* handle) { puts("main-default-loop-fired"); fflush(stdout); uv_close(handle,closed); }
+        static napi_value schedule(napi_env env,napi_callback_info info) {
+            (void)info;
+            void* timer = calloc(1,uv_handle_size(13));
+            if (!timer) abort();
+            if (uv_timer_init(uv_default_loop(),timer) != 0 || uv_timer_start(timer,fired,1,0) != 0) abort();
+            napi_value result; napi_get_undefined(env,&result); return result;
+        }
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env,napi_value exports) {
+            napi_value fn;
+            napi_create_function(env,"schedule",8,schedule,NULL,&fn);
+            napi_set_named_property(env,exports,"schedule",fn);
+            return exports;
+        }
+    "#).unwrap();
+    assert!(Command::new("cc").args(["-shared", "-fPIC"])
+        .arg(&addon_c).arg("-o").arg(package.join("native.node"))
+        .status().unwrap().success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(&source,
+        "import { schedule } from 'main-uv-native'; function main(): void { schedule(); }\n")
+        .unwrap();
+    build(&source,&output,&[],&[],&[],&registry,&[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout),
+        "main-default-loop-fired\nmain-default-loop-closed\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
