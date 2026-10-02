@@ -2744,6 +2744,48 @@ fn resolves_a_required_directory_through_its_own_package_manifest() {
 }
 
 #[test]
+fn directory_main_self_cycle_uses_index_fallback() {
+    let dir = temp_registry("module_main_self_cycle");
+    fs::write(dir.join("package.json"), r#"{"main":"."}"#).unwrap();
+    fs::write(dir.join("index.js"), "module.exports = 1;").unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, ".").unwrap();
+    assert_eq!(relative, "index.js");
+    assert_eq!(absolute.canonicalize().unwrap(), dir.join("index.js").canonicalize().unwrap());
+    fs::write(dir.join("package.json"), r#"{"main":"./."}"#).unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, ".").unwrap();
+    assert_eq!(relative, "index.js");
+    assert_eq!(absolute.canonicalize().unwrap(), dir.join("index.js").canonicalize().unwrap());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mutually_recursive_directory_entries_return_a_cycle_diagnostic() {
+    let dir = temp_registry("module_main_mutual_cycle");
+    for (name, main) in [("a", "../b"), ("b", "../a")] {
+        let directory = dir.join(name);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("package.json"), format!(r#"{{"main":"{main}"}}"#)).unwrap();
+    }
+    let error = resolve_module_path(&dir, "./a").unwrap_err();
+    assert!(error.contains("circular directory module entry"), "{error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_directory_entry_cycle_uses_index_fallback() {
+    use std::os::unix::fs::symlink;
+    let dir = temp_registry("module_main_symlink_cycle");
+    fs::write(dir.join("package.json"), r#"{"main":"./alias"}"#).unwrap();
+    fs::write(dir.join("index.js"), "module.exports = 1;").unwrap();
+    symlink(".", dir.join("alias")).unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, ".").unwrap();
+    assert_eq!(relative, "alias/index.js");
+    assert_eq!(absolute.canonicalize().unwrap(), dir.join("index.js").canonicalize().unwrap());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn resolves_main_field_written_exactly() {
     let dir = temp_registry("main_exact");
     fs::write(dir.join("main.js"), "module.exports = 1;").unwrap();
