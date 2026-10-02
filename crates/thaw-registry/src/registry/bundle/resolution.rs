@@ -132,28 +132,9 @@ fn package_subpath_runtime_target(
     conditions: &[&str],
 ) -> Option<String> {
     let exports = manifest.get("exports")?.as_object()?;
-    if let Some(exact) = exports.get(&format!("./{subpath}")) {
-        return select_export_condition(exact, conditions).map(str::to_string);
-    }
-    let mut matches = exports
-        .iter()
-        .filter_map(|(key, value)| {
-            let pattern = key.strip_prefix("./")?;
-            let capture = wildcard_capture(pattern, subpath)?;
-            Some((pattern, value, capture))
-        })
-        .collect::<Vec<_>>();
-    matches.sort_by_key(|(pattern, _, _)| {
-        let (prefix, suffix) = pattern.split_once('*').unwrap();
-        (std::cmp::Reverse(prefix.len()), std::cmp::Reverse(suffix.len()))
-    });
-    for (_, value, capture) in matches {
-        if let Some(target) = select_export_condition(value, conditions) {
-            return Some(target.replace('*', capture));
-        }
-        return None;
-    }
-    None
+    let (value, capture) = matched_package_subpath_export(exports, subpath)?;
+    let target = select_export_condition(value, conditions)?;
+    Some(capture.map_or_else(|| target.to_string(), |value| target.replace('*', value)))
 }
 
 fn resolve_package_import(path: &Path, spec: &str) -> Option<(String, PathBuf)> {

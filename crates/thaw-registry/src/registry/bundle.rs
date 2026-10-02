@@ -117,7 +117,13 @@ fn runtime_export_specifiers(
             for file in &files {
                 if let Some(capture) = wildcard_capture(runtime, file) {
                     let expanded = subpath.replacen('*', capture, 1);
-                    if validate_export_subpath(&expanded).is_ok() {
+                    if validate_export_subpath(&expanded).is_ok()
+                        && package_subpath_runtime_target(
+                            manifest,
+                            &expanded,
+                            &["require", "node", "default"],
+                        ).is_some()
+                    {
                         specifiers.push(format!("{package_name}/{expanded}"));
                     }
                 }
