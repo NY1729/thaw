@@ -1978,6 +1978,20 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
                     "__thaw_json_typeof" => return Ok(HirType::Str),
+                    "__thaw_json_borrowed_handle_id" => {
+                        let [value] = args.as_slice() else {
+                            return Err("borrowed JSON handle probe expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "borrowed JSON handle")?;
+                        return Ok(HirType::I64);
+                    }
+                    "__thaw_json_receiver_bigint" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON bigint expects one operand".into());
+                        };
+                        self.expect_type(&HirType::I64, value, "JSON bigint")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
                     "__thaw_json_is_buffer_shape" => return Ok(HirType::Bool),
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),

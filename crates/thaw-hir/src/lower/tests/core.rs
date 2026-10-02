@@ -885,3 +885,37 @@ fn substituted_collection_names_keep_plain_interface_shadowing() {
         assert_eq!(resolve_ts_type_with_substitution(&alias.type_ann, &HashMap::new(), &interfaces, &GenericInterfaces::new(), &mut Vec::new()).unwrap(), shape);
     }
 }
+
+#[test]
+fn generic_key_literal_strict_equality_lowers_as_string_content_comparison() {
+    let program = lower(
+        r#"function sameKey<T, K extends keyof T>(value: T, first: K, second: K): boolean {
+            return first === second;
+        }
+        function main(): void {
+            const value = { name: "thaw" };
+            console.log(sameKey(value, "name", "name"));
+        }"#,
+    );
+    fn has_string_comparison(expr: &HirExpr) -> bool {
+        match expr {
+            HirExpr::BinOp(BinOp::EqEqEq, left, right) => {
+                matches!(left.as_ref(), HirExpr::TypedClosure(HirType::Str, _))
+                    && matches!(right.as_ref(), HirExpr::TypedClosure(HirType::Str, _))
+            }
+            HirExpr::Call(callee, args) => {
+                has_string_comparison(callee) || args.iter().any(has_string_comparison)
+            }
+            HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body) => {
+                has_string_comparison(body)
+            }
+            _ => false,
+        }
+    }
+    let specialized = program.functions.iter().find(|function| function.name.starts_with("sameKey"))
+        .expect("generic key comparison must specialize");
+    assert!(specialized.body.iter().any(|statement| match statement {
+        HirStmt::Return(Some(value)) => has_string_comparison(value),
+        _ => false,
+    }), "literal-typed equality must lower both operands as string content");
+}

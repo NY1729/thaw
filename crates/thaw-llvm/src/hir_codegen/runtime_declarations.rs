@@ -254,6 +254,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_borrowed_handle_id",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_cstring_destroy",
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

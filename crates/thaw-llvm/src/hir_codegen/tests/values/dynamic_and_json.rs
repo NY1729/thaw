@@ -1050,6 +1050,116 @@ fn compiles_dynamic_value_strict_equality() {
 }
 
 #[test]
+fn strict_equality_keeps_dynamic_value_kinds_and_live_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.eqText = '1'; globalThis.eqNumber = 1; globalThis.eqBool = true; globalThis.eqBig = 1n; globalThis.eqObject = {}; globalThis.eqOther = {};");
+            const text: JsValue = getDynamicValue("eqText");
+            const number: JsValue = getDynamicValue("eqNumber");
+            const boolean: JsValue = getDynamicValue("eqBool");
+            const bigint: JsValue = getDynamicValue("eqBig");
+            const object: JsValue = getDynamicValue("eqObject");
+            const same: JsValue = getDynamicValue("eqObject");
+            const other: JsValue = getDynamicValue("eqOther");
+            const boxed: any = object;
+            const jsonText: any = "1";
+            console.log(1 === text, 1 !== text, 1 === number, 1 === boolean);
+            console.log(jsonText === 1, jsonText !== 1, jsonText === "1");
+            console.log(object === same, object === other, object === boxed);
+            console.log(1n === bigint, 1n === text, 1n === number);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_dynamic_kinds_identity"),
+        "false true true false\nfalse true true\ntrue false true\ntrue false false\n"
+    );
+}
+
+#[test]
+fn strict_equality_distinguishes_host_primitives_brands_and_number_edges() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.eqZero = 0; globalThis.eqMinusZero = -0; globalThis.eqNaN = NaN; globalThis.eqNul = String.fromCharCode(0); globalThis.eqObject = {};");
+            const plus: JsValue = getDynamicValue("eqZero");
+            const minus: JsValue = getDynamicValue("eqMinusZero");
+            const nan: JsValue = getDynamicValue("eqNaN");
+            const nul: JsValue = getDynamicValue("eqNul");
+            const object: JsValue = getDynamicValue("eqObject");
+            const boxedPlus: any = plus;
+            const boxedObject: any = object;
+            const parsedZero: any = JSON.parse("0");
+            const parsedNul: any = JSON.parse("\"\\u0000\"");
+            const fake: any = JSON.parse("{\"__thaw_js_handle_id__\":1}");
+            console.log(plus === minus, nan === nan, boxedPlus === minus, parsedZero === plus);
+            console.log(boxedObject === object, fake === object, parsedNul === nul);
+            console.log(JSON.parse("1") === 1, JSON.parse("\"1\"") === 1);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_host_primitives_brands_edges"),
+        "true false true true\ntrue false true\ntrue false\n"
+    );
+}
+
+#[test]
+fn strict_sparse_index_evaluates_both_operands_in_source_order() {
+    let source = r#"
+        function values(): number[] {
+            console.log("array");
+            return [];
+        }
+        function missing(): undefined {
+            console.log("undefined");
+            return undefined;
+        }
+        function main(): void {
+            console.log(values()[0] === missing());
+            console.log(missing() === values()[0]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_sparse_source_order"),
+        "array\nundefined\ntrue\nundefined\narray\ntrue\n"
+    );
+}
+
+#[test]
+fn strict_sparse_index_snapshots_before_rhs_mutation() {
+    let source = r#"
+        const items: number[] = [];
+        items.length = 1;
+        function fill(): undefined {
+            items[0] = 1;
+            return undefined;
+        }
+        function main(): void {
+            console.log(items[0] === fill());
+            delete items[0];
+            console.log(fill() === items[0]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_sparse_rhs_mutation"),
+        "true\nfalse\n"
+    );
+}
+
+#[test]
+fn strict_equal_literal_typed_strings_compare_content() {
+    let source = r#"
+        function sameKey<T, K extends keyof T>(value: T, first: K, second: K): boolean {
+            return first === second;
+        }
+        function main(): void {
+            const value = { name: "thaw" };
+            console.log(sameKey(value, "name", "name"));
+            console.log(sameKey(value, "name", "name") === false);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "strict_literal_string_values"), "true\nfalse\n");
+}
+
+#[test]
 fn compares_present_optional_strings_by_value() {
     let source = r#"
         function main(): void {

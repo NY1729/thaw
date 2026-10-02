@@ -70,6 +70,14 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_json_typeof" => {
                 return self.compile_single_arg_call("thaw_json_typeof", args, "JSON typeof")
             }
+            "__thaw_json_borrowed_handle_id" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_borrowed_handle_id", args, "borrowed JSON handle");
+            }
+            "__thaw_json_receiver_bigint" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_receiver_bigint", args, "JSON bigint");
+            }
             "__thaw_json_is_date_shape" => {
                 let [value] = args else {
                     return Err("__thaw_json_is_date_shape expects one argument".into());
