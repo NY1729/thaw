@@ -544,6 +544,33 @@ fn message_port_transfer_detaches_the_source_port() {
 }
 
 #[test]
+fn url_search_params_form_encoding_and_live_iteration() {
+    assert_eq!(load(r#"function checkLiveParams() {
+        const check = (value, expected) => { if (value !== expected) throw new Error(value + ' != ' + expected); };
+        check(new URLSearchParams({k: "!'()~* -._"}).toString(), 'k=%21%27%28%29%7E*+-._');
+        const params = new URLSearchParams('a=1&b=2'), entries = params.entries();
+        check(entries.next().value.join(':'), 'a:1');
+        params.set('b', 'changed'); params.append('c', '3');
+        check(entries.next().value.join(':'), 'b:changed');
+        check(entries.next().value.join(':'), 'c:3');
+        check(entries.next().done, true); params.append('d', '4'); check(entries.next().done, true);
+        const keys = params.keys(); check(keys.next().value, 'a');
+        params.delete('a'); check(keys.next().value, 'c');
+        const values = params.values(); check(values.next().value, 'changed');
+        params.set('c', 'updated'); check(values.next().value, 'updated');
+        const sorted = new URLSearchParams('b=2&a=1'), ordered = sorted.entries();
+        check(ordered.next().value[0], 'b'); sorted.sort(); check(ordered.next().value[0], 'b');
+        const changed = new URLSearchParams('a=1&b=2&c=3'), seen = [], receiver = {};
+        changed.forEach(function(value, key, owner) {
+            check(this, receiver); check(owner, changed); seen.push(key + ':' + value);
+            if (key === 'a') { changed.delete('a'); changed.append('d', '4'); }
+        }, receiver);
+        check(seen.join('|'), 'a:1|c:3|d:4'); return true;
+    }"#), 1);
+    assert_eq!(call("checkLiveParams", "[]"), "true");
+}
+
+#[test]
 fn url_search_params_preserves_duplicates_and_iterates() {
     assert_eq!(
             load(

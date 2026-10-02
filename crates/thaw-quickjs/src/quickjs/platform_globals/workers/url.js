@@ -1,5 +1,5 @@
   if (typeof globalThis.URLSearchParams !== 'function') {
-    const encodeFormPart = value => encodeURIComponent(String(value)).replace(/%20/g, '+');
+    const encodeFormPart = value => encodeURIComponent(String(value)).replace(/[!'()~]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase()).replace(/%20/g, '+');
     const decodeFormPart = value => decodeURIComponent(String(value).replace(/\+/g, ' '));
     globalThis.URLSearchParams = class URLSearchParams {
       constructor(init = '') {
@@ -71,11 +71,14 @@
           .map(item => item[0]);
         this.__thawChanged();
       }
-      entries() { return this.__thawEntries.map(entry => entry.slice())[Symbol.iterator](); }
-      keys() { return this.__thawEntries.map(entry => entry[0])[Symbol.iterator](); }
-      values() { return this.__thawEntries.map(entry => entry[1])[Symbol.iterator](); }
+      *entries() { for (let index = 0; index < this.__thawEntries.length; index++) yield this.__thawEntries[index].slice(); }
+      *keys() { for (let index = 0; index < this.__thawEntries.length; index++) yield this.__thawEntries[index][0]; }
+      *values() { for (let index = 0; index < this.__thawEntries.length; index++) yield this.__thawEntries[index][1]; }
       forEach(callback, thisArg) {
-        for (const entry of this.__thawEntries.slice()) callback.call(thisArg, entry[1], entry[0], this);
+        for (let index = 0; index < this.__thawEntries.length; index++) {
+          const entry = this.__thawEntries[index];
+          callback.call(thisArg, entry[1], entry[0], this);
+        }
       }
       toString() { return this.__thawEntries.map(entry => encodeFormPart(entry[0]) + '=' + encodeFormPart(entry[1])).join('&'); }
       [Symbol.iterator]() { return this.entries(); }
