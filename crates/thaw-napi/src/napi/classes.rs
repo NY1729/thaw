@@ -150,6 +150,9 @@ pub unsafe extern "C" fn napi_wrap(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if env.finalizing || env.finalized {
+        return record_status(env_ptr, NAPI_CLOSING);
+    }
     if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
         return record_status(env_ptr, NAPI_OBJECT_EXPECTED);
     }
@@ -239,6 +242,9 @@ pub unsafe extern "C" fn napi_add_finalizer(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if env.finalizing || env.finalized {
+        return record_status(env_ptr, NAPI_CLOSING);
+    }
     env.object_finalizers
         .entry(object as usize)
         .or_default()
@@ -246,6 +252,7 @@ pub unsafe extern "C" fn napi_add_finalizer(
             data,
             finalize,
             hint,
+            backing: ptr::null_mut(),
         });
     if !result.is_null() {
         *result = alloc_reference(env, object, 0);
@@ -264,10 +271,14 @@ pub unsafe extern "C" fn node_api_post_finalizer(
     let (Ok(env), Some(finalize)) = (env_mut(env), finalize) else {
         return record_status(env_ptr, NAPI_INVALID_ARG);
     };
+    if env.finalized {
+        return record_status(env_ptr, NAPI_CLOSING);
+    }
     env.posted_finalizers.push(FinalizeRecord {
         data,
         finalize: Some(finalize),
         hint,
+        backing: ptr::null_mut(),
     });
     NAPI_OK
 }
@@ -283,6 +294,9 @@ pub unsafe extern "C" fn napi_set_instance_data(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if env.finalizing || env.finalized {
+        return record_status(env_ptr, NAPI_CLOSING);
+    }
     if env.instance_data.is_some() {
         return record_status(env_ptr, NAPI_GENERIC_FAILURE);
     }
@@ -290,6 +304,7 @@ pub unsafe extern "C" fn napi_set_instance_data(
         data,
         finalize,
         hint,
+        backing: ptr::null_mut(),
     });
     NAPI_OK
 }
@@ -322,6 +337,9 @@ pub unsafe extern "C" fn napi_add_env_cleanup_hook(
     let (Ok(env), Some(hook)) = (env_mut(env), hook) else {
         return record_status(env_ptr, NAPI_INVALID_ARG);
     };
+    if env.finalizing || env.finalized {
+        return record_status(env_ptr, NAPI_CLOSING);
+    }
     if env
         .cleanup_hooks
         .iter()
@@ -362,9 +380,18 @@ pub unsafe extern "C" fn napi_add_async_cleanup_hook(
     result: *mut *mut AsyncCleanupHookHandle,
 ) -> NapiStatus {
     let env_ptr = env;
+    if env.is_null() { return NAPI_INVALID_ARG; }
+    // Async hooks can outlive this call. A stack/direct Env has no owner that
+    // can retain it until the hook removes its handle.
+    if (*env).owner != std::thread::current().id() { return NAPI_INVALID_ARG; }
     let (Ok(env_ref), Some(hook)) = (env_mut(env), hook) else {
         return record_status(env_ptr, NAPI_INVALID_ARG);
     };
+    if !env_ref.host_managed || env_ref.finalizing || env_ref.finalized
+        || (env_ref.shutdown_requested && !env_ref.async_cleanup_dispatching)
+    {
+        return record_status(env_ptr, NAPI_CLOSING);
+    }
     let mut handle = Box::new(AsyncCleanupHookHandle {
         env: env as usize,
         hook,
@@ -372,11 +399,11 @@ pub unsafe extern "C" fn napi_add_async_cleanup_hook(
         state: AtomicU8::new(0),
     });
     let handle_ptr = (&mut *handle) as *mut AsyncCleanupHookHandle;
-    async_cleanup_handles()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(handle);
+    let mut handles = async_cleanup_handles()
+        .lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    handles.push(handle);
     env_ref.async_cleanup_hooks.push(handle_ptr);
+    drop(handles);
     if let Some(result) = result.as_mut() {
         *result = handle_ptr;
     }
@@ -400,12 +427,9 @@ pub unsafe extern "C" fn napi_remove_async_cleanup_hook(
         return NAPI_INVALID_ARG;
     };
     match handle_ref.state.swap(2, Ordering::AcqRel) {
-        0 => {
-            if let Some(env) = (handle_ref.env as NapiEnv).as_mut() {
-                env.async_cleanup_hooks
-                    .retain(|candidate| *candidate != handle);
-            }
-        }
+        // A foreign thread may remove before owner dispatch. Leave a
+        // tombstone in Env's Vec; owner begin skips state 2 under this lock.
+        0 => {}
         1 => {
             ACTIVE_ASYNC_CLEANUP_HOOKS.fetch_sub(1, Ordering::AcqRel);
         }
@@ -545,7 +569,7 @@ pub unsafe extern "C" fn napi_new_instance(
         new_target: constructor,
         data: function.data,
     };
-    let returned = (function.callback)(env, &mut info);
+    let returned = invoke_napi_callback(env, function.callback, &mut info);
     if env_mut(env)
         .map(|env| env.exception.is_some())
         .unwrap_or(false)

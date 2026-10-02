@@ -1409,3 +1409,47 @@ fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
     assert_eq!(unsafe { json_from_value_with_undefined(nan, true) }.unwrap(), JsonValue::Null);
     assert_eq!(unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"], 0);
 }
+
+// Proposed thaw-napi/src/tests.rs integration test. UNRUN; source-only.
+// A native destructor executes inside libc::dlclose. Nested shutdown must
+// fail while the outer release retains finalized Env Boxes and mapped libs.
+#[cfg(target_os = "linux")]
+#[test]
+fn library_destructor_cannot_reenter_shutdown_or_load() {
+    let _guard = lock_async_test();
+    let dir = std::env::temp_dir().join(format!("thaw-napi-dlclose-reentry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let trace = dir.join("destructor.trace");
+    let addon = dir.join("reentry.node");
+    let addon_c = dir.join("reentry.c");
+    let text = format!(r#"
+        #include <stdint.h>
+        #include <stdio.h>
+        typedef void* napi_env; typedef void* napi_value;
+        extern uint8_t thaw_napi_unload_all(void);
+        extern uint8_t thaw_napi_finish_shutdown(void);
+        extern uint8_t thaw_napi_load(const char*);
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env,napi_value exports) {{
+            (void)env; return exports;
+        }}
+        __attribute__((destructor)) static void nested_release(void) {{
+            unsigned nested_unload = thaw_napi_unload_all();
+            unsigned nested_finish = thaw_napi_finish_shutdown();
+            unsigned nested_load = thaw_napi_load("{}");
+            FILE* trace = fopen("{}", "w");
+            if (trace) {{ fprintf(trace,"%u,%u,%u\n",nested_unload,nested_finish,nested_load); fclose(trace); }}
+        }}
+    "#, addon.display(), trace.display());
+    std::fs::write(&addon_c, text).unwrap();
+    assert!(std::process::Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&addon_c).arg("-o").arg(&addon)
+        .status().unwrap().success());
+    let path = std::ffi::CString::new(addon.to_string_lossy().as_bytes()).unwrap();
+    assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+    assert_eq!(thaw_napi_begin_shutdown(), 1);
+    assert_eq!(thaw_napi_poll_shutdown(), 1);
+    assert_eq!(thaw_napi_finish_shutdown(), 1);
+    assert_eq!(std::fs::read_to_string(&trace).unwrap(), "0,0,0\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

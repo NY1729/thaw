@@ -24,7 +24,7 @@ unsafe fn host_property_for_owner(
     owner: usize,
     key: &PropertyKey,
 ) -> Option<NapiValue> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.host_properties.get(&owner)?.get(key).copied())
         .or_else(|| {
             HOST.with(|host| {
@@ -32,6 +32,7 @@ unsafe fn host_property_for_owner(
                 host.module_envs
                     .iter()
                     .chain(host.pending_call_envs.iter())
+                    .filter(|candidate| !candidate.finalized)
                     .find_map(|candidate| candidate.host_properties.get(&owner)?.get(key).copied())
             })
         })
@@ -39,13 +40,13 @@ unsafe fn host_property_for_owner(
 
 unsafe fn host_property_keys_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
     let mut keys = env
-        .as_ref()
+        .as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.host_properties.get(&owner))
         .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     HOST.with(|host| {
         let host = host.borrow();
-        for candidate in host.module_envs.iter().chain(host.pending_call_envs.iter()) {
+        for candidate in host.module_envs.iter().chain(host.pending_call_envs.iter()).filter(|candidate| !candidate.finalized) {
             if let Some(properties) = candidate.host_properties.get(&owner) {
                 keys.extend(properties.keys().cloned());
             }
@@ -55,7 +56,7 @@ unsafe fn host_property_keys_for_owner(env: NapiEnv, owner: usize) -> Vec<Proper
 }
 
 unsafe fn property_order_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey) -> usize {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.property_order.get(&owner))
         .and_then(|order| order.iter().position(|candidate| candidate == key))
         .or_else(|| {
@@ -64,6 +65,7 @@ unsafe fn property_order_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey
                 host.module_envs
                     .iter()
                     .chain(host.pending_call_envs.iter())
+                    .filter(|candidate| !candidate.finalized)
                     .find_map(|candidate| {
                         candidate
                             .property_order
@@ -77,7 +79,7 @@ unsafe fn property_order_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey
 }
 
 unsafe fn error_name_for_owner(env: NapiEnv, owner: usize) -> Option<String> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.error_names.get(&owner).cloned())
         .or_else(|| {
             HOST.with(|host| {
@@ -85,6 +87,7 @@ unsafe fn error_name_for_owner(env: NapiEnv, owner: usize) -> Option<String> {
                 host.module_envs
                     .iter()
                     .chain(host.pending_call_envs.iter())
+                    .filter(|candidate| !candidate.finalized)
                     .find_map(|candidate| candidate.error_names.get(&owner).cloned())
             })
         })
@@ -614,26 +617,28 @@ unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &PropertyKey) -> 
 }
 
 unsafe fn accessor_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey) -> Option<Accessor> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.accessors.get(&(owner, key.clone())).copied())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
+                    .filter(|module_env| !module_env.finalized)
                     .find_map(|module_env| module_env.accessors.get(&(owner, key.clone())).copied())
             })
         })
 }
 
 unsafe fn prototype_for_owner(env: NapiEnv, owner: usize) -> Option<usize> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.prototypes.get(&owner).copied())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
+                    .filter(|module_env| !module_env.finalized)
                     .find_map(|module_env| module_env.prototypes.get(&owner).copied())
             })
         })
@@ -641,7 +646,7 @@ unsafe fn prototype_for_owner(env: NapiEnv, owner: usize) -> Option<usize> {
 
 unsafe fn accessors_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
     let mut keys = env
-        .as_ref()
+        .as_ref().filter(|env| !env.finalized)
         .map(|env| {
             env.accessors
                 .keys()
@@ -651,7 +656,7 @@ unsafe fn accessors_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
         })
         .unwrap_or_default();
     HOST.with(|host| {
-        for module_env in &host.borrow().module_envs {
+        for module_env in host.borrow().module_envs.iter().filter(|env| !env.finalized) {
             keys.extend(
                 module_env
                     .accessors
@@ -668,11 +673,11 @@ unsafe fn property_attributes_for(env: NapiEnv, owner: usize, key: &PropertyKey)
     if let Some(attributes) = intrinsic_property_attributes(owner as NapiValue, key) {
         return attributes;
     }
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.property_attributes.get(&(owner, key.clone())).copied())
         .or_else(|| {
             HOST.with(|host| {
-                host.borrow().module_envs.iter().find_map(|module_env| {
+                host.borrow().module_envs.iter().filter(|env| !env.finalized).find_map(|module_env| {
                     module_env
                         .property_attributes
                         .get(&(owner, key.clone()))
@@ -684,26 +689,28 @@ unsafe fn property_attributes_for(env: NapiEnv, owner: usize, key: &PropertyKey)
 }
 
 unsafe fn symbol_for(env: NapiEnv, id: u64) -> Option<NapiValue> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.symbols.get(&id).copied())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
+                    .filter(|module_env| !module_env.finalized)
                     .find_map(|module_env| module_env.symbols.get(&id).copied())
             })
         })
 }
 
 unsafe fn type_tag_for(env: NapiEnv, object: NapiValue) -> Option<NapiTypeTag> {
-    env.as_ref()
+    env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.type_tags.get(&(object as usize)).copied())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
+                    .filter(|module_env| !module_env.finalized)
                     .find_map(|module_env| module_env.type_tags.get(&(object as usize)).copied())
             })
         })
@@ -772,4 +779,3 @@ unsafe fn write_callback_value(env: NapiEnv, out: *mut NapiValue, value: NapiVal
     }
     write_value(out, value)
 }
-

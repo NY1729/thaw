@@ -270,18 +270,45 @@ pub unsafe extern "C" fn napi_get_uv_event_loop(env: NapiEnv, out: *mut *mut c_v
     if env.is_null() || out.is_null() {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    if (*env).owner != std::thread::current().id() || (*env).finalized {
+        return NAPI_INVALID_ARG;
+    }
     #[cfg(target_os = "linux")]
     {
-        let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"uv_default_loop".as_ptr());
-        if symbol.is_null() {
+        type UvLoopSize = unsafe extern "C" fn() -> usize;
+        type UvLoopInit = unsafe extern "C" fn(*mut c_void) -> i32;
+        let size = libc::dlsym(libc::RTLD_DEFAULT, c"uv_loop_size".as_ptr());
+        let init = libc::dlsym(libc::RTLD_DEFAULT, c"uv_loop_init".as_ptr());
+        if size.is_null() || init.is_null() {
             return record_status(env, NAPI_GENERIC_FAILURE);
         }
-        let default_loop =
-            std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> *mut c_void>(symbol);
-        *out = default_loop();
-        if (*out).is_null() {
+        let size = std::mem::transmute::<*mut c_void, UvLoopSize>(size);
+        let init = std::mem::transmute::<*mut c_void, UvLoopInit>(init);
+        if let Some(event_loop) = (*env).acquired_default_uv_loop {
+            *out = event_loop as *mut c_void;
+            return NAPI_OK;
+        }
+        let event_loop = HOST.with(|host| {
+            let Ok(mut host) = host.try_borrow_mut() else { return ptr::null_mut(); };
+            if let Some(event_loop) = host.owned_uv_loop {
+                return event_loop as *mut c_void;
+            }
+            if host.unloading { return ptr::null_mut(); }
+            let event_loop = libc::calloc(1, size());
+            if event_loop.is_null() { return ptr::null_mut(); }
+            if init(event_loop) != 0 {
+                libc::free(event_loop);
+                return ptr::null_mut();
+            }
+            host.owned_uv_loop = Some(event_loop as usize);
+            event_loop
+        });
+        if event_loop.is_null() {
             return record_status(env, NAPI_GENERIC_FAILURE);
         }
+        *out = event_loop;
+        // Record this exact thread-owned loop on the Env while it is live.
+        (*env).acquired_default_uv_loop = Some(event_loop as usize);
         NAPI_OK
     }
     #[cfg(not(target_os = "linux"))]
@@ -299,13 +326,11 @@ pub unsafe extern "C" fn thaw_napi_register_uv_loop(event_loop: *mut c_void) -> 
     if event_loop.is_null() {
         return NAPI_INVALID_ARG;
     }
-    let mut loops = registered_uv_loops()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let address = event_loop as usize;
-    if !loops.contains(&address) {
-        loops.push(address);
-    }
+    REGISTERED_UV_LOOPS.with(|loops| {
+        let mut loops = loops.borrow_mut();
+        let address = event_loop as usize;
+        if !loops.contains(&address) { loops.push(address); }
+    });
     NAPI_OK
 }
 
@@ -316,15 +341,18 @@ pub unsafe extern "C" fn thaw_napi_unregister_uv_loop(event_loop: *mut c_void) -
     if event_loop.is_null() {
         return NAPI_INVALID_ARG;
     }
-    let mut loops = registered_uv_loops()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let address = event_loop as usize;
-    let Some(index) = loops.iter().position(|registered| *registered == address) else {
-        return NAPI_INVALID_ARG;
-    };
-    loops.swap_remove(index);
-    NAPI_OK
+    if !registered_uv_loops().contains(&(event_loop as usize)) { return NAPI_INVALID_ARG; }
+    if uv_loop_has_work(event_loop) { return NAPI_GENERIC_FAILURE; }
+    let removed = REGISTERED_UV_LOOPS.with(|loops| {
+        let mut loops = loops.borrow_mut();
+        let address = event_loop as usize;
+        let Some(index) = loops.iter().position(|registered| *registered == address) else {
+            return false;
+        };
+        loops.swap_remove(index);
+        true
+    });
+    if removed { NAPI_OK } else { NAPI_INVALID_ARG }
 }
 
 #[no_mangle]
@@ -505,7 +533,7 @@ pub unsafe extern "C" fn napi_get_element(
                     new_target: ptr::null_mut(),
                     data: accessor.data,
                 };
-                let value = getter(env, &mut info);
+                let value = invoke_napi_callback(env, getter, &mut info);
                 if env_mut(env)
                     .map(|env| env.exception.is_some())
                     .unwrap_or(false)
