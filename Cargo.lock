@@ -3294,6 +3294,7 @@ dependencies = [
  "icu_normalizer",
  "jiff",
  "libc",
+ "num-bigint",
  "regex",
  "regress",
  "rustls",

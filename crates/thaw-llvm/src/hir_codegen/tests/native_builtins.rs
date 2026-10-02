@@ -1613,6 +1613,20 @@ fn compiles_number_to_string_with_radix() {
 }
 
 #[test]
+fn compiles_min_subnormal_nondecimal_radix_without_fraction_cap() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log(Number.MIN_VALUE.toString(2));
+            console.log(Number.MIN_VALUE.toString(16));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_to_string_min_subnormal_radix"),
+        format!("0.{}1\n0.{}4\n", "0".repeat(1073), "0".repeat(268))
+    );
+}
+
+#[test]
 fn compiles_weak_map_and_weak_set() {
     let source = r#"
         type Session = { userId: number };
