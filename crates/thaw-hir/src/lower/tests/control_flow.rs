@@ -163,6 +163,89 @@ fn lowers_boolean_logical_operators_to_short_circuit_closures() {
 }
 
 #[test]
+fn nullish_logical_and_preserves_falsy_left_and_lazy_right() {
+    let program = lower(r#"
+        function later(): number { return 9; }
+        function numberAnd(value: number | undefined): number | undefined {
+            return value && later();
+        }
+        function booleanAnd(value: boolean | null): boolean | null {
+            return value && true;
+        }
+        function stringAnd(value: string | undefined): string | undefined {
+            return value && "right";
+        }
+        function nullishAnd(value: number | null | undefined): number | null | undefined {
+            return value && later();
+        }
+        function main(): void {
+            numberAnd(0); numberAnd(NaN); booleanAnd(false);
+            stringAnd(""); nullishAnd(null); nullishAnd(undefined);
+        }
+    "#);
+    // Each falsy branch returns the captured left wrapper, preserving 0,
+    // false, empty string, NaN, null and undefined. `later()` remains only
+    // in the truthy branch of the generated IIFE.
+    for function in &program.functions[1..5] {
+        let lowered = format!("{:?}", function.body);
+        assert!(lowered.contains("__thaw_nullish_and_left_"), "{lowered}");
+        assert!(lowered.contains("Return(Some(Var(\"__thaw_nullish_and_left_"), "{lowered}");
+        assert!(!lowered.contains("OptionalNone"), "{lowered}");
+        assert!(!lowered.contains("NullableNone"), "{lowered}");
+        assert!(!lowered.contains("NullishNull"), "{lowered}");
+    }
+}
+
+#[test]
+fn nullish_logical_and_supports_heterogeneous_results_without_widening_truthy_objects() {
+    let program = lower(r#"
+        function mixed(value: number | undefined): number | string | undefined {
+            return value && "right";
+        }
+        function arrayAnd(value: number[] | undefined): string | undefined {
+            return value && "right";
+        }
+        function objectAnd(value: { x: number } | null): boolean | null {
+            return value && true;
+        }
+        function both(value: { x: number } | null | undefined): string | null | undefined {
+            return value && "right";
+        }
+        function crossAbsence(value: number | undefined): number | null | undefined {
+            return value && null;
+        }
+        function optionalRight(value: number[] | null, right: string | undefined): string | null | undefined {
+            return value && right;
+        }
+        type Pair = number | string;
+        function aliased(value: Pair | undefined): number | string | boolean | undefined {
+            return value && true;
+        }
+        type Inner = number | undefined;
+        function nestedLeft(value: Inner | undefined): number | undefined {
+            return value && 1;
+        }
+        type MaybeNull = number | null;
+        function nestedRight(value: number[] | undefined, right: MaybeNull | undefined): number | null | undefined {
+            return value && right;
+        }
+    "#);
+    assert!(matches!(program.functions[0].ret, HirType::Union(_)));
+    assert_eq!(program.functions[1].ret, HirType::Optional(Box::new(HirType::Str)));
+    assert_eq!(program.functions[2].ret, HirType::Nullable(Box::new(HirType::Bool)));
+    assert_eq!(program.functions[3].ret, HirType::Nullish(Box::new(HirType::Str)));
+    assert_eq!(program.functions[4].ret, HirType::Nullish(Box::new(HirType::F64)));
+    assert_eq!(program.functions[5].ret, HirType::Nullish(Box::new(HirType::Str)));
+    assert!(matches!(program.functions[6].ret, HirType::Union(_)));
+    assert_eq!(program.functions[7].ret, HirType::Optional(Box::new(HirType::F64)));
+    assert_eq!(program.functions[8].ret, HirType::Nullish(Box::new(HirType::F64)));
+    let both = format!("{:?}", program.functions[3].body);
+    assert!(both.contains("NullishIsUndefined"), "{both}");
+    assert!(both.contains("NullishUndefined"), "{both}");
+    assert!(both.contains("NullishNull"), "{both}");
+}
+
+#[test]
 fn rejects_wrong_assignment_and_declared_return_types() {
     let assignment = thaw_parser::parse_typescript(
         "function main(): void { let value = 1; value = \"x\"; }",
