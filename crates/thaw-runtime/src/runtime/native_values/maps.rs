@@ -71,7 +71,7 @@ fn canonical_num_key(key: f64) -> u64 {
 }
 
 unsafe fn str_key_bytes<'a>(key: u64) -> &'a [u8] {
-    unsafe { CStr::from_ptr(key as *const c_char) }.to_bytes()
+    unsafe { thaw_arena::NativeStr::from_ptr(key as *const c_char) }.to_bytes()
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -477,7 +477,7 @@ pub unsafe extern "C" fn thaw_map_snapshot_values(map: *const u8) -> *mut u8 {
 
 /// Allocates a native 2-tuple (`[i64 length=2][first][second]`, the same
 /// layout an `HirExpr::ArrayLit` of two elements produces), then wraps its
-/// address in a one-word "handle" cell (see thaw-llvm's
+/// address in a two-word `{buffer, presence}` handle cell (see thaw-llvm's
 /// `compile_array_wrap`/`compile_array_data` doc comment) and returns the
 /// handle's address as a `u64`, or `0` only on arena allocation failure.
 /// An `Array`/`Tuple` value is always a handle now, including one built
@@ -495,12 +495,13 @@ fn arena_pair(first: u64, second: u64) -> u64 {
         pair.add(8).cast::<u64>().write_unaligned(first);
         pair.add(16).cast::<u64>().write_unaligned(second);
     }
-    let handle = thaw_arena::thaw_arena_alloc(8, 8);
+    let handle = thaw_arena::thaw_arena_alloc(16, 8);
     if handle.is_null() {
         return 0;
     }
     unsafe {
         handle.cast::<u64>().write_unaligned(pair as u64);
+        handle.add(8).cast::<u64>().write_unaligned(0);
     }
     handle as u64
 }
@@ -611,7 +612,8 @@ macro_rules! key_kind_functions {
         #[no_mangle]
         /// # Safety
         /// `map` must be null or a pointer returned by `thaw_map_new`; a
-        /// string key must be a valid NUL-terminated UTF-8 string.
+        /// string key must be a live registered native string or a valid
+        /// NUL-terminated C string.
         pub unsafe extern "C" fn $has(map: *const u8, key: $key_ty) -> u8 {
             unsafe { map_has::<$kind>(map, $encode(key)) as u8 }
         }
@@ -621,7 +623,8 @@ macro_rules! key_kind_functions {
         ///
         /// # Safety
         /// `map` must be a pointer returned by `thaw_map_new`; a string
-        /// key must be a valid NUL-terminated UTF-8 string; `value` must
+        /// key must be a live registered native string or a valid
+        /// NUL-terminated C string; `value` must
         /// be a bit pattern this key/value pair's codegen produced (see
         /// `__thaw_value_to_word` in `thaw-llvm`).
         pub unsafe extern "C" fn $set(map: *mut u8, key: $key_ty, value: u64) -> u8 {
@@ -633,7 +636,8 @@ macro_rules! key_kind_functions {
         ///
         /// # Safety
         /// `map` must be null or a pointer returned by `thaw_map_new`; a
-        /// string key must be a valid NUL-terminated UTF-8 string.
+        /// string key must be a live registered native string or a valid
+        /// NUL-terminated C string.
         pub unsafe extern "C" fn $delete(map: *mut u8, key: $key_ty) -> u8 {
             unsafe { map_delete::<$kind>(map, $encode(key)) as u8 }
         }
@@ -811,6 +815,25 @@ mod map_native_tests {
     }
 
     #[test]
+    fn str_keys_include_registered_bytes_after_embedded_nul() {
+        let map = unsafe { thaw_map_new() };
+        let ax = thaw_arena::arena_string(b"a\0x");
+        let ay = thaw_arena::arena_string(b"a\0y");
+        let a = thaw_arena::arena_string(b"a");
+        let ax_again = thaw_arena::arena_string(b"a\0x");
+        assert_eq!(unsafe { thaw_map_str_set(map, ax, value(1.0)) }, 1);
+        assert_eq!(unsafe { thaw_map_str_set(map, ay, value(2.0)) }, 1);
+        assert_eq!(unsafe { thaw_map_str_set(map, a, value(3.0)) }, 1);
+        assert_eq!(unsafe { thaw_map_size(map) }, 3.0);
+        assert_eq!(unsafe { thaw_map_str_get_f64(map, ax_again) }, 1.0);
+        assert_eq!(unsafe { thaw_map_str_get_f64(map, ay) }, 2.0);
+        assert_eq!(unsafe { thaw_map_str_get_f64(map, a) }, 3.0);
+        assert_eq!(unsafe { thaw_map_str_delete(map, ax_again) }, 1);
+        assert_eq!(unsafe { thaw_map_str_has(map, ay) }, 1);
+        assert_eq!(unsafe { thaw_map_size(map) }, 2.0);
+    }
+
+    #[test]
     fn ref_keyed_uses_pointer_identity_not_content() {
         let map = unsafe { thaw_map_new() };
         // Two distinct allocations that happen to hold identical bytes are
@@ -956,6 +979,7 @@ mod map_native_tests {
                 // handle: one more level of indirection than the raw pair
                 // buffer `arena_pair` builds. See `compile_array_wrap`'s
                 // doc comment in thaw-llvm.
+                assert_eq!(unsafe { ((handle as *const u8).add(8).cast::<u64>()).read() }, 0);
                 let pair = unsafe { (handle as *const u64).read() } as *mut u8;
                 let key = f64::from_bits(unsafe { pair.add(8).cast::<u64>().read() });
                 let value = f64::from_bits(unsafe { pair.add(16).cast::<u64>().read() });
