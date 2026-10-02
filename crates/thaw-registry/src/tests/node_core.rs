@@ -935,6 +935,59 @@ fn http2_hpack_reuses_dynamic_entries_across_streams() {
 }
 
 #[test]
+fn http2_hpack_zero_table_limit_is_not_replaced_by_default() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_hpack_zero");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  function encode(limit) {
+    var session = new http2.ClientHttp2Session(999975, 'tcp'), frames = [];
+    session._send = function(frame) { if (frame[3] === 1) frames.push(Buffer.from(frame.subarray(9))); return true; };
+    if (limit !== undefined) session._frame(4, 0, 0, Buffer.from([0, 1, 0, 0, 0, limit]));
+    var stream = new http2.ClientHttp2Stream(session, 1);
+    session._streams.set(1, stream);
+    session._sendHeaders(1, { 'x-repeat': 'value' }, false);
+    var firstSize = session._encoderTable.length;
+    session._sendHeaders(1, { 'x-repeat': 'value' }, false);
+    return [frames[0].equals(frames[1]), firstSize, session._encoderTable.length, frames[0].length > frames[1].length];
+  }
+  function decode(limit, update) {
+    var session = new http2.ServerHttp2Session(999976, 'tcp'), status;
+    if (limit !== undefined) session.localSettings.headerTableSize = limit;
+    session.on('stream', function(stream, headers) { status = headers[':status']; });
+    try { session._frame(1, 4, 1, Buffer.from([update, 0x88])); }
+    catch (error) { return error.message; }
+    return [status, session._decoderMaxSize];
+  }
+  return [encode(0), encode(128), encode(), decode(0, 0x21), decode(0, 0x20), decode(1, 0x21), decode(undefined, 0x21)];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_hpack_zero_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2HpackZero = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2HpackZero").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,0,0,false],[false,1,1,true],[false,1,1,true],"HPACK table size exceeds SETTINGS limit",["200",0],["200",1],["200",1]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn http2_tls_sessions_negotiate_h2_with_alpn() {
     use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
