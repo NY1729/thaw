@@ -38,6 +38,13 @@ pub struct AddedPackage {
     pub native_diagnostic: Option<String>,
 }
 
+// Match a complete target suffix in the package leaf, not a prefix of another
+// architecture or libc variant (for example, arm versus arm64).
+fn optional_dependency_matches_target(name: &str, marker: &str) -> bool {
+    let leaf = name.rsplit('/').next().unwrap_or(name);
+    leaf == marker || leaf.strip_suffix(marker).is_some_and(|prefix| prefix.ends_with('-'))
+}
+
 fn select_optional_dependency_executable(
     node_modules_dir: &Path,
     manifest: &serde_json::Value,
@@ -59,7 +66,7 @@ fn select_optional_dependency_executable(
     };
     for name in optional
         .keys()
-        .filter(|name| markers.iter().any(|marker| name.contains(marker)))
+        .filter(|name| markers.iter().any(|marker| optional_dependency_matches_target(name, marker)))
     {
         let root = node_modules_dir.join(name);
         if !root.is_dir() {
@@ -595,7 +602,7 @@ fn platform_shared_libraries(
         vec![format!("{platform}-{arch}"), format!("{platform}-{arch}-{libc}")]
     };
     let mut libraries = Vec::new();
-    for name in optional.keys().filter(|name| markers.iter().any(|marker| name.contains(marker))) {
+    for name in optional.keys().filter(|name| markers.iter().any(|marker| optional_dependency_matches_target(name, marker))) {
         let root = node_modules_dir.join(name);
         if !root.is_dir() {
             continue;
