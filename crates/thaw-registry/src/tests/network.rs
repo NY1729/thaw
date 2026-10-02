@@ -406,6 +406,53 @@ fn http_client_requests_and_parses_a_real_chunked_response() {
 }
 
 #[test]
+fn http_response_complete_waits_for_chunked_body_end() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nbody\r\n0\r\n\r\n").unwrap();
+    });
+
+    let dir = temp_registry("builtin_http_complete_after_body");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http = require('node:http'); module.exports = function(port) { return new Promise(function(resolve, reject) {
+          var request = http.get({ hostname: '127.0.0.1', port: port }, function(response) {
+            var atHeaders = response.complete, body = [];
+            response.on('data', function(chunk) { body.push(chunk.toString()); });
+            response.on('end', function() { resolve([atHeaders, body.join(''), response.complete]); });
+          }); request.on('error', reject);
+        }); };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_complete_after_body_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpCompleteAfterBody = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpCompleteAfterBody").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[false,"body",true]"#);
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn http_incoming_pause_buffers_chunked_body_and_resume_waits_for_end() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
@@ -630,7 +677,7 @@ fn http_client_upgrades_and_keeps_the_socket_duplex() {
     });
 
     let dir = temp_registry("builtin_http_client_upgrade");
-    fs::write(dir.join("index.js"), "var http = require('node:http'); module.exports = async function (port) { return new Promise(function(resolve, reject) { var request = http.request({ hostname: '127.0.0.1', port: port, path: '/', headers: { Connection: 'Upgrade', Upgrade: 'websocket' } }); request.on('error', reject); request.on('response', function() { reject(new Error('unexpected response')); }); request.on('upgrade', function(response, socket, head) { var result = [response.statusCode, head.toString()]; socket.on('data', function(data) { result.push(data.toString()); socket.destroy(); resolve(result); }); socket.write('ping'); }); request.end(); }); };").unwrap();
+    fs::write(dir.join("index.js"), "var http = require('node:http'); module.exports = async function (port) { return new Promise(function(resolve, reject) { var request = http.request({ hostname: '127.0.0.1', port: port, path: '/', headers: { Connection: 'Upgrade', Upgrade: 'websocket' } }); request.on('error', reject); request.on('response', function() { reject(new Error('unexpected response')); }); request.on('upgrade', function(response, socket, head) { var result = [response.statusCode, response.complete, head.toString()]; socket.on('data', function(data) { result.push(data.toString()); socket.destroy(); resolve(result); }); socket.write('ping'); }); request.end(); }); };").unwrap();
     let empty_node_modules = temp_registry("builtin_http_client_upgrade_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -641,7 +688,7 @@ fn http_client_upgrades_and_keeps_the_socket_duplex() {
     let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     assert_eq!(
         unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-        r#"[101,"head","pong"]"#
+        r#"[101,true,"head","pong"]"#
     );
     server.join().unwrap();
     let _ = fs::remove_dir_all(dir);
