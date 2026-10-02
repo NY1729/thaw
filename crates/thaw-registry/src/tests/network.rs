@@ -2433,3 +2433,314 @@ fn http_client_write_accepts_second_argument_callback() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn http_incoming_pipe_waits_for_all_drains_and_keeps_user_pause() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_pipe_backpressure");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events');
+module.exports = async function() {
+  var gate = false, socket = { _setHttpReadPaused: function(value) { gate = value; }, destroy: function() {} };
+  var message = new http.IncomingMessage(socket);
+  message._bodyReadGate = function() { socket._setHttpReadPaused(message._bodyBytes >= 16384 || message._blockedPipes()); };
+  message._bodyResume = function() { message._syncReadGate(); };
+  function destination() { var result = new EventEmitter(); result.seen = []; result.write = function(chunk) { this.seen.push(chunk.toString()); return this.seen.length > 1; }; result.end = function() {}; return result; }
+  var first = destination(), second = destination();
+  message.pipe(first); message.pipe(second);
+  message._queueBody(Buffer.from('A')); message._queueBody(Buffer.from('B'));
+  await Promise.resolve();
+  var initial = first.seen.join('') === 'A' && second.seen.join('') === 'A' && gate && message._bodyBytes === 1;
+  first.emit('drain'); await Promise.resolve();
+  var oneDrain = first.seen.length === 1 && second.seen.length === 1 && message._blockedPipes();
+  message.pause(); second.emit('drain'); await Promise.resolve();
+  var userPause = first.seen.length === 1 && second.seen.length === 1 && message.isPaused();
+  message.resume(); await Promise.resolve();
+  var resumed = first.seen.join('') === 'AB' && second.seen.join('') === 'AB' && !message._blockedPipes();
+  message.unpipe(first); message._abortBody();
+  var clean = first.listenerCount('drain') === 0 && second.listenerCount('drain') === 0 && message._pipeRecords.length === 0;
+
+  var synchronous = new http.IncomingMessage(null), syncDestination = new EventEmitter(), syncWrites = 0;
+  syncDestination.write = function() { syncWrites++; this.emit('drain'); return false; };
+  synchronous.pipe(syncDestination); synchronous._queueBody(Buffer.from('x')); await Promise.resolve();
+  var syncSafe = syncWrites === 1 && !synchronous._blockedPipes() && syncDestination.listenerCount('drain') === 0;
+
+  var reentrant = new http.IncomingMessage(null), removed = new EventEmitter(), removedWrites = 0, once = false;
+  removed.write = function() { removedWrites++; return false; };
+  removed.on('newListener', function(name) { if (name === 'drain' && !once) { once = true; reentrant.unpipe(removed); } });
+  reentrant.pipe(removed); reentrant._queueBody(Buffer.from('z')); await Promise.resolve();
+  var reentrySafe = removedWrites === 0 && removed.listenerCount('drain') === 0 && reentrant._pipeRecords.length === 0;
+  return [initial, oneDrain, userPause, resumed, clean, syncSafe, reentrySafe];
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_pipe_backpressure_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpPipeBackpressure = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpPipeBackpressure").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[true,true,true,true,true,true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_transport_gate_does_not_override_socket_pause_or_duplicate_pumps() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_transport_gate");
+    fs::write(dir.join("index.js"), r#"var net = require('node:net'), tls = require('node:tls');
+module.exports = async function() {
+  var originalNet = globalThis.__thaw_net_poll_read, originalTls = globalThis.__thaw_tls_poll_read, netPolls = 0, tlsPolls = 0;
+  globalThis.__thaw_net_poll_read = function() { netPolls++; return 'pending'; };
+  globalThis.__thaw_tls_poll_read = function() { tlsPolls++; return 'pending'; };
+  try {
+    var plain = new net.Socket(), secure = new tls.TLSSocket();
+    plain._handle = 999901; plain.readable = true;
+    secure._handle = 999902; secure.readable = true; secure._readReady = true; secure._isServer = true;
+    plain.pause(); secure.pause(); plain._startRead(); secure._startRead();
+    await Promise.resolve();
+    var userPause = netPolls === 0 && tlsPolls === 0;
+    plain._setHttpReadPaused(true); secure._setHttpReadPaused(true);
+    plain.resume(); secure.resume(); await Promise.resolve();
+    var httpGate = netPolls === 0 && tlsPolls === 0 && !plain.isPaused() && !secure.isPaused();
+    plain.pause(); secure.pause();
+    plain._setHttpReadPaused(false); secure._setHttpReadPaused(false); await Promise.resolve();
+    var independent = netPolls === 0 && tlsPolls === 0 && plain.isPaused() && secure.isPaused();
+    plain.resume(); secure.resume(); await Promise.resolve();
+    var first = netPolls === 1 && tlsPolls === 1;
+    plain._setHttpReadPaused(true); secure._setHttpReadPaused(true);
+    await new Promise(function(resolve) { setTimeout(resolve, 2); });
+    var stopped = netPolls === 1 && tlsPolls === 1;
+    plain._setHttpReadPaused(false); secure._setHttpReadPaused(false);
+    await Promise.resolve();
+    var restarted = netPolls === 2 && tlsPolls === 2;
+    plain._handle = 0; secure._handle = 0;
+    return [userPause, httpGate, independent, first, stopped, restarted];
+  } finally { globalThis.__thaw_net_poll_read = originalNet; globalThis.__thaw_tls_poll_read = originalTls; }
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_transport_gate_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpTransportGate = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpTransportGate").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[true,true,true,true,true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_paused_large_chunk_keeps_pipeline_behind_bounded_body() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut request = b"POST /first HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nc000\r\n".to_vec();
+        request.extend(vec![b'x'; 49152]);
+        request.extend_from_slice(b"\r\n0\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(&request).unwrap();
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            let length = head.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").and_then(|value| value.parse::<usize>().ok())).unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            bodies.push(body);
+        }
+        bodies
+    });
+
+    let dir = temp_registry("builtin_http_paused_large_chunk");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http');
+module.exports = async function(port) {
+  var count = 0, total = 0, snapshot, server = http.createServer(function(request, response) {
+    count++;
+    if (request.url === '/first') {
+      request.on('data', function(chunk) { total += chunk.length; });
+      request.on('end', function() { response.end('first'); });
+      request.pause();
+      var deadline = Date.now() + 1000; (function inspect() { if (request._bodyBytes === 16384 && request.socket._httpReadPaused) { snapshot = [request._bodyBytes, request.socket._httpReadPaused, count]; request.resume(); } else if (Date.now() < deadline) setTimeout(inspect, 1); else { snapshot = ['timeout', request._bodyBytes, count]; server.close(); } })();
+    } else response.end('second', function() { server.close(); });
+  });
+  await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); });
+  return [snapshot, total, count];
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_paused_large_chunk_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpPausedLargeChunk = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpPausedLargeChunk").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[[16384,true,1],49152,2]");
+    assert_eq!(client.join().unwrap(), [b"first".to_vec(), b"second".to_vec()]);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_client_large_chunk_drains_pending_before_deferred_eof_validation() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_client_pending_eof");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events');
+module.exports = async function() {
+  var socket = new EventEmitter(), response, total = 0, errors = [], closes = 0, gated = false;
+  socket.write = function() { return true; }; socket.destroy = function() { this.emit('close'); };
+  socket._setHttpReadPaused = function(value) { gated = value; };
+  var transport = { createConnection: function() { return socket; } };
+  var request = http.request('http://localhost/', { _transport: transport, agent: false }, function(value) {
+    response = value; response.on('data', function(chunk) { total += chunk.length; });
+    response.on('error', function(error) { errors.push(error.code || error.message); });
+    response.pause();
+  });
+  request.on('error', function(error) { errors.push(error.code || error.message); });
+  request.on('close', function() { closes++; });
+  request.end(); socket.emit('connect');
+  var packet = Buffer.concat([Buffer.from('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nc000\r\n'), Buffer.alloc(49152, 120), Buffer.from('\r\n0\r\n\r\n')]);
+  socket.emit('data', packet); socket.emit('end'); socket.emit('close');
+  var before = [response._bodyBytes, gated, total, response.aborted];
+  var finished = new Promise(function(resolve) { response.on('end', resolve); });
+  response.resume(); await finished;
+  return [before, total, response.complete, response.aborted, errors, closes];
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_client_pending_eof_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpClientPendingEof = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpClientPendingEof").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[[16384,true,0,false],49152,true,false,[],1]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_pipeline_waits_for_completed_but_unconsumed_request_body() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.write_all(b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nxGET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            let length = head.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").and_then(|value| value.parse::<usize>().ok())).unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            bodies.push(body);
+        }
+        bodies
+    });
+
+    let dir = temp_registry("builtin_http_pipeline_unconsumed");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http');
+module.exports = async function(port) {
+  var count = 0, snapshot, server = http.createServer(function(request, response) {
+    count++;
+    if (request.url === '/first') {
+      request.on('data', function() {});
+      request.pause();
+      response.end('first');
+      var deadline = Date.now() + 1000; (function inspect() { if (request.complete && request._bodyBytes === 1 && request.socket._httpReadPaused) { snapshot = [count, request._bodyBytes, request.socket._httpReadPaused]; request.resume(); } else if (Date.now() < deadline) setTimeout(inspect, 1); else { snapshot = ['timeout', count, request._bodyBytes]; server.close(); } })();
+    } else response.end('second', function() { server.close(); });
+  });
+  await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); });
+  return [snapshot, count];
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_pipeline_unconsumed_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpPipelineUnconsumed = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpPipelineUnconsumed").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[[1,1,true],2]");
+    assert_eq!(client.join().unwrap(), [b"first".to_vec(), b"second".to_vec()]);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_client_rejects_malformed_incremental_chunk_sizes() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_client_invalid_chunk_size");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events');
+module.exports = async function() {
+  var results = [];
+  for (var token of ['-1', '1junk', '20000000000000']) {
+    var socket = new EventEmitter(), response, errors = 0;
+    socket.write = function() { return true; }; socket.destroy = function() { this.emit('close'); };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } }, function(value) {
+      response = value; response.on('error', function(error) { if (error.message === 'Parse Error: Invalid chunk size') errors++; });
+    });
+    request.on('error', function(error) { if (error.message === 'Parse Error: Invalid chunk size') errors++; });
+    request.end(); socket.emit('connect');
+    socket.emit('data', Buffer.from('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + token + '\r\nx\r\n0\r\n\r\n'));
+    results.push(!!response && response.aborted && !response.complete && errors === 2);
+  }
+  return results;
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_client_invalid_chunk_size_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpInvalidChunkSize = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpInvalidChunkSize").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[true,true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
