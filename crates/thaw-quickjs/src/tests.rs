@@ -613,6 +613,24 @@ fn worker_transport_codec_preserves_graphs_and_builtins() {
 }
 
 #[test]
+fn url_preserves_params_reference_and_decodes_malformed_form_input() {
+    assert_eq!(load(r#"function checkUrlParamsIdentity() {
+        const check = (value, expected) => { if (value !== expected) throw new Error('URL assertion'); };
+        const url = new URL('https://example.test/?a=1'), params = url.searchParams;
+        url.search = '?b=2'; check(url.searchParams, params); check(params.get('a'), null); check(params.get('b'), '2');
+        params.append('c', '3'); check(url.search, '?b=2&c=3');
+        url.href = 'https://other.test/?d=4'; check(url.searchParams, params); check(params.get('b'), null); check(params.get('d'), '4');
+        params.set('d', 'updated'); check(url.search, '?d=updated');
+        const malformed = new URLSearchParams('raw=%zz%2&bad=%E0%80%80&bom=%EF%BB%BF&plus=a+b&unicode=雪');
+        check(malformed.get('raw'), '%zz%2'); check(malformed.get('bad'), '���');
+        check(malformed.get('bom'), '\uFEFF'); check(malformed.get('plus'), 'a b'); check(malformed.get('unicode'), '雪');
+        check(new URL('https://example.test/?x=%FF').searchParams.get('x'), '�');
+        return true;
+    }"#), 1);
+    assert_eq!(call("checkUrlParamsIdentity", "[]"), "true");
+}
+
+#[test]
 fn url_resolves_relative_paths_and_synchronizes_search_params() {
     assert_eq!(
             load(
