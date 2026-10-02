@@ -206,6 +206,9 @@ pub struct HirCompiler<'ctx> {
     /// Key by the exact LLVM cell value so branch/function map swaps need no mirror.
     pending_js_capture_claims: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
+    /// Frame slots holding the current fresh cell of captured `for (let ...)`
+    /// bindings. A resume reloads the pointer rather than sharing a value slot.
+    for_iteration_frame_slots: HashMap<String, PointerValue<'ctx>>,
     global_variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>, HirType)>,
     module_exception_roots: Vec<PointerValue<'ctx>>,
     function_return_types: HashMap<String, HirType>,
@@ -250,6 +253,7 @@ impl<'ctx> HirCompiler<'ctx> {
             arena_variables: HashSet::new(),
             pending_js_capture_claims: HashMap::new(),
             async_frame_cells: HashSet::new(),
+            for_iteration_frame_slots: HashMap::new(),
             global_variables: HashMap::new(),
             module_exception_roots: Vec::new(),
             function_return_types: HashMap::new(),
@@ -456,6 +460,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(guard.as_pointer_value(), bool_type.const_int(1, false))
             .map_err(|error| error.to_string())?;
         self.variables.clear();
+        self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
@@ -586,6 +591,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_store(state.as_pointer_value(), state_ty.const_int(1, false))
             .map_err(|error| error.to_string())?;
         self.variables.clear();
+        self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
@@ -1130,6 +1136,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(entry);
 
         self.variables.clear();
+        self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();

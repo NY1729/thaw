@@ -35,6 +35,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let entry = self.context.append_basic_block(ramp, "entry");
         self.builder.position_at_end(entry);
         self.variables.clear();
+        self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
@@ -81,6 +82,17 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(waiting_slot, ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
+        for (index, (name, _)) in plan.locals.iter().enumerate() {
+            if name.starts_with("@@thaw_for_iteration_") {
+                let slot = self.async_frame_field(
+                    frame,
+                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                    &format!("frame_{name}"),
+                )?;
+                self.builder.build_store(slot, ptr_ty.const_null())
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         self.bind_async_frame_locals(frame, plan)?;
         // Arena allocation is not zeroed outside tracing mode. Initialize
         // compiler-private provenance before any source statement executes.
@@ -122,6 +134,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let resume_entry = self.context.append_basic_block(resume, "entry");
         self.builder.position_at_end(resume_entry);
         self.variables.clear();
+        self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
@@ -389,6 +402,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, block) in case_blocks.into_iter().enumerate() {
             self.builder.position_at_end(block);
             self.variables.clear();
+            self.for_iteration_frame_slots.clear();
             self.catch_native_text.clear();
             self.variable_hir_types.clear();
             self.arena_variables.clear();
@@ -692,8 +706,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 &format!("frame_{name}"),
             )?;
             self.async_frame_cells.insert(slot);
-            self.variables
-                .insert(name.clone(), (slot, self.basic_type(ty)?));
+            if name.starts_with("@@thaw_for_iteration_") {
+                let cell = self.builder.build_load(
+                    self.context.ptr_type(AddressSpace::default()), slot,
+                    &format!("current_{name}"),
+                ).map_err(|error| error.to_string())?.into_pointer_value();
+                self.for_iteration_frame_slots.insert(name.clone(), slot);
+                self.arena_variables.insert(name.clone());
+                self.variables.insert(name.clone(), (cell, self.basic_type(ty)?));
+            } else {
+                self.variables.insert(name.clone(), (slot, self.basic_type(ty)?));
+            }
             self.variable_hir_types.insert(name.clone(), ty.clone());
         }
         for binding in &plan.generated_catch_bindings {
@@ -710,6 +733,43 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or_else(|| format!("missing async catch validity cell `{valid_name}`"))?;
             self.catch_native_text.insert(binding.clone(), (catch_slot, native_slot, original_slot, valid_slot));
         }
+        Ok(())
+    }
+
+    fn store_for_iteration_cell(
+        &mut self,
+        name: &str,
+        ty: &HirType,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        let frame_slot = *self.for_iteration_frame_slots.get(name)
+            .ok_or_else(|| format!("missing iteration frame slot for `{name}`"))?;
+        let llvm_ty = self.basic_type(ty)?;
+        let cell = self.build_arena_cell(&self.builder, llvm_ty, name)?;
+        self.builder.build_store(cell, value).map_err(|error| error.to_string())?;
+        self.builder.build_store(frame_slot, cell).map_err(|error| error.to_string())?;
+        self.variables.insert(name.to_string(), (cell, llvm_ty));
+        self.variable_hir_types.insert(name.to_string(), ty.clone());
+        self.arena_variables.insert(name.to_string());
+        if *ty == HirType::JsValue {
+            self.uses_quickjs = true;
+            self.uses_quickjs_handles = true;
+            self.builder.build_call(
+                self.module.get_function("thaw_js_retain_handle").unwrap(),
+                &[value.into()], "retain_iteration_js_handle",
+            ).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn reload_for_iteration_cell(&mut self, name: &str, ty: &HirType) -> Result<(), String> {
+        let slot = *self.for_iteration_frame_slots.get(name)
+            .ok_or_else(|| format!("missing iteration frame slot for `{name}`"))?;
+        let cell = self.builder.build_load(
+            self.context.ptr_type(AddressSpace::default()), slot,
+            &format!("current_{name}"),
+        ).map_err(|error| error.to_string())?.into_pointer_value();
+        self.variables.insert(name.to_string(), (cell, self.basic_type(ty)?));
         Ok(())
     }
 
@@ -785,21 +845,23 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|e| e.to_string())?;
                     self.builder.position_at_end(initialize);
                     let value = self.compile_expr(expr)?;
-                    let (slot, slot_ty) = self
-                        .variables
-                        .get(name)
-                        .copied()
-                        .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
-                    if slot_ty != self.basic_type(ty)? {
-                        return Err(format!("async frame local `{name}` changed type"));
+                    if self.for_iteration_frame_slots.contains_key(name) {
+                        self.store_for_iteration_cell(name, ty, value)?;
+                    } else {
+                        let (slot, slot_ty) = self.variables.get(name).copied()
+                            .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
+                        if slot_ty != self.basic_type(ty)? {
+                            return Err(format!("async frame local `{name}` changed type"));
+                        }
+                        self.builder.build_store(slot, value).map_err(|e| e.to_string())?;
                     }
-                    self.builder
-                        .build_store(slot, value)
-                        .map_err(|e| e.to_string())?;
                     self.builder
                         .build_unconditional_branch(continue_block)
                         .map_err(|e| e.to_string())?;
                     self.builder.position_at_end(continue_block);
+                    if self.for_iteration_frame_slots.contains_key(name) {
+                        self.reload_for_iteration_cell(name, ty)?;
+                    }
                     self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                     continue;
                 }
@@ -986,22 +1048,20 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             if let HirStmt::Let(name, ty, expr) = stmt {
                 let value = self.compile_expr(expr)?;
-                let index = plan
-                    .locals
-                    .iter()
-                    .position(|(local, _)| local == name)
-                    .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
-                let slot = self.async_frame_field(
-                    frame,
-                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
-                    &format!("frame_{name}"),
-                )?;
-                self.async_frame_cells.insert(slot);
-                self.builder
-                    .build_store(slot, value)
-                    .map_err(|e| e.to_string())?;
-                self.variables
-                    .insert(name.clone(), (slot, self.basic_type(ty)?));
+                if self.for_iteration_frame_slots.contains_key(name) {
+                    self.store_for_iteration_cell(name, ty, value)?;
+                } else {
+                    let index = plan.locals.iter().position(|(local, _)| local == name)
+                        .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
+                    let slot = self.async_frame_field(
+                        frame,
+                        self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                        &format!("frame_{name}"),
+                    )?;
+                    self.async_frame_cells.insert(slot);
+                    self.builder.build_store(slot, value).map_err(|e| e.to_string())?;
+                    self.variables.insert(name.clone(), (slot, self.basic_type(ty)?));
+                }
             } else if self.compile_stmt(stmt)? {
                 self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                 return Ok(AsyncBlockExit::Returned);
