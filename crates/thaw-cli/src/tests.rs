@@ -1585,3 +1585,29 @@ include!("tests/jit_analysis.rs");
 include!("tests/external_classes.rs");
 include!("tests/overload_inference.rs");
 include!("tests/x.rs");
+
+#[test]
+fn embedded_compat_and_package_bundle_names_are_logical_sources() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let compat = compat_case_source_name("nested parse");
+    assert_eq!(compat, FileName::Custom("compat case nested parse".into()));
+    let source = "function main(): void {}";
+    let (module, map) = thaw_parser::parse_typescript_with_source_map_named(source, compat.clone()).unwrap();
+    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &compat);
+
+    let bundle = registry_bundle_js_source_name("pkg", true);
+    assert_eq!(bundle, FileName::Custom("pkg bundle JavaScript".into()));
+    let (module, map) = thaw_parser::parse_javascript_with_source_map_named(
+        "exports.make = () => 1;", bundle.clone()).unwrap();
+    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &bundle);
+    assert_eq!(registry_bundle_js_source_name("pkg", false),
+        FileName::Custom("pkg missing bundle JavaScript".into()));
+
+    let function = thaw_bridge::parse_dts("export declare function make(): number;").unwrap().remove(0);
+    assert_eq!(jit_export_named("exports.make = () => 1;", &bundle, "make", true, &function).is_some(),
+        jit_export("exports.make = () => 1;", "make", true, &function).is_some());
+    assert!(jit_export_named("exports.make = ;", &bundle, "make", true, &function).is_none());
+    assert_eq!(jit_rejection_reason_named("exports.make = ;", &bundle, &function),
+        "package JavaScript could not be parsed for specialization");
+}
