@@ -573,10 +573,13 @@ fn decode_chunked(body: &[u8]) -> Result<Option<Vec<u8>>, String> {
             .map_err(|_| format!("invalid chunk size `{size_text}`"))?;
         cursor = line_end + 2;
         if size == 0 {
-            if body.len() < cursor + 2 {
+            let terminator_end = cursor
+                .checked_add(2)
+                .ok_or("chunk size overflows address space")?;
+            if body.len() < terminator_end {
                 return Ok(None);
             }
-            if &body[cursor..cursor + 2] == b"\r\n" {
+            if &body[cursor..terminator_end] == b"\r\n" {
                 return Ok(Some(decoded));
             }
             return if find_bytes(&body[cursor..], b"\r\n\r\n").is_some() {
@@ -588,14 +591,17 @@ fn decode_chunked(body: &[u8]) -> Result<Option<Vec<u8>>, String> {
         let chunk_end = cursor
             .checked_add(size)
             .ok_or("chunk size overflows address space")?;
-        if body.len() < chunk_end + 2 {
+        let terminator_end = chunk_end
+            .checked_add(2)
+            .ok_or("chunk size overflows address space")?;
+        if body.len() < terminator_end {
             return Ok(None);
         }
-        if &body[chunk_end..chunk_end + 2] != b"\r\n" {
+        if &body[chunk_end..terminator_end] != b"\r\n" {
             return Err("chunk data is missing its CRLF terminator".to_string());
         }
         decoded.extend_from_slice(&body[cursor..chunk_end]);
-        cursor = chunk_end + 2;
+        cursor = terminator_end;
     }
 }
 
