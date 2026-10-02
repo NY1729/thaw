@@ -133,6 +133,60 @@ fn logical_operators_short_circuit_sync_and_awaited_operands() {
 }
 
 #[test]
+fn blocking_await_preserves_typed_rejection_reason_in_short_circuit_expressions() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const reason = { marker: 7 };
+            try { console.log(true && (await Promise.reject<number>(41))); }
+            catch (error) { console.log(typeof error, (error as number) + 1); }
+            try { console.log(true && (await Promise.reject<boolean>(false))); }
+            catch (error) { console.log(typeof error, error === false); }
+            try { console.log(true && (await Promise.reject<number>(reason))); }
+            catch (error) { console.log(typeof error, error === reason); }
+            console.log(true && (await Promise.resolve(9)));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "blocking_await_typed_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("blocking_await_failed"), "expected blocking fallback: {ir}");
+    assert!(ir.contains("@thaw_promise_exception_tag"), "{ir}");
+    assert_eq!(
+        compile_and_run(source, "blocking_await_typed_reasons"),
+        "number 42\nboolean true\nobject true\n9\n"
+    );
+}
+
+#[test]
+fn native_callback_void_blocking_await_preserves_boolean_rejection() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b65566f6964(
+            callback: () => Promise<void>,
+        ): void;
+        function main(): void {
+            loadScript("globalThis.invokeVoid = callback => { try { callback(); } catch (error) { console.log(error instanceof Error, error.message === 'false'); } };");
+            __thaw_typed_js_696e766f6b65566f6964(
+                (): Promise<void> => Promise.reject<void>(false),
+            );
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "blocking_await_void_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("blocking_await_void_failed"), "expected void blocking fallback: {ir}");
+    assert_eq!(
+        compile_and_run(source, "blocking_await_void_reason"),
+        "true true\n"
+    );
+}
+
+#[test]
 fn compiles_string_template_literals_with_ordered_and_awaited_interpolation() {
     let source = r#"
         function word(label: string, value: string): string {
