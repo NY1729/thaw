@@ -450,7 +450,12 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    fn loop_closure_references(stmt: &Stmt, name: &str) -> bool {
+    fn loop_closure_references(
+        stmt: &Stmt,
+        test: Option<&Box<Expr>>,
+        update: Option<&Box<Expr>>,
+        name: &str,
+    ) -> bool {
         struct Finder<'a> {
             name: &'a str,
             closure_depth: usize,
@@ -481,6 +486,12 @@ impl<'a> FnLowerer<'a> {
             found: false,
         };
         stmt.visit_with(&mut finder);
+        if let Some(test) = test {
+            test.visit_with(&mut finder);
+        }
+        if let Some(update) = update {
+            update.visit_with(&mut finder);
+        }
         finder.found
     }
 
@@ -1273,15 +1284,15 @@ impl<'a> FnLowerer<'a> {
                             }
                             names
                                 .into_iter()
-                                .filter(|name| Self::loop_closure_references(&for_stmt.body, name))
+                                .filter(|name| Self::loop_closure_references(
+                                    &for_stmt.body,
+                                    for_stmt.test.as_ref(),
+                                    for_stmt.update.as_ref(),
+                                    name,
+                                ))
                                 .collect::<Vec<_>>()
                         }
                         _ => Vec::new(),
-                    };
-
-                    let cond = match &for_stmt.test {
-                        Some(test) => self.lower_condition_expr(test)?,
-                        None => HirExpr::Lit(HirLit::Bool(true)),
                     };
 
                     let loop_bindings = self.bindings.clone();
@@ -1291,21 +1302,23 @@ impl<'a> FnLowerer<'a> {
                         let ty = self.scope.get(&outer).cloned().ok_or_else(|| {
                             format!("unknown `for` iteration binding `{source}`")
                         })?;
-                        let inner = self.bind_local(&source, ty.clone());
+                        let inner = self.bind_for_iteration_local(&source, ty.clone());
                         iteration_bindings.push((outer, inner, ty));
                     }
+                    let cond = match &for_stmt.test {
+                        Some(test) => self.lower_condition_expr(test)?,
+                        None => HirExpr::Lit(HirLit::Bool(true)),
+                    };
                     let mut body = self.lower_loop_body(&for_stmt.body)?;
+                    let update = for_stmt.update.as_ref().map(|expr| self.lower_expr(expr)).transpose()?;
                     self.bindings = loop_bindings;
-                    let mut prefix = iteration_bindings
+                    let prefix = iteration_bindings
                         .iter()
                         .map(|(outer, inner, ty)| {
                             HirStmt::Let(inner.clone(), ty.clone(), HirExpr::Var(outer.clone()))
                         })
                         .collect::<Vec<_>>();
-                    prefix.append(&mut body);
-                    body = prefix;
-
-                    let mut advance = iteration_bindings
+                    let advance = iteration_bindings
                         .iter()
                         .map(|(outer, inner, _)| {
                             HirStmt::Expr(HirExpr::Assign(
@@ -1314,16 +1327,42 @@ impl<'a> FnLowerer<'a> {
                             ))
                         })
                         .collect::<Vec<_>>();
-                    if let Some(update) = &for_stmt.update {
-                        let update = self.lower_expr(update)?;
-                        advance.push(HirStmt::Expr(update));
-                    }
-                    if !advance.is_empty() {
+                    if iteration_bindings.is_empty() {
+                        let mut advance = advance;
+                        if let Some(update) = update {
+                            advance.push(HirStmt::Expr(update));
+                        }
+                        if !advance.is_empty() {
+                            body = inject_for_advance_before_continue(body, &advance);
+                            body.extend(advance);
+                        }
+                        out.push(HirStmt::While(cond, body));
+                    } else {
+                        // The first environment exists before the first test. Each
+                        // following environment is copied from the preceding body's
+                        // final values before update, then retained by that test and
+                        // body (including closures created in either expression).
+                        let first = format!("@@thaw_for_first_{}", self.next_binding);
+                        self.next_binding += 1;
+                        out.push(HirStmt::Let(first.clone(), HirType::Bool,
+                            HirExpr::Lit(HirLit::Bool(true))));
+                        let mut next = prefix;
+                        let mut update_branch = Vec::new();
+                        if let Some(update) = update {
+                            update_branch.push(HirStmt::Expr(update));
+                        }
+                        next.push(HirStmt::If(
+                            HirExpr::Var(first.clone()),
+                            vec![HirStmt::Expr(HirExpr::Assign(first,
+                                Box::new(HirExpr::Lit(HirLit::Bool(false)))))],
+                            update_branch,
+                        ));
+                        next.push(HirStmt::If(cond, Vec::new(), vec![HirStmt::Break]));
                         body = inject_for_advance_before_continue(body, &advance);
-                        body.extend(advance);
+                        next.extend(body);
+                        next.extend(advance);
+                        out.push(HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), next));
                     }
-
-                    out.push(HirStmt::While(cond, body));
                     Ok(out)
                 })();
                 self.bindings = saved;

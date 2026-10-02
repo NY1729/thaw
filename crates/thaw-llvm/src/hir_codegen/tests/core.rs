@@ -1180,6 +1180,93 @@ fn for_let_closures_capture_each_iteration_binding() {
 }
 
 #[test]
+fn for_let_test_and_update_closures_share_their_iteration() {
+    let source = r#"
+        function main(): void {
+            const tests: (() => number)[] = [];
+            const updates: (() => number)[] = [];
+            const bodies: (() => number)[] = [];
+            for (let i = 0; (tests.push((): number => i), i < 3);
+                 (updates.push((): number => i), i++)) {
+                bodies.push((): number => i);
+                if (i === 1) continue;
+            }
+            console.log(tests[0](), tests[1](), tests[2](), tests[3]());
+            console.log(updates[0](), updates[1](), updates[2]());
+            console.log(bodies[0](), bodies[1](), bodies[2]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "for_test_update_cells"),
+        "0 1 2 3\n1 2 3\n0 1 2\n");
+}
+
+#[test]
+fn for_let_capture_detection_includes_test_and_update_without_body_capture() {
+    let source = r#"
+        function main(): void {
+            const tests: (() => number)[] = [];
+            for (let i = 0; (tests.push((): number => i), i < 2); i++) {}
+            const updates: (() => number)[] = [];
+            for (let j = 0; j < 2; (updates.push((): number => j), j++)) {}
+            console.log(tests[0](), tests[1](), tests[2]());
+            console.log(updates[0](), updates[1]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "for_header_only_captures"),
+        "0 1 2\n1 2\n");
+}
+
+#[test]
+fn for_let_body_mutation_flows_through_continue_into_next_update() {
+    let source = r#"
+        function main(): void {
+            const bodies: (() => number)[] = [];
+            const updates: (() => number)[] = [];
+            for (let i = 0; i < 4; (updates.push((): number => i), i++)) {
+                bodies.push((): number => i);
+                if (i === 0) { i = 2; continue; }
+            }
+            console.log(bodies[0](), bodies[1]());
+            console.log(updates[0](), updates[1]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "for_continue_cells"), "2 3\n3 4\n");
+}
+
+#[test]
+fn async_for_let_closures_keep_distinct_cells_across_await() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const callbacks: (() => number)[] = [];
+            for (let i = 0; i < 3; i++) {
+                callbacks.push((): number => i);
+                await sleep(1);
+            }
+            console.log(callbacks[0](), callbacks[1](), callbacks[2]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_for_iteration_cells"), "0 1 2\n");
+}
+
+#[test]
+fn async_for_let_header_closures_share_updated_cells_after_resume() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const tests: (() => number)[] = [];
+            const updates: (() => number)[] = [];
+            for (let i = 0; (tests.push((): number => i), i < 2);
+                 (updates.push((): number => i), i++)) {
+                await sleep(1);
+            }
+            console.log(tests[0](), tests[1](), tests[2]());
+            console.log(updates[0](), updates[1]());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_for_header_cells"),
+        "0 1 2\n1 2\n");
+}
+
+#[test]
 fn returned_closures_share_one_promoted_arena_cell() {
     let source = r#"
         type Counter = { increment: () => number; read: () => number };
