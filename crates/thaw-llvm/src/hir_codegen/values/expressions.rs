@@ -136,6 +136,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(ptr, val)
                     .map_err(|e| e.to_string())?;
+                if let Some((catch_slot, _, _, valid_slot)) = self.catch_native_text.get(name) {
+                    if *catch_slot == ptr {
+                        self.builder.build_store(*valid_slot,
+                            self.context.bool_type().const_zero())
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
                 Ok(val)
             }
             HirExpr::PostfixUpdate(name, op) => {

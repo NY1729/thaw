@@ -199,7 +199,7 @@ pub struct HirCompiler<'ctx> {
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     /// Only compiler-created catch cells enter this map; source-visible names
     /// (including a matching metadata suffix) never establish provenance.
-    catch_native_text: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>)>,
+    catch_native_text: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
     arena_variables: HashSet<String>,
     /// Only prepromoted JsValue cells have a pending first-capture retain.
@@ -801,64 +801,109 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    fn async_catch_valid_name(name: &str) -> String {
+        format!("@@thaw_catch_original_valid:{name}")
+    }
+
+    fn async_catch_original_name(name: &str) -> String {
+        format!("@@thaw_catch_original_value:{name}")
+    }
+
     fn async_catch_native_name(name: &str) -> String {
         // `@` is not valid in a TypeScript binding. The frame cell is reserved
         // for compiler-generated catch state and cannot be forged by a user Var.
         format!("@@thaw_catch_native_text:{name}")
     }
 
-    /// Preserve an explicitly captured catch string only when rethrowing the
-    /// same binding. Every other ThrowValue keeps the opaque public ABI.
-    fn reject_caught_or_opaque_value(
+    /// Restore the tuple captured at the catch boundary only while its visible
+    /// binding still holds the original value. A source assignment invalidates
+    /// the original slot, so an overwritten catch is thrown as an opaque value.
+    fn restore_caught_exception_tuple(
         &self,
+        error: PointerValue<'ctx>,
+        expression: &HirExpr,
+    ) -> Result<bool, String> {
+        let HirExpr::Var(binding) = expression else { return Ok(false) };
+        let Some((catch_slot, native_slot, original_slot, valid_slot)) = self.catch_native_text.get(binding) else {
+            return Ok(false);
+        };
+        if self.variables.get(binding).map(|(slot, _)| slot) != Some(catch_slot) {
+            return Ok(false);
+        }
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let original = self.builder.build_load(ptr, *original_slot, "caught_original_value")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        let same = self.builder.build_int_compare(IntPredicate::EQ,
+            self.builder.build_ptr_to_int(error, self.context.i64_type(), "rethrow_error_bits")
+                .map_err(|error| error.to_string())?,
+            self.builder.build_ptr_to_int(original, self.context.i64_type(), "rethrow_original_bits")
+                .map_err(|error| error.to_string())?,
+            "rethrow_original_matches",
+        ).map_err(|error| error.to_string())?;
+        let original_valid = self.builder.build_load(self.context.bool_type(), *valid_slot,
+            "rethrow_original_valid").map_err(|error| error.to_string())?.into_int_value();
+        let same = self.builder.build_and(same, original_valid, "rethrow_unchanged_catch")
+            .map_err(|error| error.to_string())?;
+        let native = self.builder.build_load(ptr, *native_slot, "caught_native_text")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        let matching_text = self.builder.build_int_compare(IntPredicate::EQ,
+            self.builder.build_ptr_to_int(error, self.context.i64_type(), "caught_error_bits")
+                .map_err(|error| error.to_string())?,
+            self.builder.build_ptr_to_int(native, self.context.i64_type(), "caught_native_bits")
+                .map_err(|error| error.to_string())?,
+            "caught_native_matches",
+        ).map_err(|error| error.to_string())?;
+        let native_present = self.builder.build_is_not_null(native, "caught_native_present")
+            .map_err(|error| error.to_string())?;
+        let trusted = self.builder.build_and(same,
+            self.builder.build_and(matching_text, native_present, "caught_native_matches_present")
+                .map_err(|error| error.to_string())?,
+            "caught_native_trusted",
+        ).map_err(|error| error.to_string())?;
+        let native = self.builder.build_select(trusted, native, ptr.const_null(), "rethrow_native_text")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), native)
+            .map_err(|error| error.to_string())?;
+        let metadata: [(&str, PointerValue<'ctx>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool); 6] = [
+            ("aggregate", self.pending_exception_aggregate_errors().as_pointer_value(),
+                BasicTypeEnum::from(ptr), ptr.const_null().into(), true),
+            ("object", self.pending_exception_object().as_pointer_value(),
+                BasicTypeEnum::from(ptr), ptr.const_null().into(), false),
+            ("tag", self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                self.context.i64_type().into(), self.context.i64_type().const_int(4, false).into(), false),
+            ("f64", self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
+                self.context.f64_type().into(), self.context.f64_type().const_zero().into(), false),
+            ("i64", self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
+                self.context.i64_type().into(), self.context.i64_type().const_zero().into(), false),
+            ("bool", self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
+                self.context.bool_type().into(), self.context.bool_type().const_zero().into(), false),
+        ];
+        for (suffix, global, ty, zero, require_trusted) in metadata {
+            let name = format!("{binding}__thaw_exception_{suffix}");
+            let (slot, _) = self.variables.get(&name)
+                .ok_or_else(|| format!("missing caught exception metadata `{name}`"))?;
+            let value = self.builder.build_load(ty, *slot, "caught_rethrow_metadata")
+                .map_err(|error| error.to_string())?;
+            let value = self.builder.build_select(if require_trusted { trusted } else { same },
+                value, zero, "selected_rethrow_metadata")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(global, value).map_err(|error| error.to_string())?;
+        }
+        Ok(true)
+    }
+
+    fn reject_caught_or_opaque_value(
+        &mut self,
         completion: PointerValue<'ctx>,
         error: PointerValue<'ctx>,
         expression: &HirExpr,
         name: &str,
     ) -> Result<(), String> {
-        if let HirExpr::Var(binding) = expression {
-            if let Some((catch_slot, native_slot)) = self.catch_native_text.get(binding) {
-                if self.variables.get(binding).map(|(slot, _)| slot) != Some(catch_slot) {
-                    // A source binding shadowed the compiler-created catch.
-                    return self.reject_opaque_value(completion, error, name);
-                }
-                let native_text = self.builder.build_load(
-                    self.context.ptr_type(AddressSpace::default()), *native_slot,
-                    "caught_rethrow_native_text",
-                ).map_err(|error| error.to_string())?;
-                let aggregate = if let Some((slot, _)) = self.variables.get(&format!("{binding}__thaw_exception_aggregate")) {
-                    self.builder.build_load(self.context.ptr_type(AddressSpace::default()), *slot,
-                        "caught_rethrow_aggregate_errors").map_err(|error| error.to_string())?.into_pointer_value()
-                } else {
-                    self.context.ptr_type(AddressSpace::default()).const_null()
-                };
-                let error_bits = self.builder.build_ptr_to_int(error, self.context.i64_type(),
-                    "caught_rethrow_error_bits").map_err(|error| error.to_string())?;
-                let native_bits = self.builder.build_ptr_to_int(native_text.into_pointer_value(), self.context.i64_type(),
-                    "caught_rethrow_native_bits").map_err(|error| error.to_string())?;
-                let matching = self.builder.build_int_compare(IntPredicate::EQ, error_bits, native_bits,
-                    "caught_rethrow_text_matches").map_err(|error| error.to_string())?;
-                let nonnull = self.builder.build_is_not_null(native_text.into_pointer_value(),
-                    "caught_rethrow_has_native_text").map_err(|error| error.to_string())?;
-                let trusted = self.builder.build_and(matching, nonnull, "caught_rethrow_trusted_pair")
-                    .map_err(|error| error.to_string())?;
-                let aggregate = self.builder.build_select(trusted, aggregate,
-                    self.context.ptr_type(AddressSpace::default()).const_null(), "caught_rethrow_paired_aggregate")
-                    .map_err(|error| error.to_string())?;
-                self.builder.build_call(
-                    self.module.get_function("thaw_promise_reject_typed_with_aggregate").unwrap(),
-                    &[
-                        completion.into(), error.into(), self.context.i64_type().const_zero().into(),
-                        self.context.f64_type().const_zero().into(), self.context.i64_type().const_zero().into(),
-                        self.context.bool_type().const_zero().into(),
-                        self.context.ptr_type(AddressSpace::default()).const_null().into(), native_text.into(),
-                        aggregate.into(),
-                    ], name,
-                ).map_err(|error| error.to_string())?;
-                return Ok(());
-            }
+        if self.restore_caught_exception_tuple(error, expression)? {
+            self.reject_promise_with_pending_exception(completion, error, name)
+        } else {
+            self.reject_opaque_value(completion, error, name)
         }
-        self.reject_opaque_value(completion, error, name)
     }
 
     fn reject_opaque_value(&self, completion: PointerValue<'ctx>, error: PointerValue<'ctx>, name: &str) -> Result<(), String> {

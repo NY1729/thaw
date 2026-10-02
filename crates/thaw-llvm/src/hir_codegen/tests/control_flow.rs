@@ -1184,3 +1184,106 @@ fn instanceof_guard_skips_object_access_for_an_unrelated_thrown_value() {
         "not a MyError\nplain string\n"
     );
 }
+
+#[test]
+fn generators_close_after_uncaught_throw_and_keep_caught_throws_resumable() {
+    let source = r#"
+        function* syncValues(): Generator<number> { yield 1; throw "sync boom"; }
+        async function* asyncValues(): AsyncGenerator<number> { yield 2; await sleep(1); throw "async boom"; }
+        function* caught(): Generator<number> { try { throw "caught"; } catch (e) { yield 3; } yield 4; }
+        async function main(): Promise<void> {
+            const s = syncValues(); console.log(s.next().value);
+            try { s.next(); } catch (e) { console.log(e); }
+            console.log(s.next().done, s.next().value);
+            const a = asyncValues(); console.log((await a.next()).value);
+            try { await a.next(); } catch (e) { console.log(e); }
+            console.log((await a.next()).done, (await a.next()).value);
+            const c = caught(); console.log(c.next().value, c.next().value, c.next().done);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generator_uncaught_completion"),
+        "1\nsync boom\ntrue undefined\n2\nasync boom\ntrue undefined\n3 4 true\n");
+}
+
+#[test]
+fn async_generators_close_without_erasing_caught_rejection_metadata() {
+    let source = r#"
+        async function* typed(): AsyncGenerator<number> {
+            yield 1;
+            await sleep(1);
+            throw new TypeError("typed boom");
+        }
+        async function* numeric(): AsyncGenerator<number> {
+            yield 2;
+            await sleep(1);
+            throw 42;
+        }
+        async function failNested(): Promise<void> {
+            await sleep(1);
+            throw new TypeError("nested boom");
+        }
+        async function* nested(): AsyncGenerator<number> {
+            yield 3;
+            try { await failNested(); }
+            catch (error) {
+                try { throw "inner"; } catch (ignored) {}
+                throw error;
+            }
+        }
+        async function* reassigned(): AsyncGenerator<number> {
+            yield 4;
+            try { await failNested(); }
+            catch (error) { error = "replacement"; throw error; }
+        }
+        async function main(): Promise<void> {
+            const a = typed();
+            console.log((await a.next()).value);
+            try { await a.next(); }
+            catch (error) { console.log(error instanceof TypeError, error.message); }
+            console.log((await a.next()).done);
+            const b = numeric();
+            console.log((await b.next()).value);
+            try { await b.next(); }
+            catch (error) { console.log(typeof error, (error as number) + 1); }
+            console.log((await b.next()).done);
+            const c = nested();
+            console.log((await c.next()).value);
+            try { await c.next(); }
+            catch (error) { console.log(error instanceof TypeError, error.message); }
+            console.log((await c.next()).done);
+            const d = reassigned();
+            console.log((await d.next()).value);
+            try { await d.next(); }
+            catch (error) { console.log(error instanceof TypeError, error); }
+            console.log((await d.next()).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_uncaught_typed_completion"),
+        "1\ntrue typed boom\ntrue\n2\nnumber 43\ntrue\n3\ntrue nested boom\ntrue\n4\nfalse replacement\ntrue\n"
+    );
+}
+
+#[test]
+fn guarded_async_direct_throws_keep_string_and_typed_rejection_metadata() {
+    let source = r#"
+        async function stringFailure(): Promise<void> {
+            try { await sleep(1); throw "seed"; }
+            catch (ignored) { throw "direct text"; }
+        }
+        async function typedFailure(): Promise<void> {
+            try { await sleep(1); throw "seed"; }
+            catch (ignored) { throw new TypeError("direct typed"); }
+        }
+        async function main(): Promise<void> {
+            try { await stringFailure(); }
+            catch (error) { console.log(typeof error, error === "direct text"); }
+            try { await typedFailure(); }
+            catch (error) { console.log(error instanceof TypeError, error.message); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "guarded_async_direct_throw_metadata"),
+        "string true\ntrue direct typed\n"
+    );
+}
