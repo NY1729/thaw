@@ -661,13 +661,45 @@ impl<'a> FnLowerer<'a> {
                 .collect::<Result<Vec<_>, String>>()?;
             return Ok(HirExpr::JsonObjectLit(fields, element.as_ref().clone()));
         }
+        // A referenced union alias can nest an absence wrapper inside
+        // another wrapper or a union. Flatten those tags before assigning
+        // the canonical result layout; each branch still owns one value.
+        if matches!(declared, HirType::Union(_) | HirType::Optional(_)
+            | HirType::Nullable(_) | HirType::Nullish(_)) {
+            let actual = self.infer_expr_type(&value)?;
+            let nested_wrapper = match &actual {
+                HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+                    matches!(inner.as_ref(), HirType::Optional(_) | HirType::Nullable(_)
+                        | HirType::Nullish(_))
+                    || matches!(inner.as_ref(), HirType::Union(parts)
+                        if parts.iter().any(|part| matches!(part, HirType::Optional(_)
+                            | HirType::Nullable(_) | HirType::Nullish(_))))
+                }
+                _ => false,
+            };
+            let union_into_wrapper = matches!((&actual, declared),
+                (HirType::Union(_), HirType::Optional(_) | HirType::Nullable(_)
+                    | HirType::Nullish(_)));
+            let union_with_nested_wrapper = matches!((&actual, declared),
+                (HirType::Union(parts), HirType::Union(_)) if parts.iter().any(|part|
+                    matches!(part, HirType::Optional(_) | HirType::Nullable(_)
+                        | HirType::Nullish(_))));
+            let direct_member = matches!(declared, HirType::Union(elements)
+                if elements.contains(&actual));
+            if actual != *declared && !direct_member && (nested_wrapper || union_into_wrapper || union_with_nested_wrapper) {
+                return self.coerce_composite_to_declared(declared, value, actual);
+            }
+        }
         if let HirType::Union(elements) = declared {
             let actual = self.infer_expr_type(&value)?;
             if &actual == declared {
                 return Ok(value);
             }
             if let HirType::Union(source) = &actual {
-                if equivalent_union_members(source, elements) {
+                // Widen a source union as well as reordering equivalent
+                // members. Logical expressions can add a right-hand type
+                // while retaining every left-hand alternative.
+                if source.iter().all(|member| elements.contains(member)) {
                     let parameter = "__thaw_union_retag_value".to_string();
                     let mut statements = Vec::with_capacity(source.len());
                     for (source_index, member) in source.iter().enumerate() {
@@ -776,7 +808,42 @@ impl<'a> FnLowerer<'a> {
             };
         }
         if let HirType::Nullish(payload) = declared {
-            return match self.infer_expr_type(&value)? {
+            let actual = self.infer_expr_type(&value)?;
+            // Widen a one-absence wrapper without losing which absence it
+            // carried. This is needed when the two sides of `&&` contribute
+            // null and undefined separately.
+            if let HirType::Optional(source) | HirType::Nullable(source) = &actual {
+                if source == payload {
+                    let parameter = "__thaw_nullish_widen".to_string();
+                    let left = HirExpr::Var(parameter.clone());
+                    let (absent, absent_value, present_value) = match &actual {
+                        HirType::Optional(_) => (
+                            HirExpr::OptionalIsNone(Box::new(left.clone()), source.as_ref().clone()),
+                            HirExpr::NullishUndefined(payload.as_ref().clone()),
+                            HirExpr::OptionalValue(Box::new(left), source.as_ref().clone()),
+                        ),
+                        HirType::Nullable(_) => (
+                            HirExpr::NullableIsNone(Box::new(left.clone()), source.as_ref().clone()),
+                            HirExpr::NullishNull(payload.as_ref().clone()),
+                            HirExpr::NullableValue(Box::new(left), source.as_ref().clone()),
+                        ),
+                        _ => unreachable!(),
+                    };
+                    let adapter = HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam { name: parameter, ty: actual }],
+                        declared.clone(),
+                        Box::new(HirExpr::Block(vec![
+                            HirStmt::If(absent, vec![HirStmt::Return(Some(absent_value))], Vec::new()),
+                            HirStmt::Return(Some(HirExpr::NullishSome(
+                                Box::new(present_value), payload.as_ref().clone(),
+                            ))),
+                        ])),
+                    );
+                    return Ok(HirExpr::Call(Box::new(adapter), vec![value]));
+                }
+            }
+            return match actual {
                 HirType::Null => Ok(HirExpr::NullishNull(payload.as_ref().clone())),
                 HirType::Undefined => Ok(HirExpr::NullishUndefined(payload.as_ref().clone())),
                 actual if actual == *declared => Ok(value),
@@ -864,13 +931,83 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::ObjectLit(reordered))
     }
 
+    /// Normalize nested alias wrappers and unions one tag at a time. The
+    /// value is captured as one lambda argument before any branch inspects
+    /// it; recursive coercion only evaluates the selected payload.
+    fn coerce_composite_to_declared(
+        &mut self,
+        declared: &HirType,
+        value: HirExpr,
+        source: HirType,
+    ) -> Result<HirExpr, String> {
+        let parameter = format!("__thaw_flatten_absence_{}", self.next_binding);
+        self.next_binding += 1;
+        let previous = self.scope.insert(parameter.clone(), source.clone());
+        let result = (|| -> Result<HirExpr, String> {
+            let current = HirExpr::Var(parameter.clone());
+            let mut statements = Vec::new();
+            match &source {
+                HirType::Optional(payload) => {
+                    let absent = self.coerce_to_declared(declared, HirExpr::Lit(HirLit::Undefined))?;
+                    statements.push(HirStmt::If(HirExpr::OptionalIsNone(Box::new(current.clone()),
+                        payload.as_ref().clone()), vec![HirStmt::Return(Some(absent))], Vec::new()));
+                    let inner = HirExpr::OptionalValue(Box::new(current), payload.as_ref().clone());
+                    statements.push(HirStmt::Return(Some(self.coerce_to_declared(declared, inner)?)));
+                }
+                HirType::Nullable(payload) => {
+                    let absent = self.coerce_to_declared(declared, HirExpr::Lit(HirLit::Null))?;
+                    statements.push(HirStmt::If(HirExpr::NullableIsNone(Box::new(current.clone()),
+                        payload.as_ref().clone()), vec![HirStmt::Return(Some(absent))], Vec::new()));
+                    let inner = HirExpr::NullableValue(Box::new(current), payload.as_ref().clone());
+                    statements.push(HirStmt::Return(Some(self.coerce_to_declared(declared, inner)?)));
+                }
+                HirType::Nullish(payload) => {
+                    let null = self.coerce_to_declared(declared, HirExpr::Lit(HirLit::Null))?;
+                    statements.push(HirStmt::If(HirExpr::NullishIsNull(Box::new(current.clone()),
+                        payload.as_ref().clone()), vec![HirStmt::Return(Some(null))], Vec::new()));
+                    let undefined = self.coerce_to_declared(declared, HirExpr::Lit(HirLit::Undefined))?;
+                    statements.push(HirStmt::If(HirExpr::NullishIsUndefined(Box::new(current.clone()),
+                        payload.as_ref().clone()), vec![HirStmt::Return(Some(undefined))], Vec::new()));
+                    let inner = HirExpr::NullishValue(Box::new(current), payload.as_ref().clone());
+                    statements.push(HirStmt::Return(Some(self.coerce_to_declared(declared, inner)?)));
+                }
+                HirType::Union(members) => {
+                    if members.is_empty() {
+                        return Err("cannot coerce an empty union".into());
+                    }
+                    for (index, member) in members.iter().enumerate() {
+                        let inner = HirExpr::UnionValue(Box::new(current.clone()), index, members.clone());
+                        let adapted = self.coerce_to_declared(declared, inner)?;
+                        if index + 1 == members.len() {
+                            statements.push(HirStmt::Return(Some(adapted)));
+                        } else {
+                            statements.push(HirStmt::If(HirExpr::BinOp(BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(Box::new(current.clone()), members.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64)))),
+                                vec![HirStmt::Return(Some(adapted))], Vec::new()));
+                        }
+                    }
+                }
+                _ => unreachable!("composite coercion requires a wrapper or union"),
+            }
+            let adapter = HirExpr::Lambda(Vec::new(), vec![HirParam { name: parameter.clone(), ty: source }],
+                declared.clone(), Box::new(HirExpr::Block(statements)));
+            Ok(HirExpr::Call(Box::new(adapter), vec![value]))
+        })();
+        match previous {
+            Some(previous) => { self.scope.insert(parameter, previous); }
+            None => { self.scope.remove(&parameter); }
+        }
+        result
+    }
+
     /// Re-tags an `Optional`/`Nullable`/`Nullish` value into a `Union`
     /// that already contains its payload type and its absent form(s)
     /// (`Undefined` / `Null`). Returns `None` when `actual` isn't one of
     /// those, or the union doesn't fully cover it (so the caller can fall
     /// through to its existing error).
     fn retag_nullish_into_union(
-        &self,
+        &mut self,
         actual: &HirType,
         elements: &[HirType],
         value: &HirExpr,
@@ -919,9 +1056,14 @@ impl<'a> FnLowerer<'a> {
             ),
             _ => return Ok(None),
         };
-        let Some(payload_slot) = slot(payload) else {
+        // An alias can make the payload itself a union. The target may
+        // spell its leaves separately, so re-tag that payload through the
+        // ordinary subset-union adapter instead of requiring one slot.
+        let payload_slot = slot(payload);
+        if payload_slot.is_none() && !matches!(payload, HirType::Union(parts)
+            if parts.iter().all(|part| slot(part).is_some())) {
             return Ok(None);
-        };
+        }
         let mut absent_slots = Vec::with_capacity(arms.len());
         for (_, literal) in &arms {
             let absent_ty = match literal {
@@ -962,11 +1104,19 @@ impl<'a> FnLowerer<'a> {
                 Vec::new(),
             ));
         }
-        statements.push(HirStmt::Return(Some(HirExpr::UnionInject(
-            Box::new(payload_value),
-            payload_slot,
-            elements.to_vec(),
-        ))));
+        let tagged_payload = if let Some(payload_slot) = payload_slot {
+            HirExpr::UnionInject(Box::new(payload_value), payload_slot, elements.to_vec())
+        } else {
+            let parameter = "__thaw_nullish_retag".to_string();
+            let previous = self.scope.insert(parameter.clone(), actual.clone());
+            let result = self.coerce_to_declared(&HirType::Union(elements.to_vec()), payload_value);
+            match previous {
+                Some(previous) => { self.scope.insert(parameter, previous); }
+                None => { self.scope.remove(&parameter); }
+            }
+            result?
+        };
+        statements.push(HirStmt::Return(Some(tagged_payload)));
         let adapter = HirExpr::Lambda(
             Vec::new(),
             vec![HirParam {

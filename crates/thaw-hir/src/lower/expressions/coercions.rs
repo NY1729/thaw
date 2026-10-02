@@ -176,11 +176,8 @@ impl<'a> FnLowerer<'a> {
             );
             lhs_type = HirType::Json;
         }
-        // `x && rhs` where `x: T | null` (`| undefined`): result is
-        // `rhs | null` -- `null` when `x` is absent, otherwise `rhs`
-        // (evaluated with `x` narrowed to `T`, as the caller already
-        // lowered it). A present-but-falsy payload (`""`, `0`) is folded
-        // into the absent case.
+        // Nullish left operands need their own result conversion, because
+        // the falsy branch must return the original tagged value.
         if let HirType::Nullable(_) | HirType::Optional(_) | HirType::Nullish(_) = &lhs_type {
             return if is_and {
                 self.lower_nullish_and(lhs, lhs_type, rhs, rhs_type)
@@ -228,10 +225,8 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
 
-    /// `x && rhs` for an `Optional`/`Nullable`/`Nullish` `x`: an IIFE
-    /// that returns `rhs` (wrapped in `x`'s absent-form kind, payload =
-    /// `rhs`'s type) when `x` is present-and-truthy, and the absent form
-    /// otherwise.
+    /// `&&` returns its original left operand whenever it is falsy,
+    /// including a present 0, false, empty string or NaN.
     fn lower_nullish_and(
         &mut self,
         lhs: HirExpr,
@@ -239,30 +234,91 @@ impl<'a> FnLowerer<'a> {
         rhs: HirExpr,
         rhs_type: HirType,
     ) -> Result<HirExpr, String> {
+        let payload = match &lhs_type {
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) =>
+                payload.as_ref().clone(),
+            _ => unreachable!(),
+        };
         let name = format!("__thaw_nullish_and_left_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(name.clone(), lhs_type.clone());
         let left = HirExpr::Var(name.clone());
-        let condition = self.truthiness_expr(left, &lhs_type)?;
-        let rhs = Box::new(rhs);
-        let (present, none) = match &lhs_type {
-            HirType::Optional(_) => (
-                HirExpr::OptionalSome(rhs, rhs_type.clone()),
-                HirExpr::OptionalNone(rhs_type),
-            ),
-            HirType::Nullable(_) => (
-                HirExpr::NullableSome(rhs, rhs_type.clone()),
-                HirExpr::NullableNone(rhs_type),
-            ),
-            _ => (
-                HirExpr::NullishSome(rhs, rhs_type.clone()),
-                HirExpr::NullishNull(rhs_type),
-            ),
+        let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
+        let payload_always_truthy = matches!(&payload,
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+            | HirType::Dictionary(_) | HirType::Promise(_)
+            | HirType::Function(_, _) | HirType::CallableFunction(..));
+
+        fn add_member(ty: HirType, members: &mut Vec<HirType>) {
+            if !members.contains(&ty) { members.push(ty); }
+        }
+        fn add_parts(ty: &HirType, members: &mut Vec<HirType>) {
+            match ty {
+                HirType::Union(parts) => for part in parts { add_parts(part, members); },
+                HirType::Optional(payload) => {
+                    add_parts(payload, members);
+                    add_member(HirType::Undefined, members);
+                }
+                HirType::Nullable(payload) => {
+                    add_parts(payload, members);
+                    add_member(HirType::Null, members);
+                }
+                HirType::Nullish(payload) => {
+                    add_parts(payload, members);
+                    add_member(HirType::Null, members);
+                    add_member(HirType::Undefined, members);
+                }
+                leaf => add_member(leaf.clone(), members),
+            }
+        }
+        let mut members = Vec::new();
+        if !payload_always_truthy { add_parts(&payload, &mut members); }
+        match &lhs_type {
+            HirType::Optional(_) => add_member(HirType::Undefined, &mut members),
+            HirType::Nullable(_) => add_member(HirType::Null, &mut members),
+            HirType::Nullish(_) => {
+                add_member(HirType::Null, &mut members);
+                add_member(HirType::Undefined, &mut members);
+            }
+            _ => unreachable!(),
+        }
+        add_parts(&rhs_type, &mut members);
+        let result_type = if members.len() == 2 && members.contains(&HirType::Undefined) {
+            HirType::Optional(Box::new(members.iter().find(|ty| **ty != HirType::Undefined).unwrap().clone()))
+        } else if members.len() == 2 && members.contains(&HirType::Null) {
+            HirType::Nullable(Box::new(members.iter().find(|ty| **ty != HirType::Null).unwrap().clone()))
+        } else if members.len() == 3 && members.contains(&HirType::Null)
+            && members.contains(&HirType::Undefined) {
+            HirType::Nullish(Box::new(members.iter()
+                .find(|ty| !matches!(ty, HirType::Null | HirType::Undefined)).unwrap().clone()))
+        } else if members.len() == 1 {
+            members[0].clone()
+        } else {
+            HirType::Union(members)
+        };
+        let present = self.coerce_to_declared(&result_type, rhs)?;
+        let falsy = if payload_always_truthy {
+            // Only the absent tags can take this branch. Preserve which
+            // absent tag a Nullish left operand actually carried.
+            let mut absent = |kind| self.coerce_to_declared(&result_type, HirExpr::Lit(kind));
+            match &lhs_type {
+                HirType::Optional(_) => absent(HirLit::Undefined)?,
+                HirType::Nullable(_) => absent(HirLit::Null)?,
+                HirType::Nullish(_) => HirExpr::Conditional(
+                    Box::new(HirExpr::NullishIsUndefined(Box::new(left), payload)),
+                    Box::new(absent(HirLit::Undefined)?),
+                    Box::new(absent(HirLit::Null)?),
+                    result_type.clone(),
+                ),
+                _ => unreachable!(),
+            }
+        } else {
+            self.coerce_to_declared(&result_type, left)?
         };
         let result = HirExpr::Block(vec![HirStmt::If(
             condition,
             vec![HirStmt::Return(Some(present))],
-            vec![HirStmt::Return(Some(none))],
+            vec![HirStmt::Return(Some(falsy))],
         )]);
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
