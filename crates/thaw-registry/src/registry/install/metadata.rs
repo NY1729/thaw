@@ -303,21 +303,63 @@ fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(Str
 /// `exports` maps, `.json`/`.node` candidates, etc.) -- just these two
 /// common shapes.
 fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBuf), String> {
+    let mut active_directories = std::collections::HashSet::new();
+    let mut cyclic_entry = false;
+    let mut identity_error = None;
+    resolve_module_path_inner(
+        package_dir,
+        path,
+        &mut active_directories,
+        &mut cyclic_entry,
+        &mut identity_error,
+    )
+}
+
+fn resolve_module_path_inner(
+    package_dir: &Path,
+    path: &str,
+    active_directories: &mut std::collections::HashSet<PathBuf>,
+    cyclic_entry: &mut bool,
+    identity_error: &mut Option<String>,
+) -> Result<(String, PathBuf), String> {
     let trimmed = path.trim_end_matches('/');
     let directory = package_dir.join(trimmed);
     if directory.is_dir() {
-        if let Ok(manifest) = read_manifest(&directory) {
-            let entry =
-                package_export_target(&manifest, None, &["require", "node", "default"])
-                    .or_else(|| manifest.get("main").and_then(|value| value.as_str()));
-            if let Some(entry) = entry {
-                if let Ok((relative, absolute)) = resolve_module_path(&directory, entry) {
+        // Canonical identity detects both lexical `.`/`..` cycles and symlink aliases.
+        // Keep only the active recursion chain: a candidate may be visited again
+        // after another branch has finished without forming a cycle.
+        match fs::canonicalize(&directory) {
+            Ok(identity) if active_directories.insert(identity.clone()) => {
+                let nested = read_manifest(&directory).ok().and_then(|manifest| {
+                    let entry =
+                        package_export_target(&manifest, None, &["require", "node", "default"])
+                            .or_else(|| manifest.get("main").and_then(|value| value.as_str()));
+                    entry.and_then(|entry| {
+                        resolve_module_path_inner(
+                            &directory,
+                            entry,
+                            active_directories,
+                            cyclic_entry,
+                            identity_error,
+                        )
+                        .ok()
+                    })
+                });
+                active_directories.remove(&identity);
+                if let Some((relative, absolute)) = nested {
                     return Ok((
                         normalize_path_string(&format!("{trimmed}/{relative}")),
                         absolute,
                     ));
                 }
             }
+            Ok(_) => *cyclic_entry = true,
+            Err(error) => {
+                *identity_error = Some(format!(
+                    "couldn't identify JS module directory `{}`: {error}",
+                    directory.display()
+                ));
+            },
         }
     }
     let candidates = [
@@ -339,6 +381,15 @@ fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBu
         if resolved.is_file() {
             return Ok((candidate.clone(), resolved));
         }
+    }
+    if let Some(error) = identity_error {
+        return Err(error.clone());
+    }
+    if *cyclic_entry {
+        return Err(format!(
+            "circular directory module entry for `\"{path}\"` (tried `{}`)",
+            candidates.join("`, `")
+        ));
     }
     Err(format!(
         "couldn't find a JS module for `\"{path}\"` (tried `{}`)",
