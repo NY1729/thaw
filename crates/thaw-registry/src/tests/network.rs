@@ -2782,3 +2782,100 @@ module.exports = async function() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn net_socket_terminal_cleanup_preserves_first_listener_error() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_net_terminal_cleanup");
+    fs::write(dir.join("index.js"), r#"var net = require('node:net');
+module.exports = function() {
+  var originalQueue = globalThis.queueMicrotask, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy, originalListen = globalThis.__thaw_net_listen, originalAccept = globalThis.__thaw_net_poll_accept, originalCloseListener = globalThis.__thaw_net_close_listener, originalTimer = globalThis.__thaw_set_timeout_ref;
+  var queued = [], retired = [], marker = new Error('listener marker'), closeMarker = new Error('close marker'), nativeMarker = new Error('native marker');
+  globalThis.queueMicrotask = function(task) { queued.push(task); };
+  globalThis.__thaw_net_destroy = function(handle) { retired.push(handle); };
+  function drain() { while (queued.length) queued.shift()(); }
+  function socket(handle) { var value = new net.Socket(); value._handle = handle; value.readable = value.writable = true; return value; }
+  try {
+    var duplicate = socket(910001), duplicateEvents = [], duplicateCaught = false;
+    duplicate.on('error', function() { duplicateEvents.push('error'); duplicate.destroy(); throw marker; });
+    duplicate.on('close', function() { duplicateEvents.push('close'); duplicate.destroy(); throw closeMarker; });
+    duplicate.destroy(new Error('failure')); duplicate.destroy(new Error('again'));
+    try { drain(); } catch (error) { duplicateCaught = error === marker; }
+    var duplicateResult = [duplicateCaught, duplicateEvents, retired.slice(), duplicate.destroyed, duplicate._handle];
+    retired.length = 0;
+
+    var readError = socket(910002), readEvents = [], readCaught = false;
+    globalThis.__thaw_net_poll_read = function() { return 'err:read failed'; };
+    readError.on('error', function(error) { readEvents.push('error:' + error.code); throw marker; });
+    readError.on('close', function(value) { readEvents.push('close:' + value); });
+    readError._startRead();
+    try { drain(); } catch (error) { readCaught = error === marker; }
+    var readResult = [readCaught, readEvents, readError.destroyed, readError._handle, retired.slice()];
+
+    var eof = socket(910003), eofEvents = [], eofCaught = false;
+    globalThis.__thaw_net_poll_read = function() { return 'eof'; };
+    eof.on('end', function() { eofEvents.push('end'); throw marker; });
+    eof.on('close', function(value) { eofEvents.push('close:' + value); });
+    eof._startRead();
+    try { drain(); } catch (error) { eofCaught = error === marker; }
+    var eofResult = [eofCaught, eofEvents, eof.destroyed, eof._handle];
+
+    var data = socket(910004), dataEvents = [], dataCaught = false;
+    globalThis.__thaw_net_poll_read = function() { return 'ok:61'; };
+    data.on('data', function() { dataEvents.push('data'); throw marker; });
+    data.on('close', function() { dataEvents.push('close'); });
+    data._startRead();
+    try { queued.shift()(); } catch (error) { dataCaught = error === marker; }
+    drain();
+    var dataResult = [dataCaught, dataEvents, data.destroyed, data._handle, retired.slice()];
+
+    var native = socket(910005), nativeEvents = [], nativeCaught = false;
+    globalThis.__thaw_net_destroy = function() { throw nativeMarker; };
+    native.on('close', function() { nativeEvents.push('close'); });
+    try { native.destroy(); } catch (error) { nativeCaught = error === nativeMarker; }
+    drain();
+    var nativeResult = [nativeCaught, nativeEvents, native.destroyed, native._handle];
+    var falsy = socket(910008), falsyEvents = [], falsyCaught = false;
+    globalThis.__thaw_net_destroy = function() { throw undefined; };
+    falsy.on('close', function() { falsyEvents.push('close'); });
+    try { falsy.destroy(); } catch (error) { falsyCaught = error === undefined; }
+    drain();
+    var falsyResult = [falsyCaught, falsyEvents, falsy.destroyed, falsy._handle];
+
+    retired.length = 0;
+    globalThis.__thaw_net_destroy = function(handle) { retired.push(handle); };
+    globalThis.__thaw_net_listen = function() { return 'ok:910006:12345'; };
+    globalThis.__thaw_net_poll_accept = function() { return 'ok:910007:127.0.0.1:12346'; };
+    globalThis.__thaw_net_close_listener = function() {};
+    var scheduled = 0;
+    globalThis.__thaw_set_timeout_ref = function() { scheduled++; return scheduled; };
+    var server = net.createServer(function() { throw marker; }), acceptCaught = false;
+    server.listen(0);
+    try { queued.shift()(); } catch (error) { acceptCaught = error === marker; }
+    server.close(); drain();
+    var acceptedResult = [acceptCaught, retired.slice(), server.connections, scheduled];
+    return [duplicateResult, readResult, eofResult, dataResult, nativeResult, falsyResult, acceptedResult];
+  } finally {
+    globalThis.queueMicrotask = originalQueue;
+    globalThis.__thaw_net_poll_read = originalPoll;
+    globalThis.__thaw_net_destroy = originalDestroy;
+    globalThis.__thaw_net_listen = originalListen;
+    globalThis.__thaw_net_poll_accept = originalAccept;
+    globalThis.__thaw_net_close_listener = originalCloseListener;
+    globalThis.__thaw_set_timeout_ref = originalTimer;
+  }
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_net_terminal_cleanup_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetTerminalCleanup = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseNetTerminalCleanup").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,["error","close"],[910001],true,0],[true,["error:ECONNRESET","close:true"],true,0,[]],[true,["end","close:false"],true,0],[true,["data","close"],true,0,[910004]],[true,["close"],true,0],[true,["close"],true,0],[true,[910007],0,1]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
