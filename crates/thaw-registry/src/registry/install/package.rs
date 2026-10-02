@@ -34,6 +34,7 @@
 /// requested and later confirmed, rather than every `add` silently
 /// meaning "whatever's newest today".
 pub fn add(registry_dir: &Path, package: &str) -> Result<AddedPackage, String> {
+    validate_installed_package_name(split_package_spec(package).0)?;
     let scratch = std::env::temp_dir().join(format!(
         "thaw-registry-add-{}-{}",
         package.replace(['/', '@'], "_"),
@@ -67,6 +68,19 @@ pub fn package_name(spec: &str) -> &str {
     split_package_spec(spec).0
 }
 
+fn validate_installed_package_name(name: &str) -> Result<(), String> {
+    let parts: Vec<&str> = name.split('/').collect();
+    let valid = if name.starts_with('@') {
+        parts.len() == 2 && parts[0].len() > 1
+    } else {
+        parts.len() == 1
+    };
+    if !valid || parts.iter().any(|part| part.is_empty() || *part == "." || *part == ".." || part.contains('\\')) {
+        return Err(format!("invalid installed package name `{name}`"));
+    }
+    Ok(())
+}
+
 fn split_package_spec(spec: &str) -> (&str, Option<&str>) {
     let search_from = if spec.starts_with('@') {
         spec.find('/').map(|i| i + 1).unwrap_or(spec.len())
@@ -80,6 +94,174 @@ fn split_package_spec(spec: &str) -> (&str, Option<&str>) {
         }
         None => (spec, None),
     }
+}
+
+// The stage names are exclusive but do not serialize two writers that read
+// the same installed root. Hold this sibling sidecar through the root read,
+// stage, publication, and rollback. A stale sidecar is reported rather than
+// guessed dead from its timestamp/PID.
+struct PackageWriterGuard {
+    path: PathBuf,
+    token: String,
+}
+
+impl PackageWriterGuard {
+    fn acquire(destination: &Path) -> Result<Self, String> {
+        let parent = destination.parent().ok_or_else(|| format!("package `{}` has no parent", destination.display()))?;
+        fs::create_dir_all(parent).map_err(|error| format!("failed to create `{}`: {error}", parent.display()))?;
+        let name = destination.file_name().unwrap_or_default().to_string_lossy();
+        let path = parent.join(format!(".{name}.writer-lock"));
+        static NEXT_WRITER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let token = format!("{}-{}", std::process::id(), NEXT_WRITER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path)
+            .map_err(|error| format!("cannot reserve package writer `{}`: {error}; if stale, verify no writer is active before removing it", path.display()))?;
+        if let Err(error) = file.write_all(token.as_bytes()) {
+            // A partial token cannot prove ownership at cleanup. Leave the
+            // sidecar fail-closed for explicit recovery.
+            return Err(format!("failed to write package writer `{}`: {error}; verify no writer is active before removing it", path.display()));
+        }
+        Ok(Self { path, token })
+    }
+}
+
+impl Drop for PackageWriterGuard {
+    fn drop(&mut self) {
+        // A manually replaced sidecar is no longer ours. Cooperating writers
+        // never remove another holder's file, including on error paths.
+        if fs::read_to_string(&self.path).ok().as_deref() == Some(&self.token) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredInstanceIndex {
+    format: u32,
+    // Empty key is the package main; every other key is an exact export.
+    // Keeping this only at the package root avoids colliding with an export
+    // named `foo/instances.json` or `foo/lock.json`.
+    exports: BTreeMap<String, Vec<StoredInstance>>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct StoredInstance {
+    identity: String,
+    name: String,
+    locator: String,
+    version: String,
+}
+
+type InstanceVersions = BTreeMap<PathBuf, (String, String, String)>;
+
+fn instance_identity(node_modules_dir: &Path, directory: &Path) -> Result<String, String> {
+    if let Ok(relative) = directory.strip_prefix(node_modules_dir) {
+        if relative.as_os_str().is_empty()
+            || relative.components().any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(format!("invalid package instance `{}`", directory.display()));
+        }
+        let path = relative.to_str().ok_or_else(|| format!("non-UTF-8 package instance `{}`", directory.display()))?;
+        Ok(format!("node_modules:{path}"))
+    } else {
+        let absolute = if directory.is_absolute() {
+            directory.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| format!("cannot locate package instance `{}`: {error}", directory.display()))?
+                .join(directory)
+        };
+        let path = absolute.to_str().ok_or_else(|| format!("non-UTF-8 package instance `{}`", directory.display()))?;
+        Ok(format!("external:{path}"))
+    }
+}
+
+fn stored_instances(node_modules_dir: &Path, versions: &InstanceVersions) -> Result<Vec<StoredInstance>, String> {
+    versions.iter().map(|(path, (name, locator, version))| {
+        Ok(StoredInstance {
+            identity: instance_identity(node_modules_dir, path)?,
+            name: name.clone(), locator: locator.clone(), version: version.clone(),
+        })
+    }).collect()
+}
+
+fn write_instance_index(directory: &Path, index: &StoredInstanceIndex) -> Result<(), String> {
+    let source = serde_json::to_string_pretty(index)
+        .map_err(|error| format!("failed to serialize instance index: {error}"))?;
+    fs::write(directory.join("instances.json"), source)
+        .map_err(|error| format!("failed to write `{}`: {error}", directory.join("instances.json").display()))
+}
+
+fn read_instance_index(directory: &Path) -> Result<StoredInstanceIndex, String> {
+    let path = directory.join("instances.json");
+    let source = fs::read_to_string(&path).map_err(|error| {
+        format!("cannot read `{}`: {error}; re-register the installed package before adding a lazy subpath", path.display())
+    })?;
+    let index: StoredInstanceIndex = serde_json::from_str(&source)
+        .map_err(|error| format!("invalid `{}`: {error}; re-register the installed package", path.display()))?;
+    if index.format != 2 || !index.exports.contains_key("") {
+        return Err(format!("unsupported `{}`; re-register the installed package", path.display()));
+    }
+    for (export, instances) in &index.exports {
+        if !export.is_empty() {
+            validate_export_subpath(export)?;
+        }
+        instance_versions(instances, &path)?;
+    }
+    Ok(index)
+}
+
+fn instance_versions(instances: &[StoredInstance], path: &Path) -> Result<InstanceVersions, String> {
+    let mut versions = BTreeMap::new();
+    for instance in instances {
+        let (kind, key) = instance.identity.split_once(':').ok_or_else(|| format!("invalid identity in `{}`", path.display()))?;
+        let valid = match kind {
+            "node_modules" => !key.is_empty() && Path::new(key).components().all(|part| matches!(part, std::path::Component::Normal(_))),
+            "external" => Path::new(key).is_absolute(),
+            _ => false,
+        };
+        if !valid || instance.name.is_empty() || instance.locator.is_empty() || instance.version.is_empty() {
+            return Err(format!("invalid instance in `{}`", path.display()));
+        }
+        let previous = versions.insert(PathBuf::from(&instance.identity), (instance.name.clone(), instance.locator.clone(), instance.version.clone()));
+        if previous.is_some() { return Err(format!("duplicate identity in `{}`", path.display())); }
+    }
+    Ok(versions)
+}
+
+fn project_all_instances(index: &StoredInstanceIndex, path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut versions = BTreeMap::new();
+    for records in index.exports.values() {
+        merge_instance_versions(&mut versions, instance_versions(records, path)?)?;
+    }
+    project_package_versions(versions)
+}
+
+fn merge_instance_versions(into: &mut InstanceVersions, from: InstanceVersions) -> Result<(), String> {
+    for (identity, record) in from {
+        if let Some(previous) = into.get(&identity) {
+            if previous != &record {
+                return Err(format!("package instance `{}` changed between registered bundles; re-register the installed package", identity.display()));
+            }
+        } else {
+            into.insert(identity, record);
+        }
+    }
+    Ok(())
+}
+
+fn write_projected_lock(directory: &Path, versions: &BTreeMap<String, String>) -> Result<(), String> {
+    let path = directory.join("lock.json");
+    if versions.len() <= 1 {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to remove `{}`: {error}", path.display())),
+        }
+        return Ok(());
+    }
+    let source = serde_json::to_string_pretty(versions)
+        .map_err(|error| format!("failed to serialize `{}`: {error}", path.display()))?;
+    fs::write(&path, source).map_err(|error| format!("failed to write `{}`: {error}", path.display()))
 }
 
 /// Reserve sibling paths on the same filesystem as the package destination.
@@ -238,6 +420,7 @@ pub fn add_installed(
     node_modules_dir: &Path,
     name: &str,
 ) -> Result<AddedPackage, String> {
+    validate_installed_package_name(name)?;
     let fallback_dts = installed_types_package_dts(node_modules_dir, name)?;
     add_installed_inner(registry_dir, node_modules_dir, name, fallback_dts, true)
 }
@@ -250,6 +433,7 @@ pub fn add_installed_root(
     node_modules_dir: &Path,
     name: &str,
 ) -> Result<AddedPackage, String> {
+    validate_installed_package_name(name)?;
     let fallback_dts = installed_types_package_dts(node_modules_dir, name)?;
     add_installed_inner(registry_dir, node_modules_dir, name, fallback_dts, false)
 }
@@ -261,6 +445,7 @@ fn add_installed_inner(
     fallback_dts: Option<(String, String)>,
     eager_subpaths: bool,
 ) -> Result<AddedPackage, String> {
+    validate_installed_package_name(name)?;
     let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
 
@@ -282,6 +467,8 @@ fn add_installed_inner(
             main_field,
             &mut bundle_source_cache,
         )?;
+    let root_instances = bundle_source_cache.last_bundle_versions.clone();
+    let root_records = stored_instances(node_modules_dir, &root_instances)?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
         Some((rel, abs)) => {
@@ -327,6 +514,7 @@ fn add_installed_inner(
     };
 
     let destination = registry_dir.join(name);
+    let _writer = PackageWriterGuard::acquire(&destination)?;
     let (dest_dir, backup_dir) = staged_package_paths(&destination)?;
     let staged_result = (|| -> Result<AddedPackage, String> {
         let native_addon = match prepared_addon {
@@ -367,6 +555,8 @@ fn add_installed_inner(
             )
         })?;
         write_bundle(&dest_dir, &js_source)?;
+        let mut index = StoredInstanceIndex { format: 2, exports: BTreeMap::new() };
+        index.exports.insert(String::new(), root_records);
         if eager_subpaths {
             for export in package_subpath_exports(&manifest, &package_dir)? {
                 write_installed_subpath(
@@ -377,9 +567,14 @@ fn add_installed_inner(
                     &export,
                     &mut bundle_source_cache,
                 )?;
+                index.exports.insert(
+                    export.subpath,
+                    stored_instances(node_modules_dir, &bundle_source_cache.last_bundle_versions)?,
+                );
             }
             dependency_versions = project_package_versions(bundle_source_cache.package_versions.clone())?;
         }
+        write_instance_index(&dest_dir, &index)?;
         fs::write(dest_dir.join("version.txt"), &resolved_version).map_err(|e| {
             format!(
                 "failed to write `{}`: {e}",
@@ -391,17 +586,7 @@ fn add_installed_inner(
         // a single-file package with no dependencies would otherwise get an
         // uninformative one-entry file next to `version.txt` saying the same
         // thing twice.
-        let lock_path = dest_dir.join("lock.json");
-        if dependency_versions.len() > 1 {
-            let lock_json = serde_json::to_string_pretty(&dependency_versions)
-                .map_err(|e| format!("failed to serialize `lock.json` for `{name}`: {e}"))?;
-            fs::write(&lock_path, lock_json).map_err(|e| {
-                format!(
-                    "failed to write `{}`: {e}",
-                    dest_dir.join("lock.json").display()
-                )
-            })?;
-        }
+        write_projected_lock(&dest_dir, &dependency_versions)?;
 
         Ok(AddedPackage {
             dts_relative_path,
@@ -423,9 +608,9 @@ fn add_installed_inner(
     Ok(added)
 }
 
-// A lazy export can be the parent of another materialized export (`foo` and
-// `foo/bar`). Copy its existing tree before replacing its own files so the
-// staged publication retains all descendants and unrelated contents.
+// Copy a whole installed package for one parent-level publication. A lazy
+// export can itself be the parent of another materialized export (`foo` and
+// `foo/bar`); replacing its own files must retain its descendants.
 fn copy_installed_subpath_tree(source: &Path, staged: &Path) -> Result<std::fs::Permissions, String> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|error| format!("failed to inspect `{}`: {error}", source.display()))?;
@@ -456,6 +641,38 @@ fn copy_installed_subpath_tree(source: &Path, staged: &Path) -> Result<std::fs::
     Ok(metadata.permissions())
 }
 
+fn collect_materialized_exports(
+    root: &Path,
+    directory: &Path,
+    exports: &mut std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    if !directory.exists() { return Ok(()); }
+    for entry in fs::read_dir(directory)
+        .map_err(|error| format!("failed to read `{}`: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read `{}`: {error}", directory.display()))?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| format!("failed to inspect `{}`: {error}", path.display()))?;
+        if kind.is_file() { continue; }
+        if !kind.is_dir() {
+            return Err(format!("unsupported installed subpath entry `{}`", path.display()));
+        }
+        let has_dts = path.join("package.d.ts").is_file();
+        let has_bundle = path.join("bundle.js.gz").is_file() || path.join("bundle.js").is_file();
+        if has_dts != has_bundle {
+            return Err(format!("incomplete installed export `{}`; re-register the package", path.display()));
+        }
+        if has_dts {
+            let relative = path.strip_prefix(root).map_err(|error| format!("invalid installed export path: {error}"))?;
+            let key = relative.to_str().ok_or_else(|| format!("non-UTF-8 installed export `{}`", path.display()))?.replace('\\', "/");
+            validate_export_subpath(&key)?;
+            exports.insert(key);
+        }
+        collect_materialized_exports(root, &path, exports)?;
+    }
+    Ok(())
+}
+
 /// Materializes one exact package export from an existing `node_modules`.
 pub fn add_installed_subpath(
     registry_dir: &Path,
@@ -463,6 +680,7 @@ pub fn add_installed_subpath(
     specifier: &str,
 ) -> Result<(), String> {
     let (name, subpath) = split_bare_spec(specifier);
+    validate_installed_package_name(name)?;
     let subpath = subpath.ok_or_else(|| format!("`{specifier}` has no package subpath"))?;
     let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
@@ -470,67 +688,48 @@ pub fn add_installed_subpath(
         .into_iter()
         .find(|export| export.subpath == subpath)
         .ok_or_else(|| format!("package `{name}` has no export named `./{subpath}`"))?;
-    let destination = registry_dir.join(name).join("subpaths").join(&export.subpath);
-    // A first lazy subpath may need new parent directories inside the installed
-    // package. Remove only the ones this call introduced if publication fails.
-    let mut created_parents = Vec::new();
-    let mut parent = destination.parent();
-    while let Some(directory) = parent {
-        match fs::symlink_metadata(directory) {
-            Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                created_parents.push(directory.to_path_buf());
-                parent = directory.parent();
-            }
-            Err(error) => {
-                return Err(format!("failed to inspect `{}`: {error}", directory.display()));
-            }
-        }
+    let destination = registry_dir.join(name);
+    let _writer = PackageWriterGuard::acquire(&destination)?;
+    // A root made by an older writer has only a projected lock; it cannot
+    // identify a same-name nested package instance across lazy calls.
+    let mut index = read_instance_index(&destination)?;
+    let stored_version = fs::read_to_string(destination.join("version.txt"))
+        .map_err(|error| format!("cannot read installed root version: {error}; re-register `{name}`"))?;
+    let current_version = manifest.get("version").and_then(|value| value.as_str()).unwrap_or("0.0.0");
+    if stored_version.trim() != current_version {
+        return Err(format!("installed `{name}` changed version; re-register it before adding `{specifier}`"));
     }
-    let result = (|| -> Result<(), String> {
-        let (staged, backup) = staged_package_paths(&destination)?;
-        let previous_permissions = match fs::symlink_metadata(&destination) {
-            Ok(_) => match copy_installed_subpath_tree(&destination, &staged) {
-                Ok(permissions) => Some(permissions),
-                Err(error) => return Err(discard_staged_package(&staged, error)),
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(discard_staged_package(
-                    &staged,
-                    format!("failed to inspect `{}`: {error}", destination.display()),
-                ));
-            }
-        };
-        if let Err(error) = write_installed_subpath(
-            &staged,
-            node_modules_dir,
-            name,
-            &package_dir,
-            &export,
-            &mut SourceCache::default(),
-        ) {
-            return Err(discard_staged_package(&staged, error));
+    let (staged, backup) = staged_package_paths(&destination)?;
+    let staged_result = (|| -> Result<(), String> {
+        let permissions = copy_installed_subpath_tree(&destination, &staged)?;
+        let export_dir = staged.join("subpaths").join(&export.subpath);
+        let mut cache = SourceCache::default();
+        write_installed_subpath(&export_dir, node_modules_dir, name, &package_dir, &export, &mut cache)?;
+        index.exports.insert(
+            export.subpath.clone(),
+            stored_instances(node_modules_dir, &cache.last_bundle_versions)?,
+        );
+        let subpaths = staged.join("subpaths");
+        let mut materialized = std::collections::BTreeSet::new();
+        collect_materialized_exports(&subpaths, &subpaths, &mut materialized)?;
+        let recorded = index.exports.keys().filter(|key| !key.is_empty()).cloned().collect::<std::collections::BTreeSet<_>>();
+        if materialized != recorded {
+            return Err(format!("installed `{name}` has exports without matching instance metadata; re-register the package"));
         }
-        if let Some(permissions) = previous_permissions {
-            if let Err(error) = fs::set_permissions(&staged, permissions) {
-                return Err(discard_staged_package(
-                    &staged,
-                    format!("failed to preserve `{}` permissions: {error}", destination.display()),
-                ));
-            }
-        }
-        if let Err(error) = publish_staged_package(&staged, &destination, &backup) {
-            return Err(discard_staged_package(&staged, error));
-        }
+        let projected = project_all_instances(&index, &staged.join("instances.json"))?;
+        write_instance_index(&staged, &index)?;
+        write_projected_lock(&staged, &projected)?;
+        fs::set_permissions(&staged, permissions)
+            .map_err(|error| format!("failed to preserve `{}` permissions: {error}", destination.display()))?;
         Ok(())
     })();
-    if result.is_err() {
-        for directory in created_parents {
-            let _ = fs::remove_dir(directory);
-        }
+    if let Err(error) = staged_result {
+        return Err(discard_staged_package(&staged, error));
     }
-    result
+    if let Err(error) = publish_staged_package(&staged, &destination, &backup) {
+        return Err(discard_staged_package(&staged, error));
+    }
+    Ok(())
 }
 
 fn write_installed_subpath(

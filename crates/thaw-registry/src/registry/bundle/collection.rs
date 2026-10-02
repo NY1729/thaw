@@ -137,6 +137,10 @@ struct SourceCache {
     modules: HashMap<(PathBuf, String), (String, ModuleAnalysis)>,
     rewritten: HashMap<(PathBuf, String, bool), Option<String>>,
     package_versions: BTreeMap<PathBuf, (String, String, String)>,
+    // Raw identities for the most recently completed bundle. The cumulative
+    // map above cannot describe one export after its shared dependencies were
+    // already visited by another export.
+    last_bundle_versions: BTreeMap<PathBuf, (String, String, String)>,
 }
 
 #[cfg(test)]
@@ -524,6 +528,7 @@ fn bundle_commonjs_package_cached(
 
     let file_count = modules.len();
     let dependency_versions = project_package_versions(package_versions.clone())?;
+    source_cache.last_bundle_versions = package_versions.clone();
     source_cache.package_versions.extend(package_versions);
     Ok((
         render_bundle(&main_key, &modules),
