@@ -17,12 +17,13 @@ pub struct ResolvedPackage {
     /// this field existed) -- see `AddedPackage::resolved_version`.
     pub version: Option<String>,
     /// Every *other* real npm package `add` folded into `bundle.js`,
-    /// mapped to its resolved version, read back from `lock.json`. Duplicate
+    /// mapped to its resolved version, read back from the package's root
+    /// `lock.json` or its indexed export instances. Duplicate
     /// installed names use node_modules-relative locator keys; unique names
     /// retain their historical keys. See
     /// `AddedPackage::dependency_versions`. `None` if there's no
-    /// `lock.json` (a single-file package with no dependencies never gets
-    /// one written; nor does a hand-curated or pre-`lock.json` package).
+    /// version metadata (a single-file package with no dependencies never
+    /// gets a lock; nor does a hand-curated or pre-lock package).
     pub dependency_versions: Option<BTreeMap<String, String>>,
 }
 
@@ -32,7 +33,8 @@ pub struct ResolvedPackage {
 /// have nothing for thaw-bridge's shim to call.
 pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, String> {
     let (package, subpath) = split_bare_spec(name);
-    let mut dir = registry_dir.join(package);
+    let package_root = registry_dir.join(package);
+    let mut dir = package_root.clone();
     if let Some(subpath) = subpath {
         validate_export_subpath(subpath)?;
         dir = dir.join("subpaths").join(subpath);
@@ -97,9 +99,25 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         .ok()
         .map(|s| s.trim().to_string());
 
-    let dependency_versions = fs::read_to_string(dir.join("lock.json"))
+    let legacy_lock = || fs::read_to_string(dir.join("lock.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<BTreeMap<String, String>>(&s).ok());
+    let dependency_versions = if let Some(subpath) = subpath {
+        match fs::symlink_metadata(package_root.join("instances.json")) {
+            Ok(_) => {
+                let index = read_instance_index(&package_root)?;
+                let records = index.exports.get(subpath).ok_or_else(|| {
+                    format!("registry package `{name}` has no recorded version instances; re-register it")
+                })?;
+                let versions = project_package_versions(instance_versions(records, &package_root.join("instances.json"))?)?;
+                (versions.len() > 1).then_some(versions)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => legacy_lock(),
+            Err(error) => return Err(format!("cannot inspect registry package `{name}` instance index: {error}")),
+        }
+    } else {
+        legacy_lock()
+    };
 
     Ok(ResolvedPackage {
         name: name.to_string(),
