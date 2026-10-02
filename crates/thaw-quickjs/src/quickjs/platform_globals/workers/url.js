@@ -1,6 +1,18 @@
   if (typeof globalThis.URLSearchParams !== 'function') {
     const encodeFormPart = value => encodeURIComponent(String(value)).replace(/[!'()~]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase()).replace(/%20/g, '+');
-    const decodeFormPart = value => decodeURIComponent(String(value).replace(/\+/g, ' '));
+    const decodeFormPart = value => {
+      const source = new TextEncoder().encode(String(value).replace(/\+/g, ' '));
+      const bytes = [];
+      const hex = byte => byte >= 48 && byte <= 57 ? byte - 48
+        : byte >= 65 && byte <= 70 ? byte - 55 : byte >= 97 && byte <= 102 ? byte - 87 : -1;
+      for (let index = 0; index < source.length; index++) {
+        const high = hex(source[index + 1]), low = hex(source[index + 2]);
+        if (source[index] === 37 && high >= 0 && low >= 0) {
+          bytes.push(high * 16 + low); index += 2;
+        } else bytes.push(source[index]);
+      }
+      return new TextDecoder('utf-8', { ignoreBOM: true }).decode(Uint8Array.from(bytes));
+    };
     globalThis.URLSearchParams = class URLSearchParams {
       constructor(init = '') {
         this.__thawEntries = [];
@@ -157,7 +169,9 @@
             || (this.__thawProtocol === 'https:' && this.__thawPort === '443')) this.__thawPort = '';
       }
       __thawRefreshParams() {
-        const params = new URLSearchParams(this.__thawSearch);
+        const parsed = new URLSearchParams(this.__thawSearch);
+        const params = this.__thawSearchParams || parsed;
+        if (params !== parsed) params.__thawEntries = parsed.__thawEntries;
         params.__thawUpdate = value => { this.__thawSearch = value === '' ? '' : '?' + value; };
         this.__thawSearchParams = params;
       }
@@ -186,7 +200,7 @@
         const authority = this.hostname !== '' || this.protocol === 'file:' ? '//' + credentials + this.host : '';
         return this.protocol + authority + this.pathname + this.search + this.hash;
       }
-      set href(value) { const replacement = new URL(value); Object.assign(this, replacement); this.__thawRefreshParams(); }
+      set href(value) { const replacement = new URL(value), params = this.__thawSearchParams; Object.assign(this, replacement); this.__thawSearchParams = params; this.__thawRefreshParams(); }
       toString() { return this.href; }
       toJSON() { return this.href; }
       static canParse(input, base) { try { new URL(input, base); return true; } catch (_) { return false; } }
