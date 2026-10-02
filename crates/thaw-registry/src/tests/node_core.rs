@@ -723,6 +723,52 @@ fn http2_h2c_sessions_exchange_real_frames_over_tcp() {
 }
 
 #[test]
+fn http2_zero_initial_window_blocks_data_until_window_update() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_zero_window");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function () {
+  var session = new http2.ClientHttp2Session(1, 'tcp'), frames = [];
+  session.authority = 'example.test';
+  session._send = function(value) { frames.push(Buffer.from(value)); return true; };
+  var dataCount = function() { return frames.filter(function(value) { return value[3] === 0; }).length; };
+  session._frame(4, 0, 0, Buffer.from([0, 4, 0, 0, 0, 0]));
+  var first = session.request({ ':path': '/first' });
+  var firstWindow = first._sendWindow, firstWrite = first.write('a');
+  var blocked = [firstWindow, firstWrite, first._writeQueue.length, dataCount()];
+  session._frame(8, 0, first.id, Buffer.from([0, 0, 0, 1]));
+  var resumed = [first._sendWindow, first._writeQueue.length, dataCount(), frames[frames.length - 1][9]];
+  var second = session.request({ ':path': '/second' });
+  var secondWindow = second._sendWindow, secondWrite = second.write('b');
+  var beforeSettings = [secondWindow, secondWrite, second._writeQueue.length, dataCount()];
+  session._frame(4, 0, 0, Buffer.from([0, 4, 0, 0, 0, 1]));
+  var afterSettings = [second._sendWindow, second._writeQueue.length, dataCount(), frames[frames.length - 2][9]];
+  session.localSettings.initialWindowSize = 0;
+  var receiveWindow = new http2.Http2Stream(session, 99)._receiveWindow;
+  return blocked.concat(resumed, beforeSettings, afterSettings, [receiveWindow]);
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_zero_window_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2ZeroWindow = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2ZeroWindow").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[0,false,1,0,0,0,1,97,0,false,1,1,0,0,2,98,0]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn http2_flow_control_resumes_large_bidirectional_bodies() {
     use std::ffi::{CStr, CString};
 
