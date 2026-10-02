@@ -359,6 +359,12 @@ pub(super) struct TlsClientOptions<'a> {
     pub(super) reject_unauthorized: bool,
 }
 
+pub(super) fn take_tls_stream_handle(next: &mut u32) -> Option<u32> {
+    let handle = *next;
+    *next = handle.checked_add(2)?;
+    Some(handle)
+}
+
 pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
     let TlsClientOptions {
         host,
@@ -438,8 +444,9 @@ pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
         .map(|certificate| certificate.as_ref().to_vec());
     TLS_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
-        let handle = streams.0;
-        streams.0 = streams.0.wrapping_add(1).max(1);
+        let Some(handle) = take_tls_stream_handle(&mut streams.0) else {
+            return "err:TLS socket handle exhausted".to_string();
+        };
         TLS_CLIENT_CERTIFICATES.with(|certificates| {
             certificates.borrow_mut().insert(
                 handle,
@@ -610,8 +617,9 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
         .map(|certificate| certificate.as_ref().to_vec());
     TLS_SERVER_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
-        let stream_handle = streams.0;
-        streams.0 = streams.0.wrapping_add(1).max(1);
+        let Some(stream_handle) = take_tls_stream_handle(&mut streams.0) else {
+            return "err:TLS socket handle exhausted".to_string();
+        };
         TLS_SERVER_CERTIFICATES.with(|certificates| {
             certificates.borrow_mut().insert(
                 stream_handle,

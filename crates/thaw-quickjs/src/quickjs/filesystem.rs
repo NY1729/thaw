@@ -956,7 +956,7 @@ thread_local! {
     #[cfg(feature = "tls")]
     static TLS_STREAMS: RefCell<TlsStreamTable> = RefCell::new((1, HashMap::new()));
     #[cfg(feature = "tls")]
-    static TLS_SERVER_STREAMS: RefCell<TlsServerStreamTable> = RefCell::new((1, HashMap::new()));
+    static TLS_SERVER_STREAMS: RefCell<TlsServerStreamTable> = RefCell::new((2, HashMap::new()));
     #[cfg(feature = "tls")]
     static TLS_LISTENERS: RefCell<(u32, HashMap<u32, TlsListener>)> = RefCell::new((1, HashMap::new()));
     #[cfg(feature = "tls")]
