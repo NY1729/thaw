@@ -36,8 +36,10 @@ impl<'a> FnLowerer<'a> {
                     // separate map, not `self.narrowings` -- see
                     // `json_typeof_narrowing`.
                     .or_else(|| self.json_narrowings.get(&resolved))
-                    .or_else(|| self.scope.get(&resolved))
                     .cloned()
+                    .or_else(|| self.partial_nullable_narrowings.get(&resolved)
+                        .map(|payload| HirType::Nullable(Box::new(payload.clone()))))
+                    .or_else(|| self.scope.get(&resolved).cloned())
             }
             Expr::This(_) => {
                 let resolved = self.resolve_binding("this");

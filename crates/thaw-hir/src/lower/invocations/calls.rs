@@ -735,6 +735,8 @@ impl<'a> FnLowerer<'a> {
                         .cloned()
                         .or_else(|| self.nullable_narrowings.get(&object_name).cloned())
                         .or_else(|| self.nullish_narrowings.get(&object_name).cloned())
+                        .or_else(|| self.partial_nullable_narrowings.get(&object_name)
+                            .map(|payload| HirType::Nullable(Box::new(payload.clone()))))
                         .or_else(|| self.scope.get(&object_name).cloned());
                     object_ty
                         .map(|object_ty| {

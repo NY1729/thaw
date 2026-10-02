@@ -2025,3 +2025,253 @@ fn resolves_keyof_alias_target_before_its_owner_alias() {
     );
     lower("type I = { a: number }; type Keys = keyof I; function main(): void { const key: Keys = 'a'; console.log(key); }");
 }
+
+#[test]
+fn typeof_nullish_narrowing_keeps_null_until_it_is_excluded() {
+    let unsafe_undefined = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            if (typeof x !== "undefined") return x.value;
+            return 0;
+        }
+    "#).unwrap();
+    assert!(lower_module(&unsafe_undefined).is_err());
+
+    let unsafe_object = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            if (typeof x === "object") return x.value;
+            return 0;
+        }
+    "#).unwrap();
+    assert!(lower_module(&unsafe_object).is_err());
+
+    let safe = lower(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            if (typeof x === "undefined") return 0;
+            if (x === null) return 1;
+            return x.value;
+        }
+        function choose(x: Item | null | undefined): number {
+            return typeof x === "undefined" ? 0 : x === null ? 1 : x.value;
+        }
+        function objectBranch(x: Item | null | undefined): number {
+            if (typeof x === "object") {
+                if (x !== null) return x.value;
+            }
+            return 0;
+        }
+    "#);
+    let body = format!("{:?}", safe.functions);
+    assert!(body.contains("NullableNone"), "{body}");
+    assert!(body.contains("NullishIsNull"), "{body}");
+
+    let reassigned = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            if (typeof x !== "undefined") {
+                x = null;
+                return x.value;
+            }
+            return 0;
+        }
+    "#).unwrap();
+    assert!(lower_module(&reassigned).is_err());
+}
+
+#[test]
+fn typeof_partial_narrowing_tracks_nested_writes_without_losing_sibling_guards() {
+    let stale_after_block = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            if (flag) { x = undefined; }
+            if (x === null) return 1;
+            return x.value;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_after_block).is_err());
+
+    let stale_after_expression = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            const ignored = flag ? (x = undefined, 0) : 1;
+            if (x === null) return 1;
+            return x.value;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_after_expression).is_err());
+
+    lower(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            if (flag) { x = undefined; }
+            else { if (x === null) return 1; return x.value; }
+            return 0;
+        }
+        function choose(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            return flag ? (x = undefined, 0) : x === null ? 1 : x.value;
+        }
+        function shadowed(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            if (flag) { let x: Item | null | undefined = undefined; x = undefined; }
+            if (x === null) return 1;
+            return x.value;
+        }
+    "#);
+}
+
+#[test]
+fn completed_typeof_nullish_narrowing_does_not_survive_nested_writes() {
+    let stale_after_completion = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            if (x === null) return 1;
+            if (flag) { x = undefined; }
+            return x.value;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_after_completion).is_err());
+
+    let stale_after_expression = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            if (x === null) return 1;
+            const ignored = flag ? (x = undefined, 0) : 1;
+            return x.value;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_after_expression).is_err());
+
+    lower(r#"
+        type Item = { value: number };
+        function branch(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            if (x === null) return 1;
+            if (flag) { x = undefined; }
+            else { return x.value; }
+            return 0;
+        }
+        function choice(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            if (x === null) return 1;
+            return flag ? (x = undefined, 0) : x.value;
+        }
+        function shadowed(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x === "undefined") return 0;
+            if (x === null) return 1;
+            if (flag) { let x: Item | null | undefined = undefined; x = undefined; }
+            return x.value;
+        }
+    "#);
+}
+
+#[test]
+fn typeof_guard_does_not_reapply_after_its_condition_writes_the_binding() {
+    let stale_if = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            if (typeof x !== "undefined" && (x = undefined, true)) {
+                if (x !== null) return x.value;
+            }
+            return 0;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_if).is_err());
+
+    let stale_guard_clause = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            if (!(typeof x !== "undefined" && (x = undefined, true))) return 0;
+            if (x !== null) return x.value;
+            return 0;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_guard_clause).is_err());
+
+    let stale_conditional = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            return (typeof x !== "undefined" && (x = undefined, true))
+                ? x.value : 0;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_conditional).is_err());
+
+    lower(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x !== "undefined" && flag) {
+                if (x !== null) return x.value;
+            }
+            return 0;
+        }
+        function choose(x: Item | null | undefined, flag: boolean): number {
+            return typeof x !== "undefined" && flag
+                ? x === null ? 0 : x.value
+                : 0;
+        }
+    "#);
+}
+
+#[test]
+fn typeof_guard_distinguishes_test_writes_from_exiting_body_writes() {
+    lower(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            if (typeof x === "undefined") { x = undefined; return 0; }
+            if (x === null) return 1;
+            return x.value;
+        }
+    "#);
+
+    let stale_nested_logical = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined): number {
+            if ((typeof x !== "undefined" && (x = undefined, true))
+                && (x !== null && x.value > 0)) return 1;
+            return 0;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_nested_logical).is_err());
+
+    lower(r#"
+        type Item = { value: number };
+        function read(x: Item | null | undefined, flag: boolean): number {
+            if (typeof x !== "undefined" && flag) {
+                if (x !== null) return x.value;
+            }
+            return 0;
+        }
+    "#);
+}
+
+#[test]
+fn generator_resume_assignment_invalidates_completed_nullish_narrowing() {
+    let stale_resume = thaw_parser::parse_typescript(r#"
+        type Item = { value: number };
+        function* read(x: Item | null | undefined): Generator<number, number, Item | null | undefined> {
+            if (typeof x === "undefined") return 0;
+            if (x === null) return 1;
+            x = yield 2;
+            return x.value;
+        }
+    "#).unwrap();
+    assert!(lower_module(&stale_resume).is_err());
+
+    lower(r#"
+        type Item = { value: number };
+        function* read(x: Item | null | undefined): Generator<number, number, Item | null | undefined> {
+            x = yield 2;
+            if (typeof x === "undefined") return 0;
+            if (x === null) return 1;
+            return x.value;
+        }
+    "#);
+}

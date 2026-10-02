@@ -318,6 +318,9 @@ impl<'a> FnLowerer<'a> {
         }
         let current = target_to_read_expr(&target)?;
         self.expect_type(&HirType::F64, &current, "update operand")?;
+        if let Target::Var(name) = &target {
+            self.record_binding_write(name);
+        }
         if update.prefix {
             if let Target::Index(array, index) = target {
                 let array_name = format!("__thaw_update_array_{}", self.next_binding);

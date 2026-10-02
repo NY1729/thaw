@@ -818,7 +818,24 @@ impl<'a> FnLowerer<'a> {
                         payload.clone(),
                     )),
                     Some(_) => unreachable!(),
-                    None => Ok(HirExpr::Var(name)),
+                    None => {
+                        if let Some(payload) = self.partial_nullable_narrowings.get(&name) {
+                            let value = HirExpr::Var(name);
+                            Ok(HirExpr::Block(vec![
+                                HirStmt::If(
+                                    HirExpr::NullishIsNull(Box::new(value.clone()), payload.clone()),
+                                    vec![HirStmt::Return(Some(HirExpr::NullableNone(payload.clone())))],
+                                    Vec::new(),
+                                ),
+                                HirStmt::Return(Some(HirExpr::NullableSome(
+                                    Box::new(HirExpr::NullishValue(Box::new(value), payload.clone())),
+                                    payload.clone(),
+                                ))),
+                            ]))
+                        } else {
+                            Ok(HirExpr::Var(name))
+                        }
+                    },
                 }
             }
 
@@ -1590,9 +1607,13 @@ impl<'a> FnLowerer<'a> {
                         &[(name, value_type, value)],
                     );
                 }
+                let left_versions = self.narrowing_write_versions.clone();
                 let mut lhs = self.lower_expr(&bin.left)?;
                 let rhs_narrowing = self
                     .optional_undefined_narrowing(&bin.left)
+                    .filter(|(name, _, _, _)| {
+                        left_versions.get(name) == self.narrowing_write_versions.get(name)
+                    })
                     .filter(|(_, _, present, _)| {
                         (bin.op == BinaryOp::LogicalAnd && *present)
                             || (bin.op == BinaryOp::LogicalOr && !*present)
@@ -2537,17 +2558,26 @@ impl<'a> FnLowerer<'a> {
                 let alternate_union = branch_union(false);
                 let consequent_optional = branch_optional(true);
                 let alternate_optional = branch_optional(false);
+                let condition_versions = self.narrowing_write_versions.clone();
                 let test = self.lower_condition_expr(&conditional.test)?;
+                let still_valid = |name: &Symbol| {
+                    condition_versions.get(name) == self.narrowing_write_versions.get(name)
+                };
+                let consequent_optional = consequent_optional.filter(|(name, _, _)| still_valid(name));
+                let alternate_optional = alternate_optional.filter(|(name, _, _)| still_valid(name));
+                let saved_narrowings = self.save_narrowings();
                 let mut consequent = self.lower_expr_with_union_narrowing(
                     &conditional.cons,
                     consequent_union.as_deref(),
                     consequent_optional.as_ref(),
                 )?;
+                self.restore_narrowings_for_sibling(&saved_narrowings);
                 let mut alternate = self.lower_expr_with_union_narrowing(
                     &conditional.alt,
                     alternate_union.as_deref(),
                     alternate_optional.as_ref(),
                 )?;
+                self.restore_narrowings(saved_narrowings);
                 let consequent_type = self.infer_expr_type(&consequent)?;
                 let alternate_type = self.infer_expr_type(&alternate)?;
                 let result_type = if consequent_type == alternate_type {
