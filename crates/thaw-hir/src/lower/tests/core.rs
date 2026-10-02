@@ -837,3 +837,15 @@ fn generates_typed_inherited_member_wrappers_and_prefers_overrides() {
         .collect::<Vec<_>>();
     assert_eq!(answer.len(), 1, "override must suppress inherited wrapper");
 }
+
+#[test]
+fn generic_object_inference_matches_required_field_names() {
+    let pattern = GenericTypePattern::Object(vec![("a".into(), GenericTypePattern::Variable("T".into()))]);
+    let actual = HirType::Object(vec![("b".into(), HirType::Bool), ("a".into(), HirType::F64)]);
+    let mut inferred = HashMap::new();
+    match_generic_pattern(&pattern, &actual, &mut inferred).unwrap();
+    assert_eq!(inferred.get("T"), Some(&HirType::F64));
+    assert!(match_generic_pattern(&pattern, &HirType::Object(vec![("b".into(), HirType::F64)]), &mut HashMap::new()).is_err());
+    lower(r#"function get<T>(value: { a: T }): T { return value.a; }
+        function main(): void { const value = { a: 3, b: true }; const result: number = get(value); console.log(result); }"#);
+}

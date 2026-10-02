@@ -1358,17 +1358,10 @@ fn match_generic_pattern(
         (GenericTypePattern::Dictionary(expected), HirType::Dictionary(actual)) => {
             match_generic_pattern(expected, actual, inferred)
         }
-        (GenericTypePattern::Object(expected), HirType::Object(value))
-            if expected.len() == value.len() =>
-        {
-            for ((expected_name, expected_ty), (actual_name, actual_ty)) in
-                expected.iter().zip(value)
-            {
-                if expected_name != actual_name {
-                    return Err(format!(
-                        "generic argument object field `{actual_name}` does not match `{expected_name}`"
-                    ));
-                }
+        (GenericTypePattern::Object(expected), HirType::Object(value)) => {
+            for (expected_name, expected_ty) in expected {
+                let (_, actual_ty) = value.iter().find(|(name, _)| name == expected_name)
+                    .ok_or_else(|| format!("generic argument object is missing field `{expected_name}`"))?;
                 match_generic_pattern(expected_ty, actual_ty, inferred)?;
             }
             Ok(())
