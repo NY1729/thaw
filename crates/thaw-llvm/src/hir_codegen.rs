@@ -72,6 +72,7 @@ const PENDING_REJECTION_SYMBOL: &str = "__thaw_pending_rejection";
 /// `Promise.reject`) only ever looks at the string channel and stays
 /// completely unaware this one exists.
 const PENDING_EXCEPTION_OBJECT_SYMBOL: &str = "__thaw_pending_exception_object";
+const PENDING_EXCEPTION_AGGREGATE_SYMBOL: &str = "__thaw_pending_exception_aggregate_errors";
 const PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL: &str = "__thaw_pending_exception_native_text";
 const PENDING_EXCEPTION_VALUE_TAG_SYMBOL: &str = "__thaw_pending_exception_value_tag";
 const PENDING_EXCEPTION_F64_SYMBOL: &str = "__thaw_pending_exception_f64";
@@ -354,6 +355,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_global(ptr_ty, None, PENDING_EXCEPTION_OBJECT_SYMBOL);
         pending_object.set_linkage(Linkage::Internal);
         pending_object.set_initializer(&ptr_ty.const_null());
+        let pending_aggregate = self.module.add_global(ptr_ty, None, PENDING_EXCEPTION_AGGREGATE_SYMBOL);
+        pending_aggregate.set_linkage(Linkage::Internal);
+        pending_aggregate.set_initializer(&ptr_ty.const_null());
         let typed_slots: [(&str, BasicTypeEnum); 4] = [
             (
                 PENDING_EXCEPTION_VALUE_TAG_SYMBOL,
@@ -535,6 +539,7 @@ impl<'ctx> HirCompiler<'ctx> {
             (PENDING_EXCEPTION_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_OBJECT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+            (PENDING_EXCEPTION_AGGREGATE_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
             (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
@@ -545,7 +550,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let slot = self.module.add_global(ty, None, &format!("{name}_{symbol}"));
             slot.set_linkage(Linkage::Internal);
             slot.set_initializer(&ty.const_zero());
-            if symbol == PENDING_EXCEPTION_SYMBOL || symbol == PENDING_EXCEPTION_OBJECT_SYMBOL {
+            if symbol == PENDING_EXCEPTION_SYMBOL || symbol == PENDING_EXCEPTION_OBJECT_SYMBOL || symbol == PENDING_EXCEPTION_AGGREGATE_SYMBOL {
                 self.module_exception_roots.push(slot.as_pointer_value());
             }
             cached.push((self.module.get_global(symbol).unwrap(), slot, ty));
@@ -783,6 +788,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let null = self.context.ptr_type(AddressSpace::default()).const_null();
         self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), null)
             .map_err(|error| error.to_string())?;
+        // Every fresh native/FFI/host error already clears text provenance.
+        // The Promise.any companion belongs to the same exception tuple.
+        self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(), null)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -817,13 +826,33 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.context.ptr_type(AddressSpace::default()), *native_slot,
                     "caught_rethrow_native_text",
                 ).map_err(|error| error.to_string())?;
+                let aggregate = if let Some((slot, _)) = self.variables.get(&format!("{binding}__thaw_exception_aggregate")) {
+                    self.builder.build_load(self.context.ptr_type(AddressSpace::default()), *slot,
+                        "caught_rethrow_aggregate_errors").map_err(|error| error.to_string())?.into_pointer_value()
+                } else {
+                    self.context.ptr_type(AddressSpace::default()).const_null()
+                };
+                let error_bits = self.builder.build_ptr_to_int(error, self.context.i64_type(),
+                    "caught_rethrow_error_bits").map_err(|error| error.to_string())?;
+                let native_bits = self.builder.build_ptr_to_int(native_text.into_pointer_value(), self.context.i64_type(),
+                    "caught_rethrow_native_bits").map_err(|error| error.to_string())?;
+                let matching = self.builder.build_int_compare(IntPredicate::EQ, error_bits, native_bits,
+                    "caught_rethrow_text_matches").map_err(|error| error.to_string())?;
+                let nonnull = self.builder.build_is_not_null(native_text.into_pointer_value(),
+                    "caught_rethrow_has_native_text").map_err(|error| error.to_string())?;
+                let trusted = self.builder.build_and(matching, nonnull, "caught_rethrow_trusted_pair")
+                    .map_err(|error| error.to_string())?;
+                let aggregate = self.builder.build_select(trusted, aggregate,
+                    self.context.ptr_type(AddressSpace::default()).const_null(), "caught_rethrow_paired_aggregate")
+                    .map_err(|error| error.to_string())?;
                 self.builder.build_call(
-                    self.module.get_function("thaw_promise_reject_typed_with_native_text").unwrap(),
+                    self.module.get_function("thaw_promise_reject_typed_with_aggregate").unwrap(),
                     &[
                         completion.into(), error.into(), self.context.i64_type().const_zero().into(),
                         self.context.f64_type().const_zero().into(), self.context.i64_type().const_zero().into(),
                         self.context.bool_type().const_zero().into(),
                         self.context.ptr_type(AddressSpace::default()).const_null().into(), native_text.into(),
+                        aggregate.into(),
                     ], name,
                 ).map_err(|error| error.to_string())?;
                 return Ok(());
@@ -843,6 +872,11 @@ impl<'ctx> HirCompiler<'ctx> {
     fn pending_exception_native_text(&self) -> inkwell::values::GlobalValue<'ctx> {
         self.module.get_global(PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL)
             .expect("native text provenance is declared before code generation")
+    }
+
+    fn pending_exception_aggregate_errors(&self) -> inkwell::values::GlobalValue<'ctx> {
+        self.module.get_global(PENDING_EXCEPTION_AGGREGATE_SYMBOL)
+            .expect("aggregate exception state is declared before code generation")
     }
 
     fn pending_exception_object(&self) -> inkwell::values::GlobalValue<'ctx> {
@@ -898,10 +932,30 @@ impl<'ctx> HirCompiler<'ctx> {
             "pending_native_text_provenance",
         ).map_err(|error| error.to_string())?;
         args.push(native_text.into());
+        let aggregate_errors = self.builder.build_load(
+            self.context.ptr_type(AddressSpace::default()),
+            self.pending_exception_aggregate_errors().as_pointer_value(),
+            "pending_aggregate_errors",
+        ).map_err(|error| error.to_string())?;
+        let ptr_int = self.context.i64_type();
+        let error_bits = self.builder.build_ptr_to_int(error, ptr_int, "pending_error_bits")
+            .map_err(|error| error.to_string())?;
+        let native_bits = self.builder.build_ptr_to_int(native_text.into_pointer_value(), ptr_int,
+            "pending_native_text_bits").map_err(|error| error.to_string())?;
+        let matching_text = self.builder.build_int_compare(IntPredicate::EQ, error_bits, native_bits,
+            "aggregate_text_matches_error").map_err(|error| error.to_string())?;
+        let nonnull_text = self.builder.build_is_not_null(native_text.into_pointer_value(),
+            "aggregate_has_trusted_text").map_err(|error| error.to_string())?;
+        let trusted = self.builder.build_and(matching_text, nonnull_text, "aggregate_trusted_pair")
+            .map_err(|error| error.to_string())?;
+        let aggregate_errors = self.builder.build_select(trusted, aggregate_errors.into_pointer_value(),
+            self.context.ptr_type(AddressSpace::default()).const_null(), "paired_aggregate_errors")
+            .map_err(|error| error.to_string())?;
+        args.push(aggregate_errors.into());
         self.builder
             .build_call(
                 self.module
-                    .get_function("thaw_promise_reject_typed_with_native_text")
+                    .get_function("thaw_promise_reject_typed_with_aggregate")
                     .unwrap(),
                 &args,
                 name,

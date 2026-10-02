@@ -2860,7 +2860,17 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_promise_reject_typed_with_aggregate",
+            self.context.i8_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i64_type.into(), f64_type.into(),
+                  i64_type.into(), self.context.bool_type().into(), i8_ptr.into(),
+                  i8_ptr.into(), i8_ptr.into()], false,
+            ),
+            Some(Linkage::External),
+        );
         for (name, ty) in [
+            ("thaw_promise_exception_aggregate_errors", BasicTypeEnum::from(i8_ptr)),
             ("thaw_promise_exception_tag", BasicTypeEnum::from(i64_type)),
             ("thaw_promise_exception_f64", BasicTypeEnum::from(f64_type)),
             ("thaw_promise_exception_i64", BasicTypeEnum::from(i64_type)),

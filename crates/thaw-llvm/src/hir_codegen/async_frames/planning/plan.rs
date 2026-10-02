@@ -4,6 +4,7 @@ impl<'ctx> HirCompiler<'ctx> {
         locals.push((Self::async_catch_native_name(name), HirType::Str));
         for (suffix, ty) in [
             ("object", HirType::Object(Vec::new())),
+            ("aggregate", HirType::Object(Vec::new())),
             ("tag", HirType::I64),
             ("f64", HirType::F64),
             ("i64", HirType::I64),
@@ -18,7 +19,7 @@ impl<'ctx> HirCompiler<'ctx> {
             name.to_string(),
             Box::new(error),
         ))];
-        for suffix in ["native_text", "object", "tag", "f64", "i64", "bool"] {
+        for suffix in ["native_text", "object", "aggregate", "tag", "f64", "i64", "bool"] {
             assignments.push(HirStmt::Expr(HirExpr::Assign(
                 if suffix == "native_text" { Self::async_catch_native_name(name) }
                 else { format!("{name}__thaw_exception_{suffix}") },

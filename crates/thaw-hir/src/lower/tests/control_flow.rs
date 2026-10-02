@@ -451,3 +451,19 @@ fn renames_catch_binding_that_shadows_an_outer_local() {
     assert!(format!("{:?}", catch_body).contains("error__thaw_local_0"));
     assert!(format!("{:?}", body[2]).contains("Var(\"error\")"));
 }
+
+#[test]
+fn explicit_null_throw_uses_distinct_exception_reason_tag() {
+    let program = lower(r#"function main(): void { try { throw null; } catch (error) { console.log(error); } }"#);
+    let text = format!("{:?}", program.functions[0].body);
+    assert!(text.contains("__thaw_set_pending_exception_tag"), "{text}");
+    assert!(text.contains("I64(6)"), "{text}");
+}
+
+#[test]
+fn promise_catch_direct_rethrow_uses_binding_snapshot_marker() {
+    let program = lower(r#"function main(): void { Promise.reject<number>(1).catch(error => { throw error; }); }"#);
+    let text = format!("{:?}", program);
+    assert!(text.contains("@@thaw_rethrow_pending_exception"), "{text}");
+    assert!(text.contains("@@thaw_promise_rejection:"), "{text}");
+}

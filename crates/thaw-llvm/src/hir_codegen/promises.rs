@@ -114,6 +114,9 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         if reject {
             if !typed_rejection {
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(
                         self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
@@ -300,6 +303,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.context.ptr_type(AddressSpace::default()).const_null(),
             )
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
         self.builder
             .build_store(
                 self.pending_exception_object().as_pointer_value(),
@@ -355,6 +359,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 ("thaw_promise_exception_i64", self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL)),
                 ("thaw_promise_exception_bool", self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL)),
                 ("thaw_promise_exception_object", self.pending_exception_object()),
+                ("thaw_promise_exception_aggregate_errors", self.pending_exception_aggregate_errors()),
             ] {
                 let value = self.builder
                     .build_call(
@@ -371,11 +376,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
             }
         }
+        let rejected_text = if on_rejected {
+            let native_text = self.builder.build_call(
+                self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+                &[source_promise.into()], "chain_native_text",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("native text copy returned no value")?.into_pointer_value();
+            let has_text = self.builder.build_is_not_null(native_text, "chain_has_native_text")
+                .map_err(|error| error.to_string())?;
+            let text = self.builder.build_select(has_text, native_text, result, "chain_rejection_text")
+                .map_err(|error| error.to_string())?;
+            self.mark_pending_native_text(native_text)?;
+            Some(text)
+        } else { None };
         let callback_input = if on_rejected { &HirType::Str } else { input };
         let value = if !on_rejected && callback_input == &HirType::Void {
             None
         } else if on_rejected {
-            Some(result.into())
+            Some(rejected_text.expect("rejection text was captured").into())
         } else {
             Some(
                 self.builder
@@ -438,8 +456,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(pending_slot, ptr.const_null())
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(succeeded);
+        if on_rejected {
+            self.clear_pending_native_text()?;
+        }
         if flatten {
             self.builder
                 .build_call(
@@ -566,6 +588,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(pending_slot, ptr.const_null())
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(succeeded);
         if matches!(callback_return, HirType::Promise(_)) {
@@ -1248,6 +1271,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ("thaw_promise_exception_i64", self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL)),
             ("thaw_promise_exception_bool", self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL)),
             ("thaw_promise_exception_object", self.pending_exception_object()),
+                ("thaw_promise_exception_aggregate_errors", self.pending_exception_aggregate_errors()),
         ] {
             let value = self.builder
                 .build_call(
