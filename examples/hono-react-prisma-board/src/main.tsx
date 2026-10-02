@@ -13,6 +13,7 @@ function Board() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [author, setAuthor] = useState("");
   const [message, setMessage] = useState("");
+  const [submitError, setSubmitError] = useState("");
 
   async function reload() {
     const response = await fetch("/api/posts");
@@ -24,13 +25,27 @@ function Board() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    await fetch("/api/posts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ author, message }),
-    });
+    try {
+      const response = await fetch("/api/posts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ author, message }),
+      });
+      if (!response.ok) {
+        setSubmitError(`投稿できませんでした (HTTP ${response.status})。入力内容を確認して再試行してください。`);
+        return;
+      }
+    } catch {
+      setSubmitError("投稿できませんでした。接続を確認して再試行してください。");
+      return;
+    }
     setMessage("");
-    await reload();
+    setSubmitError("");
+    try {
+      await reload();
+    } catch {
+      setSubmitError("投稿は完了しましたが、一覧を更新できませんでした。");
+    }
   }
 
   return <main>
@@ -39,6 +54,7 @@ function Board() {
       <input aria-label="名前" value={author} onChange={(event) => setAuthor(event.target.value)} placeholder="名前" required />
       <textarea aria-label="投稿" value={message} onChange={(event) => setMessage(event.target.value)} placeholder="投稿内容" required />
       <button>投稿する</button>
+      {submitError && <p role="alert">{submitError}</p>}
     </form>
     <section>{posts.map((post) => <article key={post.id}>
       <strong>{post.author}</strong>
