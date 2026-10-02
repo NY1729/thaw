@@ -175,6 +175,14 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_runtime_exception_report_text",
+            i8_ptr.fn_type(&[
+                i8_ptr.into(), i8_ptr.into(), i64_type.into(), self.context.f64_type().into(),
+                i64_type.into(), self.context.bool_type().into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_emit_uncaught",
             self.context.i8_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
@@ -2252,6 +2260,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_terminal_work_pending",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_run_cli",
             self.context.i32_type().fn_type(&[], false),
             Some(Linkage::External),
@@ -2712,6 +2725,25 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_async_work_pending",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_napi_begin_shutdown",
+            "thaw_napi_poll_shutdown",
+            "thaw_napi_finish_shutdown",
+        ] {
+            self.module.add_function(
+                name, self.context.i8_type().fn_type(&[], false), Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_napi_take_shutdown_error",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_unload_all",
             self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),
@@ -2744,6 +2776,16 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_runtime_run_until_idle",
             i64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_async_work_pending",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_shutdown_wait",
+            self.context.void_type().fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -2850,6 +2892,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_promise_detach_for_report",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_promise_drain_unhandled",
             self.context.i8_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
@@ -2866,11 +2915,13 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         for name in [
             "thaw_promise_drain_unhandled_result",
+            "thaw_promise_drain_unhandled_text_result",
         ] {
             self.module.add_function(name, self.context.i8_type().fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
         }
         for name in [
             "thaw_promise_set_unhandled_reporter_result",
+            "thaw_promise_set_unhandled_reporter_text_result",
             "thaw_promise_set_rejection_handled_reporter_result",
         ] {
             self.module.add_function(name, self.context.void_type().fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
@@ -2878,6 +2929,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_promise_take_unhandled_failure",
             self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_take_report_activity",
+            i64_type.fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(

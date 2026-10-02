@@ -238,6 +238,18 @@ pub unsafe extern "C" fn thaw_promise_forward_rejection(
 struct DetachedPromise {
     promise: *mut ThawPromise,
     pending_exception: *mut *const u8,
+    owned_report: bool,
+}
+
+fn promise_report_bytes(source: &ThawPromise) -> Vec<u8> {
+    source.rejection_text.clone().unwrap_or_else(|| match source.exception_tag {
+        1 => javascript_number_string(source.exception_f64).into_bytes(),
+        2 => source.exception_i64.to_string().into_bytes(),
+        3 => source.exception_bool.to_string().into_bytes(),
+        5 => b"undefined".to_vec(),
+        4 => b"Unhandled opaque string Promise rejection".to_vec(),
+        _ => b"Unhandled opaque Promise rejection".to_vec(),
+    })
 }
 
 extern "C" fn destroy_detached_promise(frame: *mut u8, result: *const u8) {
@@ -245,7 +257,14 @@ extern "C" fn destroy_detached_promise(frame: *mut u8, result: *const u8) {
     if unsafe { thaw_promise_state(state.promise) } == 2 && !state.pending_exception.is_null() {
         let pending = unsafe { &mut *state.pending_exception };
         if pending.is_null() {
-            *pending = result;
+            *pending = if state.owned_report {
+                // Snapshot producer-owned text and typed fields while the source
+                // Promise is live. An arbitrary rejection result is opaque.
+                let source = unsafe { &*state.promise };
+                thaw_arena::owned_string(promise_report_bytes(source)).cast()
+            } else {
+                result
+            };
         }
     }
     unsafe { thaw_promise_destroy(state.promise) };
@@ -261,12 +280,31 @@ pub unsafe extern "C" fn thaw_promise_detach(
     promise: *mut ThawPromise,
     pending_exception: *mut *const u8,
 ) -> u8 {
+    unsafe { detach_promise(promise, pending_exception, false) }
+}
+
+/// Compiler-private variant for the terminal rejection slot. The slot owns
+/// its diagnostic string and must destroy it after reporting.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_detach_for_report(
+    promise: *mut ThawPromise,
+    pending_rejection: *mut *const u8,
+) -> u8 {
+    unsafe { detach_promise(promise, pending_rejection, true) }
+}
+
+unsafe fn detach_promise(
+    promise: *mut ThawPromise,
+    pending_exception: *mut *const u8,
+    owned_report: bool,
+) -> u8 {
     if promise.is_null() {
         return 0;
     }
     let state = Box::into_raw(Box::new(DetachedPromise {
         promise,
         pending_exception,
+        owned_report,
     }));
     let subscribed = unsafe {
         thaw_promise_subscribe(promise, destroy_detached_promise, state.cast::<u8>())
@@ -1071,6 +1109,16 @@ fn report_listener_error(error: *const c_char) -> bool {
 #[no_mangle]
 pub extern "C" fn thaw_promise_set_unhandled_reporter_result(reporter: Option<PromiseUnhandledResultFn>) {
     UNHANDLED_REPORTER_RESULT.with(|registered| registered.set(reporter));
+    UNHANDLED_REPORTER_TEXT_RESULT.with(|registered| registered.set(None));
+    UNHANDLED_REPORTER.with(|registered| registered.set(None));
+}
+
+/// Compiler-private reporter: its callback receives a temporary owned native
+/// diagnostic string, never the public Promise result pointer.
+#[no_mangle]
+pub extern "C" fn thaw_promise_set_unhandled_reporter_text_result(reporter: Option<PromiseUnhandledResultFn>) {
+    UNHANDLED_REPORTER_TEXT_RESULT.with(|registered| registered.set(reporter));
+    UNHANDLED_REPORTER_RESULT.with(|registered| registered.set(None));
     UNHANDLED_REPORTER.with(|registered| registered.set(None));
 }
 
@@ -1087,6 +1135,7 @@ pub extern "C" fn thaw_promise_set_rejection_handled_reporter_result(
 pub extern "C" fn thaw_promise_set_unhandled_reporter(reporter: Option<PromiseUnhandledFn>) {
     UNHANDLED_REPORTER.with(|registered| registered.set(reporter));
     UNHANDLED_REPORTER_RESULT.with(|registered| registered.set(None));
+    UNHANDLED_REPORTER_TEXT_RESULT.with(|registered| registered.set(None));
 }
 
 #[no_mangle]
@@ -1100,7 +1149,10 @@ pub extern "C" fn thaw_promise_set_rejection_handled_reporter(
 fn report_registered_unhandled_rejections() {
     let reporter = UNHANDLED_REPORTER.with(Cell::get);
     let result_reporter = UNHANDLED_REPORTER_RESULT.with(Cell::get);
-    let failed = if result_reporter.is_some() {
+    let text_reporter = UNHANDLED_REPORTER_TEXT_RESULT.with(Cell::get);
+    let failed = if text_reporter.is_some() {
+        thaw_promise_drain_unhandled_text_result(text_reporter)
+    } else if result_reporter.is_some() {
         thaw_promise_drain_unhandled_result(result_reporter)
     } else {
         thaw_promise_drain_unhandled(reporter)
@@ -1114,10 +1166,12 @@ fn report_registered_unhandled_rejections() {
 fn report_pending_rejection_handled() {
     let count = PENDING_REJECTION_HANDLED.with(|pending| pending.replace(0));
     if let Some(reporter) = REJECTION_HANDLED_REPORTER_RESULT.with(Cell::get) {
+        PROMISE_REPORT_ACTIVITY.with(|activity| activity.set(activity.get().saturating_add(count)));
         for _ in 0..count {
             report_listener_error(reporter().error);
         }
     } else if let Some(reporter) = REJECTION_HANDLED_REPORTER.with(Cell::get) {
+        PROMISE_REPORT_ACTIVITY.with(|activity| activity.set(activity.get().saturating_add(count)));
         for _ in 0..count {
             reporter();
         }
@@ -1127,6 +1181,12 @@ fn report_pending_rejection_handled() {
 #[no_mangle]
 pub extern "C" fn thaw_promise_take_unhandled_failure() -> u8 {
     UNHANDLED_FAILURE.with(|failed| u8::from(failed.replace(false)))
+}
+
+/// Notification progress is separate from the unhandled-failure latch.
+#[no_mangle]
+pub extern "C" fn thaw_promise_take_report_activity() -> usize {
+    PROMISE_REPORT_ACTIVITY.with(|activity| activity.replace(0))
 }
 
 // Only rejection_text marks a pointer as a native C string. Public reject
@@ -1142,6 +1202,7 @@ pub extern "C" fn thaw_promise_drain_unhandled_result(
     reporter: Option<PromiseUnhandledResultFn>,
 ) -> u8 {
     let rejected = collect_unhandled_rejections();
+    PROMISE_REPORT_ACTIVITY.with(|activity| activity.set(activity.get().saturating_add(rejected.len())));
     let mut failed = false;
     for rejection in rejected {
         let text = rejection.text.as_ref().map(thaw_arena::owned_string);
@@ -1160,11 +1221,37 @@ pub extern "C" fn thaw_promise_drain_unhandled_result(
     u8::from(failed)
 }
 
+/// Compiler-private text adapter for QuickJS process events. This keeps the
+/// public Result reporter's opaque-pointer ABI unchanged.
+#[no_mangle]
+pub extern "C" fn thaw_promise_drain_unhandled_text_result(
+    reporter: Option<PromiseUnhandledResultFn>,
+) -> u8 {
+    let rejected = collect_unhandled_rejections();
+    PROMISE_REPORT_ACTIVITY.with(|activity| activity.set(activity.get().saturating_add(rejected.len())));
+    let mut failed = false;
+    for rejection in rejected {
+        let text = thaw_arena::owned_string(&rejection.diagnostic);
+        let result = reporter.map(|reporter| reporter(text.cast()));
+        let handled = result.as_ref().is_some_and(|result| result.value != 0 && result.error.is_null());
+        if !handled {
+            unsafe { thaw_runtime_report_uncaught(text) };
+            failed = true;
+        }
+        if let Some(result) = result {
+            failed |= report_listener_error(result.error);
+        }
+        unsafe { thaw_arena::destroy_string(text) };
+    }
+    u8::from(failed)
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_promise_drain_unhandled(
     reporter: Option<PromiseUnhandledFn>,
 ) -> u8 {
     let rejected = collect_unhandled_rejections();
+    PROMISE_REPORT_ACTIVITY.with(|activity| activity.set(activity.get().saturating_add(rejected.len())));
     let mut failed = false;
     for rejection in rejected {
         let text = rejection.text.as_ref().map(thaw_arena::owned_string);
@@ -1184,6 +1271,7 @@ pub extern "C" fn thaw_promise_drain_unhandled(
 struct UnhandledRejection {
     error: *const u8,
     text: Option<Vec<u8>>,
+    diagnostic: Vec<u8>,
 }
 
 fn collect_unhandled_rejections() -> Vec<UnhandledRejection> {
@@ -1198,6 +1286,7 @@ fn collect_unhandled_rejections() -> Vec<UnhandledRejection> {
                     UnhandledRejection {
                         error: promise.result.unwrap_or(std::ptr::null()),
                         text: promise.rejection_text.clone(),
+                        diagnostic: promise_report_bytes(promise),
                     }
                 })
             })

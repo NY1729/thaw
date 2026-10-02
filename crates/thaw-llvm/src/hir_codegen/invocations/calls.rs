@@ -1483,7 +1483,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_promise_detach").unwrap(),
+                        self.module.get_function(if name == "__thaw_detach_rejection" {
+                            "thaw_promise_detach_for_report"
+                        } else {
+                            "thaw_promise_detach"
+                        }).unwrap(),
                         &[
                             promise.into(),
                             pending.as_pointer_value().into(),

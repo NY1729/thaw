@@ -2781,7 +2781,16 @@ fn generated_main_uses_result_reporters_and_destroys_listener_errors() {
     assert!(ir.contains("@thaw_js_emit_uncaught_result"), "{ir}");
     assert!(ir.contains("@thaw_js_emit_unhandled_rejection_result"), "{ir}");
     assert!(ir.contains("@thaw_js_emit_rejection_handled_result"), "{ir}");
-    assert!(ir.contains("@thaw_promise_drain_unhandled_result"), "{ir}");
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_set_unhandled_reporter_text_result(")), "{ir}");
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_drain_unhandled_text_result(")), "{ir}");
+    assert!(!ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_drain_unhandled_result(")), "{ir}");
+    assert!(!ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_set_unhandled_reporter_result(")), "{ir}");
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_js_terminal_work_pending(")), "{ir}");
     assert!(ir.contains("destroy_js_listener_exception"), "{ir}");
     assert!(ir.contains("destroy_rejection_listener_exception"), "{ir}");
 }
@@ -2850,4 +2859,69 @@ fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
     let ir = compiler.print_to_string();
     assert!(ir.contains("__thaw_async_lambda_"), "{ir}");
     assert!(ir.contains("rethrown_native_text_provenance"), "{ir}");
+}
+
+#[test]
+fn main_cleanup_keeps_process_reporting_and_addons_live_on_init_failure() {
+    let module = thaw_parser::parse_typescript(
+        "function __thaw_module_init(): void { throw 'init failed'; } function main(): void {}",
+    ).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "terminal_shutdown_order");
+    compiler.uses_napi = true;
+    compiler.uses_quickjs = true;
+    compiler.uses_quickjs_handles = true;
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("init_failed") && ir.contains("entry_cleanup"), "{ir}");
+    let ordinary = ir.find("terminal_ordinary_notifications:").unwrap();
+    let begin = ir.find("terminal_begin_shutdown:").unwrap();
+    let finish = ir.find("finish_napi_shutdown").unwrap();
+    assert!(ordinary < begin && begin < finish, "{ir}");
+    assert!(ir.contains("take_shutdown_error") && ir.contains("terminal_promise_notifications"), "{ir}");
+    assert!(ir.contains("original_exception_owned_report_text")
+        && ir.contains("destroy_original_exception_report")
+        && ir.contains("listener_exception_owned_report_text")
+        && ir.contains("destroy_native_handler_exception_report"), "{ir}");
+    let original = ir.find("process_pending_exception = load ptr").unwrap();
+    let listener = ir[original..].find("emit_process_uncaught_exception = call").unwrap() + original;
+    let handler = ir[listener..].find("process_handler_exception = load ptr").unwrap() + listener;
+    let next_report = ir[handler..].find("report_uncaught_exception = call").unwrap() + handler;
+    for slot in [
+        "@__thaw_pending_exception_object",
+        "@__thaw_pending_exception_value_tag",
+        "@__thaw_pending_exception_f64",
+        "@__thaw_pending_exception_i64",
+        "@__thaw_pending_exception_bool",
+    ] {
+        assert!(ir[original..listener].contains(slot), "original exception metadata: {ir}");
+        assert!(ir[handler..next_report].contains(slot), "listener exception metadata: {ir}");
+    }
+    assert!(!ir.contains("unload_napi_addons"), "{ir}");
+}
+
+#[test]
+fn terminal_rejection_listener_jobs_finish_before_process_exit() {
+    let source = r#"
+        function main(): void {
+            loadScript("process.on('unhandledRejection', () => { console.log('notify'); queueMicrotask(() => console.log('job')); });");
+            Promise.reject("first");
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "terminal_rejection_jobs"), "notify\njob\n");
+}
+
+#[test]
+fn source_function_cannot_forge_trusted_exception_text_marker() {
+    let source = r#"
+        function __thaw_trusted_exception_text(value: string): string {
+            return "user:" + value;
+        }
+        function main(): void {
+            try { throw __thaw_trusted_exception_text("x"); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "reserved_exception_text_marker"), "user:x\n");
 }

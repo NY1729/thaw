@@ -2324,6 +2324,10 @@ impl<'a> FnLowerer<'a> {
                 });
                 let value = self.lower_expr(&throw_stmt.arg)?;
                 let value_type = self.infer_expr_type(&value)?;
+                let trusted_text = |value| HirExpr::Call(
+                    Box::new(HirExpr::Var("@@thaw_trusted_exception_text".to_string())),
+                    vec![value],
+                );
                 if promise_rethrow {
                     return Ok(vec![HirStmt::Throw(value)]);
                 }
@@ -2376,7 +2380,7 @@ impl<'a> FnLowerer<'a> {
                             )),
                             vec![object_var],
                         )),
-                        HirStmt::Throw(message),
+                        HirStmt::Throw(trusted_text(message)),
                     ]);
                 }
                 let setter = match value_type {
@@ -2397,7 +2401,7 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var(setter.to_string())),
                             vec![value_var],
                         )),
-                        HirStmt::Throw(message),
+                        HirStmt::Throw(trusted_text(message)),
                     ]);
                 }
                 let tag = match value_type {
@@ -2413,11 +2417,11 @@ impl<'a> FnLowerer<'a> {
                             )),
                             vec![HirExpr::Lit(HirLit::I64(tag))],
                         )),
-                        HirStmt::Throw(self.coerce_primitive_to_string(value)?),
+                        HirStmt::Throw(trusted_text(self.coerce_primitive_to_string(value)?)),
                     ]);
                 }
                 let value = self.coerce_primitive_to_string(value)?;
-                Ok(vec![HirStmt::Throw(value)])
+                Ok(vec![HirStmt::Throw(trusted_text(value))])
             }
 
             Stmt::Try(try_stmt) => {
