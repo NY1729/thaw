@@ -1,3 +1,11 @@
+struct NarrowingSnapshot {
+    optional: HashMap<Symbol, HirType>,
+    nullable: HashMap<Symbol, HirType>,
+    nullish: HashMap<Symbol, HirType>,
+    partial_nullable: HashMap<Symbol, HirType>,
+    write_versions: HashMap<Symbol, u64>,
+}
+
 /// Lowers one function body while retaining its typed lexical scope.
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
@@ -6,6 +14,9 @@ struct FnLowerer<'a> {
     narrowings: HashMap<Symbol, HirType>,
     nullable_narrowings: HashMap<Symbol, HirType>,
     nullish_narrowings: HashMap<Symbol, HirType>,
+    partial_nullable_narrowings: HashMap<Symbol, HirType>,
+    narrowing_write_versions: HashMap<Symbol, u64>,
+    last_if_condition_narrowing: Option<(Symbol, HirType, bool, u8)>,
     json_narrowings: HashMap<Symbol, HirType>,
     exception_object_narrowings: HashMap<Symbol, HirType>,
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,

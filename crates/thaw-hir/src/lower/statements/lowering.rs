@@ -902,6 +902,9 @@ impl<'a> FnLowerer<'a> {
                 ))
             }
         };
+        if let Target::Var(name) = &target {
+            self.record_binding_write(name);
+        }
         Ok(vec![HirStmt::Expr(build_assign(target, value))])
     }
 
@@ -1095,7 +1098,11 @@ impl<'a> FnLowerer<'a> {
                 let json_narrowing = self.json_typeof_narrowing(&if_stmt.test);
                 let exception_narrowing =
                     self.exception_instanceof_narrowing(&if_stmt.test);
+                let condition_versions = self.narrowing_write_versions.clone();
                 let cond = self.lower_condition_expr(&if_stmt.test)?;
+                let narrowing = narrowing.filter(|(name, _, _, _)| {
+                    condition_versions.get(name) == self.narrowing_write_versions.get(name)
+                });
                 let then_narrowing = narrowing
                     .as_ref()
                     .filter(|(_, _, present, _)| *present)
@@ -1134,6 +1141,7 @@ impl<'a> FnLowerer<'a> {
                 };
                 let then_union = branch_union(true);
                 let else_union = branch_union(false);
+                let saved_narrowings = self.save_narrowings();
                 let then_branch = self
                     .lower_body_with_union_narrowing(
                         &if_stmt.cons,
@@ -1146,6 +1154,7 @@ impl<'a> FnLowerer<'a> {
                             .as_ref(),
                         exception_narrowing.as_ref(),
                     )?;
+                self.restore_narrowings_for_sibling(&saved_narrowings);
                 let else_branch = match &if_stmt.alt {
                     Some(alt) => self.lower_body_with_union_narrowing(
                         alt,
@@ -1160,6 +1169,8 @@ impl<'a> FnLowerer<'a> {
                         )?,
                     None => Vec::new(),
                 };
+                self.restore_narrowings(saved_narrowings);
+                self.last_if_condition_narrowing = narrowing;
                 Ok(vec![HirStmt::If(cond, then_branch, else_branch)])
             }
 
@@ -1699,6 +1710,7 @@ impl<'a> FnLowerer<'a> {
                                         item_type
                                     ));
                                 }
+                                self.record_binding_write(&item_name);
                                 vec![HirStmt::Expr(HirExpr::Assign(
                                     item_name,
                                     Box::new(item_value()),
@@ -2031,6 +2043,7 @@ impl<'a> FnLowerer<'a> {
                                     "`for...in` assignment target must be Str, got {binding_type:?}"
                                 ));
                             }
+                            self.record_binding_write(&binding_name);
                             HirStmt::Expr(HirExpr::Assign(
                                 binding_name,
                                 Box::new(key_value()),

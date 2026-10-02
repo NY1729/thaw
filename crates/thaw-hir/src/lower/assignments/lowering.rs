@@ -872,6 +872,9 @@ impl<'a> FnLowerer<'a> {
                 )
             });
         let mut bindings = Vec::new();
+        if let Some(name) = assigned_variable.as_ref() {
+            self.record_binding_write(name);
+        }
 
         if assign.op != AssignOp::Assign {
             target = match target {
@@ -1460,6 +1463,7 @@ impl<'a> FnLowerer<'a> {
                 // source, behaves identically to before).
                 let value = self.coerce_primitive_array_argument(value, &expected)?;
                 self.invalidate_destructured_union_correlation(&name);
+                self.record_binding_write(&name);
                 let (result, array, nested_array, object, functions) = function
                     .map(|metadata| {
                         (
