@@ -494,82 +494,92 @@ fn decode_chunked(body: &[u8]) -> Result<Option<Vec<u8>>, String> {
 }
 
 fn parse_http_response(response: &[u8], eof: bool) -> Result<Option<ParsedHttpResponse>, String> {
-    let Some(header_end) = find_bytes(response, b"\r\n\r\n") else {
-        return if eof {
-            Err("malformed HTTP response (incomplete headers)".to_string())
-        } else {
-            Ok(None)
-        };
-    };
-    let head = std::str::from_utf8(&response[..header_end])
-        .map_err(|_| "HTTP response headers are not valid UTF-8")?;
-    let mut lines = head.lines();
-    let status = lines
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or("malformed HTTP status line")?;
-    let mut content_length = None;
-    let mut chunked = false;
-    let mut location = None;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            return Err(format!("malformed HTTP header `{line}`"));
-        };
-        if name.eq_ignore_ascii_case("content-length") {
-            content_length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|_| "invalid Content-Length header")?,
-            );
-        }
-        if name.eq_ignore_ascii_case("transfer-encoding")
-            && value
-                .split(',')
-                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
-        {
-            chunked = true;
-        }
-        if name.eq_ignore_ascii_case("location") {
-            location = Some(value.trim().to_string());
-        }
-    }
-    let body = &response[header_end + 4..];
-    if chunked {
-        return decode_chunked(body).map(|body| {
-            body.map(|body| ParsedHttpResponse {
-                status,
-                body,
-                location,
-            })
-        });
-    }
-    if let Some(length) = content_length {
-        if body.len() < length {
+    let mut response = response;
+    loop {
+        let Some(header_end) = find_bytes(response, b"\r\n\r\n") else {
             return if eof {
-                Err(format!(
-                    "HTTP body ended after {} bytes, expected {length}",
-                    body.len()
-                ))
+                Err("malformed HTTP response (incomplete headers)".to_string())
             } else {
                 Ok(None)
             };
+        };
+        let head = std::str::from_utf8(&response[..header_end])
+            .map_err(|_| "HTTP response headers are not valid UTF-8")?;
+        let mut lines = head.lines();
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|status| status.parse::<u16>().ok())
+            .ok_or("malformed HTTP status line")?;
+        let mut content_length = None;
+        let mut chunked = false;
+        let mut location = None;
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                return Err(format!("malformed HTTP header `{line}`"));
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = Some(
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| "invalid Content-Length header")?,
+                );
+            }
+            if name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+            {
+                chunked = true;
+            }
+            if name.eq_ignore_ascii_case("location") {
+                location = Some(value.trim().to_string());
+            }
         }
-        return Ok(Some(ParsedHttpResponse {
-            status,
-            body: body[..length].to_vec(),
-            location,
-        }));
-    }
-    if eof {
-        Ok(Some(ParsedHttpResponse {
-            status,
-            body: body.to_vec(),
-            location,
-        }))
-    } else {
-        Ok(None)
+        let body = &response[header_end + 4..];
+        if (100..200).contains(&status) {
+            if status == 101 {
+                return Err("HTTP protocol upgrade is not supported by async fetch".to_string());
+            }
+            response = body;
+            continue;
+        }
+        if chunked {
+            return decode_chunked(body).map(|body| {
+                body.map(|body| ParsedHttpResponse {
+                    status,
+                    body,
+                    location,
+                })
+            });
+        }
+        if let Some(length) = content_length {
+            if body.len() < length {
+                return if eof {
+                    Err(format!(
+                        "HTTP body ended after {} bytes, expected {length}",
+                        body.len()
+                    ))
+                } else {
+                    Ok(None)
+                };
+            }
+            return Ok(Some(ParsedHttpResponse {
+                status,
+                body: body[..length].to_vec(),
+                location,
+            }));
+        }
+        return if eof {
+            Ok(Some(ParsedHttpResponse {
+                status,
+                body: body.to_vec(),
+                location,
+            }))
+        } else {
+            Ok(None)
+        };
     }
 }
 

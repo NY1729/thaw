@@ -1372,6 +1372,53 @@ fn incrementally_parses_content_length_response() {
 }
 
 #[test]
+fn skips_complete_interim_responses_until_final_http_response() {
+    let interim = b"HTTP/1.1 100 Continue\r\nX-Interim: yes\r\n\r\nHTTP/1.1 102 Processing\r\n\r\nHTTP/1.1 103 Early Hints\r\nLocation: /interim\r\n\r\n";
+    let partial_interim = b"HTTP/1.1 100 Continue\r\nX-Interim:";
+    assert!(parse_http_response(partial_interim, false).unwrap().is_none());
+    assert!(parse_http_response(partial_interim, true).is_err());
+    let partial_head = [&interim[..], &b"HTTP/1.1 302 Found\r\nLoc"[..]].concat();
+    assert!(parse_http_response(&partial_head, false).unwrap().is_none());
+    assert!(parse_http_response(&partial_head, true).is_err());
+
+    let final_head = b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 5\r\n\r\n";
+    let partial_body = [&interim[..], &final_head[..], &b"he"[..]].concat();
+    assert!(parse_http_response(&partial_body, false).unwrap().is_none());
+    let complete = [&interim[..], &final_head[..], &b"hello"[..]].concat();
+    let parsed = parse_http_response(&complete, false).unwrap().unwrap();
+    assert_eq!(parsed.status, 302);
+    assert_eq!(parsed.body, b"hello");
+    assert_eq!(parsed.location.as_deref(), Some("/final"));
+}
+
+#[test]
+fn interim_response_waits_for_complete_chunked_final_response() {
+    let interim = b"HTTP/1.1 103 Early Hints\r\n\r\n";
+    let final_head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let partial = [&interim[..], &final_head[..], &b"4\r\nWi"[..]].concat();
+    assert!(parse_http_response(&partial, false).unwrap().is_none());
+    let complete = [&interim[..], &final_head[..], &b"4\r\nWiki\r\n0\r\n\r\n"[..]].concat();
+    let parsed = parse_http_response(&complete, false).unwrap().unwrap();
+    assert_eq!(parsed.status, 200);
+    assert_eq!(parsed.body, b"Wiki");
+    assert_eq!(parsed.location, None);
+}
+
+#[test]
+fn interim_only_eof_and_protocol_upgrade_are_errors() {
+    let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
+    assert!(parse_http_response(interim, false).unwrap().is_none());
+    assert!(parse_http_response(interim, true).is_err());
+    let upgrade = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+    assert!(parse_http_response(upgrade, false)
+        .err()
+        .unwrap()
+        .contains("upgrade"));
+    let invalid_interim = b"HTTP/1.1 103 Early Hints\r\nContent-Length: invalid\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    assert!(parse_http_response(invalid_interim, false).is_err());
+}
+
+#[test]
 fn incrementally_decodes_chunked_response() {
     let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWi";
     assert!(parse_http_response(partial, false).unwrap().is_none());
