@@ -436,7 +436,18 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
     let next = READY_CONTINUATIONS.with(|ready| ready.borrow_mut().pop_front());
     let Some((subscription, result)) = next else {
         report_registered_unhandled_rejections();
-        return u8::from(io_events != 0);
+        // A rejection listener can enqueue a continuation or another rejection.
+        // Recheck after dispatch so an idle drain does not stop before that work.
+        let reporting_work = PENDING_REJECTION_HANDLED.with(|pending| pending.get() != 0)
+            || ACTIVE_PROMISES.with(|active| {
+                active.borrow().iter().any(|promise| {
+                    let promise = unsafe { &**promise };
+                    promise.rejected && !promise.handled && !promise.reported_unhandled
+                })
+            });
+        return u8::from(io_events != 0
+            || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
+            || reporting_work);
     };
     (subscription.resume)(subscription.frame, result);
     1
