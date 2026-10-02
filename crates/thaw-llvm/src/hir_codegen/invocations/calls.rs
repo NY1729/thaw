@@ -680,7 +680,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let right = self.compile_expr(right)?;
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 let runtime = format!("thaw_{runtime}");
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
@@ -690,7 +690,21 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("bigint arithmetic returned no value".into());
+                    .ok_or("bigint arithmetic returned no value".to_string())?;
+                if matches!(name.as_str(), "__thaw_bigint_decimal_div" | "__thaw_bigint_decimal_mod") {
+                    let invalid = self.builder
+                        .build_is_null(result.into_pointer_value(), "bigint_zero_divisor")
+                        .map_err(|error| error.to_string())?;
+                    let function = self.current_function();
+                    let error_bb = self.context.append_basic_block(function, "bigint_division_error");
+                    let continue_bb = self.context.append_basic_block(function, "bigint_division_ok");
+                    self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(error_bb);
+                    self.compile_throw_builtin_error("RangeError", "Division by zero")?;
+                    self.builder.position_at_end(continue_bb);
+                }
+                return Ok(result);
             }
             "__thaw_temporal_now" | "__thaw_temporal_now_nanos" => {
                 if !args.is_empty() {

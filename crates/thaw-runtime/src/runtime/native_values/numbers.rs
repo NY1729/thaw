@@ -895,8 +895,9 @@ fn decimal_to_string(negative: bool, digits: &[u8]) -> String {
 }
 
 /// Applies a signed operation to two decimal strings and returns the
-/// decimal result. `operation` is `0`=add, `1`=subtract, `2`=multiply,
-/// `3`=divide (truncating), `4`=remainder (sign of the dividend).
+/// decimal result, or `None` for division or remainder by zero.
+/// `operation` is `0`=add, `1`=subtract, `2`=multiply, `3`=divide
+/// (truncating), `4`=remainder (sign of the dividend).
 ///
 /// # Safety
 /// Both pointers must be null or valid NUL-terminated UTF-8 strings.
@@ -904,7 +905,7 @@ unsafe fn bigint_decimal_operation(
     left: *const c_char,
     right: *const c_char,
     operation: u8,
-) -> String {
+) -> Option<String> {
     let read = |pointer: *const c_char| -> (bool, Vec<u8>) {
         if pointer.is_null() {
             return (false, vec![0]);
@@ -913,7 +914,7 @@ unsafe fn bigint_decimal_operation(
     };
     let (left_negative, left_digits) = read(left);
     let (right_negative, right_digits) = read(right);
-    match operation {
+    Some(match operation {
         0 | 1 => {
             let right_negative = if operation == 1 { !right_negative } else { right_negative };
             if left_negative == right_negative {
@@ -941,7 +942,7 @@ unsafe fn bigint_decimal_operation(
         ),
         _ => {
             if decimal_is_zero(&right_digits) {
-                return "0".to_string();
+                return None;
             }
             let (quotient, remainder) = decimal_divmod_magnitude(&left_digits, &right_digits);
             if operation == 3 {
@@ -950,7 +951,7 @@ unsafe fn bigint_decimal_operation(
                 decimal_to_string(left_negative, &remainder)
             }
         }
-    }
+    })
 }
 
 macro_rules! bigint_decimal_operation_fn {
@@ -964,7 +965,11 @@ macro_rules! bigint_decimal_operation_fn {
             left: *const c_char,
             right: *const c_char,
         ) -> *const c_char {
-            let text = unsafe { bigint_decimal_operation(left, right, $operation) };
+            let Some(text) = (unsafe { bigint_decimal_operation(left, right, $operation) }) else {
+                // A null result signals division or remainder by zero to the
+                // code generator, which raises a catchable RangeError.
+                return std::ptr::null();
+            };
             arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
         }
     };
@@ -1119,7 +1124,14 @@ unsafe fn bigint_decimal_shift(
         };
     }
     let base_bits = decimal_to_bits(&digits);
-    let width = base_bits.len() + amount + 2;
+    if !left_shift && amount >= base_bits.len() {
+        return if negative { "-1" } else { "0" }.to_string();
+    }
+    let width = if left_shift {
+        base_bits.len() + amount + 2
+    } else {
+        base_bits.len() + 1
+    };
     let twos = signed_to_twos(negative, &digits, width);
     let result = if left_shift {
         let mut out = vec![0u8; amount];
@@ -1188,6 +1200,7 @@ mod bigint_decimal_tests {
         let left = std::ffi::CString::new(left).unwrap();
         let right = std::ffi::CString::new(right).unwrap();
         unsafe { bigint_decimal_operation(left.as_ptr(), right.as_ptr(), operation) }
+            .expect("nonzero BigInt divisor")
     }
 
     #[test]
@@ -1206,7 +1219,14 @@ mod bigint_decimal_tests {
         assert_eq!(operate("-7", "3", 4), "-1");
         assert_eq!(operate("7", "-3", 4), "1");
         assert_eq!(operate("0", "5", 3), "0");
-        assert_eq!(operate("5", "0", 3), "0");
+        for operation in [3, 4] {
+            let left = std::ffi::CString::new("5").unwrap();
+            let zero = std::ffi::CString::new("0").unwrap();
+            assert!(
+                unsafe { bigint_decimal_operation(left.as_ptr(), zero.as_ptr(), operation) }
+                    .is_none()
+            );
+        }
         assert_eq!(operate("007", "3", 0), "10");
     }
 
@@ -1239,6 +1259,12 @@ mod bigint_decimal_tests {
             shift("-123456789012345678901234567890", "8", false),
             "-482253082079475308207947531"
         );
+        assert_eq!(shift("123456789012345678901234567890", "1000000", false), "0");
+        assert_eq!(
+            shift("-123456789012345678901234567890", "1000000", false),
+            "-1"
+        );
+        assert_eq!(shift("123456789012345678901234567890", "-1000000", true), "0");
     }
 }
 
