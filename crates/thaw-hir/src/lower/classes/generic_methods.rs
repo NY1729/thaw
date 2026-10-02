@@ -531,9 +531,7 @@ fn resolve_explicit_generic_class_method_types(
                     )
                 })?
         };
-        argument.visit_mut_with(&mut GenericClassTypeSubstituter {
-            substitutions: &ast_substitution,
-        });
+        argument.visit_mut_with(&mut GenericClassTypeSubstituter::new(&ast_substitution));
         let ty = lower_ts_type(&argument, interfaces, generic_interfaces)?;
         ast_substitution.insert(parameter.clone(), Box::new(argument.clone()));
         hir_substitution.insert(parameter.clone(), ty.clone());
@@ -1079,9 +1077,7 @@ fn specialize_generic_class_methods(
                 method.function.type_params = None;
                 method
                     .function
-                    .visit_mut_with(&mut GenericClassTypeSubstituter {
-                        substitutions: &substitutions,
-                    });
+                    .visit_mut_with(&mut GenericClassTypeSubstituter::new(&substitutions));
                 generated
                     .entry(usage.class.clone())
                     .or_default()
