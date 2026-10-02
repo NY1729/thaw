@@ -136,11 +136,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             return Ok(val);
         }
+        if self.restore_caught_exception_tuple(val, expr)? {
+            return Ok(val);
+        }
         self.clear_pending_native_text()?;
         if trusted_text.is_some() || matches!(expr, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))) {
             self.mark_pending_native_text(val)?;
         } else if let HirExpr::Var(name) = expr {
-            if let Some((catch_slot, native_slot)) = self.catch_native_text.get(name) {
+            if let Some((catch_slot, native_slot, _, _)) = self.catch_native_text.get(name) {
                 if self.variables.get(name).map(|(slot, _)| slot) == Some(catch_slot) {
                     let provenance = self.builder.build_load(
                         self.context.ptr_type(AddressSpace::default()), *native_slot,
@@ -525,6 +528,13 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(catch_slot, thrown)
             .map_err(|e| e.to_string())?;
+        let valid_slot = self.builder.build_alloca(self.context.bool_type(), "catch_original_valid_slot")
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(valid_slot, self.context.bool_type().const_int(1, false))
+            .map_err(|e| e.to_string())?;
+        let original_slot = self.builder.build_alloca(str_ty, "catch_original_value_slot")
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(original_slot, thrown).map_err(|e| e.to_string())?;
         let native_text_slot = self.builder.build_alloca(str_ty, "catch_native_text_slot")
             .map_err(|e| e.to_string())?;
         let native_text = self.builder.build_load(
@@ -538,7 +548,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "caught_aggregate_errors",
         ).map_err(|e| e.to_string())?;
         let previous_native_text = self.catch_native_text.insert(
-            catch_name.to_string(), (catch_slot, native_text_slot),
+            catch_name.to_string(), (catch_slot, native_text_slot, original_slot, valid_slot),
         );
         self.builder
             .build_store(

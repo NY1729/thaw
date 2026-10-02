@@ -22,6 +22,12 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         match name.as_str() {
+            "@@thaw_capture_throw_text" => {
+                let [value] = args else {
+                    return Err("caught throw conversion expects one operand".into());
+                };
+                return self.compile_throw_text(value).map(Into::into);
+            }
             "__thaw_object_has_accessor" => {
                 let [object, property, setter] = args else {
                     return Err(

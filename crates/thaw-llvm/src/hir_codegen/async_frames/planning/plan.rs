@@ -2,6 +2,8 @@ impl<'ctx> HirCompiler<'ctx> {
     fn push_async_catch_locals(locals: &mut Vec<(String, HirType)>, name: &str) {
         locals.push((name.to_string(), HirType::Str));
         locals.push((Self::async_catch_native_name(name), HirType::Str));
+        locals.push((Self::async_catch_original_name(name), HirType::Str));
+        locals.push((Self::async_catch_valid_name(name), HirType::Bool));
         for (suffix, ty) in [
             ("object", HirType::Object(Vec::new())),
             ("aggregate", HirType::Object(Vec::new())),
@@ -15,10 +17,25 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn async_catch_assignments(name: &str, error: HirExpr) -> Vec<HirStmt> {
+        // The split-frame try catches a direct throw without emitting a
+        // Throw statement. Run the same compiler throw conversion first so
+        // trusted-text markers and typed pending metadata are evaluated once
+        // before the catch frame snapshots them.
         let mut assignments = vec![HirStmt::Expr(HirExpr::Assign(
             name.to_string(),
-            Box::new(error),
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("@@thaw_capture_throw_text".into())),
+                vec![error],
+            )),
         ))];
+        assignments.push(HirStmt::Expr(HirExpr::Assign(
+            Self::async_catch_original_name(name),
+            Box::new(HirExpr::Var(name.to_string())),
+        )));
+        assignments.push(HirStmt::Expr(HirExpr::Assign(
+            Self::async_catch_valid_name(name),
+            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+        )));
         for suffix in ["native_text", "object", "aggregate", "tag", "f64", "i64", "bool"] {
             assignments.push(HirStmt::Expr(HirExpr::Assign(
                 if suffix == "native_text" { Self::async_catch_native_name(name) }
