@@ -122,28 +122,25 @@ impl<'a> FnLowerer<'a> {
         });
         let logical_param_count =
             signature.params.len() - usize::from(signature.native_rest.is_some());
-        if logical_param_count < usize::BITS as usize
-            && arguments.len() + receiver_count <= logical_param_count
-        {
-            let mut omitted_mask = 0usize;
+        if arguments.len() + receiver_count <= logical_param_count {
+            let mut omitted_mask = HirOptionalMask::default();
             for index in receiver_count..logical_param_count {
                 let omitted = match arguments.get(index - receiver_count) {
                     None => true,
                     Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
                 };
                 if omitted {
-                    omitted_mask |= 1usize << index;
+                    omitted_mask.insert(index);
                 }
             }
-            let wrapper = omitted_parameter_symbol(symbol, omitted_mask);
-            if omitted_mask != 0 {
+            let wrapper = omitted_parameter_symbol(symbol, &omitted_mask);
+            if !omitted_mask.is_empty() {
                 if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
                     arguments = arguments
                         .into_iter()
                         .enumerate()
                         .filter_map(|(index, argument)| {
-                            (omitted_mask & (1usize << (index + receiver_count)) == 0)
-                                .then_some(argument)
+                            (!omitted_mask.contains(index + receiver_count)).then_some(argument)
                         })
                         .collect();
                     *symbol = wrapper;
