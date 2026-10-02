@@ -1013,6 +1013,27 @@ fn dynamic_flat_skips_deleted_slots_and_preserves_present_nullish_values() {
     );
 }
 
+#[test]
+fn stringify_replacer_array_skips_sparse_keys_with_and_without_space() {
+    let source = r#"
+        function main(): void {
+            const value: any = { "": 99, secret: 1, keep: 2 };
+            const sparse: string[] = [, "keep"];
+            console.log(JSON.stringify(value, sparse));
+            console.log(JSON.stringify(value, sparse, 2));
+            console.log(JSON.stringify(value, sparse, "--"));
+            const ordered: string[] = ["keep", , "keep", "secret"];
+            console.log(JSON.stringify(value, ordered));
+            sparse[0] = "secret";
+            console.log(JSON.stringify(value, sparse));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "stringify_sparse_replacer_keys"),
+        "{\"keep\":2}\n{\n  \"keep\": 2\n}\n{\n--\"keep\": 2\n}\n{\"keep\":2,\"secret\":1}\n{\"secret\":1,\"keep\":2}\n"
+    );
+}
+
 /// Sibling of `compiles_dynamic_array_flat` for `.flatMap()`: a callback
 /// whose return value is itself dynamically-typed (`Json`, not a
 /// statically nested `T[][]`) hit `lower_array_flat_map_result`'s final

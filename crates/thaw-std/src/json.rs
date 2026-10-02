@@ -1656,13 +1656,16 @@ fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
     stringify_value(&ordered_json_omitting_undefined(value), indent)
 }
 
-fn string_array(array: *const u8) -> Vec<Vec<u8>> {
+fn string_array(array: *const u8, presence: *const u8) -> Vec<Vec<u8>> {
     if array.is_null() {
         return Vec::new();
     }
     let length = unsafe { (array as *const i64).read() }.max(0) as usize;
     let mut keys = Vec::new();
     for index in 0..length {
+        if !native_array_slot_present(presence, index) {
+            continue;
+        }
         let key = unsafe { (array.add(8 + index * 8) as *const *const c_char).read() };
         let key = to_key(key);
         if !keys.contains(&key) {
@@ -1672,12 +1675,12 @@ fn string_array(array: *const u8) -> Vec<Vec<u8>> {
     keys
 }
 
-fn stringify_with_keys(value: *mut Value, keys: *const u8, indent: &[u8]) -> *const c_char {
+fn stringify_with_keys(value: *mut Value, keys: *const u8, presence: *const u8, indent: &[u8]) -> *const c_char {
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return top_level_undefined_string();
     }
-    let keys = string_array(keys);
+    let keys = string_array(keys, presence);
     stringify_value(&filtered_json_omitting_undefined(value, &keys), indent)
 }
 
@@ -1698,29 +1701,31 @@ pub extern "C" fn thaw_json_stringify_string_space(
 }
 
 #[no_mangle]
-pub extern "C" fn thaw_json_stringify_keys(value: *mut Value, keys: *const u8) -> *const c_char {
-    stringify_with_keys(value, keys, &[])
+pub extern "C" fn thaw_json_stringify_keys(value: *mut Value, keys: *const u8, presence: *const u8) -> *const c_char {
+    stringify_with_keys(value, keys, presence, &[])
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify_keys_number_space(
     value: *mut Value,
     keys: *const u8,
+    presence: *const u8,
     space: f64,
 ) -> *const c_char {
     let width = space.trunc().clamp(0.0, 10.0) as usize;
-    stringify_with_keys(value, keys, &vec![b' '; width])
+    stringify_with_keys(value, keys, presence, &vec![b' '; width])
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify_keys_string_space(
     value: *mut Value,
     keys: *const u8,
+    presence: *const u8,
     space: *const c_char,
 ) -> *const c_char {
     let indent = wtf8_encode_utf16(&wtf8_decode_utf16(unsafe { CStr::from_ptr(space) }.to_bytes())
         .into_iter().take(10).collect::<Vec<_>>());
-    stringify_with_keys(value, keys, &indent)
+    stringify_with_keys(value, keys, presence, &indent)
 }
 
 #[no_mangle]
@@ -4092,7 +4097,7 @@ mod tests {
         }
         assert_eq!(read_c_string(thaw_json_stringify(object)), r#"{"\ud800":1,"\ud801":2,"x\u0000y":3}"#);
         let selected = alloc_pointer_array(vec![second.cast(), first.cast()]);
-        assert_eq!(read_c_string(thaw_json_stringify_keys(object, selected)), r#"{"\ud801":2,"\ud800":1}"#);
+        assert_eq!(read_c_string(thaw_json_stringify_keys(object, selected, std::ptr::null())), r#"{"\ud801":2,"\ud800":1}"#);
         let child = parse("{}");
         unsafe { thaw_json_set_prototype(child, object) };
         assert_eq!(thaw_json_as_number(thaw_json_get(child, second)), 2.0);
@@ -4519,7 +4524,7 @@ mod tests {
         );
         let key_array = encode_string_array(&["a", "b", "c"]);
         assert_eq!(
-            read_c_string(thaw_json_stringify_keys(object, key_array)),
+            read_c_string(thaw_json_stringify_keys(object, key_array, std::ptr::null())),
             r#"{"a":1,"c":3}"#
         );
 
@@ -4588,12 +4593,12 @@ mod tests {
         );
         let key_array = encode_string_array(&["a"]);
         assert_eq!(
-            read_c_string(thaw_json_stringify_keys(sentinel, key_array)),
+            read_c_string(thaw_json_stringify_keys(sentinel, key_array, std::ptr::null())),
             "undefined"
         );
         assert_eq!(
             read_c_string(thaw_json_stringify_keys_number_space(
-                sentinel, key_array, 2.0
+                sentinel, key_array, std::ptr::null(), 2.0
             )),
             "undefined"
         );

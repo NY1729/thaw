@@ -320,11 +320,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 let value = self.compile_expr(value)?;
                 let keys_handle = self.compile_expr(keys)?.into_pointer_value();
                 let keys = self.compile_array_data(keys_handle)?;
+                let presence = self.compile_array_presence(keys_handle)?;
                 return self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_json_stringify_keys").unwrap(),
-                        &[value.into(), keys.into()],
+                        &[value.into(), keys.into(), presence.into()],
                         "json_stringify_keys",
                     )
                     .map_err(|error| error.to_string())?
@@ -340,6 +341,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let value = self.compile_expr(value)?;
                 let keys_handle = self.compile_expr(keys)?.into_pointer_value();
                 let keys = self.compile_array_data(keys_handle)?;
+                let presence = self.compile_array_presence(keys_handle)?;
                 let space = self.compile_expr(space)?;
                 return self
                     .builder
@@ -347,7 +349,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.module
                             .get_function(name.trim_start_matches("__"))
                             .unwrap(),
-                        &[value.into(), keys.into(), space.into()],
+                        &[value.into(), keys.into(), presence.into(), space.into()],
                         "json_stringify_keys_space",
                     )
                     .map_err(|error| error.to_string())?
