@@ -13,6 +13,7 @@ struct ModuleAnalysis {
     require_condition_specs: Vec<String>,
     has_esm: bool,
     has_top_level_await: bool,
+    uses_import_meta: bool,
     attribute_error: Option<String>,
     has_nonliteral_module_load: bool,
     uses_global_fetch: bool,
@@ -33,7 +34,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
     use thaw_parser::ast::{
         ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, ForOfStmt, Function, Ident,
         ImportSpecifier, Lit, MemberExpr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem,
-        ObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, VarDeclarator,
+        MetaPropKind, ObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, VarDeclarator,
     };
 
     fn validate_attributes(source: &str, attributes: Option<&ObjectLit>) -> Result<(), String> {
@@ -84,6 +85,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         create_require_functions: Vec<String>,
         module_namespaces: Vec<String>,
         uses_global_fetch: bool,
+        uses_import_meta: bool,
     }
 
     struct TopLevelAwait {
@@ -206,6 +208,13 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
     }
     impl Visit for Calls {
+        fn visit_expr(&mut self, expression: &Expr) {
+            if matches!(expression, Expr::MetaProp(meta) if meta.kind == MetaPropKind::ImportMeta) {
+                self.uses_import_meta = true;
+            }
+            expression.visit_children_with(self);
+        }
+
         fn visit_ident(&mut self, identifier: &Ident) {
             if identifier.sym == "fetch" {
                 self.uses_global_fetch = true;
@@ -402,6 +411,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         create_require_functions,
         module_namespaces,
         uses_global_fetch: false,
+        uses_import_meta: false,
     };
     module.visit_with(&mut calls);
     let mut top_level_await = TopLevelAwait { found: false };
@@ -454,6 +464,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
             .iter()
             .any(|item| matches!(item, ModuleItem::ModuleDecl(_))),
         has_top_level_await: top_level_await.found,
+        uses_import_meta: calls.uses_import_meta,
         attribute_error,
         has_nonliteral_module_load: calls.has_nonliteral_module_load,
         uses_global_fetch: calls.uses_global_fetch,
