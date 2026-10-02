@@ -543,3 +543,74 @@ fn destructures_union_arrays_with_defaults_rest_and_single_evaluation() {
         "1 2 3|4\na b c|d\n1 2 3|4\na b c|d\n4\n"
     );
 }
+
+#[test]
+fn nested_destructuring_reads_each_getter_result_once() {
+    let source = r#"
+        function main(): void {
+            let reads = 0;
+            const source = {
+                get nested(): { x: number; y: number } {
+                    reads++;
+                    return { x: reads, y: reads };
+                },
+                get pair(): [number, number] {
+                    reads++;
+                    return [reads, reads];
+                },
+                get optional(): { x: number | undefined; y: number } {
+                    reads++;
+                    return { x: undefined, y: reads };
+                },
+            };
+            const { nested: { x, y } } = source;
+            console.log(x, y, reads);
+            let assignedX = 0;
+            let assignedY = 0;
+            ({ nested: { x: assignedX, y: assignedY } } = source);
+            console.log(assignedX, assignedY, reads);
+            const { pair: [first, second] } = source;
+            console.log(first, second, reads);
+            let assignedFirst = 0;
+            let assignedSecond = 0;
+            ({ pair: [assignedFirst, assignedSecond] } = source);
+            console.log(assignedFirst, assignedSecond, reads);
+            const { optional: { x: defaulted = 42, y: sibling } } = source;
+            console.log(defaulted, sibling, reads);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_destructuring_getter_once"),
+        "1 1 1\n2 2 2\n3 3 3\n4 4 4\n42 5 5\n"
+    );
+}
+
+#[test]
+fn nested_destructuring_preserves_array_and_function_union_metadata() {
+    let source = r#"
+        type Result =
+            { kind: "number"; value: number } |
+            { kind: "text"; value: string };
+        type Source = { nested: { items: Result[]; make: () => Result } };
+        function main(): void {
+            const source: Source = {
+                nested: {
+                    items: [{ kind: "number", value: 32 } as Result],
+                    make: (): Result => ({ kind: "text", value: "returned" }),
+                },
+            };
+            const { nested: { items, make } } = source;
+            for (const item of items) {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            const made = make();
+            if (made.kind === "number") console.log(made.value + 10);
+            else console.log(made.value + "!");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_destructuring_union_metadata"),
+        "42\nreturned!\n"
+    );
+}
