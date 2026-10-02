@@ -51,6 +51,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(quickjs_failure, self.context.i32_type().const_zero())
                 .unwrap();
         }
+        let main_returns_promise = self.frame_async_functions.contains_key("main")
+            || self.promise_returning_functions.contains("main");
         let completion = user_main.and_then(|user_main| {
             self.builder
                 .build_call(user_main, &[], "call_thaw_user_main")
@@ -58,7 +60,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
         });
-        if let Some(completion) = completion {
+        if let Some(completion) = completion.filter(|_| main_returns_promise) {
             let completion = completion.into_pointer_value();
             self.builder
                 .build_call(
