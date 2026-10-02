@@ -1014,6 +1014,34 @@ fn dynamic_flat_skips_deleted_slots_and_preserves_present_nullish_values() {
 }
 
 #[test]
+fn native_array_to_json_retains_holes_for_nested_dynamic_values() {
+    let source = r#"
+        declare function __thaw_typed_js_70726f6265486f6c65(values: number[]): string;
+        function main(): void {
+            const sparse: number[] = [, 5];
+            const nested: any[] = [sparse, 6];
+            console.log(Object.hasOwn(nested[0], 0), Object.hasOwn(nested[0], 1));
+            console.log(JSON.stringify(nested), JSON.stringify(nested.flat()));
+            const field: any = { values: sparse };
+            console.log(Object.hasOwn(field.values, 0), JSON.stringify(field.values));
+            const explicit: any[] = [, 5];
+            explicit[0] = undefined;
+            const explicitNested: any[] = [explicit, 6];
+            console.log(Object.hasOwn(explicitNested[0], 0), JSON.stringify(explicitNested.flat()));
+            const nativeExplicit: number[] = [undefined, 5];
+            const nativeExplicitNested: any[] = [nativeExplicit, 6];
+            console.log(Object.hasOwn(nativeExplicitNested[0], 0), nativeExplicitNested[0][0] === undefined, JSON.stringify(nativeExplicitNested.flat()));
+            loadScript("globalThis.probeHole = values => [Object.hasOwn(values, 0), values[0] === undefined, values.length].join(',');");
+            console.log(__thaw_typed_js_70726f6265486f6c65(sparse));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_array_json_hole_transfer"),
+        "false true\n[[null,5],6] [5,6]\nfalse [null,5]\ntrue [null,5,6]\ntrue true [null,5,6]\nfalse,true,2\n"
+    );
+}
+
+#[test]
 fn stringify_replacer_array_skips_sparse_keys_with_and_without_space() {
     let source = r#"
         function main(): void {
