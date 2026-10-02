@@ -9693,3 +9693,73 @@ fn spread_primitive_conversion_evaluates_tuple_and_throwing_operands_once() {
     assert_eq!(compile_and_run(source, "spread_primitive_operand_once"),
         "null 1\nspread 2\ndirect 3\n");
 }
+
+#[test]
+fn array_presence_checks_current_length_after_reduce_callbacks_shrink_it() {
+    let source = r#"
+        function main(): void {
+            const dense: number[] = [1, 2, 3];
+            let denseVisits = 0;
+            const denseSum = dense.reduce((sum, value, index) => {
+                denseVisits += 1;
+                if (index === 0) dense.length = 1;
+                return sum + value;
+            }, 0);
+            console.log(denseSum, denseVisits, dense.length);
+
+            const sparse: number[] = [1, , 3];
+            let sparseVisits = 0;
+            const sparseSum = sparse.reduce((sum, value, index) => {
+                sparseVisits += 1;
+                if (index === 0) sparse.length = 1;
+                return sum + value;
+            }, 0);
+            console.log(sparseSum, sparseVisits, sparse.length);
+
+            const reverseDense: number[] = [1, 2, 3];
+            let reverseDenseVisits = 0;
+            const reverseDenseSum = reverseDense.reduceRight((sum, value, index) => {
+                reverseDenseVisits += 1;
+                if (index === 2) reverseDense.length = 1;
+                return sum + value;
+            }, 0);
+            console.log(reverseDenseSum, reverseDenseVisits, reverseDense.length);
+
+            const reverseSparse: number[] = [1, , 3];
+            let reverseSparseVisits = 0;
+            const reverseSparseSum = reverseSparse.reduceRight((sum, value, index) => {
+                reverseSparseVisits += 1;
+                if (index === 2) reverseSparse.length = 1;
+                return sum + value;
+            }, 0);
+            console.log(reverseSparseSum, reverseSparseVisits, reverseSparse.length);
+
+            const presentUndefined: number[] = [, 2].toReversed();
+            let visits = 0;
+            presentUndefined.forEach(() => { visits += 1; });
+            console.log(visits, presentUndefined.indexOf(undefined), presentUndefined.length);
+            const empty: number[] = [];
+            console.log(empty.pop() === undefined, empty.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_presence_current_length_reduce"),
+        "1 1 1\n1 1 1\n4 2 1\n4 2 1\n2 1 2\ntrue 0\n"
+    );
+}
+
+#[test]
+fn array_literal_spread_snapshots_before_a_later_mutating_expression() {
+    let source = r#"
+        function main(): void {
+            const first: number[] = [1];
+            const mutate = (): number[] => {
+                first[0] = 2;
+                return [3];
+            };
+            const result: number[] = [...first, ...mutate()];
+            console.log(result.join(","), first.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_spread_prior_snapshot"), "1,3 2\n");
+}
