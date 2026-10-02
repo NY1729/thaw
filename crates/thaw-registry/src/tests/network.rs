@@ -1900,29 +1900,52 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
             .with_no_client_auth(),
     );
     let tls_client = std::thread::spawn(move || {
-        let socket = loop {
-            match TcpStream::connect(("127.0.0.1", server_port)) {
-                Ok(socket) => break socket,
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
-            }
-        };
-        let connection =
-            ClientConnection::new(client_config, ServerName::try_from("localhost").unwrap())
-                .unwrap();
-        let mut stream = StreamOwned::new(connection, socket);
-        stream
-            .write_all(b"GET /from-rust HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        let mut responses = Vec::new();
+        let mut first_stream = None;
+        for close_first in [false, true] {
+            let socket = loop {
+                match TcpStream::connect(("127.0.0.1", server_port)) {
+                    Ok(socket) => break socket,
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
+                }
+            };
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            let connection = ClientConnection::new(
+                client_config.clone(),
+                ServerName::try_from("localhost").unwrap(),
+            )
             .unwrap();
-        stream.conn.send_close_notify();
-        stream.flush().unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        response
+            let mut stream = StreamOwned::new(connection, socket);
+            stream
+                .write_all(b"GET /from-rust HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            if close_first {
+                stream.conn.send_close_notify();
+            }
+            stream.flush().unwrap();
+            // First request needs a response before EOF; second ends first and
+            // needs the accepted socket's write half for an async response.
+            let mut first = [0_u8; 1];
+            stream.read_exact(&mut first).unwrap();
+            let mut response = String::from_utf8(first.to_vec()).unwrap();
+            let mut chunk = [0_u8; 1024];
+            while !response.ends_with("\r\n\r\nsecure-server") {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0);
+                response.push_str(std::str::from_utf8(&chunk[..read]).unwrap());
+            }
+            if !close_first {
+                first_stream = Some(stream); // Keep the peer's write half open through response.finish.
+            }
+            responses.push(response);
+        }
+        drop(first_stream);
+        responses
     });
     let server_dir = temp_registry("builtin_https_server");
     fs::write(
             server_dir.join("index.js"),
-            "var https = require('node:https'); module.exports = async function (port, cert, key) { var observed; var server = https.createServer({ cert: cert, key: key }, function(request, response) { observed = [request.method, request.url, request.socket.encrypted, request.socket.authorized]; response.statusCode = 202; response.setHeader('X-TLS', 'yes'); response.end('secure-server', function() { server.close(); }); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return [observed, server.listening, server instanceof https.Server]; };",
+            "var https = require('node:https'); module.exports = async function (port, cert, key) { var observed = [], terminal = [], completed = 0, firstFinished = false, firstSocket; var server = https.createServer({ cert: cert, key: key }, function(request, response) { observed.push([request.method, request.url, request.socket.encrypted, request.socket.authorized]); var first = observed.length === 1; if (first) firstSocket = request.socket; response.statusCode = 202; response.setHeader('X-TLS', 'yes'); if (!first) response.setHeader('X-First-Finished', firstFinished ? 'yes' : 'no'); setTimeout(function() { response.end('secure-server', function() { if (first) firstFinished = true; if (++completed === 2) { firstSocket.destroy(); server.close(); } }); }, 10); }); server.on('secureConnection', function(socket) { var events = { end: 0, close: 0 }; terminal.push(events); socket.pause(); setTimeout(function() { socket.resume(); }, 5); socket.on('end', function() { events.end++; }); socket.on('close', function() { events.close++; }); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return [observed, server.listening, server instanceof https.Server, terminal.map(function(events) { return events.end <= 1 && events.close === 1; }), terminal[1].end]; };",
         )
         .unwrap();
     let server_node_modules = temp_registry("builtin_https_server_node_modules");
@@ -1948,12 +1971,15 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     let server_result = unsafe { CStr::from_ptr(server_result) }.to_string_lossy();
     assert_eq!(
         server_result,
-        r#"[["GET","/from-rust",true,true],false,true]"#
+        r#"[[["GET","/from-rust",true,true],["GET","/from-rust",true,true]],false,true,[true,true],1]"#
     );
-    let response = tls_client.join().unwrap();
-    assert!(response.starts_with("HTTP/1.1 202 Accepted\r\n"));
-    assert!(response.contains("X-TLS: yes\r\n"));
-    assert!(response.ends_with("\r\n\r\nsecure-server"));
+    let responses = tls_client.join().unwrap();
+    assert!(responses[1].contains("X-First-Finished: yes\r\n"));
+    for response in responses {
+        assert!(response.starts_with("HTTP/1.1 202 Accepted\r\n"));
+        assert!(response.contains("X-TLS: yes\r\n"));
+        assert!(response.ends_with("\r\n\r\nsecure-server"));
+    }
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
     let _ = fs::remove_dir_all(&server_dir);
