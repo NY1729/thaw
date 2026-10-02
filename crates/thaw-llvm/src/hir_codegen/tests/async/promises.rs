@@ -849,6 +849,143 @@ fn promise_constructor_executor_accepts_a_tuple_spread() {
     );
 }
 
+#[test]
+fn promise_constructor_resolve_accepts_values_and_promises_per_call() {
+    let source = r#"
+        function named(resolve: (value: number | Promise<number>) => void): void {
+            resolve(Promise.resolve(5));
+        }
+        async function main(): Promise<void> {
+            const adopted: number = await new Promise<number>((resolve, reject) => {
+                resolve(Promise.resolve(7));
+                resolve(99);
+                reject("late");
+            });
+            const plain: number = await new Promise<number>((resolve) => {
+                resolve(8);
+                resolve(Promise.resolve(100));
+                throw "late";
+            });
+            const rejected: number = await new Promise<number>((resolve, reject) => {
+                reject("first");
+                resolve(Promise.resolve(200));
+            }).catch(reason => reason === "first" ? 4 : 0);
+            const escaped: number = await new Promise<number>((resolve) => {
+                const done = resolve;
+                done(Promise.resolve(9));
+            });
+            const spreadResolve: number = await new Promise<number>((resolve) => {
+                resolve(...[Promise.resolve(13)]);
+            });
+            const namedValue: number = await new Promise<number>(named);
+            const spreadValue: number = await new Promise<number>(...[named]);
+            const asyncExecutor: number = await new Promise<number>(async (resolve) => {
+                resolve(Promise.resolve(10));
+            });
+            await new Promise<void>((resolve) => {
+                resolve(Promise.resolve());
+                resolve();
+            });
+            console.log(adopted, plain, rejected, escaped, spreadResolve, namedValue, spreadValue, asyncExecutor);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_constructor_mixed_resolver"),
+        "7 8 4 9 13 5 5 10\n"
+    );
+}
+
+#[test]
+fn promise_constructor_mixed_resolver_preserves_structured_result_layouts() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const absent: number | undefined = await new Promise<number | undefined>((resolve) => {
+                resolve(undefined);
+                resolve(Promise.resolve(100));
+            });
+            const optionalPromise: number | undefined = await new Promise<number | undefined>((resolve) => {
+                resolve(Promise.resolve(11));
+            });
+            const tuple: [number, string] = await new Promise<[number, string]>((resolve) => {
+                resolve(Promise.resolve([4, "tuple"] as [number, string]));
+            });
+            const nullable: number | null = await new Promise<number | null>((resolve) => {
+                resolve(null);
+            });
+            const justNull: null = await new Promise<null>((resolve) => {
+                resolve(Promise.resolve(null));
+            });
+            const plainNull: null = await new Promise<null>((resolve) => {
+                resolve(null);
+            });
+            const justUndefined: undefined = await new Promise<undefined>((resolve) => {
+                resolve(undefined);
+            });
+            const object: { value: number } = await new Promise<{ value: number }>((resolve) => {
+                resolve(Promise.resolve({ value: 12 }));
+            });
+            const widened: number | string = await new Promise<number | string>((resolve) => {
+                resolve(Promise.resolve("text"));
+            });
+            console.log(absent, optionalPromise, tuple[0], tuple[1], nullable, justNull, plainNull, justUndefined, object.value, widened);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_constructor_structured_resolver"),
+        "undefined 11 4 tuple null null null undefined 12 text\n"
+    );
+}
+
+#[test]
+fn promise_constructor_absent_resolve_arguments_keep_their_effects() {
+    let source = r#"
+        function getNull(): null {
+            console.log("null effect");
+            return null;
+        }
+        function getUndefined(): undefined {
+            console.log("undefined effect");
+            return undefined;
+        }
+        async function main(): Promise<void> {
+            await new Promise<void>((resolve) => {
+                resolve(console.log("void effect"));
+                resolve(Promise.resolve());
+            });
+            await new Promise<undefined>((resolve) => {
+                resolve(getUndefined());
+            });
+            await new Promise<null>((resolve) => {
+                resolve(getNull());
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_absent_resolve_effects"),
+        "void effect\nundefined effect\nnull effect\n"
+    );
+}
+
+#[test]
+fn promise_constructor_mixed_void_resolver_resumes_without_a_result_payload() {
+    let source = r#"
+        async function getVoid(): Promise<void> {
+            await sleep(1);
+            console.log("awaited effect");
+        }
+        async function main(): Promise<void> {
+            await new Promise<void>(async (resolve) => {
+                resolve(await getVoid());
+            });
+            console.log("settled");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_mixed_void_resume"),
+        "awaited effect\nsettled\n"
+    );
+}
+
 /// `new Promise((resolve) => setTimeout(resolve, ms))` -- the standard
 /// zero-dependency "sleep" idiom, ubiquitous in real code (retries,
 /// throttling, tests) -- used to fail to compile: the executor's

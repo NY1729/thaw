@@ -311,6 +311,30 @@ fn lower_ts_type(
                 if elements[1] == HirType::Null {
                     return Ok(HirType::Nullable(Box::new(elements[0].clone())));
                 }
+                // The Promise constructor's resolver may accept either its
+                // result layout or a promise for that same layout. Keep the
+                // result as one member even when it is itself a wrapper,
+                // union, or aggregate that the general union grammar does
+                // not otherwise expose as a leaf.
+                let mixed_value = if matches!(&elements[1], HirType::Promise(inner)
+                    if inner.as_ref() == &elements[0]) {
+                    Some(elements[0].clone())
+                } else if matches!(&elements[0], HirType::Promise(inner)
+                    if inner.as_ref() == &elements[1]) {
+                    Some(elements[1].clone())
+                } else {
+                    None
+                };
+                if let Some(value) = mixed_value {
+                    if value == HirType::Void {
+                        return Ok(HirType::Optional(Box::new(HirType::Promise(
+                            Box::new(HirType::Void),
+                        ))));
+                    }
+                    return Ok(HirType::Union(vec![
+                        value.clone(), HirType::Promise(Box::new(value)),
+                    ]));
+                }
             }
             if elements.len() >= 2
                 && elements.iter().all(|element| {
@@ -326,7 +350,13 @@ fn lower_ts_type(
                             | HirType::Array(_)
                             | HirType::Tuple(_)
                             | HirType::Object(_)
+                            | HirType::Promise(_)
+                            | HirType::Optional(_)
+                            | HirType::Nullable(_)
+                            | HirType::Nullish(_)
+                            | HirType::Union(_)
                             | HirType::Function(_, _)
+                            | HirType::CallableFunction(_, _, _, _)
                             | HirType::Undefined
                             | HirType::Null
                     )

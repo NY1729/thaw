@@ -281,17 +281,57 @@ fn lowers_promise_void_constructor_with_zero_argument_resolve() {
     let HirStmt::Expr(HirExpr::Await(inner)) = &program.functions[0].body[0] else {
         panic!("expected awaited Promise<void>");
     };
-    let HirExpr::PromiseNew(executor, HirType::Void, false, false) = inner.as_ref() else {
+    let HirExpr::PromiseNewMixed(executor, HirType::Void, resolver) = inner.as_ref() else {
         panic!("expected Promise<void> constructor");
     };
+    assert!(matches!(resolver,
+        HirType::CallableFunction(params, mask, None, ret)
+            if mask.contains(0) && ret.as_ref() == &HirType::Void
+                && matches!(params.as_slice(), [HirType::Optional(inner)]
+                    if inner.as_ref() == &HirType::Promise(Box::new(HirType::Void)))
+    ));
     let HirExpr::Lambda(_, params, HirType::Void, _) = executor.as_ref() else {
         panic!("expected Promise executor lambda");
     };
     assert!(matches!(
         &params[0].ty,
-        HirType::Function(resolve_params, ret)
-            if resolve_params.is_empty() && ret.as_ref() == &HirType::Void
+        HirType::CallableFunction(resolve_params, mask, None, ret)
+            if resolve_params.len() == 1 && mask.contains(0)
+                && ret.as_ref() == &HirType::Void
     ));
+}
+
+#[test]
+fn promise_constructor_resolver_has_per_call_value_or_promise_type() {
+    let program = lower(r#"
+        async function main(): Promise<void> {
+            const first: number = await new Promise<number>((resolve, reject) => {
+                resolve(7);
+                resolve(Promise.resolve(8));
+            });
+            const second: number = await new Promise<number>((resolve, reject) => {
+                resolve(Promise.resolve(9));
+                resolve(10);
+            });
+            const optional: number | undefined = await new Promise<number | undefined>((resolve) => {
+                resolve(undefined);
+                resolve(Promise.resolve(11));
+            });
+            console.log(first, second, optional);
+        }
+    "#);
+    assert_eq!(program.functions.len(), 1);
+    let source = r#"
+        async function main(): Promise<void> {
+            const result: number = await new Promise<number>((resolve) => {
+                resolve("wrong");
+            });
+            console.log(result);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("Promise resolve value has type"), "{error}");
 }
 
 #[test]

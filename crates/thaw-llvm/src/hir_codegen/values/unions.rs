@@ -36,6 +36,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_ptr_to_int(value, self.context.i64_type(), "union_pointer_bits")
                 .map_err(|error| error.to_string())?,
+            (_, BasicValueEnum::StructValue(value)) => {
+                let slot = self.build_arena_cell(
+                    &self.builder,
+                    value.get_type().into(),
+                    "union_struct_payload",
+                )?;
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_ptr_to_int(slot, self.context.i64_type(), "union_struct_bits")
+                    .map_err(|error| error.to_string())?
+            }
             _ => return Err(format!("cannot pack {member:?} into a union payload")),
         };
         let union_type = self
@@ -102,15 +115,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map(Into::into)
                 .map_err(|error| error.to_string()),
             HirType::I64 | HirType::JsValue => Ok(payload.into()),
-            _ => self
-                .builder
-                .build_int_to_ptr(
-                    payload,
-                    self.context.ptr_type(AddressSpace::default()),
-                    "union_pointer",
-                )
-                .map(Into::into)
-                .map_err(|error| error.to_string()),
+            _ => {
+                let pointer = self
+                    .builder
+                    .build_int_to_ptr(
+                        payload,
+                        self.context.ptr_type(AddressSpace::default()),
+                        "union_pointer",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let ty = self.basic_type(member)?;
+                if ty.is_struct_type() {
+                    self.builder
+                        .build_load(ty, pointer, "union_struct")
+                        .map_err(|error| error.to_string())
+                } else {
+                    Ok(pointer.into())
+                }
+            }
         }
     }
 

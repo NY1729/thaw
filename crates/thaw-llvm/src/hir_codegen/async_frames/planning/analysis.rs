@@ -43,6 +43,7 @@ impl<'ctx> HirCompiler<'ctx> {
         matches!(
             expr,
             HirExpr::PromiseNew(_, _, _, _)
+                | HirExpr::PromiseNewMixed(_, _, _)
                 | HirExpr::PromiseThen(_, _, _, _, _, _)
                 | HirExpr::PromiseFinally(_, _, _, _)
                 | HirExpr::PromiseAll(_, _)

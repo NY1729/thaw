@@ -707,6 +707,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 matches!(
                     inner.as_ref(),
                     HirExpr::PromiseNew(_, _, _, _)
+                        | HirExpr::PromiseNewMixed(_, _, _)
                         | HirExpr::PromiseThen(_, _, _, _, _, _)
                         | HirExpr::PromiseFinally(_, _, _, _)
                         | HirExpr::PromiseAll(_, _)
@@ -724,6 +725,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     || Self::expr_awaits_frame_source(inner, frame_functions)
             }
             HirExpr::BinOp(_, left, right)
+            | HirExpr::EvalThen(left, right)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::DynamicPropAccess(left, right, _, _) => {

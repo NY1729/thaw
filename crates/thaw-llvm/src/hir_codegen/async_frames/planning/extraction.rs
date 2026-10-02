@@ -37,7 +37,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
                         HirType::Str
                     }
-                    HirExpr::PromiseNew(_, resolved, _, _) => resolved.clone(),
+                    HirExpr::PromiseNew(_, resolved, _, _)
+                    | HirExpr::PromiseNewMixed(_, resolved, _) => resolved.clone(),
                     HirExpr::PromiseThen(_, _, _, output, _, _) => output.clone(),
                     HirExpr::PromiseFinally(_, _, input, _) => input.clone(),
                     HirExpr::PromiseAll(_, element) | HirExpr::PromiseAllArray(_, element) => {
@@ -76,6 +77,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         match expr {
             HirExpr::BinOp(_, left, right)
+            | HirExpr::EvalThen(left, right)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::DynamicPropAccess(left, right, _, _) => {
