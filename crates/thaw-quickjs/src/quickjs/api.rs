@@ -104,7 +104,7 @@ fn native_promise_state(promise: *const c_void) -> u8 {
         if poll.is_null() || state.is_null() {
             return 0;
         }
-        std::mem::transmute::<*mut c_void, extern "C" fn() -> usize>(poll)();
+        std::mem::transmute::<*mut c_void, extern "C" fn() -> u8>(poll)();
         std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*const c_void) -> u8>(state)(promise)
     }
 }
