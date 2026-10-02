@@ -154,7 +154,7 @@ impl<'ctx> HirCompiler<'ctx> {
         match ty {
             HirType::Bool => (1, 1),
             HirType::F64 | HirType::I64 => (8, 8),
-            HirType::Array(_) | HirType::Object(_)
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
                 if aggregate_abi != FfiAggregateAbi::Internal =>
             {
                 Self::ffi_aggregate_storage_layout(ty, aggregate_abi)
