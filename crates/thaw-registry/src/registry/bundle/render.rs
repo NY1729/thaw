@@ -324,11 +324,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20localRequire.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
          \x20\x20\x20\x20localRequire.cache = __thaw_bundle_cache;\n\
          \x20\x20\x20\x20var localImport = function(spec) { var target = __thaw_bundle_target(importMap, spec); if (target) return __thaw_bundle_require(target.key, target.factory); if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); };\n\
-         \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
-         \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(importMap, spec);\n\
-         \x20\x20\x20\x20\x20\x20if (!target) return Promise.resolve().then(function() { if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); });\n\
-         \x20\x20\x20\x20\x20\x20return Promise.resolve().then(function() { __thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready; });\n\
-         \x20\x20\x20\x20};\n\
+         \x20\x20\x20\x20var localRequireAsync = __thaw_bundle_create_import_async(factoryKey, globalThis.__thaw_worker_module);\n\
          \x20\x20\x20\x20var filename = '/thaw_modules/' + factoryKey, slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash);\n\
          \x20\x20\x20\x20var initialized;\n\
          \x20\x20\x20\x20try { var factory = __thaw_bundle_factories[factoryKey]; if (Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, factoryKey)) factory = factory(__thaw_bundle_origin_for(key)); initialized = Object.prototype.hasOwnProperty.call(__thaw_bundle_commonjs_contexts, factoryKey) ? factory.call(mod.exports, mod, mod.exports, localRequire, localRequireAsync, filename, dirname, localImport) : factory(mod, mod.exports, localRequire, localRequireAsync, filename, dirname, localImport); } catch (error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; }\n\
@@ -351,9 +347,19 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20var known = __thaw_bundle_known_package_maps[String(base)] || [];\n\
          \x20\x20return function(spec) { spec = String(spec); var target = __thaw_bundle_target(map, spec); if (target) return __thaw_bundle_require(target.key, target.factory); if (__thaw_bundle_import_missing(known, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); };\n\
          }\n\
-         function __thaw_bundle_create_import_async(base) {\n\
-         \x20\x20var importModule = __thaw_bundle_create_import(base);\n\
-         \x20\x20return function(spec) { return Promise.resolve().then(function() { var target = __thaw_bundle_target(__thaw_bundle_import_maps[String(base)] || {}, String(spec)); var value = importModule(spec); return target ? __thaw_bundle_cache[target.key].ready : value; }); };\n\
+         function __thaw_bundle_create_import_async(base, workerModule) {\n\
+         \x20\x20var map = __thaw_bundle_import_maps[String(base)] || {};\n\
+         \x20\x20var known = __thaw_bundle_known_package_maps[String(base)] || [];\n\
+         \x20\x20return function(spec) {\n\
+         \x20\x20\x20\x20try { spec = `${spec}`; } catch (error) { return Promise.reject(error); }\n\
+         \x20\x20\x20\x20if (workerModule !== undefined && (spec === 'worker_threads' || spec === 'node:worker_threads')) return Promise.resolve(workerModule);\n\
+         \x20\x20\x20\x20return Promise.resolve().then(function() {\n\
+         \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
+         \x20\x20\x20\x20\x20\x20if (target) { __thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready; }\n\
+         \x20\x20\x20\x20\x20\x20if (__thaw_bundle_import_missing(known, spec)) throw new Error('Cannot resolve import ' + spec);\n\
+         \x20\x20\x20\x20\x20\x20return require(spec);\n\
+         \x20\x20\x20\x20});\n\
+         \x20\x20};\n\
          }\n\
          function __thaw_bundle_register_worker_main(key, mod) {\n\
          \x20\x20if (Object.prototype.hasOwnProperty.call(__thaw_bundle_cache, key)) throw new Error('Worker entry already initialized');\n\
