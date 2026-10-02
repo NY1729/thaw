@@ -60,6 +60,20 @@ impl<'a> FnLowerer<'a> {
         hir_name
     }
 
+    // The name marks a binding whose cell must be replaced on every for-loop
+    // iteration, including when an async function resumes in a new frame call.
+    fn bind_for_iteration_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
+        let hir_name = format!("@@thaw_for_iteration_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(hir_name.clone(), ty);
+        self.used_hir_bindings.insert(hir_name.clone());
+        self.bindings
+            .entry(source_name.to_string())
+            .or_default()
+            .push(hir_name.clone());
+        hir_name
+    }
+
     fn lower_scoped_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let saved = self.bindings.clone();
         let saved_narrowings = self.save_narrowings();

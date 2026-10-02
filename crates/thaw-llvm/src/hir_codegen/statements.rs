@@ -205,6 +205,10 @@ impl<'ctx> HirCompiler<'ctx> {
 
             HirStmt::Let(name, ty, expr) => {
                 let val = self.compile_expr(expr)?;
+                if self.for_iteration_frame_slots.contains_key(name) {
+                    self.store_for_iteration_cell(name, ty, val)?;
+                    return Ok(false);
+                }
                 let llvm_ty = self.basic_type(ty)?;
                 // A `Let` for a name that's already bound to an async-frame
                 // slot (`bind_async_frame_locals` sets this up before a
