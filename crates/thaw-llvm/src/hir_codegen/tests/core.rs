@@ -2522,6 +2522,59 @@ fn propagates_synchronous_native_callback_exceptions_to_quickjs() {
 }
 
 #[test]
+fn native_callback_own_typed_throw_and_deferred_sync_throw_keep_host_abi() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b6553796e63(
+            callback: () => void,
+        ): void;
+        declare function __thaw_typed_js_696e766f6b654465666572726564(
+            callback: () => Promise<number>,
+        ): void;
+        function main(): void {
+            loadScript("globalThis.invokeSync = callback => { try { callback(); } catch (error) { console.log(error.name + ':' + error.message); } }; globalThis.invokeDeferred = callback => { const promise = callback(); console.log(typeof promise.then); promise.catch(error => console.log(error.name + ':' + error.message)); };");
+            __thaw_typed_js_696e766f6b6553796e63(
+                (): void => { throw new TypeError("inner typed"); },
+            );
+            // This is deliberately non-async: its closure throws before it
+            // creates a Promise, but the registered callback ABI is deferred.
+            __thaw_typed_js_696e766f6b654465666572726564(
+                (): Promise<number> => { throw new TypeError("deferred typed"); },
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_callback_typed_pending_and_deferred_failure"),
+        "TypeError:inner typed\nfunction\nTypeError:deferred typed\n"
+    );
+}
+
+#[test]
+fn settled_native_callback_promise_keeps_unrelated_rejection_separate() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b65436f6e63757272656e74(
+            first: () => Promise<number>,
+            second: () => Promise<number>,
+        ): void;
+        async function first(): Promise<number> {
+            await sleep(0);
+            return 31;
+        }
+        async function second(): Promise<number> {
+            await sleep(0);
+            throw new TypeError("other continuation");
+        }
+        function main(): void {
+            loadScript("globalThis.invokeConcurrent = (first, second) => { const own = first(); const other = second(); own.then(value => console.log('own:' + value)); other.catch(error => console.log('other:' + error.message)); };");
+            __thaw_typed_js_696e766f6b65436f6e63757272656e74(first, second);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "settled_callback_and_unrelated_continuation"),
+        "own:31\nother:other continuation\n"
+    );
+}
+
+#[test]
 fn registers_a_callback_with_an_optional_void_result() {
     let source = r#"
         function main(): void {
