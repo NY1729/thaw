@@ -9849,3 +9849,41 @@ fn array_literal_spread_snapshots_before_a_later_mutating_expression() {
     "#;
     assert_eq!(compile_and_run(source, "array_spread_prior_snapshot"), "1,3 2\n");
 }
+
+#[test]
+fn bigint_radix_and_index_arguments_validate_before_native_clamping() {
+    let source = r#"
+        function getValue(): bigint { console.log("value"); return 255n; }
+        function getBits(): number { console.log("bits"); return 8; }
+        function getReceiver(): bigint { console.log("receiver"); return 10n; }
+        function getRadix(): number { console.log("radix"); return 2; }
+        function getMissing(): undefined { console.log("missing"); return undefined; }
+        function render(radix: number | string | undefined): string { return (10n).toString(radix); }
+        function main(): void {
+            console.log(getReceiver().toString(getRadix()));
+            console.log((10n).toString(getMissing()));
+            const dynamicMissing: any = undefined;
+            console.log((10n).toString(dynamicMissing));
+            console.log((10n).toString(2.9));
+            console.log(render(undefined));
+            console.log(render(2));
+            console.log(render("16"));
+            try { render(1); } catch (error) { console.log((error as Error).name); }
+            try { (10n).toString(1); } catch (error) { console.log((error as Error).name); }
+            try { (10n).toString(37); } catch (error) { console.log((error as Error).name); }
+            try { (10n).toString(NaN); } catch (error) { console.log((error as Error).name); }
+            try { (10n).toString(Infinity); } catch (error) { console.log((error as Error).name); }
+            console.log(BigInt.asIntN(getBits(), getValue()));
+            console.log(BigInt.asIntN(NaN, 1n));
+            console.log(BigInt.asUintN(-0.5, 1n));
+            console.log(BigInt.asUintN(8.9, 255n));
+            try { BigInt.asIntN(-1, 1n); } catch (error) { console.log((error as Error).name); }
+            try { BigInt.asUintN(Infinity, 1n); } catch (error) { console.log((error as Error).name); }
+            try { BigInt.asIntN(9007199254740992, 1n); } catch (error) { console.log((error as Error).name); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bigint_radix_index_validation"),
+        "receiver\nradix\n1010\nmissing\n10\n10\n1010\n10\n1010\na\nRangeError\nRangeError\nRangeError\nRangeError\nRangeError\nbits\nvalue\n-1n\n0n\n0n\n255n\nRangeError\nRangeError\nRangeError\n"
+    );
+}

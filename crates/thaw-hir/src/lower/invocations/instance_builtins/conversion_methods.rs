@@ -352,12 +352,77 @@ impl<'a> FnLowerer<'a> {
                         let [radix] = arguments.as_slice() else {
                             return Err("native `.toString()` expects zero or one argument".into());
                         };
-                        let radix = self.coerce_primitive_to_number(radix.clone())?;
+                        // Explicit undefined selects radix 10. Preserve the raw argument
+                        // binding (including its side effects) before numeric coercion.
+                        let radix_type = self.infer_expr_type(radix)?;
+                        let missing = match &radix_type {
+                            HirType::Undefined => Some(HirExpr::Lit(HirLit::Bool(true))),
+                            HirType::Json => Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                                vec![radix.clone()],
+                            )),
+                            HirType::JsValue => Some(self.dynamic_value_is_undefined(radix.clone())),
+                            HirType::Optional(payload) => Some(HirExpr::OptionalIsNone(
+                                Box::new(radix.clone()), payload.as_ref().clone(),
+                            )),
+                            HirType::Nullish(payload) => Some(HirExpr::NullishIsUndefined(
+                                Box::new(radix.clone()), payload.as_ref().clone(),
+                            )),
+                            _ => None,
+                        };
+                        let radix = if let HirType::Union(members) = &radix_type {
+                            // A general union keeps its member tag. Project exactly
+                            // the selected member; only undefined gets the default.
+                            let mut branches = Vec::with_capacity(members.len());
+                            for (index, member) in members.iter().enumerate() {
+                                let selected = HirExpr::UnionValue(
+                                    Box::new(radix.clone()), index, members.clone(),
+                                );
+                                branches.push(if *member == HirType::Undefined {
+                                    HirExpr::Lit(HirLit::F64(10.0))
+                                } else {
+                                    self.coerce_primitive_to_number(selected)?
+                                });
+                            }
+                            let mut result = branches.pop().expect("union has members");
+                            for index in (0..branches.len()).rev() {
+                                result = HirExpr::Conditional(
+                                    Box::new(HirExpr::BinOp(
+                                        BinOp::EqEqEq,
+                                        Box::new(HirExpr::UnionTag(
+                                            Box::new(radix.clone()), members.clone(),
+                                        )),
+                                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                    )),
+                                    Box::new(branches[index].clone()),
+                                    Box::new(result),
+                                    HirType::F64,
+                                );
+                            }
+                            result
+                        } else {
+                            let converted = self.coerce_primitive_to_number(radix.clone())?;
+                            if let Some(missing) = missing {
+                                HirExpr::Conditional(
+                                    Box::new(missing),
+                                    Box::new(HirExpr::Lit(HirLit::F64(10.0))),
+                                    Box::new(converted),
+                                    HirType::F64,
+                                )
+                            } else {
+                                converted
+                            }
+                        };
+                        let receiver_name = format!("__thaw_bigint_radix_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::I64);
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_i64_to_radix_string".into())),
-                            vec![receiver, radix],
+                            vec![HirExpr::Var(receiver_name.clone()), radix],
                         );
-                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                        let mut bindings = vec![(receiver_name, HirType::I64, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if !call.args.is_empty() {
                         return Err("native `.toString()` does not accept arguments yet".into());
