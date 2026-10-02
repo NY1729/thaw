@@ -1806,3 +1806,55 @@ module.exports = function() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn http2_received_rst_reports_nonclean_stream_error_before_close() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_rst_error");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  function probe(code, throwListeners) {
+    var session = new http2.ClientHttp2Session(999980 + code, 'tcp'), stream = new http2.Http2Stream(session, 1), events = [], marker = new Error('aborted listener threw'), thrown;
+    session._streams.set(1, stream); stream._pendingEnd = true;
+    stream.on('aborted', function() { events.push('aborted:' + arguments.length); if (throwListeners) throw marker; });
+    stream.on('error', function(error) { events.push('error:' + arguments.length + ':' + error.code + ':' + error.message); if (throwListeners) throw new Error('error listener threw'); });
+    stream.on('close', function() { events.push('close:' + arguments.length); });
+    var payload = Buffer.alloc(4); payload[0] = code >>> 24; payload[1] = code >>> 16; payload[2] = code >>> 8; payload[3] = code;
+    try { session._frame(3, 0, 1, payload); } catch (error) { thrown = error === marker ? 'aborted-marker' : error.code || error.message; }
+    session._frame(3, 0, 1, payload);
+    return [stream.rstCode, stream.closed, session._streams.has(1), stream._pendingEnd, events, thrown || null];
+  }
+  var noListener = new http2.ClientHttp2Session(999999, 'tcp'), bare = new http2.Http2Stream(noListener, 1), closeSeen = false, uncaught;
+  noListener._streams.set(1, bare);
+  bare.on('close', function() { closeSeen = arguments.length === 0; });
+  try { noListener._frame(3, 0, 1, Buffer.from([0, 0, 0, 7])); } catch (error) { uncaught = [error.code, error.message]; }
+  return [probe(0, false), probe(8, false), probe(7, false), probe(99, false), probe(2, true), [closeSeen, uncaught]];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_rst_error_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2RstError = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2RstError").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[[0,true,false,false,["aborted:0","close:0"],null],[8,true,false,false,["aborted:0","close:0"],null],[7,true,false,false,["aborted:0","error:1:ERR_HTTP2_STREAM_ERROR:Stream closed with error code NGHTTP2_REFUSED_STREAM","close:0"],null],[99,true,false,false,["aborted:0","error:1:ERR_HTTP2_STREAM_ERROR:Stream closed with error code 99","close:0"],null],[2,true,false,false,["aborted:0","error:1:ERR_HTTP2_STREAM_ERROR:Stream closed with error code NGHTTP2_INTERNAL_ERROR","close:0"],"aborted-marker"],[true,["ERR_HTTP2_STREAM_ERROR","Stream closed with error code NGHTTP2_REFUSED_STREAM"]]]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
