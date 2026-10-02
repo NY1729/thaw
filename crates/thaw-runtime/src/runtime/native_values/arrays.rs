@@ -2002,6 +2002,83 @@ unsafe fn array_index_present(presence: *const u8, index: usize) -> bool {
         || unsafe { presence.add(8 + index).read() == 1 }
 }
 
+fn canonical_array_property_index(key: &str) -> Option<usize> {
+    let index = key.parse::<u32>().ok()?;
+    (key == index.to_string()).then_some(index as usize)
+}
+
+#[no_mangle]
+/// Deletes an own native-array property without changing its length.
+/// Returns 0 for a non-configurable own property, 1 for success, and 2 when
+/// a dense-to-sparse mask allocation fails.
+///
+/// # Safety
+/// `handle` must point to a writable two-pointer native array handle, and
+/// `key` to a valid NUL-terminated string.
+pub unsafe extern "C" fn thaw_array_delete_property(
+    handle: *mut u8,
+    key: *const c_char,
+) -> u8 {
+    if handle.is_null() || key.is_null() {
+        return 0;
+    }
+    let Ok(key) = (unsafe { CStr::from_ptr(key) }).to_str() else {
+        return 1;
+    };
+    if key == "length" {
+        return 0;
+    }
+    let Some(index) = canonical_array_property_index(key) else {
+        return 1;
+    };
+    let array = unsafe { handle.cast::<*mut u8>().read() };
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return 0;
+    };
+    if index >= length {
+        return 1;
+    }
+    let presence_slot = unsafe { handle.add(8).cast::<*mut u8>() };
+    let mut presence = unsafe { presence_slot.read() };
+    if !unsafe { array_index_exists(presence, index) } {
+        return 1;
+    }
+    if thaw_object_state(handle, 1) {
+        return 0;
+    }
+    let mask_length = if presence.is_null() {
+        0
+    } else {
+        unsafe { presence.cast::<u64>().read() as usize }
+    };
+    if index >= mask_length {
+        // Both the dense-mask setter and the short-mask extender allocate
+        // `8 + length` bytes; check before either reaches its unchecked sum.
+        if length.checked_add(8).is_none() {
+            return 2;
+        }
+        if !presence.is_null() {
+            // A live index beyond an older mask defaults to present. Extend
+            // privately before writing state 0; a failed allocation leaves
+            // the handle's original mask and its holes untouched.
+            presence = unsafe {
+                thaw_array_presence_extend(
+                    presence, mask_length, length - mask_length, 0, std::ptr::null(),
+                )
+            };
+            if presence.is_null() {
+                return 2;
+            }
+        }
+    }
+    let updated = unsafe { thaw_array_presence_set_state(presence, length, index, 0) };
+    if updated.is_null() {
+        return 2;
+    }
+    unsafe { presence_slot.write(updated) };
+    1
+}
+
 #[no_mangle]
 /// # Safety
 /// `array` is a readable Thaw array, `presence` its mask or null, and `key` a C string.
@@ -2037,15 +2114,12 @@ pub unsafe extern "C" fn thaw_array_has_property(
     ) {
         return 1;
     }
-    let Ok(index) = key.parse::<u32>() else {
+    let Some(index) = canonical_array_property_index(key) else {
         return 0;
     };
-    if key != index.to_string()
-        || unsafe { native_array_length(array) }.is_none_or(|length| (index as usize) >= length)
-    {
+    if unsafe { native_array_length(array) }.is_none_or(|length| index >= length) {
         return 0;
     }
-    let index = index as usize;
     u8::from(unsafe { array_index_exists(presence, index) })
 }
 
@@ -2703,6 +2777,27 @@ mod array_read_ptr_tests {
         for index in [100.0, -5.0, 1.5, f64::NAN, f64::INFINITY] {
             let ptr = unsafe { thaw_array_read_ptr(array, 8, index) };
             assert_eq!(unsafe { ptr.cast::<f64>().read() }, 0.0);
+        }
+    }
+
+    #[test]
+    fn delete_extends_a_shorter_live_presence_mask_before_marking_the_index_absent() {
+        let array = build_array(&[10.0, 20.0, 30.0, 40.0]);
+        let mask = thaw_arena::thaw_arena_alloc(10, 1);
+        let handle = thaw_arena::thaw_arena_alloc(16, 8);
+        unsafe {
+            mask.cast::<u64>().write(2);
+            mask.add(8).write(0);
+            mask.add(9).write(1);
+            handle.cast::<*mut u8>().write(array);
+            handle.add(8).cast::<*mut u8>().write(mask);
+            assert_eq!(thaw_array_delete_property(handle, c"3".as_ptr()), 1);
+            let updated = handle.add(8).cast::<*mut u8>().read();
+            assert_eq!(updated.cast::<u64>().read(), 4);
+            assert_eq!((0..4).map(|index| updated.add(8 + index).read()).collect::<Vec<_>>(), vec![0, 1, 1, 0]);
+            assert_eq!(array.cast::<u64>().read(), 4);
+            assert_eq!(thaw_array_has_property(array, updated, c"3".as_ptr(), 1), 0);
+            assert_eq!(thaw_array_has_property(array, updated, c"2".as_ptr(), 1), 1);
         }
     }
 
