@@ -1799,3 +1799,239 @@ fn idle_drain_includes_work_created_by_rejection_reporters() {
         }
     }
 }
+
+#[test]
+fn result_reporters_keep_multiple_listener_failures_and_latch_status() {
+    thread_local! { static REPORTS: Cell<u32> = const { Cell::new(0) }; }
+    extern "C" fn failed_listener(_: *const u8) -> PromiseReportResult {
+        REPORTS.with(|reports| reports.set(reports.get() + 1));
+        PromiseReportResult { value: 1, error: CString::new("listener failed").unwrap().into_raw() }
+    }
+    extern "C" fn failed_handled_listener() -> PromiseReportResult {
+        PromiseReportResult { value: 0, error: CString::new("handled listener failed").unwrap().into_raw() }
+    }
+    REPORTS.with(|reports| reports.set(0));
+    thaw_promise_set_unhandled_reporter_result(Some(failed_listener));
+    thaw_promise_set_rejection_handled_reporter_result(Some(failed_handled_listener));
+    let first = thaw_promise_new();
+    let second = thaw_promise_new();
+    thaw_promise_reject(first, c"first".as_ptr().cast());
+    thaw_promise_reject(second, c"second".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    REPORTS.with(|reports| assert_eq!(reports.get(), 2));
+    assert_eq!(thaw_promise_take_unhandled_failure(), 1);
+    assert_eq!(unsafe { thaw_promise_mark_handled(first) }, 1);
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    assert_eq!(thaw_promise_take_unhandled_failure(), 1);
+    thaw_promise_set_unhandled_reporter_result(None);
+    thaw_promise_set_rejection_handled_reporter_result(None);
+    unsafe { thaw_promise_destroy(first); thaw_promise_destroy(second); }
+}
+
+#[test]
+fn reporter_setters_replace_the_other_abi_including_none() {
+    thread_local! {
+        static CALLS: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+        static HANDLED_CALLS: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+    }
+    extern "C" fn legacy(_: *const u8) -> u8 {
+        CALLS.with(|calls| { let (old, new) = calls.get(); calls.set((old + 1, new)); });
+        1
+    }
+    extern "C" fn result(_: *const u8) -> PromiseReportResult {
+        CALLS.with(|calls| { let (old, new) = calls.get(); calls.set((old, new + 1)); });
+        PromiseReportResult { value: 1, error: std::ptr::null() }
+    }
+    extern "C" fn handled_legacy() {
+        HANDLED_CALLS.with(|calls| { let (old, new) = calls.get(); calls.set((old + 1, new)); });
+    }
+    extern "C" fn handled_result() -> PromiseReportResult {
+        HANDLED_CALLS.with(|calls| { let (old, new) = calls.get(); calls.set((old, new + 1)); });
+        PromiseReportResult { value: 0, error: std::ptr::null() }
+    }
+    CALLS.with(|calls| calls.set((0, 0)));
+    HANDLED_CALLS.with(|calls| calls.set((0, 0)));
+    thaw_promise_set_unhandled_reporter_result(Some(result));
+    thaw_promise_set_unhandled_reporter(Some(legacy));
+    assert!(UNHANDLED_REPORTER_RESULT.with(|registered| registered.get().is_none()));
+    let first = thaw_promise_new();
+    thaw_promise_reject(first, c"first".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    thaw_promise_set_unhandled_reporter_result(Some(result));
+    assert!(UNHANDLED_REPORTER.with(|registered| registered.get().is_none()));
+    let second = thaw_promise_new();
+    thaw_promise_reject(second, c"second".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    CALLS.with(|calls| assert_eq!(calls.get(), (1, 1)));
+    thaw_promise_set_unhandled_reporter(None);
+    assert!(UNHANDLED_REPORTER_RESULT.with(|registered| registered.get().is_none()));
+    thaw_promise_set_unhandled_reporter(Some(legacy));
+    thaw_promise_set_unhandled_reporter_result(None);
+    assert!(UNHANDLED_REPORTER.with(|registered| registered.get().is_none()));
+    thaw_promise_set_rejection_handled_reporter_result(Some(handled_result));
+    thaw_promise_set_rejection_handled_reporter(Some(handled_legacy));
+    assert!(REJECTION_HANDLED_REPORTER_RESULT.with(|registered| registered.get().is_none()));
+    assert_eq!(unsafe { thaw_promise_mark_handled(first) }, 1);
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    HANDLED_CALLS.with(|calls| assert_eq!(calls.get(), (1, 0)));
+    thaw_promise_set_rejection_handled_reporter_result(Some(handled_result));
+    assert!(REJECTION_HANDLED_REPORTER.with(|registered| registered.get().is_none()));
+    assert_eq!(unsafe { thaw_promise_mark_handled(second) }, 1);
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    HANDLED_CALLS.with(|calls| assert_eq!(calls.get(), (1, 1)));
+    thaw_promise_set_rejection_handled_reporter(None);
+    assert!(REJECTION_HANDLED_REPORTER_RESULT.with(|registered| registered.get().is_none()));
+    thaw_promise_set_rejection_handled_reporter(Some(handled_legacy));
+    thaw_promise_set_rejection_handled_reporter_result(None);
+    assert!(REJECTION_HANDLED_REPORTER.with(|registered| registered.get().is_none()));
+    unsafe { thaw_promise_destroy(first); thaw_promise_destroy(second); }
+    assert_eq!(thaw_promise_take_unhandled_failure(), 0);
+}
+
+#[test]
+fn reporter_drain_snapshots_later_rejection_before_callback_destroys_its_owner() {
+    thread_local! {
+        static LATER: Cell<(*mut ThawPromise, *mut c_char)> = const { Cell::new((std::ptr::null_mut(), std::ptr::null_mut())) };
+        static SEEN: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(error: *const u8) {
+        SEEN.with(|seen| seen.borrow_mut().push(unsafe { CStr::from_ptr(error.cast()).to_bytes().to_vec() }));
+        if unsafe { CStr::from_ptr(error.cast()).to_bytes() } == b"first" {
+            LATER.with(|later| {
+                let (promise, message) = later.replace((std::ptr::null_mut(), std::ptr::null_mut()));
+                unsafe { thaw_promise_destroy(promise); thaw_arena::destroy_string(message); }
+            });
+        }
+    }
+    extern "C" fn legacy(error: *const u8) -> u8 { record(error); 1 }
+    extern "C" fn result(error: *const u8) -> PromiseReportResult {
+        record(error);
+        PromiseReportResult { value: 1, error: std::ptr::null() }
+    }
+    for result_abi in [false, true] {
+        SEEN.with(|seen| seen.borrow_mut().clear());
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let later_error = thaw_arena::owned_string(b"second");
+        thaw_promise_reject(first, c"first".as_ptr().cast());
+        reject_native_text(second, later_error.cast());
+        LATER.with(|later| later.set((second, later_error)));
+        assert_eq!(if result_abi {
+            thaw_promise_drain_unhandled_result(Some(result))
+        } else {
+            thaw_promise_drain_unhandled(Some(legacy))
+        }, 0);
+        SEEN.with(|seen| assert_eq!(&*seen.borrow(), &[b"first".to_vec(), b"second".to_vec()]));
+        unsafe { thaw_promise_destroy(first) };
+    }
+}
+
+#[test]
+fn opaque_promise_rejection_is_forwarded_without_string_dereference() {
+    thread_local! { static EXPECTED: Cell<*const u8> = const { Cell::new(std::ptr::null()) }; }
+    extern "C" fn legacy(error: *const u8) -> u8 {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        1
+    }
+    extern "C" fn result(error: *const u8) -> PromiseReportResult {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        PromiseReportResult { value: 1, error: std::ptr::null() }
+    }
+    let value = 99u8;
+    EXPECTED.with(|expected| expected.set(&value));
+    for result_abi in [false, true] {
+        let promise = thaw_promise_new();
+        assert_eq!(thaw_promise_reject(promise, &value), 1);
+        assert_eq!(if result_abi {
+            thaw_promise_drain_unhandled_result(Some(result))
+        } else {
+            thaw_promise_drain_unhandled(Some(legacy))
+        }, 0);
+        unsafe { thaw_promise_destroy(promise) };
+    }
+}
+
+#[test]
+fn unhandled_opaque_promise_rejections_use_safe_fallback_for_every_reporter_abi() {
+    thread_local! { static EXPECTED: Cell<*const u8> = const { Cell::new(std::ptr::null()) }; }
+    extern "C" fn unhandled(error: *const u8) -> u8 {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        0
+    }
+    extern "C" fn unhandled_result(error: *const u8) -> PromiseReportResult {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        PromiseReportResult { value: 0, error: std::ptr::null() }
+    }
+    extern "C" fn throwing(error: *const u8) -> PromiseReportResult {
+        EXPECTED.with(|expected| assert_eq!(error, expected.get()));
+        PromiseReportResult { value: 1, error: thaw_arena::owned_string("listener failed") }
+    }
+    let value = 99u8;
+    EXPECTED.with(|expected| expected.set(&value));
+    let diagnostic = unhandled_rejection_report_text(&value, false);
+    assert_eq!(unsafe { CStr::from_ptr(diagnostic) }.to_bytes(), b"Unhandled opaque Promise rejection");
+    assert_ne!(diagnostic.cast::<u8>(), &value as *const u8);
+    for mode in 0..4 {
+        let promise = thaw_promise_new();
+        assert_eq!(thaw_promise_reject(promise, &value), 1);
+        let failed = match mode {
+            0 => thaw_promise_drain_unhandled(None),
+            1 => thaw_promise_drain_unhandled(Some(unhandled)),
+            2 => thaw_promise_drain_unhandled_result(Some(unhandled_result)),
+            _ => thaw_promise_drain_unhandled_result(Some(throwing)),
+        };
+        assert_eq!(failed, 1);
+        unsafe { thaw_promise_destroy(promise) };
+    }
+    assert_eq!(thaw_promise_take_unhandled_failure(), 1);
+}
+
+#[test]
+fn generated_native_text_and_promise_forwarding_preserve_diagnostic_provenance() {
+    let source = thaw_promise_new();
+    let output = thaw_promise_new();
+    let error = c"\u{1}TypeError\u{1}Invalid native callback graph";
+    assert_eq!(unsafe { thaw_promise_reject_native_text(source, error.as_ptr().cast()) }, 1);
+    assert_eq!(unsafe { thaw_promise_forward_rejection(output, source, error.as_ptr().cast()) }, 1);
+    assert_eq!(unsafe { (*output).rejection_text.as_deref() }, Some(error.to_bytes()));
+    unsafe { thaw_promise_destroy(source) };
+    assert_eq!(unsafe { (*output).rejection_text.as_deref() }, Some(error.to_bytes()));
+    let copied = unsafe { thaw_promise_exception_native_text_copy(output) };
+    unsafe { thaw_promise_destroy(output) };
+    assert_eq!(unsafe { CStr::from_ptr(copied.cast()) }.to_bytes(), error.to_bytes());
+
+    let typed_native = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_reject_typed_with_native_text(
+        typed_native, error.as_ptr().cast(), 1, 0.0, 0, false,
+        std::ptr::null(), error.as_ptr().cast(),
+    ) }, 1);
+    assert_eq!(unsafe { (*typed_native).rejection_text.as_deref() }, Some(error.to_bytes()));
+    unsafe { thaw_promise_destroy(typed_native) };
+
+    let scalar = 99u8;
+    let opaque = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_reject_typed_with_native_text(
+        opaque, &scalar, 1, 0.0, 0, false, std::ptr::null(), error.as_ptr().cast(),
+    ) }, 1);
+    assert!(unsafe { (*opaque).rejection_text.is_none() });
+    unsafe { thaw_promise_destroy(opaque) };
+}
+
+#[test]
+fn finally_adopt_snapshots_original_native_text_before_source_destruction() {
+    let source = thaw_promise_new();
+    let returned = thaw_promise_new();
+    let output = thaw_promise_new();
+    let error = c"\u{1}TypeError\u{1}original native failure";
+    assert_eq!(unsafe { thaw_promise_reject_native_text(source, error.as_ptr().cast()) }, 1);
+    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
+        output, returned, error.as_ptr().cast(), 1, 1, 0.0, 0, false,
+        std::ptr::null(), source,
+    ) }, 1);
+    unsafe { thaw_promise_destroy(source) };
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(output) }, 2);
+    assert_eq!(unsafe { (*output).rejection_text.as_deref() }, Some(error.to_bytes()));
+    unsafe { thaw_promise_destroy(output) };
+}

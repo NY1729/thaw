@@ -129,6 +129,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         if *ret == HirType::Void {
             self.builder
@@ -890,6 +892,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // replace its typed payload.
         let exception_slots = [
             (self.pending_exception(), BasicTypeEnum::from(ptr_type)),
+            (self.pending_exception_native_text(), BasicTypeEnum::from(ptr_type)),
             (self.pending_exception_object(), BasicTypeEnum::from(ptr_type)),
             (self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL), BasicTypeEnum::from(self.context.i64_type())),
             (self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL), BasicTypeEnum::from(self.context.f64_type())),
@@ -1371,6 +1374,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(value)
     }

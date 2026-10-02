@@ -109,7 +109,9 @@ thread_local! {
     static ACTIVE_PROMISE_JOINS: Cell<usize> = const { Cell::new(0) };
     static ACTIVE_PROMISES: RefCell<Vec<*mut ThawPromise>> = const { RefCell::new(Vec::new()) };
     static UNHANDLED_REPORTER: Cell<Option<PromiseUnhandledFn>> = const { Cell::new(None) };
+    static UNHANDLED_REPORTER_RESULT: Cell<Option<PromiseUnhandledResultFn>> = const { Cell::new(None) };
     static REJECTION_HANDLED_REPORTER: Cell<Option<PromiseRejectionHandledFn>> = const { Cell::new(None) };
+    static REJECTION_HANDLED_REPORTER_RESULT: Cell<Option<PromiseRejectionHandledResultFn>> = const { Cell::new(None) };
     static PENDING_REJECTION_HANDLED: Cell<usize> = const { Cell::new(0) };
     static UNHANDLED_FAILURE: Cell<bool> = const { Cell::new(false) };
     // The current Lambda invocation's wall-clock deadline, derived from the
@@ -152,7 +154,7 @@ fn reject_for_invocation_deadline(promise: *mut ThawPromise) {
         .map_or(0.0, |(_, budget)| budget.as_secs_f64());
     let message = format!("Task timed out after {seconds:.2} seconds");
     let error = arena_c_string(&message).unwrap_or(INVOCATION_TIMEOUT_ERROR.as_ptr());
-    thaw_promise_reject(promise, error);
+    reject_native_text(promise, error);
 }
 
 /// Clears every thread-local queue that could still hold a pointer into the
@@ -286,9 +288,9 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let count = completed.len();
     for (promise, events, timed_out) in completed {
         if timed_out && events == 0 {
-            thaw_promise_reject(promise, FD_TIMEOUT_ERROR.as_ptr());
+            reject_native_text(promise, FD_TIMEOUT_ERROR.as_ptr());
         } else if events & libc::POLLNVAL != 0 {
-            thaw_promise_reject(promise, INVALID_FD_ERROR.as_ptr());
+            reject_native_text(promise, INVALID_FD_ERROR.as_ptr());
         } else {
             thaw_promise_resolve(promise, std::ptr::dangling::<u8>());
         }
@@ -484,7 +486,7 @@ fn thaw_runtime_wait_fd_until(
 ) -> *mut ThawPromise {
     let promise = thaw_promise_new();
     if fd < 0 || interests == 0 || interests & !(THAW_FD_READABLE | THAW_FD_WRITABLE) != 0 {
-        thaw_promise_reject(promise, INVALID_FD_ERROR.as_ptr());
+        reject_native_text(promise, INVALID_FD_ERROR.as_ptr());
         return promise;
     }
     FD_WAITS.with(|waits| {
@@ -637,6 +639,7 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
 #[repr(C)]
 pub struct ThawPromise {
     result: Option<*const u8>,
+    rejection_text: Option<Vec<u8>>,
     rejected: bool,
     exception_tag: u64,
     exception_f64: f64,

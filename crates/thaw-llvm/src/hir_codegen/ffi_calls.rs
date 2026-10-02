@@ -1337,6 +1337,8 @@ impl<'ctx> HirCompiler<'ctx> {
         ).map_err(|error| error.to_string())?;
         self.builder.build_store(self.pending_exception().as_pointer_value(), error.as_pointer_value())
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error.as_pointer_value())?;
         self.branch_on_pending_exception()?;
         self.builder.build_unconditional_branch(valid_bb)
             .map_err(|error| error.to_string())?;
@@ -1521,6 +1523,8 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(self.pending_exception().as_pointer_value(), error)
                 .map_err(|e| e.to_string())?;
+            self.clear_pending_native_text()?;
+            self.mark_pending_native_text(error)?;
             self.branch_on_pending_exception()?;
             return Ok(None);
         }
@@ -1564,6 +1568,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|e| e.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         if sig.ret == HirType::Str && sig.return_string_abi == FfiStringAbi::NullTerminated {
             return self

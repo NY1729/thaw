@@ -341,6 +341,20 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(self.pending_exception().as_pointer_value(), result_slot)
                 .map_err(|error| error.to_string())?;
+            self.clear_pending_native_text()?;
+            let native_text = self.builder.build_call(
+                self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+                &[promise.into()], "json_handler_native_text",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("native text copy returned no value")?.into_pointer_value();
+            let has_native_text = self.builder.build_is_not_null(native_text, "json_handler_native_text_present")
+                .map_err(|error| error.to_string())?;
+            let pending_value = self.builder.build_select(
+                has_native_text, native_text, result_slot, "json_handler_pending_value",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_store(self.pending_exception().as_pointer_value(), pending_value)
+                .map_err(|error| error.to_string())?;
+            self.mark_pending_native_text(native_text)?;
             self.builder
                 .build_call(
                     self.module.get_function("thaw_promise_destroy").unwrap(),
@@ -497,7 +511,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn configure_unhandled_rejection_reporter(&self) {
         let reporter = if self.uses_quickjs_handles {
             self.module
-                .get_function("thaw_js_emit_unhandled_rejection")
+                .get_function("thaw_js_emit_unhandled_rejection_result")
                 .unwrap()
                 .as_global_value()
                 .as_pointer_value()
@@ -507,7 +521,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_call(
                 self.module
-                    .get_function("thaw_promise_set_unhandled_reporter")
+                    .get_function("thaw_promise_set_unhandled_reporter_result")
                     .unwrap(),
                 &[reporter.into()],
                 "configure_unhandled_rejection_reporter",
@@ -515,7 +529,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .unwrap();
         let handled_reporter = if self.uses_quickjs_handles {
             self.module
-                .get_function("thaw_js_emit_rejection_handled")
+                .get_function("thaw_js_emit_rejection_handled_result")
                 .unwrap()
                 .as_global_value()
                 .as_pointer_value()
@@ -525,7 +539,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_call(
                 self.module
-                    .get_function("thaw_promise_set_rejection_handled_reporter")
+                    .get_function("thaw_promise_set_rejection_handled_reporter_result")
                     .unwrap(),
                 &[handled_reporter.into()],
                 "configure_rejection_handled_reporter",
@@ -548,25 +562,27 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(pending, "process_exception_failed")
             .unwrap();
-        let (exception_failure, reported) = if self.uses_quickjs_handles {
+        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_quickjs_handles {
             self.builder
                 .build_store(
                     self.pending_exception().as_pointer_value(),
                     pending.get_type().const_null(),
                 )
                 .unwrap();
-            let handled = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_js_emit_uncaught").unwrap(),
-                    &[pending.into()],
-                    "emit_process_uncaught_exception",
-                )
-                .unwrap()
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
-                .into_int_value();
+            self.builder.build_store(
+                self.pending_exception_native_text().as_pointer_value(),
+                pending.get_type().const_null(),
+            ).unwrap();
+            let emission = self.builder.build_call(
+                self.module.get_function("thaw_js_emit_uncaught_result").unwrap(),
+                &[pending.into()],
+                "emit_process_uncaught_exception",
+            ).unwrap().try_as_basic_value().basic().unwrap().into_struct_value();
+            let handled = self.builder.build_extract_value(emission, 0, "process_exception_handled_value")
+                .unwrap().into_int_value();
+            let listener_error = self.builder.build_extract_value(emission, 1, "process_exception_listener_error")
+                .unwrap().into_pointer_value();
+            let listener_failed = self.builder.build_is_not_null(listener_error, "process_listener_failed").unwrap();
             let handled = self
                 .builder
                 .build_int_compare(
@@ -604,6 +620,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     handler_failed,
                     "process_exception_failed_unhandled",
                 )
+                .and_then(|failed| self.builder.build_or(failed, listener_failed, "process_listener_exception_failed"))
                 .unwrap();
             let original_report = self
                 .builder
@@ -615,19 +632,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap()
                 .into_pointer_value();
-            let reported = self
-                .builder
-                .build_select(
-                    handler_failed,
-                    handler_exception,
-                    original_report,
-                    "reported_uncaught_exception",
-                )
-                .unwrap()
-                .into_pointer_value();
-            (failure, reported)
+            (failure, original_report, handler_exception, listener_error)
         } else {
-            (has_exception, pending)
+            let null = pending.get_type().const_null();
+            (has_exception, pending, null, null)
         };
         self.builder
             .build_call(
@@ -638,6 +646,21 @@ impl<'ctx> HirCompiler<'ctx> {
                 "report_uncaught_exception",
             )
             .unwrap();
+        self.builder.build_call(
+            self.module.get_function("thaw_runtime_report_uncaught").unwrap(),
+            &[native_handler_error.into()],
+            "report_native_handler_exception",
+        ).unwrap();
+        self.builder.build_call(
+            self.module.get_function("thaw_runtime_report_uncaught").unwrap(),
+            &[listener_error.into()],
+            "report_js_listener_exception",
+        ).unwrap();
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[listener_error.into()],
+            "destroy_js_listener_exception",
+        ).unwrap();
         let rejection = self
             .builder
             .build_load(
@@ -651,21 +674,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(rejection, "process_rejection_failed")
             .unwrap();
-        let (rejection_failure, reported_rejection) = if self.uses_quickjs_handles {
-            let handled = self
-                .builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_js_emit_unhandled_rejection")
-                        .unwrap(),
-                    &[rejection.into()],
-                    "emit_process_unhandled_rejection",
-                )
-                .unwrap()
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
-                .into_int_value();
+        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_quickjs_handles {
+            let emission = self.builder.build_call(
+                self.module.get_function("thaw_js_emit_unhandled_rejection_result").unwrap(),
+                &[rejection.into()],
+                "emit_process_unhandled_rejection",
+            ).unwrap().try_as_basic_value().basic().unwrap().into_struct_value();
+            let handled = self.builder.build_extract_value(emission, 0, "process_rejection_handled_value")
+                .unwrap().into_int_value();
+            let listener_error = self.builder.build_extract_value(emission, 1, "process_rejection_listener_error")
+                .unwrap().into_pointer_value();
+            let listener_failed = self.builder.build_is_not_null(listener_error, "process_rejection_listener_failed").unwrap();
             let handled = self
                 .builder
                 .build_int_compare(
@@ -679,13 +698,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_not(handled, "process_rejection_unhandled")
                 .unwrap();
-            let failure = self
-                .builder
-                .build_and(
-                    has_rejection,
-                    unhandled,
-                    "process_rejection_failed_unhandled",
-                )
+            let failure = self.builder.build_and(
+                has_rejection, unhandled, "process_rejection_failed_unhandled",
+            ).and_then(|failed| self.builder.build_or(failed, listener_failed, "process_rejection_handler_failed"))
                 .unwrap();
             let reported = self
                 .builder
@@ -697,9 +712,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap()
                 .into_pointer_value();
-            (failure, reported)
+            (failure, reported, listener_error)
         } else {
-            (has_rejection, rejection)
+            (has_rejection, rejection, rejection.get_type().const_null())
         };
         self.builder
             .build_call(
@@ -710,9 +725,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 "report_unhandled_rejection",
             )
             .unwrap();
+        self.builder.build_call(
+            self.module.get_function("thaw_runtime_report_uncaught").unwrap(),
+            &[rejection_listener_error.into()],
+            "report_rejection_listener_exception",
+        ).unwrap();
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[rejection_listener_error.into()],
+            "destroy_rejection_listener_exception",
+        ).unwrap();
         let rejection_reporter = if self.uses_quickjs_handles {
             self.module
-                .get_function("thaw_js_emit_unhandled_rejection")
+                .get_function("thaw_js_emit_unhandled_rejection_result")
                 .unwrap()
                 .as_global_value()
                 .as_pointer_value()
@@ -723,7 +748,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_promise_drain_unhandled")
+                    .get_function("thaw_promise_drain_unhandled_result")
                     .unwrap(),
                 &[rejection_reporter.into()],
                 "drain_stored_unhandled_rejections",

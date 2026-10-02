@@ -485,6 +485,7 @@ fn frame_split_propagates_async_rejection_through_await_chain() {
     let ir = compiler.print_to_string();
     assert!(ir.contains("call i8 @thaw_promise_reject"));
     assert!(ir.contains("propagate_rejection"));
+    assert!(ir.contains("@thaw_promise_forward_rejection"), "{ir}");
     assert_eq!(compile_and_run(source, "async_rejection_chain"), "before\n");
 }
 
@@ -746,4 +747,33 @@ fn frame_split_supports_async_if_and_while_inside_try() {
         compile_and_run(source, "async_if_while_in_try"),
         "branch\nloop-error\ncaught\ndone\n"
     );
+}
+
+#[test]
+fn async_catch_rethrow_carries_owned_native_text_provenance() {
+    let source = r#"
+        async function fail(): Promise<void> {
+            await sleep(1);
+            throw new TypeError("native failure");
+        }
+        async function main(): Promise<void> {
+            const error__thaw_exception_native_text = "source-controlled spoof";
+            try {
+                await fail();
+            } catch (error) {
+                console.log(error__thaw_exception_native_text);
+                throw error;
+            }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "async_catch_native_text_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_promise_exception_native_text_copy"), "{ir}");
+    assert!(ir.contains("@thaw_promise_reject_typed_with_native_text"), "{ir}");
+    assert!(ir.contains("caught_rethrow_native_text"), "{ir}");
+    assert!(ir.contains("@@thaw_catch_native_text:"), "{ir}");
 }

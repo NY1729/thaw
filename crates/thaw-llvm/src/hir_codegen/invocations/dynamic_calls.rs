@@ -155,6 +155,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(retained)
     }
@@ -224,6 +226,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(self.context.bool_type().const_int(1, false).into())
     }

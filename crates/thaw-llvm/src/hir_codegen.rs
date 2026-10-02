@@ -72,6 +72,7 @@ const PENDING_REJECTION_SYMBOL: &str = "__thaw_pending_rejection";
 /// `Promise.reject`) only ever looks at the string channel and stays
 /// completely unaware this one exists.
 const PENDING_EXCEPTION_OBJECT_SYMBOL: &str = "__thaw_pending_exception_object";
+const PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL: &str = "__thaw_pending_exception_native_text";
 const PENDING_EXCEPTION_VALUE_TAG_SYMBOL: &str = "__thaw_pending_exception_value_tag";
 const PENDING_EXCEPTION_F64_SYMBOL: &str = "__thaw_pending_exception_f64";
 const PENDING_EXCEPTION_I64_SYMBOL: &str = "__thaw_pending_exception_i64";
@@ -178,6 +179,7 @@ struct FrameAsyncPlan {
     segments: Vec<AsyncSegment>,
     captures: Vec<(String, HirType)>,
     locals: Vec<(String, HirType)>,
+    generated_catch_bindings: Vec<String>,
     ret: HirType,
     guarded_rethrow_handlers: HashMap<String, AsyncRejectionHandler>,
     returns_on_all_paths: bool,
@@ -194,6 +196,9 @@ pub struct HirCompiler<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
+    /// Only compiler-created catch cells enter this map; source-visible names
+    /// (including a matching metadata suffix) never establish provenance.
+    catch_native_text: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
     arena_variables: HashSet<String>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
@@ -236,6 +241,7 @@ impl<'ctx> HirCompiler<'ctx> {
             module: context.create_module(module_name),
             builder: context.create_builder(),
             variables: HashMap::new(),
+            catch_native_text: HashMap::new(),
             variable_hir_types: HashMap::new(),
             arena_variables: HashSet::new(),
             async_frame_cells: HashSet::new(),
@@ -336,6 +342,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_global(ptr_ty, None, PENDING_REJECTION_SYMBOL);
         rejection.set_linkage(Linkage::Internal);
         rejection.set_initializer(&ptr_ty.const_null());
+        let native_text = self.module.add_global(ptr_ty, None, PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL);
+        native_text.set_linkage(Linkage::Internal);
+        native_text.set_initializer(&ptr_ty.const_null());
         let pending_object = self
             .module
             .add_global(ptr_ty, None, PENDING_EXCEPTION_OBJECT_SYMBOL);
@@ -439,6 +448,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(guard.as_pointer_value(), bool_type.const_int(1, false))
             .map_err(|error| error.to_string())?;
         self.variables.clear();
+        self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
         self.catch_stack.clear();
@@ -519,6 +529,7 @@ impl<'ctx> HirCompiler<'ctx> {
         state.set_initializer(&state_ty.const_zero());
         let exception_slots = [
             (PENDING_EXCEPTION_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+            (PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_OBJECT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
@@ -566,6 +577,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_store(state.as_pointer_value(), state_ty.const_int(1, false))
             .map_err(|error| error.to_string())?;
         self.variables.clear();
+        self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
         self.catch_stack.clear();
@@ -763,6 +775,72 @@ impl<'ctx> HirCompiler<'ctx> {
             .expect("rejection state is declared before code generation")
     }
 
+    fn clear_pending_native_text(&self) -> Result<(), String> {
+        let null = self.context.ptr_type(AddressSpace::default()).const_null();
+        self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), null)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn mark_pending_native_text(&self, value: impl Into<BasicValueEnum<'ctx>>) -> Result<(), String> {
+        self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), value.into())
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn async_catch_native_name(name: &str) -> String {
+        // `@` is not valid in a TypeScript binding. The frame cell is reserved
+        // for compiler-generated catch state and cannot be forged by a user Var.
+        format!("@@thaw_catch_native_text:{name}")
+    }
+
+    /// Preserve an explicitly captured catch string only when rethrowing the
+    /// same binding. Every other ThrowValue keeps the opaque public ABI.
+    fn reject_caught_or_opaque_value(
+        &self,
+        completion: PointerValue<'ctx>,
+        error: PointerValue<'ctx>,
+        expression: &HirExpr,
+        name: &str,
+    ) -> Result<(), String> {
+        if let HirExpr::Var(binding) = expression {
+            if let Some((catch_slot, native_slot)) = self.catch_native_text.get(binding) {
+                if self.variables.get(binding).map(|(slot, _)| slot) != Some(catch_slot) {
+                    // A source binding shadowed the compiler-created catch.
+                    return self.reject_opaque_value(completion, error, name);
+                }
+                let native_text = self.builder.build_load(
+                    self.context.ptr_type(AddressSpace::default()), *native_slot,
+                    "caught_rethrow_native_text",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_promise_reject_typed_with_native_text").unwrap(),
+                    &[
+                        completion.into(), error.into(), self.context.i64_type().const_zero().into(),
+                        self.context.f64_type().const_zero().into(), self.context.i64_type().const_zero().into(),
+                        self.context.bool_type().const_zero().into(),
+                        self.context.ptr_type(AddressSpace::default()).const_null().into(), native_text.into(),
+                    ], name,
+                ).map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+        }
+        self.reject_opaque_value(completion, error, name)
+    }
+
+    fn reject_opaque_value(&self, completion: PointerValue<'ctx>, error: PointerValue<'ctx>, name: &str) -> Result<(), String> {
+        self.builder.build_call(
+            self.module.get_function("thaw_promise_reject").unwrap(),
+            &[completion.into(), error.into()], name,
+        ).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn pending_exception_native_text(&self) -> inkwell::values::GlobalValue<'ctx> {
+        self.module.get_global(PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL)
+            .expect("native text provenance is declared before code generation")
+    }
+
     fn pending_exception_object(&self) -> inkwell::values::GlobalValue<'ctx> {
         self.module
             .get_global(PENDING_EXCEPTION_OBJECT_SYMBOL)
@@ -810,10 +888,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into(),
             );
         }
+        let native_text = self.builder.build_load(
+            self.context.ptr_type(AddressSpace::default()),
+            self.pending_exception_native_text().as_pointer_value(),
+            "pending_native_text_provenance",
+        ).map_err(|error| error.to_string())?;
+        args.push(native_text.into());
         self.builder
             .build_call(
                 self.module
-                    .get_function("thaw_promise_reject_typed")
+                    .get_function("thaw_promise_reject_typed_with_native_text")
                     .unwrap(),
                 &args,
                 name,
@@ -829,34 +913,10 @@ impl<'ctx> HirCompiler<'ctx> {
         source: PointerValue<'ctx>,
         name: &str,
     ) -> Result<(), String> {
-        let mut args: Vec<BasicMetadataValueEnum<'ctx>> = vec![promise.into(), error.into()];
-        for getter in [
-            "thaw_promise_exception_tag",
-            "thaw_promise_exception_f64",
-            "thaw_promise_exception_i64",
-            "thaw_promise_exception_bool",
-            "thaw_promise_exception_object",
-        ] {
-            args.push(
-                self.builder
-                    .build_call(
-                        self.module.get_function(getter).unwrap(),
-                        &[source.into()],
-                        "promise_exception_value",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or_else(|| format!("{getter} returned no value"))?
-                    .into(),
-            );
-        }
         self.builder
             .build_call(
-                self.module
-                    .get_function("thaw_promise_reject_typed")
-                    .unwrap(),
-                &args,
+                self.module.get_function("thaw_promise_forward_rejection").unwrap(),
+                &[promise.into(), source.into(), error.into()],
                 name,
             )
             .map_err(|error| error.to_string())?;
@@ -921,6 +981,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
                     .map_err(|e| e.to_string())?;
+                self.clear_pending_native_text()?;
                 self.builder
                     .build_store(self.pending_exception_object().as_pointer_value(), ptr_ty.const_null())
                     .map_err(|e| e.to_string())?;
@@ -966,6 +1027,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(entry);
 
         self.variables.clear();
+        self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
         self.catch_stack.clear();
