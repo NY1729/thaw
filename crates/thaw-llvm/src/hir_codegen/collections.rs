@@ -207,13 +207,27 @@ impl<'ctx> HirCompiler<'ctx> {
         index: IntValue<'ctx>,
     ) -> Result<IntValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let presence = self.compile_array_presence(handle)?;
+        let data = self.compile_array_data(handle)?;
+        let length = self.builder
+            .build_load(i64_type, data, "array_current_length")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let in_range = self.builder
+            .build_int_compare(IntPredicate::ULT, index, length, "array_index_in_current_length")
+            .map_err(|error| error.to_string())?;
         let function = self.current_function();
+        let check_presence = self.context.append_basic_block(function, "array_check_presence");
+        let out_of_range = self.context.append_basic_block(function, "array_out_of_range");
         let dense = self.context.append_basic_block(function, "array_dense");
         let sparse = self.context.append_basic_block(function, "array_sparse");
         let sparse_present = self.context.append_basic_block(function, "array_sparse_present");
         let beyond_mask = self.context.append_basic_block(function, "array_beyond_presence_mask");
         let done = self.context.append_basic_block(function, "array_presence_done");
+        self.builder
+            .build_conditional_branch(in_range, check_presence, out_of_range)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(check_presence);
+        let presence = self.compile_array_presence(handle)?;
         let is_dense = self
             .builder
             .build_is_null(presence, "array_is_dense")
@@ -271,13 +285,19 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_unconditional_branch(done)
             .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(out_of_range);
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);
         let phi = self
             .builder
             .build_phi(self.context.i8_type(), "array_index_state")
             .map_err(|error| error.to_string())?;
         let present_by_default = self.context.i8_type().const_int(1, false);
+        let absent = self.context.i8_type().const_zero();
         phi.add_incoming(&[
+            (&absent, out_of_range),
             (&present_by_default, dense),
             (&state, sparse_present),
             (&present_by_default, beyond_mask),
