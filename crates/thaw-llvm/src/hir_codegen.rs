@@ -1212,6 +1212,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.print_to_string().to_string()
     }
 
+    /// Emits build metadata outside user source so an artifact inspector can
+    /// identify it by ELF section rather than by an arbitrary byte sequence.
+    pub fn embed_artifact_metadata(&self, metadata: &[u8]) -> Result<(), String> {
+        const SYMBOL: &str = "__thaw_artifact_metadata";
+        if self.module.get_global(SYMBOL).is_some() || self.module.get_function(SYMBOL).is_some() {
+            return Err("artifact metadata has already been emitted".into());
+        }
+        let value = self.context.const_string(metadata, true);
+        let global = self.module.add_global(value.get_type(), None, SYMBOL);
+        global.set_initializer(&value);
+        global.set_constant(true);
+        global.set_section(Some(".thaw.artifact"));
+        Ok(())
+    }
+
     /// Compiles this module to a native object file for the host target.
     pub fn write_object_file(&self, path: &Path) -> Result<(), String> {
         Target::initialize_native(&InitializationConfig::default())?;
