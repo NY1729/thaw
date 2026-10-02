@@ -209,7 +209,7 @@ fn bundle_commonjs_package_cached(
             let source = if is_json {
                 let value: serde_json::Value = serde_json::from_str(&source)
                     .map_err(|error| format!("invalid JSON module `{key}`: {error}"))?;
-                format!("module.exports = {};", value)
+                format!("module.exports = JSON.parse({});", js_string_literal(&value.to_string()))
             } else {
                 source
             };
