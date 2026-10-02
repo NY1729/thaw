@@ -22,7 +22,7 @@ pub unsafe extern "C" fn napi_set_named_property(
             new_target: ptr::null_mut(),
             data: accessor.data,
         };
-        setter(env, &mut info);
+        invoke_napi_callback(env, setter, &mut info);
         let status = if env_mut(env)
             .map(|env| env.exception.is_some())
             .unwrap_or(false)
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn napi_get_named_property(
                 new_target: ptr::null_mut(),
                 data: accessor.unwrap().data,
             };
-            let value = getter(env, &mut info);
+            let value = invoke_napi_callback(env, getter, &mut info);
             if env_mut(env)
                 .map(|env| env.exception.is_some())
                 .unwrap_or(false)
@@ -144,7 +144,7 @@ unsafe fn set_property_key(
             new_target: ptr::null_mut(),
             data: accessor.data,
         };
-        setter(env, &mut info);
+        invoke_napi_callback(env, setter, &mut info);
         let status = if env_mut(env)
             .map(|env| env.exception.is_some())
             .unwrap_or(false)
@@ -214,7 +214,7 @@ unsafe fn get_property_key(
                     new_target: ptr::null_mut(),
                     data: accessor.data,
                 };
-                let value = getter(env, &mut info);
+                let value = invoke_napi_callback(env, getter, &mut info);
                 if env_mut(env)
                     .map(|env| env.exception.is_some())
                     .unwrap_or(false)

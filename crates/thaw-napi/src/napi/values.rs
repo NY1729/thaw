@@ -430,6 +430,7 @@ pub unsafe extern "C" fn node_api_create_external_string_latin1(
     }
     *copied = true;
     if let Some(finalize) = finalize {
+        let _dispatch = ForeignCallbackGuard::new();
         finalize(env, value.cast(), hint);
     }
     NAPI_OK
@@ -454,6 +455,7 @@ pub unsafe extern "C" fn node_api_create_external_string_utf16(
     }
     *copied = true;
     if let Some(finalize) = finalize {
+        let _dispatch = ForeignCallbackGuard::new();
         finalize(env, value.cast(), hint);
     }
     NAPI_OK
@@ -535,12 +537,16 @@ pub unsafe extern "C" fn napi_create_external(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if finalize.is_some() && (env.finalizing || env.finalized) {
+        return record_status(env as NapiEnv, NAPI_CLOSING);
+    }
     let value = env.alloc(Value::External(data));
     if finalize.is_some() {
         env.finalizers.push(FinalizeRecord {
             data,
             finalize,
             hint,
+            backing: value,
         });
     }
     *out = value;

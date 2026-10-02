@@ -1,9 +1,8 @@
 #[cfg(target_os = "linux")]
 #[test]
-fn poll_uv_loop_drives_the_default_libuv_loop() {
+fn poll_uv_loop_drives_only_the_host_owned_libuv_loop() {
     let _guard = lock_async_test();
     unsafe {
-        type UvDefaultLoop = unsafe extern "C" fn() -> *mut c_void;
         type UvHandleSize = unsafe extern "C" fn(i32) -> usize;
         type UvTimerInit = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
         type UvTimerStart = unsafe extern "C" fn(
@@ -15,10 +14,10 @@ fn poll_uv_loop_drives_the_default_libuv_loop() {
 
         let library = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
         assert!(!library.is_null());
-        let default_loop = std::mem::transmute::<*mut c_void, UvDefaultLoop>(libc::dlsym(
-            libc::RTLD_DEFAULT,
-            c"uv_default_loop".as_ptr(),
-        ));
+        let mut env = Env::new();
+        let mut event_loop = ptr::null_mut();
+        assert_eq!(napi_get_uv_event_loop(&mut env, &mut event_loop), NAPI_OK);
+        assert!(!event_loop.is_null());
         let handle_size = std::mem::transmute::<*mut c_void, UvHandleSize>(libc::dlsym(
             libc::RTLD_DEFAULT,
             c"uv_handle_size".as_ptr(),
@@ -34,7 +33,7 @@ fn poll_uv_loop_drives_the_default_libuv_loop() {
         const UV_TIMER: i32 = 13;
         let timer = libc::calloc(1, handle_size(UV_TIMER));
         assert!(!timer.is_null());
-        assert_eq!(timer_init(default_loop(), timer), 0);
+        assert_eq!(timer_init(event_loop, timer), 0);
         UV_TIMER_FIRED.store(false, Ordering::Release);
         assert_eq!(timer_start(timer, Some(test_uv_timer_callback), 1, 0), 0);
         for _ in 0..1000 {
@@ -45,10 +44,102 @@ fn poll_uv_loop_drives_the_default_libuv_loop() {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(UV_TIMER_FIRED.load(Ordering::Acquire));
-        poll_uv_loop();
+        for _ in 0..100 {
+            poll_uv_loop();
+            if !uv_handles_open() { break; }
+        }
+        assert!(!uv_handles_open());
+        libc::free(timer);
+        assert!(close_owned_uv_loop());
+        libc::dlclose(library);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn recorded_main_default_loop_progresses_without_worker_polling_it() {
+    let _guard = lock_async_test();
+    unsafe {
+        type UvDefaultLoop = unsafe extern "C" fn() -> *mut c_void;
+        type UvHandleSize = unsafe extern "C" fn(i32) -> usize;
+        type UvTimerInit = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+        type UvTimerStart = unsafe extern "C" fn(*mut c_void,
+            Option<unsafe extern "C" fn(*mut c_void)>, u64, u64) -> i32;
+        let library = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        assert!(!library.is_null());
+        let default_loop = std::mem::transmute::<*mut c_void, UvDefaultLoop>(
+            libc::dlsym(libc::RTLD_DEFAULT, c"uv_default_loop".as_ptr()))();
+        assert!(!default_loop.is_null());
+        // load_impl records this exact pointer in the process-main Host.
+        HOST.with(|host| host.borrow_mut().main_default_uv_loop = Some(default_loop as usize));
+        let owner_loop = default_loop as usize;
+        assert!(known_uv_loops().contains(&owner_loop));
+        assert!(!std::thread::spawn(move || known_uv_loops().contains(&owner_loop))
+            .join().unwrap());
+        let size = std::mem::transmute::<*mut c_void, UvHandleSize>(
+            libc::dlsym(libc::RTLD_DEFAULT, c"uv_handle_size".as_ptr()));
+        let init = std::mem::transmute::<*mut c_void, UvTimerInit>(
+            libc::dlsym(libc::RTLD_DEFAULT, c"uv_timer_init".as_ptr()));
+        let start = std::mem::transmute::<*mut c_void, UvTimerStart>(
+            libc::dlsym(libc::RTLD_DEFAULT, c"uv_timer_start".as_ptr()));
+        let timer = libc::calloc(1, size(13));
+        assert!(!timer.is_null());
+        assert_eq!(init(default_loop, timer), 0);
+        UV_TIMER_FIRED.store(false, Ordering::Release);
+        assert_eq!(start(timer, Some(test_uv_timer_callback), 1, 0), 0);
+        for _ in 0..1000 {
+            thaw_napi_poll_async_work();
+            if UV_TIMER_FIRED.load(Ordering::Acquire) { break; }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(UV_TIMER_FIRED.load(Ordering::Acquire));
+        for _ in 0..100 { thaw_napi_poll_async_work(); if !uv_handles_open() { break; } }
+        assert!(!uv_handles_open());
+        HOST.with(|host| host.borrow_mut().main_default_uv_loop = None);
         libc::free(timer);
         libc::dlclose(library);
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_addon_load_retains_libuv_reference_until_host_shutdown() {
+    let _guard = lock_async_test();
+    let before = HOST.with(|host| host.borrow().libraries.len());
+    let path = format!("/tmp/thaw_missing_addon_{}.node", std::process::id());
+    assert!(unsafe { load_impl(&path, None, None) }.is_err());
+    assert_eq!(HOST.with(|host| host.borrow().libraries.len()), before + 1);
+    assert_eq!(thaw_napi_begin_shutdown(), 1);
+    assert_eq!(thaw_napi_poll_shutdown(), 1);
+    assert_eq!(thaw_napi_finish_shutdown(), 1);
+    assert!(HOST.with(|host| host.borrow().libraries.is_empty()));
+}
+
+#[test]
+fn ready_events_stay_with_their_creating_worker_thread() {
+    let _guard = lock_async_test();
+    let other_owner = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
+    let make_work = |owner| Box::new(AsyncWork {
+        env: 0,
+        owner,
+        execute: noop_execute,
+        complete: None,
+        data: 0,
+        state: AtomicU8::new(ASYNC_COMPLETE_PENDING),
+        completion_status: AtomicI32::new(NAPI_OK),
+    });
+    let local = make_work(std::thread::current().id());
+    let other = make_work(other_owner);
+    let local_address = (&*local) as *const AsyncWork as usize;
+    let other_address = (&*other) as *const AsyncWork as usize;
+    {
+        let mut ready = ready_events().lock().unwrap();
+        assert!(ready.is_empty());
+        ready.push_back(ReadyEvent::AsyncCompletion(other_address));
+        ready.push_back(ReadyEvent::AsyncCompletion(local_address));
+    }
+    assert_eq!(take_ready_event_for_current_thread(), Some(ReadyEvent::AsyncCompletion(local_address)));
+    assert_eq!(ready_events().lock().unwrap().pop_front(), Some(ReadyEvent::AsyncCompletion(other_address)));
 }
 
 #[test]
@@ -218,6 +309,179 @@ unsafe extern "C" fn async_cleanup_probe(handle: *mut AsyncCleanupHookHandle, da
 
 unsafe extern "C" fn hold_async_cleanup(handle: *mut AsyncCleanupHookHandle, _data: *mut c_void) {
     HELD_ASYNC_CLEANUP.store(handle as usize, Ordering::Release);
+}
+
+unsafe extern "C" fn ordered_finalizer_uses_napi(
+    env: NapiEnv,
+    data: *mut c_void,
+    _hint: *mut c_void,
+) {
+    let mut value = ptr::null_mut();
+    assert_eq!(napi_create_int32(env, 41, &mut value), NAPI_OK);
+    assert!(value_belongs_to_environment(env, value));
+    cleanup_probe(data);
+}
+
+unsafe extern "C" fn remove_cleanup_and_reenter(
+    handle: *mut AsyncCleanupHookHandle,
+    data: *mut c_void,
+) {
+    let env = (*handle).env;
+    assert_eq!(napi_remove_async_cleanup_hook(handle), NAPI_OK);
+    retire_owned_envs();
+    assert!(HOST.with(|host| {
+        let host = host.borrow();
+        host.module_envs.iter().chain(host.pending_call_envs.iter())
+            .any(|entry| (&**entry as *const Env as usize) == env)
+    }));
+    cleanup_probe(data);
+}
+
+unsafe extern "C" fn cleanup_finalizer_rejects_new_async_roots(
+    env: NapiEnv,
+    _data: *mut c_void,
+    _hint: *mut c_void,
+) {
+    let mut work = ptr::null_mut();
+    assert_eq!(napi_create_async_work(env, ptr::null_mut(), ptr::null_mut(),
+        Some(noop_execute), None, ptr::null_mut(), &mut work), NAPI_CLOSING);
+    let existing = (&mut *(*env).async_works[0]) as *mut AsyncWork;
+    assert_eq!(napi_queue_async_work(env, existing), NAPI_CLOSING);
+    assert_eq!(napi_add_env_cleanup_hook(env, Some(cleanup_probe), ptr::null_mut()), NAPI_CLOSING);
+}
+
+unsafe extern "C" fn queue_work_during_async_cleanup(
+    handle: *mut AsyncCleanupHookHandle,
+    _data: *mut c_void,
+) {
+    let env = (*handle).env as NapiEnv;
+    let mut work = ptr::null_mut();
+    assert_eq!(napi_create_async_work(env, ptr::null_mut(), ptr::null_mut(),
+        Some(noop_execute), None, ptr::null_mut(), &mut work), NAPI_OK);
+    assert_eq!(napi_queue_async_work(env, work), NAPI_OK);
+    assert_eq!(napi_remove_async_cleanup_hook(handle), NAPI_OK);
+}
+
+unsafe extern "C" fn nested_unload_before_cleanup_completion(
+    _env: NapiEnv,
+    data: *mut c_void,
+    _hint: *mut c_void,
+) {
+    assert_eq!(thaw_napi_unload_all(), 0);
+    assert_eq!(napi_remove_async_cleanup_hook(data as *mut AsyncCleanupHookHandle), NAPI_OK);
+}
+
+static CALLED_AFTER_FINALIZATION: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn counted_native_callback(_env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    CALLED_AFTER_FINALIZATION.fetch_add(1, Ordering::AcqRel);
+    ptr::null_mut()
+}
+
+unsafe extern "C" fn release_callback_data(
+    _env: NapiEnv, data: *mut c_void, _hint: *mut c_void,
+) {
+    drop(Box::from_raw(data.cast::<u8>()));
+}
+
+unsafe extern "C" fn release_shared_backing(data: *mut c_void, _hint: *mut c_void) {
+    drop(Box::from_raw(data.cast::<u8>()));
+}
+
+struct RetiredExternalProbe {
+    prior_env: usize,
+    buffer: usize,
+    arraybuffer: usize,
+    view: usize,
+    shared: usize,
+    shared_view: usize,
+    empty_shared: usize,
+}
+
+unsafe extern "C" fn inspect_external_after_release(
+    env: NapiEnv, data: *mut c_void, _hint: *mut c_void,
+) {
+    let handles = Box::from_raw(data.cast::<[usize; 2]>());
+    let mut bytes = ptr::null_mut();
+    let mut length = usize::MAX;
+    assert_eq!(napi_get_buffer_info(env, handles[0] as NapiValue,
+        &mut bytes, &mut length), NAPI_OK);
+    assert!(bytes.is_null());
+    assert_eq!(length, 0);
+    assert_eq!(napi_get_arraybuffer_info(env, handles[1] as NapiValue,
+        &mut bytes, &mut length), NAPI_OK);
+    assert!(bytes.is_null());
+    assert_eq!(length, 0);
+}
+
+unsafe extern "C" fn inspect_retired_external_values(
+    env: NapiEnv, data: *mut c_void, _hint: *mut c_void,
+) {
+    let probe = Box::from_raw(data.cast::<RetiredExternalProbe>());
+    let buffer = probe.buffer as NapiValue;
+    let arraybuffer = probe.arraybuffer as NapiValue;
+    let mut bytes = ptr::null_mut();
+    let mut length = 0;
+    assert_eq!(napi_get_buffer_info(env, buffer, &mut bytes, &mut length), NAPI_INVALID_ARG);
+    assert_eq!(napi_get_buffer_info(probe.prior_env as NapiEnv, buffer,
+        &mut bytes, &mut length), NAPI_INVALID_ARG);
+    assert_eq!(napi_get_arraybuffer_info(env, arraybuffer,
+        &mut bytes, &mut length), NAPI_INVALID_ARG);
+    assert_eq!(json_from_value_with_undefined(buffer, true).unwrap(),
+        serde_json::json!({ "type": "Buffer", "data": [] }));
+    assert_eq!(json_from_value_with_undefined(probe.view as NapiValue, true).unwrap(),
+        serde_json::json!({ "type": "Buffer", "data": [] }));
+    assert_eq!(arraybuffer_parts(arraybuffer).unwrap(), (ptr::null_mut(), 0, true));
+    assert_eq!(arraybuffer_parts(probe.shared as NapiValue).unwrap(),
+        (ptr::null_mut(), 0, true));
+    assert_eq!(arraybuffer_parts(probe.empty_shared as NapiValue).unwrap(),
+        (ptr::null_mut(), 0, true));
+    assert_eq!(json_from_value_with_undefined(probe.shared_view as NapiValue, true).unwrap(),
+        serde_json::json!({ "type": "Buffer", "data": [] }));
+    #[cfg(feature = "quickjs")]
+    assert!(quickjs_bridge_value(buffer).is_err());
+}
+
+unsafe extern "C" fn queue_other_env_work_from_finalizer(
+    _env: NapiEnv, data: *mut c_void, _hint: *mut c_void,
+) {
+    let other = data as NapiEnv;
+    let mut work = ptr::null_mut();
+    assert_eq!(napi_create_async_work(other, ptr::null_mut(), ptr::null_mut(),
+        Some(noop_execute), None, ptr::null_mut(), &mut work), NAPI_OK);
+    assert_eq!(napi_queue_async_work(other, work), NAPI_OK);
+}
+
+struct CrossEnvFinalizerProbe {
+    env: usize,
+    function: usize,
+    this_arg: usize,
+}
+
+unsafe extern "C" fn call_prior_env_from_later_finalizer(
+    _env: NapiEnv, data: *mut c_void, _hint: *mut c_void,
+) {
+    let probe = Box::from_raw(data as *mut CrossEnvFinalizerProbe);
+    assert!(!HOST.with(|host| host.borrow().exports.contains_key("cleanup_prior_export")));
+    // Both entrypoints reject a finalized Env in `env_mut` before their
+    // operation-specific closing paths; no native callback may execute.
+    assert_eq!(napi_call_function(probe.env as NapiEnv, probe.this_arg as NapiValue,
+        probe.function as NapiValue, 0, ptr::null(), ptr::null_mut()), NAPI_INVALID_ARG);
+    assert_eq!(node_api_post_finalizer(probe.env as NapiEnv,
+        Some(nested_unload_in_posted_finalizer), ptr::null_mut(), ptr::null_mut()), NAPI_INVALID_ARG);
+    assert_eq!(CALLED_AFTER_FINALIZATION.load(Ordering::Acquire), 0);
+}
+
+unsafe extern "C" fn nested_unload_in_async_completion(
+    _env: NapiEnv, _status: NapiStatus, _data: *mut c_void,
+) {
+    assert_eq!(thaw_napi_unload_all(), 0);
+}
+
+unsafe extern "C" fn nested_unload_in_posted_finalizer(
+    _env: NapiEnv, _data: *mut c_void, _hint: *mut c_void,
+) {
+    assert_eq!(thaw_napi_unload_all(), 0);
 }
 
 unsafe extern "C" fn posted_finalizer_uses_napi(
@@ -780,6 +1044,7 @@ fn env_cleanup_hooks_run_in_reverse_and_can_be_removed() {
 fn removed_async_cleanup_handle_rejects_removal_after_environment_drop() {
     unsafe extern "C" fn cleanup(_handle: *mut AsyncCleanupHookHandle, _data: *mut c_void) {}
     let mut env = Box::new(Env::new());
+    env.host_managed = true;
     let mut handle = ptr::null_mut();
     unsafe {
         assert_eq!(napi_add_async_cleanup_hook(&mut *env, Some(cleanup), ptr::null_mut(), &mut handle), NAPI_OK);
@@ -806,6 +1071,7 @@ fn async_cleanup_hooks_complete_in_reverse_and_can_be_removed() {
         value: 3,
     }));
     let mut env = Env::new();
+    env.host_managed = true; // Synchronous internal hook-order fixture.
     let mut removed_handle = ptr::null_mut();
     unsafe {
         assert_eq!(
@@ -848,32 +1114,344 @@ fn async_cleanup_hooks_complete_in_reverse_and_can_be_removed() {
 }
 
 #[test]
-fn asynchronous_cleanup_remains_active_until_handle_removal() {
+fn direct_environment_rejects_async_cleanup_without_pinned_owner() {
     let _guard = lock_async_test();
     HELD_ASYNC_CLEANUP.store(0, Ordering::Release);
     let mut env = Env::new();
     unsafe {
-        assert_eq!(
-            napi_add_async_cleanup_hook(
-                &mut env,
-                Some(hold_async_cleanup),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ),
-            NAPI_OK
-        );
+        assert_eq!(napi_add_async_cleanup_hook(&mut env, Some(hold_async_cleanup),
+            ptr::null_mut(), ptr::null_mut()), NAPI_CLOSING);
     }
     drop(env);
-    let handle = HELD_ASYNC_CLEANUP.swap(0, Ordering::AcqRel);
-    assert_ne!(handle, 0);
-    assert_eq!(ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire), 1);
-    unsafe {
-        assert_eq!(
-            napi_remove_async_cleanup_hook(handle as *mut AsyncCleanupHookHandle),
-            NAPI_OK
-        );
+    assert_eq!(HELD_ASYNC_CLEANUP.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn foreign_remove_and_owner_begin_serialize_async_cleanup_handle() {
+    unsafe extern "C" fn counted(_handle: *mut AsyncCleanupHookHandle, data: *mut c_void) {
+        (*(data as *const AtomicUsize)).fetch_add(1, Ordering::AcqRel);
     }
+    let _guard = lock_async_test();
+    let mut env = Box::new(Env::new());
+    env.host_managed = true;
+    let env_ptr = &mut *env as NapiEnv;
+    let calls = Box::into_raw(Box::new(AtomicUsize::new(0)));
+    let mut handle = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_add_async_cleanup_hook(env_ptr, Some(counted), calls.cast(),
+            &mut handle), NAPI_OK);
+    }
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let other_barrier = Arc::clone(&barrier);
+    let handle_address = handle as usize;
+    let remover = std::thread::spawn(move || {
+        other_barrier.wait();
+        unsafe { napi_remove_async_cleanup_hook(handle_address as *mut AsyncCleanupHookHandle) }
+    });
+    barrier.wait();
+    unsafe { Env::begin_async_cleanup(env_ptr, false) };
+    assert_eq!(remover.join().unwrap(), NAPI_OK);
+    assert!(unsafe { (*calls).load(Ordering::Acquire) } <= 1);
     assert_eq!(ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire), 0);
+    unsafe { drop(Box::from_raw(calls)) };
+    drop(env);
+}
+
+#[test]
+fn pending_async_cleanup_keeps_env_alive_until_completion_and_finalizers() {
+    let _guard = lock_async_test();
+    HELD_ASYNC_CLEANUP.store(0, Ordering::Release);
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let mut env = Box::new(Env::new());
+    env.host_managed = true;
+    let env_ptr = &mut *env as NapiEnv;
+    unsafe {
+        assert_eq!(napi_add_async_cleanup_hook(env_ptr, Some(hold_async_cleanup),
+            ptr::null_mut(), ptr::null_mut()), NAPI_OK);
+    }
+    env.cleanup_hooks.push(CleanupHookRecord {
+        hook: cleanup_probe,
+        data: Box::into_raw(Box::new(CleanupProbe { output: Arc::clone(&output), value: 2 })).cast(),
+    });
+    env.finalizers.push(FinalizeRecord {
+        data: Box::into_raw(Box::new(CleanupProbe { output: Arc::clone(&output), value: 3 })).cast(),
+        finalize: Some(ordered_finalizer_uses_napi),
+        hint: ptr::null_mut(),
+        backing: ptr::null_mut(),
+    });
+    HOST.with(|host| host.borrow_mut().pending_call_envs.push(env));
+    retire_owned_envs();
+    assert!(output.lock().unwrap().is_empty());
+    assert!(HOST.with(|host| host.borrow().pending_call_envs.iter()
+        .any(|entry| (&**entry as *const Env).cast_mut() == env_ptr)));
+    let handle = HELD_ASYNC_CLEANUP.swap(0, Ordering::AcqRel) as *mut AsyncCleanupHookHandle;
+    assert!(!handle.is_null());
+    unsafe { assert_eq!(napi_remove_async_cleanup_hook(handle), NAPI_OK); }
+    retire_owned_envs();
+    assert_eq!(*output.lock().unwrap(), vec![2, 3]);
+    assert!(HOST.with(|host| host.borrow().pending_call_envs.iter()
+        .any(|entry| (&**entry as *const Env).cast_mut() == env_ptr && entry.finalized)));
+    unsafe { assert_eq!(napi_remove_async_cleanup_hook(handle), NAPI_INVALID_ARG); }
+    let retained = HOST.with(|host| host.borrow_mut().pending_call_envs.pop().unwrap());
+    drop(retained);
+}
+
+#[test]
+fn synchronous_async_cleanup_reentry_cannot_drop_dispatching_env() {
+    let _guard = lock_async_test();
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let mut env = Box::new(Env::new());
+    env.host_managed = true;
+    let env_ptr = &mut *env as NapiEnv;
+    unsafe {
+        assert_eq!(napi_add_async_cleanup_hook(env_ptr, Some(remove_cleanup_and_reenter),
+            Box::into_raw(Box::new(CleanupProbe { output: Arc::clone(&output), value: 1 })).cast(),
+            ptr::null_mut()), NAPI_OK);
+    }
+    env.cleanup_hooks.push(CleanupHookRecord {
+        hook: cleanup_probe,
+        data: Box::into_raw(Box::new(CleanupProbe { output: Arc::clone(&output), value: 2 })).cast(),
+    });
+    env.shutdown_requested = true;
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    retire_owned_envs();
+    assert_eq!(*output.lock().unwrap(), vec![1, 2]);
+    assert!(HOST.with(|host| host.borrow().module_envs.iter()
+        .any(|entry| (&**entry as *const Env).cast_mut() == env_ptr && entry.finalized)));
+    let retained = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
+    drop(retained);
+}
+
+#[test]
+fn finalizer_cannot_queue_new_async_work_or_late_cleanup_hook() {
+    let _guard = lock_async_test();
+    let mut env = Box::new(Env::new());
+    let env_ptr = &mut *env as NapiEnv;
+    let mut work = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_create_async_work(env_ptr, ptr::null_mut(), ptr::null_mut(),
+            Some(noop_execute), None, ptr::null_mut(), &mut work), NAPI_OK);
+    }
+    env.finalizers.push(FinalizeRecord {
+        data: ptr::null_mut(), finalize: Some(cleanup_finalizer_rejects_new_async_roots),
+        hint: ptr::null_mut(),
+        backing: ptr::null_mut(),
+    });
+    env.shutdown_requested = true;
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    retire_owned_envs();
+    assert!(HOST.with(|host| host.borrow().module_envs.iter()
+        .any(|entry| (&**entry as *const Env).cast_mut() == env_ptr && entry.finalized)));
+    let retained = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
+    drop(retained);
+}
+
+#[test]
+fn unload_waits_for_work_queued_by_async_cleanup_hook() {
+    let _guard = lock_async_test();
+    let mut env = Box::new(Env::new());
+    env.host_managed = true;
+    let env_ptr = &mut *env as NapiEnv;
+    unsafe {
+        assert_eq!(napi_add_async_cleanup_hook(env_ptr,
+            Some(queue_work_during_async_cleanup), ptr::null_mut(), ptr::null_mut()), NAPI_OK);
+    }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    assert_eq!(thaw_napi_unload_all(), 1);
+    assert!(!HOST.with(|host| host.borrow().module_envs.iter()
+        .any(|entry| (&**entry as *const Env).cast_mut() == env_ptr)));
+}
+
+#[test]
+fn unload_guard_precedes_wait_for_an_already_active_cleanup_hook() {
+    let _guard = lock_async_test();
+    HELD_ASYNC_CLEANUP.store(0, Ordering::Release);
+    let mut env = Box::new(Env::new());
+    env.host_managed = true;
+    let env_ptr = &mut *env as NapiEnv;
+    unsafe {
+        assert_eq!(napi_add_async_cleanup_hook(env_ptr, Some(hold_async_cleanup),
+            ptr::null_mut(), ptr::null_mut()), NAPI_OK);
+    }
+    env.shutdown_requested = true;
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    retire_owned_envs();
+    let handle = HELD_ASYNC_CLEANUP.swap(0, Ordering::AcqRel) as *mut AsyncCleanupHookHandle;
+    assert!(!handle.is_null());
+    unsafe {
+        assert_eq!(node_api_post_finalizer(env_ptr, Some(nested_unload_before_cleanup_completion),
+            handle.cast(), ptr::null_mut()), NAPI_OK);
+    }
+    assert_eq!(thaw_napi_unload_all(), 1);
+    assert!(!HOST.with(|host| host.borrow().module_envs.iter()
+        .any(|entry| (&**entry as *const Env).cast_mut() == env_ptr)));
+}
+
+#[test]
+fn later_finalizer_cannot_dispatch_prior_env_callback_data() {
+    let _guard = lock_async_test();
+    CALLED_AFTER_FINALIZATION.store(0, Ordering::Release);
+    let mut first = Box::new(Env::new());
+    let first_env = &mut *first as NapiEnv;
+    let this_arg = first.alloc(Value::Undefined);
+    let callback_data = Box::into_raw(Box::new(7_u8)).cast::<c_void>();
+    let function = first.alloc(Value::Function(Function {
+        callback: counted_native_callback, data: callback_data,
+        properties: HashMap::new(), _thaw_bridge: None,
+    }));
+    first.finalizers.push(FinalizeRecord {
+        data: callback_data, finalize: Some(release_callback_data), hint: ptr::null_mut(),
+        backing: ptr::null_mut(),
+    });
+    first.shutdown_requested = true;
+    let mut second = Box::new(Env::new());
+    second.shutdown_requested = true;
+    second.finalizers.push(FinalizeRecord {
+        data: Box::into_raw(Box::new(CrossEnvFinalizerProbe {
+            env: first_env as usize, function: function as usize,
+            this_arg: this_arg as usize,
+        })).cast(),
+        finalize: Some(call_prior_env_from_later_finalizer), hint: ptr::null_mut(),
+        backing: ptr::null_mut(),
+    });
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.functions.insert("cleanup_prior_export".into(), Function {
+            callback: counted_native_callback, data: callback_data,
+            properties: HashMap::new(), _thaw_bridge: None,
+        });
+        host.exports.insert("cleanup_prior_export".into(), (first_env as usize, function));
+        host.module_envs.extend([first, second]);
+    });
+    retire_owned_envs();
+    assert_eq!(CALLED_AFTER_FINALIZATION.load(Ordering::Acquire), 0);
+    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    drop(retained);
+}
+
+#[test]
+fn later_finalizer_cannot_read_prior_env_external_backing_store() {
+    let _guard = lock_async_test();
+    let mut first = Box::new(Env::new());
+    let first_env = &mut *first as NapiEnv;
+    let buffer_data = Box::into_raw(Box::new(7_u8));
+    let array_data = Box::into_raw(Box::new(9_u8));
+    let shared_data = Box::into_raw(Box::new(11_u8));
+    let buffer = first.alloc(Value::ExternalBuffer { data: buffer_data, length: 1 });
+    let arraybuffer = first.alloc(Value::ExternalArrayBuffer {
+        data: array_data, length: 1, detached: false,
+    });
+    let shared = first.alloc(Value::ExternalSharedArrayBuffer {
+        data: shared_data, length: 1, retired: false,
+    });
+    let empty_shared = first.alloc(Value::ExternalSharedArrayBuffer {
+        data: ptr::null_mut(), length: 0, retired: false,
+    });
+    assert_eq!(unsafe { arraybuffer_parts(empty_shared).unwrap() },
+        (ptr::null_mut(), 0, false));
+    let empty_view = first.alloc(Value::BufferView {
+        array_buffer: empty_shared, byte_offset: 0, length: 0,
+    });
+    let mut empty_data = ptr::null_mut();
+    let mut empty_length = usize::MAX;
+    unsafe {
+        assert_eq!(napi_get_buffer_info(first_env, empty_view,
+            &mut empty_data, &mut empty_length), NAPI_OK);
+    }
+    assert!(empty_data.is_null());
+    assert_eq!(empty_length, 0);
+    first.finalizers.extend([(buffer_data, buffer), (array_data, arraybuffer)]
+        .into_iter().map(|(data, backing)| FinalizeRecord {
+            data: data.cast(), finalize: Some(release_callback_data), hint: ptr::null_mut(),
+            backing,
+        }));
+    first.finalizers.push(FinalizeRecord {
+        data: Box::into_raw(Box::new([buffer as usize, arraybuffer as usize])).cast(),
+        finalize: Some(inspect_external_after_release), hint: ptr::null_mut(),
+        backing: ptr::null_mut(),
+    });
+    first.noenv_finalizers.push(NoEnvFinalizeRecord {
+        data: shared_data.cast(), finalize: Some(release_shared_backing),
+        hint: ptr::null_mut(), backing: shared,
+    });
+    first.shutdown_requested = true;
+    let mut second = Box::new(Env::new());
+    let view = second.alloc(Value::BufferView {
+        array_buffer: arraybuffer, byte_offset: 0, length: 1,
+    });
+    let shared_view = second.alloc(Value::BufferView {
+        array_buffer: shared, byte_offset: 0, length: 1,
+    });
+    second.finalizers.push(FinalizeRecord {
+        data: Box::into_raw(Box::new(RetiredExternalProbe {
+            prior_env: first_env as usize, buffer: buffer as usize,
+            arraybuffer: arraybuffer as usize, view: view as usize,
+            shared: shared as usize, shared_view: shared_view as usize,
+            empty_shared: empty_shared as usize,
+        })).cast(),
+        finalize: Some(inspect_retired_external_values), hint: ptr::null_mut(),
+        backing: ptr::null_mut(),
+    });
+    second.shutdown_requested = true;
+    HOST.with(|host| host.borrow_mut().module_envs.extend([first, second]));
+    retire_owned_envs();
+    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    drop(retained);
+}
+
+#[test]
+fn finalizer_queued_work_keeps_other_env_owned_until_completion() {
+    let _guard = lock_async_test();
+    let mut first = Box::new(Env::new());
+    first.shutdown_requested = true;
+    let mut second = Box::new(Env::new());
+    let second_env = &mut *second as NapiEnv;
+    second.shutdown_requested = true;
+    first.finalizers.push(FinalizeRecord {
+        data: second_env.cast(), finalize: Some(queue_other_env_work_from_finalizer),
+        hint: ptr::null_mut(),
+        backing: ptr::null_mut(),
+    });
+    HOST.with(|host| host.borrow_mut().module_envs.extend([first, second]));
+    retire_owned_envs();
+    assert!(HOST.with(|host| host.borrow().module_envs.iter()
+        .any(|env| (&**env as *const Env).cast_mut() == second_env && !env.finalized)));
+    assert_eq!(thaw_napi_run_async_work(), 1);
+    assert!(HOST.with(|host| host.borrow().module_envs.iter()
+        .any(|env| (&**env as *const Env).cast_mut() == second_env && env.finalized)));
+    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    drop(retained);
+}
+
+#[test]
+fn nested_unload_cannot_retire_async_completion_stack() {
+    let _guard = lock_async_test();
+    let mut env = Box::new(Env::new());
+    let env_ptr = &mut *env as NapiEnv;
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    let mut work = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_create_async_work(env_ptr, ptr::null_mut(), ptr::null_mut(),
+            Some(noop_execute), Some(nested_unload_in_async_completion),
+            ptr::null_mut(), &mut work), NAPI_OK);
+        assert_eq!(napi_queue_async_work(env_ptr, work), NAPI_OK);
+    }
+    assert_eq!(thaw_napi_run_async_work(), 1);
+    assert_eq!(thaw_napi_unload_all(), 1);
+}
+
+#[test]
+fn nested_unload_cannot_retire_posted_finalizer_stack() {
+    let _guard = lock_async_test();
+    let mut env = Box::new(Env::new());
+    let env_ptr = &mut *env as NapiEnv;
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    unsafe {
+        assert_eq!(node_api_post_finalizer(env_ptr, Some(nested_unload_in_posted_finalizer),
+            ptr::null_mut(), ptr::null_mut()), NAPI_OK);
+    }
+    assert_eq!(thaw_napi_poll_async_work(), 1);
+    assert_eq!(thaw_napi_unload_all(), 1);
 }
 
 #[test]
@@ -1310,5 +1888,155 @@ fn async_creation_validates_resources_names_and_callback_environment() {
             ),
             NAPI_STRING_EXPECTED
         );
+    }
+}
+
+unsafe extern "C" fn phased_shutdown_records_callback_error(
+    env: NapiEnv, _data: *mut c_void, _hint: *mut c_void,
+) {
+    let env = &mut *env;
+    let error = env.alloc(Value::Error("cleanup failure".into()));
+    env.exception = Some(error);
+}
+
+#[test]
+fn registered_async_cleanup_hook_does_not_block_normal_work_drain() {
+    let _guard = lock_async_test();
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let mut env = Box::new(Env::new());
+    env.host_managed = true;
+    unsafe {
+        assert_eq!(napi_add_async_cleanup_hook(&mut *env, Some(async_cleanup_probe),
+            Box::into_raw(Box::new(CleanupProbe {
+                output: Arc::clone(&output), value: 1,
+            })).cast(), ptr::null_mut()), NAPI_OK);
+    }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    assert!(!HOST.with(|host| host.borrow().has_active_cleanup()));
+    assert_eq!(thaw_napi_run_async_work(), 0);
+    assert!(output.lock().unwrap().is_empty());
+    assert_eq!(thaw_napi_begin_shutdown(), 1);
+    assert_eq!(thaw_napi_poll_shutdown(), 1);
+    assert_eq!(*output.lock().unwrap(), vec![1]);
+    assert_eq!(thaw_napi_finish_shutdown(), 1);
+}
+
+#[test]
+fn phased_shutdown_retains_env_and_reports_errors_before_release() {
+    let _guard = lock_async_test();
+    let mut env = Box::new(Env::new());
+    let env_ptr = &mut *env as NapiEnv;
+    let previous = env.alloc(Value::Error("prior failure".into()));
+    env.exception = Some(previous);
+    env.finalizers.push(FinalizeRecord {
+        data: ptr::null_mut(), finalize: Some(phased_shutdown_records_callback_error),
+        hint: ptr::null_mut(), backing: ptr::null_mut(),
+    });
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    assert_eq!(thaw_napi_begin_shutdown(), 1);
+    assert_eq!(thaw_napi_poll_shutdown(), 1);
+    assert!(HOST.with(|host| host.borrow().module_envs.iter()
+        .any(|entry| (&**entry as *const Env).cast_mut() == env_ptr && entry.finalized)));
+    assert_eq!(thaw_napi_finish_shutdown(), 0); // errors remain unreported
+    for expected in ["prior failure", "cleanup failure"] {
+        let error = thaw_napi_take_shutdown_error();
+        assert!(!error.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(error) }.to_str().unwrap(), expected);
+        unsafe { thaw_arena::destroy_string(error) };
+    }
+    assert!(thaw_napi_take_shutdown_error().is_null());
+    assert_eq!(thaw_napi_finish_shutdown(), 1);
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn close_and_free_uv_handle(handle: *mut c_void) {
+    libc::free(handle);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shutdown_waits_for_unreferenced_and_closing_registered_handles() {
+    let _guard = lock_async_test();
+    unsafe {
+        type UvLoopSize = unsafe extern "C" fn() -> usize;
+        type UvLoopInit = unsafe extern "C" fn(*mut c_void) -> i32;
+        type UvLoopClose = unsafe extern "C" fn(*mut c_void) -> i32;
+        type UvHandleSize = unsafe extern "C" fn(i32) -> usize;
+        type UvTimerInit = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+        type UvTimerStart = unsafe extern "C" fn(
+            *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>, u64, u64,
+        ) -> i32;
+        type UvUnref = unsafe extern "C" fn(*mut c_void);
+        type UvClose = unsafe extern "C" fn(
+            *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>,
+        );
+        let library = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        assert!(!library.is_null());
+        macro_rules! uv_symbol {
+            ($name:literal, $ty:ty) => {{
+                let symbol = libc::dlsym(libc::RTLD_DEFAULT, $name.as_ptr());
+                assert!(!symbol.is_null());
+                std::mem::transmute::<*mut c_void, $ty>(symbol)
+            }};
+        }
+        let loop_size = uv_symbol!(c"uv_loop_size", UvLoopSize);
+        let loop_init = uv_symbol!(c"uv_loop_init", UvLoopInit);
+        let loop_close = uv_symbol!(c"uv_loop_close", UvLoopClose);
+        let handle_size = uv_symbol!(c"uv_handle_size", UvHandleSize);
+        let timer_init = uv_symbol!(c"uv_timer_init", UvTimerInit);
+        let timer_start = uv_symbol!(c"uv_timer_start", UvTimerStart);
+        let unref = uv_symbol!(c"uv_unref", UvUnref);
+        let close = uv_symbol!(c"uv_close", UvClose);
+        let event_loop = libc::calloc(1, loop_size());
+        assert!(!event_loop.is_null());
+        assert_eq!(loop_init(event_loop), 0);
+        assert_eq!(thaw_napi_register_uv_loop(event_loop), NAPI_OK);
+        const UV_TIMER: i32 = 13;
+        let timer = libc::calloc(1, handle_size(UV_TIMER));
+        assert!(!timer.is_null());
+        assert_eq!(timer_init(event_loop, timer), 0);
+        assert_eq!(timer_start(timer, Some(test_uv_timer_callback), 10_000, 0), 0);
+        unref(timer);
+        HOST.with(|host| host.borrow_mut().pending_call_envs.push(Box::new(Env::new())));
+        assert_eq!(thaw_napi_begin_shutdown(), 1);
+        assert_eq!(thaw_napi_poll_shutdown(), 0);
+        assert!(HOST.with(|host| !host.borrow().pending_call_envs[0].finalized));
+        assert!(uv_handles_open());
+        close(timer, Some(close_and_free_uv_handle));
+        assert!(uv_handles_open());
+        for _ in 0..100 {
+            poll_uv_loop();
+            if !uv_handles_open() { break; }
+        }
+        assert!(!uv_handles_open());
+        assert_eq!(thaw_napi_unregister_uv_loop(event_loop), NAPI_OK);
+        assert_eq!(thaw_napi_poll_shutdown(), 1);
+        assert!(HOST.with(|host| host.borrow().pending_call_envs[0].finalized));
+        assert_eq!(thaw_napi_finish_shutdown(), 1);
+        assert_eq!(loop_close(event_loop), 0);
+        libc::free(event_loop);
+        libc::dlclose(library);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn successful_default_loop_acquisition_records_the_env_receipt() {
+    let _guard = lock_async_test();
+    unsafe {
+        let library = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        assert!(!library.is_null());
+        let mut env = Env::new();
+        let mut event_loop = ptr::null_mut();
+        assert_eq!(napi_get_uv_event_loop(&mut env, &mut event_loop), NAPI_OK);
+        assert!(!event_loop.is_null());
+        assert_eq!(env.acquired_default_uv_loop, Some(event_loop as usize));
+        assert_eq!(HOST.with(|host| host.borrow().owned_uv_loop), Some(event_loop as usize));
+        let mut second = Env::new();
+        let mut same_loop = ptr::null_mut();
+        assert_eq!(napi_get_uv_event_loop(&mut second, &mut same_loop), NAPI_OK);
+        assert_eq!(same_loop, event_loop);
+        assert!(close_owned_uv_loop());
+        libc::dlclose(library);
     }
 }

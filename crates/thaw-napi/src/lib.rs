@@ -8,7 +8,7 @@ use base64::Engine;
 use flate2::read::GzDecoder;
 use libc::{c_char, c_void};
 use serde_json::Value as JsonValue;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
@@ -43,6 +43,46 @@ type NapiValue = *mut Value;
 type NapiCallbackInfo = *mut CallbackInfo;
 type NapiStatus = i32;
 type NapiCallback = unsafe extern "C" fn(NapiEnv, NapiCallbackInfo) -> NapiValue;
+
+thread_local! {
+    static FOREIGN_CALLBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct ForeignCallbackGuard(bool);
+
+impl ForeignCallbackGuard {
+    fn new() -> Self {
+        Self(FOREIGN_CALLBACK_DEPTH.try_with(|depth| depth.set(depth.get() + 1)).is_ok())
+    }
+
+    fn active() -> bool {
+        FOREIGN_CALLBACK_DEPTH.try_with(|depth| depth.get() != 0).unwrap_or(false)
+    }
+}
+
+impl Drop for ForeignCallbackGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            let _ = FOREIGN_CALLBACK_DEPTH.try_with(|depth| depth.set(depth.get() - 1));
+        }
+    }
+}
+
+unsafe fn invoke_napi_callback(env: NapiEnv, callback: NapiCallback, info: NapiCallbackInfo) -> NapiValue {
+    if env.as_ref().is_some_and(|env| env.shutdown_requested || env.finalizing || env.finalized) {
+        return closing_napi_callback(env, info);
+    }
+    let _dispatch = ForeignCallbackGuard::new();
+    callback(env, info)
+}
+
+unsafe extern "C" fn closing_napi_callback(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    if let Ok(env) = env_mut(env) {
+        let error = env.alloc(Value::Error("N-API addon is closing".into()));
+        env.exception = Some(error);
+    }
+    ptr::null_mut()
+}
 type NapiAsyncExecuteCallback = unsafe extern "C" fn(NapiEnv, *mut c_void);
 type NapiAsyncCompleteCallback = unsafe extern "C" fn(NapiEnv, NapiStatus, *mut c_void);
 type ThawNativeCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
@@ -94,6 +134,7 @@ const ASYNC_DELETED: u8 = 5;
 
 pub struct AsyncWork {
     env: usize,
+    owner: std::thread::ThreadId,
     execute: NapiAsyncExecuteCallback,
     complete: Option<NapiAsyncCompleteCallback>,
     data: usize,
@@ -112,6 +153,17 @@ enum ReadyEvent {
     ThreadsafeFunction(usize),
 }
 
+impl ReadyEvent {
+    // Pointers stay Box-stable until their completion/finalizer runs. Only
+    // their creating Host thread may execute a JS-facing ready callback.
+    unsafe fn owner(self) -> std::thread::ThreadId {
+        match self {
+            Self::AsyncCompletion(address) => (*(address as *const AsyncWork)).owner.clone(),
+            Self::ThreadsafeFunction(address) => (*(address as *const ThreadsafeFunction)).creator.clone(),
+        }
+    }
+}
+
 static READY_EVENTS: OnceLock<Mutex<VecDeque<ReadyEvent>>> = OnceLock::new();
 static ASYNC_POOL: OnceLock<Option<Arc<AsyncPool>>> = OnceLock::new();
 static ACTIVE_ASYNC_WORK: AtomicUsize = AtomicUsize::new(0);
@@ -126,10 +178,43 @@ static GLOBAL_SYMBOLS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 static THREADSAFE_FUNCTIONS: OnceLock<Mutex<Vec<Box<ThreadsafeFunction>>>> = OnceLock::new();
 #[allow(clippy::vec_box)]
 static ASYNC_CLEANUP_HANDLES: OnceLock<Mutex<Vec<Box<AsyncCleanupHookHandle>>>> = OnceLock::new();
-static REGISTERED_UV_LOOPS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+thread_local! {
+    // Libuv loops must only be driven on the thread that registered them.
+    static REGISTERED_UV_LOOPS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
 
-fn registered_uv_loops() -> &'static Mutex<Vec<usize>> {
-    REGISTERED_UV_LOOPS.get_or_init(|| Mutex::new(Vec::new()))
+fn registered_uv_loops() -> Vec<usize> {
+    REGISTERED_UV_LOOPS.with(|loops| loops.borrow().clone())
+}
+
+#[cfg(target_os = "linux")]
+fn record_process_default_uv_loop() {
+    // Record the process main thread's default-loop receipt while the loader
+    // owns libuv. Polling later uses only this recorded owner/pointer; Worker
+    // Hosts never infer ownership from a global symbol at poll time.
+    let current_tid = unsafe { libc::syscall(libc::SYS_gettid) };
+    let main_tid = unsafe { libc::getpid() } as libc::c_long;
+    if current_tid != main_tid { return; }
+    type UvDefaultLoop = unsafe extern "C" fn() -> *mut c_void;
+    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"uv_default_loop".as_ptr()) };
+    if symbol.is_null() { return; }
+    let loop_ptr = unsafe { std::mem::transmute::<*mut c_void, UvDefaultLoop>(symbol)() };
+    if !loop_ptr.is_null() {
+        HOST.with(|host| host.borrow_mut().main_default_uv_loop = Some(loop_ptr as usize));
+    }
+}
+
+fn known_uv_loops() -> Vec<usize> {
+    let mut loops = registered_uv_loops();
+    let owned = HOST.with(|host| host.borrow().owned_uv_loop);
+    if let Some(owned) = owned {
+        if !loops.contains(&owned) { loops.push(owned); }
+    }
+    let default_loop = HOST.with(|host| host.borrow().main_default_uv_loop);
+    if let Some(default_loop) = default_loop {
+        if !loops.contains(&default_loop) { loops.push(default_loop); }
+    }
+    loops
 }
 
 pub struct ThreadsafeFunction {
@@ -176,6 +261,13 @@ fn retire_threadsafe_if_ready(state: &mut ThreadsafeState) -> bool {
 
 fn ready_events() -> &'static Mutex<VecDeque<ReadyEvent>> {
     READY_EVENTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn take_ready_event_for_current_thread() -> Option<ReadyEvent> {
+    let owner = std::thread::current().id();
+    let mut ready = ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let position = ready.iter().position(|event| unsafe { event.owner() == owner })?;
+    ready.remove(position)
 }
 
 #[allow(clippy::vec_box)]
@@ -354,6 +446,7 @@ pub enum Value {
     ExternalSharedArrayBuffer {
         data: *mut u8,
         length: usize,
+        retired: bool,
     },
     ExternalArrayBuffer {
         data: *mut u8,
@@ -461,6 +554,7 @@ pub struct NapiTypeTag {
 }
 
 pub struct Env {
+    owner: std::thread::ThreadId,
     values: Vec<NapiValue>,
     global: NapiValue,
     exception: Option<NapiValue>,
@@ -475,6 +569,14 @@ pub struct Env {
     instance_data: Option<FinalizeRecord>,
     cleanup_hooks: Vec<CleanupHookRecord>,
     async_cleanup_hooks: Vec<*mut AsyncCleanupHookHandle>,
+    // Set before native module init so async hooks always have a pinned Host owner.
+    host_managed: bool,
+    async_cleanup_dispatching: bool,
+    shutdown_requested: bool,
+    // Exact Host-owned loop returned through napi_get_uv_event_loop to this Env.
+    acquired_default_uv_loop: Option<usize>,
+    finalizing: bool,
+    finalized: bool,
     external_memory: i64,
     sealed_objects: HashSet<usize>,
     frozen_objects: HashSet<usize>,
@@ -532,12 +634,14 @@ struct FinalizeRecord {
     data: *mut c_void,
     finalize: Option<NapiFinalize>,
     hint: *mut c_void,
+    backing: NapiValue,
 }
 
 struct NoEnvFinalizeRecord {
     data: *mut c_void,
     finalize: Option<NodeApiNoEnvFinalize>,
     hint: *mut c_void,
+    backing: NapiValue,
 }
 
 struct WrapRecord {
@@ -556,6 +660,7 @@ struct Accessor {
 impl Env {
     fn new() -> Self {
         Self {
+            owner: std::thread::current().id(),
             values: Vec::new(),
             global: ptr::null_mut(),
             exception: None,
@@ -570,6 +675,12 @@ impl Env {
             instance_data: None,
             cleanup_hooks: Vec::new(),
             async_cleanup_hooks: Vec::new(),
+            host_managed: false,
+            async_cleanup_dispatching: false,
+            shutdown_requested: false,
+            acquired_default_uv_loop: None,
+            finalizing: false,
+            finalized: false,
             external_memory: 0,
             sealed_objects: HashSet::new(),
             frozen_objects: HashSet::new(),
@@ -733,69 +844,197 @@ unsafe fn close_handle_scope(
     NAPI_OK
 }
 
+impl Env {
+    unsafe fn disable_dispatch(env: NapiEnv, host_owned: bool) {
+        // Cleanup code may release callback data. Keep the Env discoverable,
+        // but remove every route which could execute that data again.
+        if host_owned { HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            let names = host.exports.iter()
+                .filter(|(_, (owner, _))| *owner == env as usize)
+                .map(|(name, _)| name.clone()).collect::<Vec<_>>();
+            for name in names {
+                host.exports.remove(&name);
+                host.functions.remove(&name);
+            }
+            host.compiled_callbacks.retain(|_, value| !(*env).values.contains(value));
+        }); }
+    }
+
+    unsafe fn begin_async_cleanup(env: NapiEnv, host_owned: bool) {
+        if (*env).async_cleanup_dispatching {
+            return;
+        }
+        Self::disable_dispatch(env, host_owned);
+        (*env).async_cleanup_dispatching = true;
+        loop {
+            let pending = {
+                // Registration and draining use the handle lock. Removal only
+                // tombstones handles and never mutates this owner-thread Vec.
+                let _handles = async_cleanup_handles()
+                    .lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::mem::take(&mut (*env).async_cleanup_hooks)
+            };
+            if pending.is_empty() { break; }
+            for handle in pending.into_iter().rev() {
+                // Serialize the state transition and counter with removal. A hook
+                // may finish on another thread immediately after it starts.
+                let callback = {
+                    let handles = async_cleanup_handles()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    handles.iter().find(|entry| std::ptr::eq(entry.as_ref(), handle))
+                        .and_then(|entry| {
+                            if entry.state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                                ACTIVE_ASYNC_CLEANUP_HOOKS.fetch_add(1, Ordering::AcqRel);
+                                Some((entry.hook, entry.data))
+                            } else {
+                                None
+                            }
+                        })
+                };
+                if let Some((hook, data)) = callback {
+                    let _dispatch = ForeignCallbackGuard::new();
+                    unsafe { hook(handle, data as *mut c_void) };
+                    unsafe { capture_shutdown_exception(env) };
+                }
+            }
+        }
+        (*env).async_cleanup_dispatching = false;
+    }
+
+    fn async_cleanup_pending(&self) -> bool {
+        let env = self as *const Env as usize;
+        async_cleanup_handles()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|handle| handle.env == env && handle.state.load(Ordering::Acquire) == 1)
+    }
+}
+
+impl Env {
+    fn invalidate_external_backing(&mut self, backing: NapiValue) {
+        if backing.is_null() || !self.values.contains(&backing) { return; }
+        match unsafe { &mut *backing } {
+            Value::ExternalBuffer { data, length } => {
+                *data = ptr::null_mut();
+                *length = 0;
+            }
+            Value::ExternalSharedArrayBuffer { data, length, retired } => {
+                *data = ptr::null_mut();
+                *length = 0;
+                *retired = true;
+            }
+            Value::ExternalArrayBuffer { data, length, detached } => {
+                *data = ptr::null_mut();
+                *length = 0;
+                *detached = true;
+            }
+            Value::External(data) => *data = ptr::null_mut(),
+            _ => {}
+        }
+    }
+
+    // Keep the owning Box in HOST while invoking addon hooks/finalizers. Its
+    // NapiEnv address and owner lookups remain valid across reentrant calls.
+    unsafe fn finish_cleanup(env: NapiEnv, host_owned: bool) {
+        if (*env).finalizing || (*env).finalized { return; }
+        Self::disable_dispatch(env, host_owned);
+        (*env).finalizing = true;
+        let _dispatch = ForeignCallbackGuard::new();
+        for hook in std::mem::take(&mut (*env).cleanup_hooks).into_iter().rev() {
+            (hook.hook)(hook.data);
+            capture_shutdown_exception(env);
+        }
+        if let Some(record) = (*env).instance_data.take() {
+            if let Some(finalize) = record.finalize {
+                (*env).invalidate_external_backing(record.backing);
+                finalize(env, record.data, record.hint);
+                capture_shutdown_exception(env);
+            }
+        }
+        for record in std::mem::take(&mut (*env).finalizers) {
+            if let Some(finalize) = record.finalize {
+                (*env).invalidate_external_backing(record.backing);
+                finalize(env, record.data, record.hint);
+                capture_shutdown_exception(env);
+            }
+        }
+        for record in std::mem::take(&mut (*env).object_finalizers)
+            .into_values().flatten()
+        {
+            if let Some(finalize) = record.finalize {
+                (*env).invalidate_external_backing(record.backing);
+                finalize(env, record.data, record.hint);
+                capture_shutdown_exception(env);
+            }
+        }
+        for record in std::mem::take(&mut (*env).noenv_finalizers) {
+            if let Some(finalize) = record.finalize {
+                (*env).invalidate_external_backing(record.backing);
+                finalize(record.data, record.hint);
+                capture_shutdown_exception(env);
+            }
+        }
+        for wrap in std::mem::take(&mut (*env).wraps).into_values() {
+            if let Some(finalize) = wrap.finalize {
+                finalize(env, wrap.data, wrap.hint);
+                capture_shutdown_exception(env);
+            }
+        }
+        while !(*env).posted_finalizers.is_empty() {
+            for record in std::mem::take(&mut (*env).posted_finalizers) {
+                if let Some(finalize) = record.finalize {
+                    (*env).invalidate_external_backing(record.backing);
+                    finalize(env, record.data, record.hint);
+                    capture_shutdown_exception(env);
+                }
+            }
+        }
+        // Other Envs may still hold these stable handles while their own
+        // cleanup callbacks run. The external-memory finalizers above may
+        // have freed the backing stores, so make retained Values inert before
+        // another callback can inspect or serialize a child handle.
+        for value in &(*env).values {
+            match &mut *(*value) {
+                Value::ExternalBuffer { data, length } => {
+                    *data = ptr::null_mut();
+                    *length = 0;
+                }
+                Value::ExternalSharedArrayBuffer { data, length, retired } => {
+                    *data = ptr::null_mut();
+                    *length = 0;
+                    *retired = true;
+                }
+                Value::ExternalArrayBuffer { data, length, detached } => {
+                    *data = ptr::null_mut();
+                    *length = 0;
+                    *detached = true;
+                }
+                Value::External(data) => *data = ptr::null_mut(),
+                _ => {}
+            }
+        }
+        // Keep the owner and Values address-stable until unload; public
+        // lookups reject this finalized owner below.
+        (*env).finalized = true;
+        (*env).finalizing = false;
+    }
+}
+
 impl Drop for Env {
     fn drop(&mut self) {
-        for handle in std::mem::take(&mut self.async_cleanup_hooks)
-            .into_iter()
-            .rev()
-        {
-            let Some(handle_ref) = (unsafe { handle.as_ref() }) else {
-                continue;
-            };
-            if handle_ref
-                .state
-                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                ACTIVE_ASYNC_CLEANUP_HOOKS.fetch_add(1, Ordering::AcqRel);
-                unsafe { (handle_ref.hook)(handle, handle_ref.data as *mut c_void) };
-            }
-        }
-        for hook in std::mem::take(&mut self.cleanup_hooks).into_iter().rev() {
-            unsafe { (hook.hook)(hook.data) };
-        }
-        if let Some(record) = self.instance_data.take() {
-            if let Some(finalize) = record.finalize {
-                unsafe { finalize(self, record.data, record.hint) };
-            }
-        }
-        for record in std::mem::take(&mut self.finalizers) {
-            if let Some(finalize) = record.finalize {
-                unsafe { finalize(self, record.data, record.hint) };
-            }
-        }
-        for record in std::mem::take(&mut self.object_finalizers)
-            .into_values()
-            .flatten()
-        {
-            if let Some(finalize) = record.finalize {
-                unsafe { finalize(self, record.data, record.hint) };
-            }
-        }
-        for record in std::mem::take(&mut self.noenv_finalizers) {
-            if let Some(finalize) = record.finalize {
-                unsafe { finalize(record.data, record.hint) };
-            }
-        }
-        let wraps = std::mem::take(&mut self.wraps);
-        for wrap in wraps.into_values() {
-            if let Some(finalize) = wrap.finalize {
-                unsafe {
-                    finalize(self, wrap.data, wrap.hint);
-                }
-            }
-        }
-        while !self.posted_finalizers.is_empty() {
-            for record in std::mem::take(&mut self.posted_finalizers) {
-                if let Some(finalize) = record.finalize {
-                    unsafe { finalize(self, record.data, record.hint) };
-                }
-            }
-        }
-        for value in self.values.drain(..) {
+        if !self.finalized {
+            // Direct internal Env owners still use the synchronous Drop path.
+            // Host-owned Envs explicitly start hooks while their Box is pinned.
             unsafe {
-                drop(Box::from_raw(value));
+                Self::begin_async_cleanup(self, false);
+                Self::finish_cleanup(self, false);
             }
+        }
+        for value in std::mem::take(&mut self.values) {
+            unsafe { drop(Box::from_raw(value)) };
         }
     }
 }
@@ -813,6 +1052,11 @@ struct Host {
     qualified_packages: HashSet<String>,
     compiled_callbacks: HashMap<(usize, usize, usize), NapiValue>,
     libraries: Vec<*mut c_void>,
+    // Each thread-local Host owns its own loop; Worker's callback context must
+    // never run callbacks from the process-global uv_default_loop.
+    owned_uv_loop: Option<usize>,
+    // Recorded by the process-main loader while its libuv handle is retained.
+    main_default_uv_loop: Option<usize>,
     embedded_files: Vec<std::fs::File>,
     // Addons retain `napi_env` pointers, so moving an Env during Vec growth
     // would invalidate foreign pointers. The Box provides stable addresses.
@@ -823,6 +1067,7 @@ struct Host {
     #[allow(clippy::vec_box)]
     pending_call_envs: Vec<Box<Env>>,
     unloading: bool,
+    shutdown_errors: VecDeque<String>,
     last_error: String,
 }
 
@@ -834,20 +1079,58 @@ impl Host {
             qualified_packages: HashSet::new(),
             compiled_callbacks: HashMap::new(),
             libraries: Vec::new(),
+            owned_uv_loop: None,
+            main_default_uv_loop: None,
             embedded_files: Vec::new(),
             module_envs: Vec::new(),
             pending_call_envs: Vec::new(),
             unloading: false,
+            shutdown_errors: VecDeque::new(),
             last_error: String::new(),
         }
     }
+
+    fn has_active_async_work(&self) -> bool {
+        self.module_envs.iter().chain(&self.pending_call_envs)
+            .flat_map(|env| &env.async_works)
+            .any(|work| matches!(work.state.load(Ordering::Acquire),
+                ASYNC_QUEUED | ASYNC_EXECUTING | ASYNC_COMPLETE_PENDING))
+    }
+
+    fn has_active_cleanup(&self) -> bool {
+        self.module_envs.iter().chain(&self.pending_call_envs)
+            .any(|env| env.async_cleanup_dispatching || env.async_cleanup_pending()
+                || (env.shutdown_requested && !env.async_cleanup_hooks.is_empty()))
+    }
+}
+
+fn host_threadsafe_state(referenced_only: bool) -> bool {
+    let owner = std::thread::current().id();
+    threadsafe_functions().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter().filter(|function| function.creator == owner)
+        .any(|function| {
+            if referenced_only { function.referenced.load(Ordering::Acquire) }
+            else { !function.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).live_released }
+        })
+}
+
+fn host_has_unfinalized_threadsafe() -> bool {
+    let owner = std::thread::current().id();
+    threadsafe_functions().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter().filter(|function| function.creator == owner)
+        .any(|function| !function.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).finalizer_completed)
 }
 
 impl Drop for Host {
     fn drop(&mut self) {
-        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
-            || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
-            || ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0
+        if self.has_active_async_work()
+            || host_threadsafe_state(false)
+            || self.has_active_cleanup()
+            || self.owned_uv_loop.is_some()
+            || self.main_default_uv_loop.is_some()
+            || self.module_envs.iter().chain(&self.pending_call_envs)
+                .any(|env| !env.async_cleanup_hooks.is_empty() || env.async_cleanup_dispatching
+                    || env.shutdown_requested)
         {
             // ponytail: At process exit the OS reclaims these environments; running
             // addon finalizers after thread-local HOST destruction is invalid.
@@ -861,9 +1144,90 @@ impl Drop for Host {
     }
 }
 
+// Host vectors own each Box throughout hook dispatch. Do not hold a HOST
+// borrow or a Rust Env reference across addon callbacks or finalizers.
+fn retire_owned_envs() {
+    if ForeignCallbackGuard::active() { return; }
+    loop {
+        if HOST.with(|host| host.borrow().has_active_async_work())
+            || host_threadsafe_state(false)
+        {
+            return;
+        }
+        // Keep boxes in their original Host vectors while callback code runs.
+        let retiring = HOST.with(|host| {
+            let host = host.borrow();
+            host.pending_call_envs.iter()
+                .chain(host.module_envs.iter().filter(|env| env.shutdown_requested))
+                .map(|env| (&**env as *const Env).cast_mut()).collect::<Vec<_>>()
+        });
+        for env in &retiring {
+            unsafe { Env::disable_dispatch(*env, true) };
+        }
+        for env in &retiring {
+            if unsafe { !(*(*env)).async_cleanup_dispatching
+                && !(*(*env)).async_cleanup_hooks.is_empty() } {
+                unsafe { Env::begin_async_cleanup(*env, true) };
+            }
+        }
+        if HOST.with(|host| {
+            let host = host.borrow();
+            host.has_active_async_work() || host.has_active_cleanup()
+        }) || host_threadsafe_state(false)
+            || !registered_uv_loops().is_empty()
+            || unsafe { uv_handles_open() }
+        {
+            return;
+        }
+        // External libuv callbacks may still hold Env, addon function data,
+        // and QuickJS context. Cleanup hooks must close/unregister their loops
+        // before any finalizer can reclaim those resources.
+        // A finalizer may register a hook or queue work on another Env. Do
+        // one owner at a time, then restart the global hook/work barrier.
+        let next = retiring.into_iter().find(|env| unsafe {
+            !(*(*env)).finalized && !(*(*env)).async_cleanup_dispatching
+                && !(*(*env)).finalizing && !(*(*env)).async_cleanup_pending()
+                && (*(*env)).async_cleanup_hooks.is_empty()
+        });
+        let Some(env) = next else { break };
+        unsafe { Env::finish_cleanup(env, true) };
+    }
+}
+
 thread_local! {
     static HOST: RefCell<Host> = RefCell::new(Host::new());
     static PENDING_MODULE: RefCell<Option<NapiModule>> = const { RefCell::new(None) };
+}
+
+unsafe fn capture_shutdown_exception(env: NapiEnv) {
+    // Describing a named N-API error consults HOST. During thread-local Host
+    // destruction there is no safe reporter; do not reenter that TLS slot.
+    if HOST.try_with(|_| ()).is_err() { return; }
+    if let Err(error) = take_env_exception(env) {
+        let _ = HOST.try_with(|host| {
+            let mut host = host.borrow_mut();
+            host.last_error = error.clone();
+            host.shutdown_errors.push_back(error);
+        });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_napi_report_shutdown_errors() -> usize {
+    let errors = HOST.with(|host| std::mem::take(&mut host.borrow_mut().shutdown_errors));
+    let count = errors.len();
+    for error in errors { eprintln!("thaw-napi: uncaught shutdown exception: {error}"); }
+    count
+}
+
+/// Returns the next callback, cleanup hook, or finalizer error in occurrence
+/// order. The caller owns the string and must call thaw_cstring_destroy.
+/// Main and Worker can pass it to their uncaught reporter before Env release.
+#[no_mangle]
+pub extern "C" fn thaw_napi_take_shutdown_error() -> *mut c_char {
+    HOST.with(|host| host.borrow_mut().shutdown_errors.pop_front())
+        .map(thaw_arena::owned_string)
+        .unwrap_or(ptr::null_mut())
 }
 
 #[repr(C)]
@@ -900,7 +1264,10 @@ unsafe fn text(ptr: *const c_char) -> Result<String, String> {
 }
 
 unsafe fn env_mut<'a>(env: NapiEnv) -> Result<&'a mut Env, NapiStatus> {
-    env.as_mut().ok_or(NAPI_INVALID_ARG)
+    match env.as_mut() {
+        Some(env) if !env.finalized => Ok(env),
+        _ => Err(NAPI_INVALID_ARG),
+    }
 }
 
 fn status_message(status: NapiStatus) -> *const c_char {
@@ -957,16 +1324,16 @@ unsafe fn value_ref<'a>(value: NapiValue) -> Result<&'a Value, NapiStatus> {
 }
 
 unsafe fn value_belongs_to_environment(env: NapiEnv, value: NapiValue) -> bool {
-    if value.is_null() {
+    if value.is_null() || !env.as_ref().is_some_and(|env| !env.finalized) {
         record_status(env, NAPI_INVALID_ARG);
         return false;
     }
-    let belongs = env.as_ref().is_some_and(|env| env.values.contains(&value))
+    let belongs = env.as_ref().is_some_and(|env| !env.finalized && env.values.contains(&value))
         || HOST.with(|host| {
             host.borrow()
                 .module_envs
                 .iter()
-                .any(|module_env| module_env.values.contains(&value))
+                .any(|module_env| !module_env.finalized && module_env.values.contains(&value))
         });
     if !belongs {
         record_status(env, NAPI_INVALID_ARG);
