@@ -1,4 +1,59 @@
 impl<'a> FnLowerer<'a> {
+    // A recursive object/array pattern can read several children from one
+    // parent expression. Bind that expression before the first child read so
+    // an accessor, array index, or default is evaluated only once.
+    fn bind_destructure_source_once(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+        statements: &mut Vec<HirStmt>,
+    ) -> HirExpr {
+        if matches!(value, HirExpr::Var(_)) {
+            return value;
+        }
+        // Preserve the same nested array/function metadata a named binding
+        // carries. The recursive pattern reads child properties from this
+        // Var, so metadata tied to the original PropAccess must follow it.
+        let array = self.hir_array_element_discriminants(&value);
+        let object_array = self.hir_object_array_property_discriminants(&value);
+        let function = self.hir_function_property_discriminants(&value);
+        let object_function = self.hir_object_function_property_discriminants(&value);
+        let name = format!("__thaw_destructure_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        if let Some(metadata) = array {
+            self.array_element_discriminants.insert(name.clone(), metadata);
+        }
+        if let Some(metadata) = object_array {
+            self.object_array_property_discriminants.insert(name.clone(), metadata);
+        }
+        if let Some(metadata) = function {
+            if let Some(value) = metadata.value {
+                self.function_value_discriminants.insert(name.clone(), value);
+            }
+            if let Some(array) = metadata.array {
+                self.function_value_array_discriminants.insert(name.clone(), array);
+            }
+            if !metadata.nested_array.is_empty() {
+                self.function_value_nested_array_discriminants
+                    .insert(name.clone(), metadata.nested_array);
+            }
+            if !metadata.object.is_empty() {
+                self.function_value_object_array_property_discriminants
+                    .insert(name.clone(), metadata.object);
+            }
+            if !metadata.functions.is_empty() {
+                self.function_value_object_function_property_discriminants
+                    .insert(name.clone(), metadata.functions);
+            }
+        }
+        if let Some(metadata) = object_function {
+            self.object_function_property_discriminants.insert(name.clone(), metadata);
+        }
+        statements.push(HirStmt::Let(name.clone(), ty.clone(), value));
+        HirExpr::Var(name)
+    }
+
     fn lower_binding_pattern(
         &mut self,
         pattern: &Pat,
@@ -6,6 +61,11 @@ impl<'a> FnLowerer<'a> {
         ty: &HirType,
         statements: &mut Vec<HirStmt>,
     ) -> Result<(), String> {
+        let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
+            self.bind_destructure_source_once(value, ty, statements)
+        } else {
+            value
+        };
         if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             if let HirType::Optional(payload) = ty {
                 let discriminants = match &value {
