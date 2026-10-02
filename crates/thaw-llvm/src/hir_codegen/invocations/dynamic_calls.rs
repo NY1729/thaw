@@ -219,6 +219,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap()
             .into_struct_value();
+        let returned = self
+            .builder
+            .build_extract_value(result, 0, "dynamic_property_json_set_value")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[returned.into()],
+                "destroy_dynamic_set_result",
+            )
+            .map_err(|error| error.to_string())?;
         let error = self
             .builder
             .build_extract_value(result, 1, "dynamic_property_json_set_error")
