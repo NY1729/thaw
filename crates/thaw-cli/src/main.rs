@@ -298,10 +298,7 @@ fn run_script(args: &[String]) -> Result<i32, String> {
     let status = npm_run_command(script, directory, &extra_args)
         .status()
         .map_err(|error| format!("failed to run npm script `{script}`: {error}"))?;
-    if !status.success() {
-        return Err(format!("npm script `{script}` failed with {status}"));
-    }
-    Ok(0)
+    Ok(exit_status_code(status))
 }
 
 /// The project's `scripts`, `(name, command)` sorted by name.
