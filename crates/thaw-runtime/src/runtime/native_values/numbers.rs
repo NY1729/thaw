@@ -1,3 +1,5 @@
+use num_bigint::BigUint;
+
 fn javascript_number_string(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_string();
@@ -89,18 +91,67 @@ pub extern "C" fn thaw_number_to_string(value: f64) -> *const c_char {
     destination.cast()
 }
 
-const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+/// The exact positive binary64 magnitude in units of 2^-1074. The same
+/// scale covers subnormals, normal values, and the theoretical successor of
+/// MAX_VALUE used only for its upper rounding midpoint.
+fn radix_binary_magnitude(bits: u64) -> BigUint {
+    let exponent = ((bits >> 52) & 0x7ff) as usize;
+    let fraction = bits & ((1u64 << 52) - 1);
+    if exponent == 0 {
+        BigUint::from(fraction)
+    } else {
+        BigUint::from((1u64 << 52) | fraction) << (exponent - 1)
+    }
+}
 
-/// Formats `value` in `radix` (already normalized to an integer in
-/// `[2, 36]`), matching `Number.prototype.toString`'s non-decimal case
-/// (`radix` `10` should go through the ordinary decimal path instead --
-/// this doesn't special-case it). Uses plain `f64` arithmetic throughout
-/// rather than converting to a fixed-width integer, so it never overflows
-/// regardless of `value`'s magnitude, at the cost of the same precision
-/// `f64` itself already has past 2^53 -- a faithful reflection of what the
-/// JavaScript number actually represents, not a shortcut. The fractional
-/// part is capped at 100 digits (ordinary engines make a similar practical
-/// cutoff instead of chasing exact bit-for-bit fidelity).
+struct RadixGrid {
+    first: BigUint,
+    last: BigUint,
+    center: BigUint,
+    denominator: BigUint,
+}
+
+/// Integers k for which k * radix^exponent rounds back to the same binary64.
+/// Midpoints use denominator 2^1075; ties belong to this cell exactly when
+/// its significand is even. A positive k is required even near +0.
+fn radix_roundtrip_grid(
+    magnitude: &BigUint,
+    lower_midpoint: &BigUint,
+    upper_midpoint: &BigUint,
+    even: bool,
+    radix: u32,
+    exponent: i32,
+) -> Option<RadixGrid> {
+    let power = BigUint::from(radix).pow(exponent.unsigned_abs());
+    let midpoint_denominator = BigUint::from(1u8) << 1075;
+    let (lower, upper, center, denominator) = if exponent >= 0 {
+        (lower_midpoint.clone(), upper_midpoint.clone(), magnitude << 1,
+            midpoint_denominator * power)
+    } else {
+        (lower_midpoint * &power, upper_midpoint * &power,
+            (magnitude << 1) * &power, midpoint_denominator)
+    };
+    let zero = BigUint::from(0u8);
+    let mut first = &lower / &denominator;
+    if &lower % &denominator != zero || !even {
+        first += 1u8;
+    }
+    if first == zero {
+        first = BigUint::from(1u8);
+    }
+    let mut last = &upper / &denominator;
+    if &upper % &denominator == zero && !even {
+        if last == zero {
+            return None;
+        }
+        last -= 1u8;
+    }
+    (first <= last).then_some(RadixGrid { first, last, center, denominator })
+}
+
+/// Shortest non-decimal positional spelling that rounds to `value` in radix
+/// 2..=36. Searching lattice exponents, rather than emitting f64 fraction
+/// digits, terminates for odd radices and keeps MIN_VALUE's distant last bit.
 fn number_to_radix_string(value: f64, radix: u32) -> String {
     if value.is_nan() {
         return "NaN".to_string();
@@ -111,42 +162,67 @@ fn number_to_radix_string(value: f64, radix: u32) -> String {
     if value == 0.0 {
         return "0".to_string();
     }
-    let negative = value < 0.0;
-    let value = value.abs();
-    let radix_f = radix as f64;
+    debug_assert!((2..=36).contains(&radix));
+    let negative = value.is_sign_negative();
+    let bits = value.abs().to_bits();
+    let magnitude = radix_binary_magnitude(bits);
+    let predecessor = radix_binary_magnitude(bits - 1);
+    let successor = if bits == f64::MAX.to_bits() {
+        BigUint::from(1u8) << 2098
+    } else {
+        radix_binary_magnitude(bits + 1)
+    };
+    let lower_midpoint = &predecessor + &magnitude;
+    let upper_midpoint = &magnitude + &successor;
+    let even = bits & 1 == 0;
 
-    let mut integer_digits = Vec::new();
-    let mut whole = value.trunc();
-    if whole == 0.0 {
-        integer_digits.push(b'0');
-    }
-    while whole > 0.0 {
-        let digit = (whole % radix_f) as usize;
-        integer_digits.push(RADIX_DIGITS[digit]);
-        whole = (whole / radix_f).trunc();
-    }
-    integer_digits.reverse();
-
-    let mut text = String::with_capacity(integer_digits.len() + 8);
-    if negative {
-        text.push('-');
-    }
-    text.push_str(&String::from_utf8(integer_digits).expect("radix digits are ASCII"));
-
-    let mut fraction = value.fract();
-    if fraction > 0.0 {
-        text.push('.');
-        for _ in 0..100 {
-            fraction *= radix_f;
-            let digit = fraction.trunc() as usize;
-            text.push(RADIX_DIGITS[digit] as char);
-            fraction -= digit as f64;
-            if fraction <= 0.0 {
-                break;
-            }
+    // The finest grid is guaranteed feasible; the coarsest is infeasible for
+    // any positive finite binary64. Feasibility stays true on finer grids.
+    let mut finest = -1074;
+    let mut coarsest = 1024;
+    debug_assert!(radix_roundtrip_grid(&magnitude, &lower_midpoint,
+        &upper_midpoint, even, radix, finest).is_some());
+    while coarsest - finest > 1 {
+        let middle = finest + (coarsest - finest) / 2;
+        if radix_roundtrip_grid(&magnitude, &lower_midpoint,
+            &upper_midpoint, even, radix, middle).is_some() {
+            finest = middle;
+        } else {
+            coarsest = middle;
         }
     }
-    text
+    let grid = radix_roundtrip_grid(&magnitude, &lower_midpoint,
+        &upper_midpoint, even, radix, finest).expect("binary64 radix grid exists");
+    // Pick the closest shortest candidate; an exact candidate tie chooses an
+    // even final digit. Clamp to the half-ulp interval at its open endpoints.
+    let mut coefficient = &grid.center / &grid.denominator;
+    let remainder = &grid.center % &grid.denominator;
+    let doubled_remainder = &remainder << 1;
+    if doubled_remainder > grid.denominator
+        || (doubled_remainder == grid.denominator && coefficient.bit(0)) {
+        coefficient += 1u8;
+    }
+    if coefficient < grid.first {
+        coefficient = grid.first;
+    } else if coefficient > grid.last {
+        coefficient = grid.last;
+    }
+    let digits = coefficient.to_str_radix(radix);
+    let mut result = if finest >= 0 {
+        format!("{digits}{}", "0".repeat(finest as usize))
+    } else {
+        let fraction_digits = (-finest) as usize;
+        if digits.len() > fraction_digits {
+            let split = digits.len() - fraction_digits;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        } else {
+            format!("0.{}{digits}", "0".repeat(fraction_digits - digits.len()))
+        }
+    };
+    if negative {
+        result.insert(0, '-');
+    }
+    result
 }
 
 #[no_mangle]
@@ -663,6 +739,101 @@ mod radix_string_tests {
         assert_eq!(number_to_radix_string(0.5, 2), "0.1");
         assert_eq!(number_to_radix_string(1.5, 2), "1.1");
         assert_eq!(number_to_radix_string(-0.5, 2), "-0.1");
+    }
+
+    // Decode the printed numeral independently of the formatter's grid
+    // search, then compare its exact rational value with the binary64 cell.
+    fn decode_radix(text: &str, radix: u32) -> (BigUint, BigUint, i32) {
+        let (integer, fraction) = text.split_once('.').unwrap_or((text, ""));
+        let mut coefficient = BigUint::from(0u8);
+        let base = BigUint::from(radix);
+        for digit in integer.chars().chain(fraction.chars()) {
+            coefficient = coefficient * &base + digit.to_digit(radix).unwrap();
+        }
+        let mut exponent = -(fraction.len() as i32);
+        let numerator = coefficient.clone();
+        let denominator = base.pow(fraction.len() as u32);
+        assert_ne!(coefficient, BigUint::from(0u8));
+        while &coefficient % &base == BigUint::from(0u8) {
+            coefficient /= &base;
+            exponent += 1;
+        }
+        (numerator, denominator, exponent)
+    }
+
+    fn exact_cell_contains(value: f64, numerator: &BigUint, denominator: &BigUint) -> bool {
+        let bits = value.to_bits();
+        let integer = |bits: u64| {
+            let biased = ((bits >> 52) & 0x7ff) as usize;
+            let fraction = bits & ((1u64 << 52) - 1);
+            if biased == 0 { BigUint::from(fraction) }
+            else { BigUint::from(fraction + (1u64 << 52)) << (biased - 1) }
+        };
+        let lower = integer(bits - 1) + integer(bits);
+        let upper_neighbor = if value == f64::MAX {
+            BigUint::from(1u8) << 2098
+        } else {
+            integer(bits + 1)
+        };
+        let upper = integer(bits) + upper_neighbor;
+        let scaled = numerator << 1075;
+        let lower = lower * denominator;
+        let upper = upper * denominator;
+        if bits & 1 == 0 {
+            lower <= scaled && scaled <= upper
+        } else {
+            lower < scaled && scaled < upper
+        }
+    }
+
+    #[test]
+    fn shortest_radix_spelling_roundtrips_across_every_base() {
+        let values = [f64::from_bits(1), f64::from_bits(2),
+            f64::MIN_POSITIVE, f64::from_bits(f64::MIN_POSITIVE.to_bits() - 1),
+            0.1, 0.5, 1.0, 2.0, 9_007_199_254_740_994.0, f64::MAX];
+        for radix in 2..=36 {
+            let base = BigUint::from(radix);
+            for value in values {
+                let text = number_to_radix_string(value, radix);
+                let (numerator, denominator, exponent) = decode_radix(&text, radix);
+                assert!(exact_cell_contains(value, &numerator, &denominator),
+                    "{value:?} base {radix}: {text} does not roundtrip");
+                // A coarser lattice has no point in this rounding cell.
+                let coarser = exponent + 1;
+                let power = base.pow(coarser.unsigned_abs());
+                let binary_scale = BigUint::from(1u8) << 1074;
+                let exact_value = {
+                    let bits = value.to_bits();
+                    let biased = ((bits >> 52) & 0x7ff) as usize;
+                    let fraction = bits & ((1u64 << 52) - 1);
+                    if biased == 0 { BigUint::from(fraction) }
+                    else { BigUint::from(fraction + (1u64 << 52)) << (biased - 1) }
+                };
+                let (scaled, divisor) = if coarser >= 0 {
+                    (exact_value, binary_scale * &power)
+                } else {
+                    (exact_value * &power, binary_scale)
+                };
+                let below = &scaled / &divisor;
+                for candidate in [below.clone(), below + 1u8] {
+                    let (numerator, denominator) = if coarser >= 0 {
+                        (candidate * &power, BigUint::from(1u8))
+                    } else {
+                        (candidate, power.clone())
+                    };
+                    assert!(!exact_cell_contains(value, &numerator, &denominator),
+                        "{value:?} base {radix}: {text} has a shorter spelling");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn min_subnormal_keeps_its_last_binary_digit() {
+        assert_eq!(number_to_radix_string(f64::from_bits(1), 2),
+            format!("0.{}1", "0".repeat(1073)));
+        assert_eq!(number_to_radix_string(f64::from_bits(1), 16),
+            format!("0.{}4", "0".repeat(268)));
     }
 
     #[test]
