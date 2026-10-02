@@ -2239,6 +2239,78 @@ fn deep_namespace_functions_keep_independent_bindings_and_receivers() {
 }
 
 #[test]
+fn direct_namespace_function_and_class_capture_qualified_runtime_members() {
+    // Unrun integration regression for the declaration shape emitted by
+    // ordinary `export * as api`: sibling types resolve lexically while
+    // the function and constructor bind to module.exports.api.*.
+    let dir = std::env::temp_dir().join(format!("thaw-direct-namespace-shape-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("shape-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        export declare namespace api {
+            interface Options { label: string; }
+            class Client { constructor(options: Options); label(): string; }
+            function make(options: Options): Client;
+            const create: (options: Options) => Client;
+        }
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "class Client { constructor(options) { this.value = options.label; } label() { return this.value; } } module.exports = { api: { Client, make: function(options) { return new Client(options); }, create: function(options) { return new Client(options); } } };"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { api } from "shape-kit";
+        import * as whole from "shape-kit";
+        function main(): void {
+            const first = api.make({ label: "x" });
+            const second = new whole.api.Client({ label: "y" });
+            const third = api.create({ label: "z" });
+            console.log(first.label(), second.label(), third.label());
+        }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "x y z\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn namespace_type_only_class_origin_does_not_capture_a_hidden_runtime_member() {
+    // The type-only origin supplies the class shape; only its public value
+    // alias exists on the JavaScript namespace object.
+    let dir = std::env::temp_dir().join(format!("thaw-namespace-hidden-class-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("hidden-class-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), r#"
+        declare namespace api {
+            class Hidden { constructor(name: string); label(): string; }
+            export type { Hidden };
+            export { Hidden as PublicClient };
+        }
+    "#).unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "class Client { constructor(name) { this.name = name; } label() { return this.name; } } module.exports = { api: { PublicClient: Client } };"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+        import { api } from "hidden-class-kit";
+        function main(): void {
+            console.log(new api.PublicClient("ok").label());
+        }
+    "#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn namespace_value_alias_exposes_runtime_member_while_type_alias_stays_inert() {
     // Unrun integration regression: the declaration's source namespace is
     // not necessarily its public JavaScript property path.
