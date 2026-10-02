@@ -2184,10 +2184,12 @@ fn rewrite_external_class_methods_with_static_qualified(
                 }
             }
             let saved = self.enter_shadow_scope(names);
+            let zero_iterations = self.flow_state();
             statement.left.visit_with(self);
             self.switch_break_depth += usize::from(self.switch_break_depth > 0);
             statement.body.visit_with(self);
             self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
+            self.join_current_flow_with(&zero_iterations);
             self.exit_shadow_scope(saved);
         }
 
@@ -2200,10 +2202,12 @@ fn rewrite_external_class_methods_with_static_qualified(
                 }
             }
             let saved = self.enter_shadow_scope(names);
+            let zero_iterations = self.flow_state();
             statement.left.visit_with(self);
             self.switch_break_depth += usize::from(self.switch_break_depth > 0);
             statement.body.visit_with(self);
             self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
+            self.join_current_flow_with(&zero_iterations);
             self.exit_shadow_scope(saved);
         }
 
