@@ -2936,3 +2936,45 @@ module.exports = function() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn net_connect_listener_throw_retires_socket_without_duplicate_terminal_events() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_net_connect_listener_throw");
+    fs::write(dir.join("index.js"), r#"var net = require('node:net');
+module.exports = function() {
+  var originalQueue = globalThis.queueMicrotask, originalConnect = globalThis.__thaw_net_connect, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
+  var queued = [], retired = [], polls = 0, nextHandle = 920001, marker = new Error('connect listener');
+  globalThis.queueMicrotask = function(task) { queued.push(task); };
+  globalThis.__thaw_net_connect = function() { return 'ok:' + nextHandle++; };
+  globalThis.__thaw_net_poll_read = function() { polls++; return 'pending'; };
+  globalThis.__thaw_net_destroy = function(handle) { retired.push(handle); };
+  function drain() { while (queued.length) queued.shift()(); }
+  function probe(kind) {
+    var socket = new net.Socket(), events = [], caught = false, before = retired.length, beforePolls = polls;
+    socket.on('close', function(value) { events.push('close:' + value); socket.destroy(); });
+    socket.on('error', function() { events.push('error'); });
+    if (kind === 'before') socket.on('connect', function() { events.push('connect'); throw marker; });
+    socket.connect({ port: 12345 }, kind === 'after' ? function() { events.push('connect'); throw marker; } : kind === 'reentrant' ? function() { events.push('connect'); socket.destroy(); throw marker; } : kind === 'falsy' ? function() { events.push('connect'); throw undefined; } : undefined);
+    if (kind === 'immediate') socket.destroy();
+    try { queued.shift()(); } catch (error) { caught = kind === 'falsy' ? error === undefined : error === marker; }
+    drain();
+    return [caught, events, retired.slice(before), polls - beforePolls, socket.destroyed, socket._handle];
+  }
+  try { return [probe('after'), probe('before'), probe('reentrant'), probe('falsy'), probe('immediate')]; }
+  finally { globalThis.queueMicrotask = originalQueue; globalThis.__thaw_net_connect = originalConnect; globalThis.__thaw_net_poll_read = originalPoll; globalThis.__thaw_net_destroy = originalDestroy; }
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_net_connect_listener_throw_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetConnectThrow = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseNetConnectThrow").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[true,["connect","close:false"],[920001],0,true,0],[true,["connect","close:false"],[920002],0,true,0],[true,["connect","close:false"],[920003],0,true,0],[true,["connect","close:false"],[920004],0,true,0],[false,["close:false"],[920005],0,true,0]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
