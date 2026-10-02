@@ -1856,13 +1856,8 @@ fn installed_package_flattens_a_nested_namespace_reexport() {
     // one file below the entry point's own (transitively, through a
     // plain `export * from "./external";`) -- the shape
     // `collect_namespace_reexports` recurses through. Each of `coerce`'s
-    // own functions gets flattened under a synthesized, collision-free
-    // top-level name (here `string`/`number` collide with the package's
-    // own top-level `string`/`number` functions, exactly like zod's real
-    // `coerce.number` vs. top-level `number`), plus a `declare namespace
-    // coerce { export { ... }; }` block recording the mapping back --
-    // see `thaw_bridge::nested_namespace_members`, which parses this
-    // exact shape back out.
+    // own functions stays inside `coerce`, separate from the package's
+    // top-level `string`/`number` functions.
     let scratch = temp_registry("installed-dts-nested-namespace-scratch");
     let registry = temp_registry("installed-dts-nested-namespace-registry");
     let package = scratch.join("node_modules/case-kit5");
@@ -1910,26 +1905,57 @@ fn installed_package_flattens_a_nested_namespace_reexport() {
         declarations.contains("declare namespace coerce {"),
         "{declarations}"
     );
-    // The namespace's members are synthesized, collision-free names --
-    // not bare `string`/`number` (those are already taken by the
-    // package's own top-level functions above) -- re-exported back to
-    // their real member name via `export { synthetic as member }`.
-    assert!(
-        declarations.contains("function __thaw_ns_coerce_string(): string"),
-        "{declarations}"
-    );
-    assert!(
-        declarations.contains("function __thaw_ns_coerce_number(): number"),
-        "{declarations}"
-    );
-    assert!(
-        declarations.contains("__thaw_ns_coerce_string as string"),
-        "{declarations}"
-    );
-    assert!(
-        declarations.contains("__thaw_ns_coerce_number as number"),
-        "{declarations}"
-    );
+    let coerce = declarations.split("declare namespace coerce {").nth(1).unwrap();
+    assert!(coerce.contains("export function string(): string"), "{declarations}");
+    assert!(coerce.contains("export function number(): number"), "{declarations}");
+    assert!(!declarations.contains("__thaw_ns_coerce_"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_value_namespace_reexports_keep_classes_types_and_local_function_types() {
+    // Unrun regression: same bare member names in two value namespaces must
+    // retain separate type and constructor identities. Type-only and class-
+    // only namespaces must not disappear when the function set is empty.
+    let scratch = temp_registry("installed-value-namespace-shapes-scratch");
+    let registry = temp_registry("installed-value-namespace-shapes-registry");
+    let package = scratch.join("node_modules/shape-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"shape-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export * as left from './left';\nexport * as right from './right';\nexport * as types from './types';\nexport * as classes from './classes';\nexport * as aliased from './aliases';\n").unwrap();
+    fs::write(package.join("left.d.ts"),
+        "export interface Options { label: string; }\nexport declare class Client { constructor(options: Options); label(): string; }\nexport declare function make(options: Options): Client;\nexport interface Callable { (options: Options): Client; }\nexport declare const create: Callable;\n").unwrap();
+    fs::write(package.join("right.d.ts"),
+        "export interface Options { count: number; }\nexport declare class Client { constructor(options: Options); count(): number; }\nexport declare function make(options: Options): Client;\nexport interface Callable { (options: Options): Client; }\nexport declare const create: Callable;\n").unwrap();
+    fs::write(package.join("types.d.ts"), "export interface Options { flag: boolean; }\n").unwrap();
+    fs::write(package.join("classes.d.ts"), "export declare class Client { constructor(); }\n").unwrap();
+    fs::write(package.join("aliases.d.ts"), "export { Hidden as PublicClient } from './aliased';\n").unwrap();
+    fs::write(package.join("aliased.d.ts"), "export declare class Hidden { constructor(); }\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "shape-kit").unwrap();
+    let declarations = resolve(&registry, "shape-kit").unwrap().dts_source;
+    for alias in ["left", "right", "types", "classes", "aliased"] {
+        assert!(declarations.contains(&format!("declare namespace {alias} {{")), "{declarations}");
+    }
+    for alias in ["left", "right"] {
+        let body = declarations.split(&format!("declare namespace {alias} {{")).nth(1)
+            .unwrap().split("\n}\n").next().unwrap();
+        assert!(body.contains("export interface Options"), "{declarations}");
+        assert!(body.contains("export class Client"), "{declarations}");
+        assert!(body.contains("export function make(options: Options): Client"), "{declarations}");
+        assert!(body.contains("export const create: Callable"), "{declarations}");
+        assert_eq!(body.matches("export interface Callable").count(), 1, "{declarations}");
+    }
+    assert!(!declarations.contains("__thaw_ns_"), "{declarations}");
+    let aliased = declarations.split("declare namespace aliased {").nth(1).unwrap();
+    assert!(aliased.contains("class Hidden"), "{declarations}");
+    assert!(aliased.contains("export { Hidden as PublicClient }"), "{declarations}");
+    assert!(!aliased.contains("export class Hidden"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }

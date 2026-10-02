@@ -990,37 +990,33 @@ fn dts_source_with_reexported_functions_inner(
     // `all_reexported_function_declarations` does, via
     // `collect_namespace_reexports`.
     //
-    // Flattened the same way a class method or namespace-nested function
-    // elsewhere in this codebase is: each function is renamed to a
-    // synthesized, collision-free top-level name (`coerce` and the
-    // package's own top-level functions can freely share a bare name --
-    // zod's top-level `number()` and `coerce.number()` are unrelated
-    // functions, and simply flattening both to bare `number` would silently
-    // drop one), then a `declare namespace NAME { export { synthesized as
-    // original, ... }; }` block records the mapping back to each function's
-    // real member name -- see `thaw_bridge::nested_namespace_members`,
-    // which parses this exact shape back out of the finished flattened
-    // `.d.ts`.
+    // Keep each member directly inside its namespace. This preserves
+    // distinct `number` members in the package and `coerce`, and lets a
+    // function signature refer to sibling types such as `Options` or
+    // `Client` without losing the declaration's lexical scope. The bridge
+    // reads direct namespace functions and classes under qualified names.
     let mut namespace_visited = std::collections::BTreeSet::new();
     for (alias, target_path) in
         collect_namespace_reexports(entry_path, &module, &mut namespace_visited)?
     {
-        let mut visited = std::collections::BTreeSet::new();
-        let declarations = all_reexported_function_declarations(&target_path, &mut visited)?;
-        if declarations.is_empty() {
+        let mut visited_functions = std::collections::BTreeSet::new();
+        let functions = all_reexported_function_declarations(&target_path, &mut visited_functions)?;
+        let mut visited_types = std::collections::BTreeSet::new();
+        let types = all_reexported_type_declarations(&target_path, &mut visited_types)?;
+        if functions.is_empty() && types.is_empty() {
             continue;
         }
-        let mut members = Vec::new();
-        for (name, snippet) in declarations {
-            let synthetic = format!("__thaw_ns_{alias}_{name}");
-            output.push('\n');
-            output.push_str(&rename_declared_function(snippet, &synthetic));
-            members.push(format!("{synthetic} as {name}"));
+        output.push_str(&format!("\ndeclare namespace {alias} {{\n"));
+        let mut seen_members = std::collections::BTreeSet::new();
+        for snippet in types.into_iter().chain(functions.into_iter().map(|(_, snippet)| snippet)) {
+            for member in namespace_member_declarations(&snippet)? {
+                if seen_members.insert(member.clone()) {
+                    output.push_str(&member);
+                    output.push('\n');
+                }
+            }
         }
-        output.push_str(&format!(
-            "\ndeclare namespace {alias} {{\n    export {{ {} }};\n}}\n",
-            members.join(", ")
-        ));
+        output.push_str("}\n");
     }
     let mut self_referential_visited = std::collections::BTreeSet::new();
     for snippet in
@@ -1404,6 +1400,30 @@ fn type_only_namespace_declaration(alias: &str, snippets: Vec<String>) -> String
             .map_or_else(|| snippet.to_string(), |rest| format!("export {rest}"))
     }).collect::<Vec<_>>().join("\n");
     format!("declare namespace {alias} {{\n{body}\n}}\nexport type {{ {alias} }};")
+}
+
+fn namespace_member_declarations(snippet: &str) -> Result<Vec<String>, String> {
+    use thaw_parser::common::{SourceMapper, Spanned};
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        snippet,
+        thaw_parser::common::FileName::Custom("generated namespace member".into()),
+    )?;
+    let has_alias_marker = module.body.iter().any(|item|
+        matches!(item, thaw_parser::ast::ModuleItem::ModuleDecl(
+            thaw_parser::ast::ModuleDecl::ExportNamed(_))));
+    module.body.iter().map(|item| {
+        let text = source_map.span_to_snippet(item.span())
+            .map_err(|error| format!("failed to read namespace member declaration: {error:?}"))?;
+        let text = text.trim_start();
+        Ok(if let Some(rest) = text.strip_prefix("export declare ") {
+            format!("export {rest}")
+        } else if let Some(rest) = text.strip_prefix("declare ") {
+            // A named re-export already controls which member is public.
+            if has_alias_marker { rest.to_string() } else { format!("export {rest}") }
+        } else {
+            text.to_string()
+        })
+    }).collect()
 }
 
 fn is_type_declaration_snippet(snippet: &str) -> bool {

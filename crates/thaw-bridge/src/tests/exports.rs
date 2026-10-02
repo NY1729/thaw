@@ -224,6 +224,48 @@ fn extracts_a_callable_const_export_from_its_interfaces_call_signatures() {
     assert!(funcs.iter().any(|f| f.name == "plain"));
 }
 
+#[test]
+fn namespace_callable_consts_use_their_own_interface_and_type_scope() {
+    // Unrun regression: identical bare names in two namespaces must keep
+    // distinct signatures, while the existing top-level path still works.
+    let source = r#"
+        declare namespace Left {
+            interface Options { label: string; }
+            class Client { constructor(options: Options); }
+            interface Callable { (options: Options): Client; }
+            const make: Callable;
+            const borrowed: Right.Callable;
+            const borrowedAlias: Right.Chain;
+            const unresolved: Missing.Callable;
+        }
+        declare namespace Right {
+            interface Options { count: number; }
+            class Client { constructor(options: Options); }
+            interface Callable { (options: Options): Client; }
+            type Target = (options: Options) => Client;
+            type Chain = Target;
+            const make: Callable;
+        }
+        interface TopCallable { (value: boolean): boolean; }
+        declare const top: TopCallable;
+    "#;
+    let functions = parse_dts(source).unwrap();
+    let left = functions.iter().find(|function| function.name == "Left.make").unwrap();
+    let right = functions.iter().find(|function| function.name == "Right.make").unwrap();
+    let borrowed = functions.iter().find(|function| function.name == "Left.borrowed").unwrap();
+    let borrowed_alias = functions.iter().find(|function| function.name == "Left.borrowedAlias").unwrap();
+    assert!(!functions.iter().any(|function| function.name == "Left.unresolved"));
+    let top = functions.iter().find(|function| function.name == "top").unwrap();
+    assert_eq!(left.params[0].1, DtsType::Native(HirType::Object(vec![("label".into(), HirType::Str)])));
+    assert_eq!(right.params[0].1, DtsType::Native(HirType::Object(vec![("count".into(), HirType::F64)])));
+    assert_eq!(borrowed.params[0].1, DtsType::Native(HirType::Object(vec![("count".into(), HirType::F64)])));
+    assert_eq!(borrowed_alias.params[0].1, DtsType::Native(HirType::Object(vec![("count".into(), HirType::F64)])));
+    assert_eq!(top.params[0].1, DtsType::Native(HirType::Bool));
+    let nested = nested_namespace_members(source);
+    assert_eq!(nested["Left"]["make"], "make");
+    assert_eq!(nested["Right"]["make"], "make");
+}
+
 /// A `declare const` whose declared type does *not* resolve to a call-
 /// signature interface (an ordinary object shape, or an unknown/unrelated
 /// type name) must not contribute any function at all -- confirms the new

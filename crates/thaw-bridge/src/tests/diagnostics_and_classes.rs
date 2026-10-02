@@ -729,6 +729,37 @@ fn type_only_class_alias_keeps_instance_shape_and_separate_value_alias() {
 }
 
 #[test]
+fn namespace_class_alias_keeps_constructor_and_self_return_identity() {
+    // Unrun regression for a named class re-export moved into a value
+    // namespace. Both class shape and runtime member key stay qualified.
+    let source = r#"
+        declare namespace api {
+            class Hidden {
+                constructor(name: string);
+                self(): Hidden;
+            }
+            export type { Hidden };
+            export { Hidden as Client };
+        }
+    "#;
+    let classes = parse_dts_classes(source).unwrap();
+    let client = classes.iter().find(|class| class.name == "api.Client").unwrap();
+    assert!(client.constructible);
+    assert_eq!(client.methods.iter().find(|method| method.name == "self").unwrap()
+        .return_instance_class.as_deref(), Some("api.Client"));
+    let members = nested_namespace_members(source);
+    assert_eq!(members["api"]["Client"], "Hidden");
+    let type_names = exported_type_names(source);
+    let value_names = exported_value_names(source);
+    assert!(type_names.contains("api.Hidden"));
+    assert!(!value_names.contains("api.Hidden"));
+    assert!(value_names.contains("api.Client"));
+    assert!(!exported_value_names(
+        "declare namespace api { interface Secret {} export { Secret as PublicShape }; }"
+    ).contains("api.PublicShape"));
+}
+
+#[test]
 fn reserved_class_and_value_exports_keep_public_runtime_names() {
     // Unrun regression for the registry's valid synthetic identifiers.
     let source = r#"

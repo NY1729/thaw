@@ -186,8 +186,11 @@ fn generate_registry_shims(
             .cloned().collect::<Vec<_>>();
         let mut type_only_value_names = exclusive_type_only_value_names(
             &explicit_type_exports, &value_exports, &functions, &classes, &values);
+        // A live namespace revives inherited namespace members, but an
+        // explicit nested `export type { Hidden }` still has no value.
         type_only_value_names.retain(|name| !live_namespace_origins.iter().any(|namespace| {
-            name == namespace || name.starts_with(&format!("{namespace}."))
+            (name == namespace || name.starts_with(&format!("{namespace}.")))
+                && !(name.contains('.') && explicit_type_exports.contains(name))
         }));
         let hidden_namespaces = thaw_bridge::nonpublic_namespace_sources_named(&package.dts_source, &dts_filename);
         for name in classes.iter().map(|class| &class.name)
