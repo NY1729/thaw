@@ -228,7 +228,8 @@ extern "C" fn round_number(value: f64) -> f64 {
     if !value.is_finite() || value == 0.0 {
         return value;
     }
-    let rounded = (value + 0.5).floor();
+    let floor = value.floor();
+    let rounded = if value - floor < 0.5 { floor } else { floor + 1.0 };
     if rounded == 0.0 && value.is_sign_negative() {
         -0.0
     } else {
@@ -693,3 +694,22 @@ extern "C" fn dynamic_array_join(value: f64, separator: f64) -> f64 {
     )
 }
 
+
+#[cfg(all(test, target_arch = "x86_64", target_family = "unix"))]
+#[test]
+fn round_number_preserves_integers_and_ecmascript_ties() {
+    for (input, expected) in [
+        (4_503_599_627_370_497.0_f64, 4_503_599_627_370_497.0_f64),
+        (0.49999999999999994, 0.0),
+        (0.5, 1.0),
+        (-1.5, -1.0),
+        (-0.5, -0.0),
+        (-0.1, -0.0),
+        (-0.0, -0.0),
+        (f64::INFINITY, f64::INFINITY),
+        (f64::NEG_INFINITY, f64::NEG_INFINITY),
+    ] {
+        assert_eq!(round_number(input).to_bits(), expected.to_bits());
+    }
+    assert!(round_number(f64::NAN).is_nan());
+}
