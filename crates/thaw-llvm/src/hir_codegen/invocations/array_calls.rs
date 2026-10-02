@@ -1296,12 +1296,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
+                let presence = self.compile_array_presence(handle)?;
                 let depth = self.compile_expr(depth)?.into_float_value();
                 let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_any_array_flat").unwrap(),
-                        &[buffer.into(), depth.into()],
+                        &[buffer.into(), presence.into(), depth.into()],
                         "array_flat",
                     )
                     .map_err(|error| error.to_string())?
