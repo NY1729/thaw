@@ -1841,17 +1841,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 let handle = self.compile_expr(array)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
-                return self
-                    .builder
-                    .build_call(
-                        self.module.get_function("thaw_math_sum_precise").unwrap(),
-                        &[buffer.into()],
-                        "math_sum_precise",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("Math.sumPrecise returned no value".into());
+                let presence = self.compile_array_presence(handle)?;
+                let result = self.allocate_arena_cell(self.context.f64_type().into(), "math_sum_precise_result")?;
+                let status = self.builder.build_call(
+                    self.module.get_function("thaw_math_sum_precise").unwrap(),
+                    &[buffer.into(), presence.into(), result.into()],
+                    "math_sum_precise_status",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Math.sumPrecise returned no status")?.into_int_value();
+                let valid = self.builder.build_int_compare(
+                    IntPredicate::NE, status, self.context.i8_type().const_zero(),
+                    "math_sum_precise_valid",
+                ).map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let accepted = self.context.append_basic_block(function, "math_sum_precise_accepted");
+                let rejected = self.context.append_basic_block(function, "math_sum_precise_rejected");
+                self.builder.build_conditional_branch(valid, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.compile_throw_type_error("Math.sumPrecise requires Number values")?;
+                self.builder.position_at_end(accepted);
+                return self.builder.build_load(self.context.f64_type(), result, "math_sum_precise")
+                    .map_err(|error| error.to_string());
             }
             "__thaw_math_random" => {
                 if !args.is_empty() {
