@@ -1,3 +1,148 @@
+fn installed_artifact_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn collect(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(root, &path, files);
+            } else {
+                files.insert(path.strip_prefix(root).unwrap().to_path_buf(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    collect(root, root, &mut files);
+    files
+}
+
+#[test]
+fn failed_package_update_preserves_every_previous_artifact() {
+    let scratch = temp_registry("atomic-add-scratch");
+    let registry = temp_registry("atomic-add-registry");
+    let package = scratch.join("node_modules/atomic-kit");
+    fs::create_dir_all(package.join("feature")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"atomic-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./feature/index.d.ts","require":"./feature/index.js"}}}"#,
+    ).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const value: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.value = 1;").unwrap();
+    fs::write(package.join("feature/index.d.ts"), "export declare const feature: number;").unwrap();
+    fs::write(package.join("feature/index.js"), "exports.feature = 1;").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "atomic-kit").unwrap();
+    let installed = registry.join("atomic-kit");
+    fs::write(installed.join("native.node"), b"old addon").unwrap();
+    fs::write(installed.join("native-addon.json"), b"old metadata").unwrap();
+    fs::write(installed.join("platform-executable"), b"old executable").unwrap();
+    fs::create_dir(installed.join("native-dependencies")).unwrap();
+    fs::write(installed.join("native-dependencies/old.so"), b"old dependency").unwrap();
+    fs::write(installed.join("lock.json"), b"old lock").unwrap();
+    let before = installed_artifact_snapshot(&installed);
+
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"atomic-kit","version":"2.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./feature/missing.d.ts","require":"./feature/index.js"}}}"#,
+    ).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const value: string;").unwrap();
+    fs::write(package.join("index.js"), "exports.value = 'new';").unwrap();
+    let error = add_installed(&registry, &scratch.join("node_modules"), "atomic-kit").unwrap_err();
+    assert!(error.contains("missing.d.ts"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&installed), before);
+
+    fs::write(package.join("feature/missing.d.ts"), "export declare const feature: string;").unwrap();
+    add_installed(&registry, &scratch.join("node_modules"), "atomic-kit").unwrap();
+    assert_eq!(fs::read_to_string(installed.join("version.txt")).unwrap(), "2.0.0");
+    assert!(fs::read_to_string(installed.join("package.d.ts")).unwrap().contains("value: string"));
+    for stale in ["native.node", "native-addon.json", "platform-executable", "native-dependencies", "lock.json"] {
+        assert!(!installed.join(stale).exists(), "stale {stale}");
+    }
+    assert!(installed.join("subpaths/feature/bundle.js.gz").is_file());
+    let feature_before = installed_artifact_snapshot(&installed.join("subpaths/feature"));
+    fs::remove_file(package.join("feature/missing.d.ts")).unwrap();
+    let error = add_installed_subpath(
+        &registry,
+        &scratch.join("node_modules"),
+        "atomic-kit/feature",
+    ).unwrap_err();
+    assert!(error.contains("missing.d.ts"), "{error}");
+    assert_eq!(
+        installed_artifact_snapshot(&installed.join("subpaths/feature")),
+        feature_before,
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn failed_first_lazy_subpath_leaves_root_directory_unchanged() {
+    let scratch = temp_registry("atomic-lazy-scratch");
+    let registry = temp_registry("atomic-lazy-registry");
+    let package = scratch.join("node_modules/lazy-kit");
+    fs::create_dir_all(package.join("feature")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"lazy-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./feature":{"types":"./feature/missing.d.ts","require":"./feature/index.js"}}}"#,
+    ).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.root = 1;").unwrap();
+    fs::write(package.join("feature/index.js"), "exports.feature = 1;").unwrap();
+    add_installed_root(&registry, &scratch.join("node_modules"), "lazy-kit").unwrap();
+    let installed = registry.join("lazy-kit");
+    let before = installed_artifact_snapshot(&installed);
+    let error = add_installed_subpath(&registry, &scratch.join("node_modules"), "lazy-kit/feature").unwrap_err();
+    assert!(error.contains("missing.d.ts"), "{error}");
+    assert_eq!(installed_artifact_snapshot(&installed), before);
+    assert!(!installed.join("subpaths").exists());
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn lazy_parent_refresh_keeps_materialized_child_export() {
+    let scratch = temp_registry("atomic-nested-scratch");
+    let registry = temp_registry("atomic-nested-registry");
+    let package = scratch.join("node_modules/nested-kit");
+    fs::create_dir_all(package.join("foo/bar")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"nested-kit","version":"1.0.0","types":"index.d.ts","main":"index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./foo":{"types":"./foo/index.d.ts","require":"./foo/index.js"},"./foo/bar":{"types":"./foo/bar/index.d.ts","require":"./foo/bar/index.js"}}}"#,
+    ).unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.root = 1;").unwrap();
+    fs::write(package.join("foo/index.d.ts"), "export declare const parent: number;").unwrap();
+    fs::write(package.join("foo/index.js"), "exports.parent = 1;").unwrap();
+    fs::write(package.join("foo/bar/index.d.ts"), "export declare const child: string;").unwrap();
+    fs::write(package.join("foo/bar/index.js"), "exports.child = 'old';").unwrap();
+    let modules = scratch.join("node_modules");
+    add_installed_root(&registry, &modules, "nested-kit").unwrap();
+    add_installed_subpath(&registry, &modules, "nested-kit/foo/bar").unwrap();
+    let installed = registry.join("nested-kit/subpaths/foo");
+    let child_before = installed_artifact_snapshot(&installed.join("bar"));
+    add_installed_subpath(&registry, &modules, "nested-kit/foo").unwrap();
+    assert_eq!(installed_artifact_snapshot(&installed.join("bar")), child_before);
+    fs::write(package.join("foo/index.d.ts"), "export declare const parent: boolean;").unwrap();
+    fs::write(package.join("foo/index.js"), "exports.parent = true;").unwrap();
+    add_installed_subpath(&registry, &modules, "nested-kit/foo").unwrap();
+    assert!(fs::read_to_string(installed.join("package.d.ts")).unwrap().contains("parent: boolean"));
+    assert_eq!(installed_artifact_snapshot(&installed.join("bar")), child_before);
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn publication_failure_restores_the_previous_directory() {
+    let registry = temp_registry("atomic-add-rollback");
+    let destination = registry.join("package");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("version.txt"), "1.0.0").unwrap();
+    let staged = registry.join("missing-stage");
+    let backup = registry.join("previous");
+    let error = publish_staged_package(&staged, &destination, &backup).unwrap_err();
+    assert!(error.contains("failed to install"), "{error}");
+    assert_eq!(fs::read_to_string(destination.join("version.txt")).unwrap(), "1.0.0");
+    assert!(!backup.exists());
+    let _ = fs::remove_dir_all(registry);
+}
+
 #[test]
 fn selects_package_exports_conditions_for_runtime_and_types() {
     let manifest: serde_json::Value = serde_json::from_str(
