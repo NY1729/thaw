@@ -45,8 +45,14 @@ check_metric() {
   metric=$1
   floor=$2
   mode=$3
-  current_value=$(jq -r ".thaw.${metric}" "$current")
-  baseline_value=$(jq -r ".thaw.${metric}" "$baseline")
+  current_value=$(jq -er ".thaw.${metric} | select(type == \"number\" and . >= 0)" "$current") || {
+    echo "invalid or unreadable current metric thaw.${metric} in $current" >&2
+    return 1
+  }
+  baseline_value=$(jq -er ".thaw.${metric} | select(type == \"number\" and . >= 0)" "$baseline") || {
+    echo "invalid or unreadable baseline metric thaw.${metric} in $baseline" >&2
+    return 1
+  }
   allowed=$(awk -v base="$baseline_value" -v pct="$TOLERANCE_PCT" -v floor="$floor" \
     'BEGIN { margin = base * pct / 100; if (margin < floor) margin = floor; printf "%.4f", base + margin }')
   over=$(awk -v cur="$current_value" -v max="$allowed" 'BEGIN { print (cur > max) ? "1" : "0" }')
