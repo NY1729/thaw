@@ -1361,6 +1361,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let (arguments, spread_bindings) =
                         self.lower_native_spread_array_values(&call.args, "Array.splice")?;
+                    let has_start = !arguments.is_empty();
                     let mut arguments = arguments.into_iter();
                     let start = match arguments.next() {
                         Some(value) => self.coerce_primitive_to_number(value)?,
@@ -1368,7 +1369,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let delete_count = match arguments.next() {
                         Some(value) => self.coerce_primitive_to_number(value)?,
-                        None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                        None => HirExpr::Lit(HirLit::F64(if has_start { f64::INFINITY } else { 0.0 })),
                     };
                     let items = arguments.collect::<Vec<_>>();
                     for item in &items {

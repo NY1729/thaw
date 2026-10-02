@@ -9901,3 +9901,30 @@ fn bigint_radix_and_index_arguments_validate_before_native_clamping() {
         "receiver\nradix\n1010\nmissing\n10\n10\n1010\n10\n1010\na\nRangeError\nRangeError\nRangeError\nRangeError\nRangeError\nbits\nvalue\n-1n\n0n\n0n\n255n\nRangeError\nRangeError\nRangeError\n"
     );
 }
+
+#[test]
+fn splice_without_arguments_preserves_populated_and_sparse_receivers() {
+    let source = r#"
+        function main(): void {
+            const populated: number[] = [1, 2, 3];
+            const removed = populated.splice();
+            console.log(removed.length, populated.length, populated.join(","));
+            const sparse: number[] = [1, , 3];
+            const sparseRemoved = sparse.splice();
+            console.log(sparseRemoved.length, sparse.length, Object.hasOwn(sparse, 0), Object.hasOwn(sparse, 1), Object.hasOwn(sparse, 2));
+            const spread: number[] = [4, 5];
+            const spreadRemoved = spread.splice(...[]);
+            console.log(spreadRemoved.length, spread.join(","));
+            const tail: number[] = [7, 8, 9];
+            const tailRemoved = tail.splice(1);
+            console.log(tailRemoved.join(","), tail.join(","));
+            const explicit: number[] = [6, 7];
+            const explicitRemoved = explicit.splice(undefined);
+            console.log(explicitRemoved.join(","), explicit.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "splice_without_arguments"),
+        "0 3 1,2,3\n0 3 true false true\n0 4,5\n8,9 7\n6,7 0\n"
+    );
+}
