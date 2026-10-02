@@ -30,6 +30,23 @@ impl<'ctx> HirCompiler<'ctx> {
         name: &str,
         hir_ty: &HirType,
     ) -> Result<(), String> {
+        self.promote_variable_to_arena_cell_with_mode(name, hir_ty, false)
+    }
+
+    fn prepromote_variable_to_arena_cell(
+        &mut self,
+        name: &str,
+        hir_ty: &HirType,
+    ) -> Result<(), String> {
+        self.promote_variable_to_arena_cell_with_mode(name, hir_ty, true)
+    }
+
+    fn promote_variable_to_arena_cell_with_mode(
+        &mut self,
+        name: &str,
+        hir_ty: &HirType,
+        defer_js_retain: bool,
+    ) -> Result<(), String> {
         let Some((variable_cell, ty)) = self.variables.get(name).copied() else {
             return Ok(());
         };
@@ -59,18 +76,46 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = builder
             .build_load(ty, variable_cell, "captured_stack_value")
             .map_err(|error| error.to_string())?;
-        if self.uses_quickjs_handles && *hir_ty == HirType::JsValue {
-            builder
-                .build_call(
-                    self.module.get_function("thaw_js_retain_handle").unwrap(),
-                    &[value.into()],
-                    "retain_captured_js_handle",
-                )
-                .map_err(|error| error.to_string())?;
+        if defer_js_retain && *hir_ty == HirType::JsValue {
+            // The condition may be this function's first QuickJS operation.
+            // Establish the handle dependency before it is compiled, since an
+            // arena-promoted cell skips reactive promotion at closure creation.
+            self.uses_quickjs = true;
+            self.uses_quickjs_handles = true;
         }
+        let pending_claim = if self.uses_quickjs_handles && *hir_ty == HirType::JsValue {
+            if defer_js_retain {
+                // Match the cell's allocation placement and initial-copy site.
+                // In an outer loop this is a fresh cell and claim per iteration.
+                let claim = if promotion_scope.is_none() && !self.loop_promotion_scopes.is_empty() {
+                    self.build_arena_cell(&self.builder, self.context.i8_type().into(),
+                        &format!("{name}_capture_claim"))?
+                } else {
+                    self.allocate_arena_cell(self.context.i8_type().into(),
+                        &format!("{name}_capture_claim"))?
+                };
+                builder.build_store(claim, self.context.i8_type().const_zero())
+                    .map_err(|error| error.to_string())?;
+                Some(claim)
+            } else {
+                builder
+                    .build_call(
+                        self.module.get_function("thaw_js_retain_handle").unwrap(),
+                        &[value.into()],
+                        "retain_captured_js_handle",
+                    )
+                    .map_err(|error| error.to_string())?;
+                None
+            }
+        } else {
+            None
+        };
         builder
             .build_store(cell, value)
             .map_err(|error| error.to_string())?;
+        if let Some(claim) = pending_claim {
+            self.pending_js_capture_claims.insert(cell, claim);
+        }
         self.variables.insert(name.to_string(), (cell, ty));
         self.arena_variables.insert(name.to_string());
         Ok(())
@@ -84,6 +129,39 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<PointerValue<'ctx>, String> {
         for capture in captures {
             self.promote_variable_to_arena_cell(&capture.name, &capture.ty)?;
+        }
+        for capture in captures {
+            let (cell, ty) = self.variables.get(&capture.name).copied()
+                .ok_or_else(|| format!("missing captured variable `{}`", capture.name))?;
+            let Some(claim) = self.pending_js_capture_claims.get(&cell).copied() else {
+                continue;
+            };
+            let function = self.current_function();
+            let retain = self.context.append_basic_block(function, "capture_retain");
+            let ready = self.context.append_basic_block(function, "capture_ready");
+            let claimed = self.builder.build_load(self.context.i8_type(), claim, "capture_claimed")
+                .map_err(|error| error.to_string())?.into_int_value();
+            let unclaimed = self.builder.build_int_compare(
+                IntPredicate::EQ, claimed, self.context.i8_type().const_zero(),
+                "capture_unclaimed",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_conditional_branch(unclaimed, retain, ready)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(retain);
+            let handle = self.builder.build_load(ty, cell, "capture_current_js_handle")
+                .map_err(|error| error.to_string())?;
+            let did_retain = self.builder.build_call(
+                self.module.get_function("thaw_js_retain_handle").unwrap(),
+                &[handle.into()], "claim_captured_js_handle",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("thaw_js_retain_handle returned no status")?;
+            // A failed retain leaves the claim clear so a later construction
+            // can retry; closure construction itself follows the old path.
+            self.builder.build_store(claim, did_retain)
+                .map_err(|error| error.to_string())?;
+            self.builder.build_unconditional_branch(ready)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(ready);
         }
         let i64_type = self.context.i64_type();
         let closure = self

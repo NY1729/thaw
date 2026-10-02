@@ -2973,3 +2973,276 @@ fn source_function_cannot_forge_trusted_exception_text_marker() {
     "#;
     assert_eq!(compile_and_run(source, "reserved_exception_text_marker"), "user:x\n");
 }
+
+#[test]
+fn branch_capture_initializes_shared_cell_on_both_successors() {
+    let source = r#"
+        function choose(take: boolean): string {
+            let value = "before";
+            if (take) {
+                const change = () => { value = "after"; };
+                change();
+            }
+            return value;
+        }
+        function main(): void {
+            console.log(choose(false));
+            console.log(choose(true));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "branch_capture_initialized_cell"), "before\nafter\n");
+}
+
+#[test]
+fn else_and_both_branch_captures_share_initialized_cells() {
+    let source = r#"
+        function elseOnly(take: boolean): string {
+            let value = "before";
+            if (take) {
+                value = value;
+            } else {
+                const change = () => { value = "else"; };
+                change();
+            }
+            return value;
+        }
+        function both(take: boolean): string {
+            let value = "before";
+            if (take) {
+                const change = () => { value = "then"; };
+                change();
+            } else {
+                const change = () => { value = "else"; };
+                change();
+            }
+            return value;
+        }
+        function main(): void {
+            console.log(elseOnly(true));
+            console.log(elseOnly(false));
+            console.log(both(true));
+            console.log(both(false));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "else_and_both_branch_captures"),
+        "before\nelse\nthen\nelse\n"
+    );
+}
+
+#[test]
+fn ternary_captures_initialize_before_either_successor() {
+    let source = r#"
+        function captureThen(take: boolean): string {
+            let value = "before";
+            const chosen = take
+                ? (() => { value = "then"; return value; })()
+                : value;
+            return chosen + ":" + value;
+        }
+        function captureElse(take: boolean): string {
+            let value = "before";
+            const chosen = take
+                ? value
+                : (() => { value = "else"; return value; })();
+            return chosen + ":" + value;
+        }
+        function main(): void {
+            console.log(captureThen(false));
+            console.log(captureThen(true));
+            console.log(captureElse(true));
+            console.log(captureElse(false));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "ternary_capture_preinit"),
+        "before:before\nthen:then\nbefore:before\nelse:else\n"
+    );
+}
+
+#[test]
+fn branch_and_ternary_capture_a_fresh_loop_local_each_iteration() {
+    let source = r#"
+        function main(): void {
+            let index = 0;
+            while (index < 2) {
+                let branch = "before";
+                if (index === 0) {
+                    const change = () => { branch = "after"; };
+                    change();
+                }
+                let ternary = "before";
+                const chosen = index === 0
+                    ? (() => { ternary = "after"; return ternary; })()
+                    : ternary;
+                console.log(branch, chosen, ternary);
+                index++;
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "branch_capture_loop_local"),
+        "after after after\nbefore before before\n"
+    );
+}
+
+#[test]
+fn skipped_jsvalue_branch_capture_does_not_retain() {
+    let source = r#"
+        function choose(take: boolean): void {
+            const value: JsValue = getDynamicValue("value");
+            if (take) {
+                const hold = () => value;
+            }
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            choose(false);
+            choose(true);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "skipped_js_capture"),
+        "true\nfalse\nfalse\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn jsvalue_capture_claim_is_once_for_both_branches_and_repeated_closures() {
+    let source = r#"
+        function choose(take: boolean): void {
+            const value: JsValue = getDynamicValue("value");
+            if (take) {
+                const first = () => value;
+                const second = () => value;
+            } else {
+                const other = () => value;
+            }
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            choose(true);
+            choose(false);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "js_capture_once_both_branches"),
+        "true\ntrue\nfalse\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn jsvalue_ternary_and_short_circuit_claim_only_executed_capture() {
+    let source = r#"
+        function conditional(take: boolean): void {
+            const value: JsValue = getDynamicValue("value");
+            const done = take ? (() => { const alias: JsValue = value; return true; })() : false;
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function logical(take: boolean): void {
+            const value: JsValue = getDynamicValue("value");
+            const done = take && (() => { const alias: JsValue = value; return true; })();
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            conditional(false);
+            conditional(true);
+            logical(false);
+            logical(true);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "js_capture_conditional_logical"),
+        "true\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n");
+}
+
+#[test]
+fn jsvalue_while_capture_claims_at_first_executed_iteration_only() {
+    let source = r#"
+        function choose(times: number): void {
+            const value: JsValue = getDynamicValue("value");
+            let i = 0;
+            while (i < times) {
+                const hold = () => value;
+                i++;
+            }
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            choose(0);
+            choose(2);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "js_capture_while_once"),
+        "true\nfalse\nfalse\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn jsvalue_branch_claim_is_fresh_for_each_outer_loop_local() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            let i = 0;
+            while (i < 2) {
+                const value: JsValue = getDynamicValue("value");
+                if (i === 0) {
+                    const hold = () => value;
+                }
+                console.log(releaseDynamicValue(value));
+                console.log(releaseDynamicValue(value));
+                console.log(releaseDynamicValue(value));
+                i++;
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "js_capture_per_loop_local"),
+        "true\ntrue\nfalse\ntrue\nfalse\nfalse\n");
+}
+
+#[test]
+fn branch_capture_of_parameter_claims_before_condition_enables_quickjs() {
+    // `first` compiles before any other function enables the QuickJS host.
+    // Its condition is the first dynamic operation, after branch prepromotion.
+    let module = thaw_parser::parse_typescript(r#"
+        function first(value: JsValue): void {
+            if (hasDynamicProperty(value, "missing")) {
+                const skipped = () => value;
+            }
+            if (hasDynamicProperty(value, "x")) {
+                const held = () => value;
+            }
+        }
+        function main(): void {
+            loadScript("globalThis.obj = { x: 1 };");
+            const value: JsValue = getDynamicValue("obj");
+            first(value);
+        }
+    "#).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "first_capture_before_host_condition");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let body = ir.split("define internal void @first(").nth(1).expect(&ir)
+        .split("\n}").next().expect(&ir);
+    let zero = body.find("store i8 0, ptr %value_capture_claim_cell").expect(&ir);
+    let conditions = body.match_indices("@thaw_js_has_property_result(")
+        .map(|(index, _)| index).collect::<Vec<_>>();
+    let retains = body.match_indices("call i8 @thaw_js_retain_handle(")
+        .map(|(index, _)| index).collect::<Vec<_>>();
+    assert_eq!(conditions.len(), 2, "{ir}");
+    assert_eq!(retains.len(), 2, "{ir}");
+    assert_eq!(body.matches("store i8 0, ptr %value_capture_claim_cell").count(), 1, "{ir}");
+    // The first condition is false for `obj`; the second closure must still
+    // have a reachable claim block. Neither retain can precede its test.
+    assert!(zero < conditions[0] && conditions[0] < retains[0]
+        && retains[0] < conditions[1] && conditions[1] < retains[1], "{ir}");
+    assert!(compiler.uses_quickjs() && compiler.uses_quickjs_handles, "{ir}");
+}
