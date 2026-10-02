@@ -390,12 +390,33 @@ fn rewrite_static_worker_urls(
         })?;
         let worker_relative = normalize_path_string(&worker_relative.to_string_lossy());
         let worker_key = format!("{package_name}/{worker_relative}");
+        let origin_parameter = esm_origin_parameter(&worker_source);
         let worker_bootstrap = format!(
             "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\nrequire.addon = __thaw_worker_require.addon;\nvar __thaw_require = require;\n",
             js_string_literal(&worker_key)
         );
+        let worker_bootstrap = if let Some(origin) = origin_parameter {
+            format!("{worker_bootstrap}var {origin} = globalThis.__thaw_bundle_worker_origin({});\n", js_string_literal(&worker_key))
+        } else { worker_bootstrap };
         let worker_source =
             rewrite_esm_to_commonjs_mode(&worker_source, false).unwrap_or(worker_source);
+        // These bindings share the Worker source's function scope after the
+        // QuickJS host wrapper. Choose names absent from its original text.
+        let synthetic = (0..).find(|index| {
+            !worker_source.contains(&format!("__thaw_finish_worker_main_{index}"))
+                && !worker_source.contains(&format!("__thaw_worker_main_error_{index}"))
+        }).expect("unused Worker internal names exist");
+        let finish = format!("__thaw_finish_worker_main_{synthetic}");
+        let error = format!("__thaw_worker_main_error_{synthetic}");
+        let worker_bootstrap = format!(
+            "{worker_bootstrap}var {finish} = globalThis.__thaw_bundle_register_worker_main({}, module);\ndelete globalThis.__thaw_bundle_worker_origin;\ndelete globalThis.__thaw_bundle_register_worker_main;\n",
+            js_string_literal(&worker_key),
+        );
+        // The host already executes this text inside one function. A second
+        // function would alter lexical bindings and reject top-level await.
+        let worker_source = format!(
+            "try {{\n{worker_source}\n{finish}(true); }} catch ({error}) {{ {finish}(false, {error}); throw {error}; }}\n"
+        );
         let encoded = worker_bootstrap
             .bytes()
             .chain(worker_source.bytes())
