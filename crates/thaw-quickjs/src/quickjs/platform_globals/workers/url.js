@@ -20,6 +20,7 @@
         if (typeof init === 'string') {
           const source = init.charAt(0) === '?' ? init.substring(1) : init;
           if (source !== '') for (const field of source.split('&')) {
+            if (field === '') continue;
             const separator = field.indexOf('=');
             const name = separator < 0 ? field : field.substring(0, separator);
             const value = separator < 0 ? '' : field.substring(separator + 1);

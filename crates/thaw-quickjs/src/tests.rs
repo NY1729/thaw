@@ -544,6 +544,22 @@ fn message_port_transfer_detaches_the_source_port() {
 }
 
 #[test]
+fn url_search_params_skips_empty_fields_but_keeps_empty_names() {
+    assert_eq!(load(r#"function emptyQueryFields() {
+        const check = (value, expected) => { if (value !== expected) throw new Error('query field assertion'); };
+        const params = new URLSearchParams('?&&a=1&&');
+        check(params.size, 1); check(params.getAll('').length, 0); check(params.toString(), 'a=1');
+        check(new URLSearchParams('&&').size, 0);
+        const emptyNames = new URLSearchParams('&&=&=value&&');
+        check(emptyNames.size, 2); check(emptyNames.getAll('').join('|'), '|value'); check(emptyNames.toString(), '=&=value');
+        const url = new URL('https://example.test/?&&a=1&&');
+        check(url.searchParams.size, 1); url.searchParams.append('b', '2'); check(url.search, '?a=1&b=2');
+        return true;
+    }"#), 1);
+    assert_eq!(call("emptyQueryFields", "[]"), "true");
+}
+
+#[test]
 fn url_search_params_form_encoding_and_live_iteration() {
     assert_eq!(load(r#"function checkLiveParams() {
         const check = (value, expected) => { if (value !== expected) throw new Error(value + ' != ' + expected); };
