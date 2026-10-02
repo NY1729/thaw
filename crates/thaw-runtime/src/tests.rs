@@ -2620,3 +2620,132 @@ fn lambda_rejects_nul_trace_header_before_handler() {
     assert!(error.contains("invalid trace id header"), "{error}");
     server.join().unwrap();
 }
+
+// Source-only precursor coverage: the HIR accessor/cast stage is separate.
+unsafe fn promise_any_reason_at(handle: *const u8, index: usize) -> (u8, u64) {
+    let buffer = unsafe { handle.cast::<*const u8>().read_unaligned() };
+    let slot = unsafe { buffer.add(8 + 16 * index) };
+    unsafe { (slot.read(), slot.add(8).cast::<u64>().read_unaligned()) }
+}
+
+#[test]
+fn promise_any_reason_slots_keep_input_order_duplicate_positions_and_empty_array() {
+    let first = thaw_promise_new();
+    let second = thaw_promise_new();
+    let children = [first, second, first];
+    let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
+    assert_eq!(unsafe { thaw_promise_reject_typed(second, 1usize as *const u8, 3, 0.0, 0, true, std::ptr::null()) }, 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(any) }, 0);
+    assert_eq!(unsafe { thaw_promise_reject_typed(first, 1usize as *const u8, 1, 42.5, 0, false, std::ptr::null()) }, 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(any) }, 2);
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(any) };
+    assert!(!errors.is_null());
+    let buffer = unsafe { errors.cast::<*const u8>().read_unaligned() };
+    assert_eq!(unsafe { buffer.cast::<u64>().read_unaligned() }, 3);
+    assert_eq!(unsafe { promise_any_reason_at(errors, 0) }, (0, 42.5f64.to_bits()));
+    assert_eq!(unsafe { promise_any_reason_at(errors, 1) }, (2, 1));
+    assert_eq!(unsafe { promise_any_reason_at(errors, 2) }, (0, 42.5f64.to_bits()));
+    unsafe { thaw_promise_destroy(any) };
+
+    let empty = unsafe { thaw_promise_any(std::ptr::null(), 0) };
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(empty) };
+    assert!(!errors.is_null());
+    let buffer = unsafe { errors.cast::<*const u8>().read_unaligned() };
+    assert_eq!(unsafe { buffer.cast::<u64>().read_unaligned() }, 0);
+    unsafe { thaw_promise_destroy(empty) };
+}
+
+#[test]
+fn promise_any_nested_reason_and_native_text_outlive_child_handles() {
+    let leaf = thaw_promise_new();
+    let inner = unsafe { thaw_promise_any([leaf].as_ptr(), 1) };
+    let native = thaw_promise_new();
+    let outer = unsafe { thaw_promise_any([inner, native, inner].as_ptr(), 3) };
+    let text = b"temporary native failure\0".to_vec();
+    assert_eq!(unsafe { thaw_promise_reject_native_text(native, text.as_ptr()) }, 1);
+    drop(text);
+    assert_eq!(unsafe { thaw_promise_reject_typed(leaf, 1usize as *const u8, 2, 0.0, 77, false, std::ptr::null()) }, 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(outer) }, 2);
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(outer) };
+    let (first_tag, first_payload) = unsafe { promise_any_reason_at(errors, 0) };
+    let (native_tag, native_payload) = unsafe { promise_any_reason_at(errors, 1) };
+    assert_eq!(first_tag, 7);
+    assert_eq!(unsafe { promise_any_reason_at(errors, 2) }, (first_tag, first_payload));
+    let nested = unsafe { &*(first_payload as *const PromiseAnyErrorRecord) };
+    assert_eq!(unsafe { CStr::from_ptr(nested.text.cast()) }.to_bytes(), &PROMISE_ANY_REJECTED_ERROR[..PROMISE_ANY_REJECTED_ERROR.len() - 1]);
+    assert_eq!(unsafe { promise_any_reason_at(nested.errors, 0) }, (1, 77));
+    assert_eq!(native_tag, 9);
+    let native = unsafe { &*(native_payload as *const PromiseAnyErrorRecord) };
+    assert_eq!(unsafe { CStr::from_ptr(native.text.cast()) }.to_bytes(), b"temporary native failure");
+    assert!(native.errors.is_null());
+    unsafe { thaw_promise_destroy(outer) };
+}
+
+#[test]
+fn promise_any_forwarding_and_finally_keep_only_successfully_settled_metadata() {
+    let child = thaw_promise_new();
+    let aggregate = unsafe { thaw_promise_any([child].as_ptr(), 1) };
+    assert_eq!(unsafe { thaw_promise_reject_typed(child, 1usize as *const u8, 5, 0.0, 0, false, std::ptr::null()) }, 1);
+    thaw_runtime_run_until_idle();
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(aggregate) };
+    let forwarded = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_forward_rejection(forwarded, aggregate, PROMISE_ANY_REJECTED_ERROR.as_ptr()) }, 1);
+    assert_eq!(unsafe { thaw_promise_exception_aggregate_errors(forwarded) }, errors);
+    assert_eq!(unsafe { thaw_promise_forward_rejection(forwarded, aggregate, PROMISE_ANY_REJECTED_ERROR.as_ptr()) }, 0);
+    assert_eq!(unsafe { thaw_promise_exception_aggregate_errors(forwarded) }, errors);
+
+    let returned = thaw_promise_new();
+    let after_finally = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
+        after_finally, returned, PROMISE_ANY_REJECTED_ERROR.as_ptr(), 1,
+        0, 0.0, 0, false, std::ptr::null(), aggregate,
+    ) }, 1);
+    unsafe { thaw_promise_destroy(aggregate) };
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_exception_aggregate_errors(after_finally) }, errors);
+    unsafe { thaw_promise_destroy(forwarded); thaw_promise_destroy(after_finally) };
+}
+
+#[test]
+fn compiler_aggregate_rejection_abi_attaches_only_on_first_settlement() {
+    let promise = thaw_promise_new();
+    let first = 1u8;
+    let second = 2u8;
+    assert_eq!(unsafe { thaw_promise_reject_typed_with_aggregate(
+        promise, std::ptr::null(), 0, 0.0, 0, false, std::ptr::null(),
+        std::ptr::null(), &first,
+    ) }, 1);
+    assert_eq!(unsafe { thaw_promise_reject_typed_with_aggregate(
+        promise, std::ptr::null(), 0, 0.0, 0, false, std::ptr::null(),
+        std::ptr::null(), &second,
+    ) }, 0);
+    assert_eq!(unsafe { thaw_promise_exception_aggregate_errors(promise) }, &first);
+    unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
+fn promise_any_reason_slots_keep_object_pointer_null_and_opaque_separate() {
+    let object = 17u8;
+    let object_child = thaw_promise_new();
+    let null_child = thaw_promise_new();
+    let opaque_child = thaw_promise_new();
+    let children = [object_child, null_child, opaque_child];
+    let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
+    assert_eq!(unsafe { thaw_promise_reject_typed(
+        object_child, 1usize as *const u8, 0, 0.0, 0, false, &object,
+    ) }, 1);
+    assert_eq!(unsafe { thaw_promise_reject_typed(
+        null_child, 1usize as *const u8, 6, 0.0, 0, false, std::ptr::null(),
+    ) }, 1);
+    assert_eq!(thaw_promise_reject(opaque_child, 1usize as *const u8), 1);
+    thaw_runtime_run_until_idle();
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(any) };
+    assert_eq!(unsafe { promise_any_reason_at(errors, 0) }, (6, &object as *const u8 as u64));
+    assert_eq!(unsafe { promise_any_reason_at(errors, 1) }, (5, 0));
+    assert_eq!(unsafe { promise_any_reason_at(errors, 2) }, (8, 1));
+    unsafe { thaw_promise_destroy(any) };
+}

@@ -237,7 +237,7 @@ static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
 static PROMISE_ALL_INVALID_ERROR: &[u8] = b"Promise.all received an invalid promise\0";
 static PROMISE_RACE_INVALID_ERROR: &[u8] = b"Promise.race received an invalid promise\0";
 static PROMISE_CYCLE_ERROR: &[u8] = b"Chaining cycle detected for promise\0";
-static PROMISE_ANY_REJECTED_ERROR: &[u8] = b"All promises were rejected\0";
+static PROMISE_ANY_REJECTED_ERROR: &[u8] = b"\x01AggregateError\x01All promises were rejected\0";
 static PROMISE_SETTLED_FULFILLED: &[u8] = b"fulfilled\0";
 static PROMISE_SETTLED_REJECTED: &[u8] = b"rejected\0";
 static PROMISE_SETTLED_EMPTY_REASON: &[u8] = b"\0";
@@ -696,6 +696,7 @@ pub struct ThawPromise {
     exception_i64: i64,
     exception_bool: bool,
     exception_object: *const u8,
+    aggregate_errors: *const u8,
     handled: bool,
     reported_unhandled: bool,
     subscribers: Vec<PromiseSubscription>,

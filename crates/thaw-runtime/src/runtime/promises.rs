@@ -11,6 +11,7 @@ pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
         exception_i64: 0,
         exception_bool: false,
         exception_object: std::ptr::null(),
+        aggregate_errors: std::ptr::null(),
         handled: false,
         reported_unhandled: false,
         subscribers: Vec::new(),
@@ -165,6 +166,36 @@ pub unsafe extern "C" fn thaw_promise_reject_typed_with_native_text(
     settled
 }
 
+/// Compiler-only typed rejection with the Promise.any errors companion.
+/// The companion is attached only when this call actually settles `promise`;
+/// a repeated rejection cannot overwrite an earlier reason array.
+///
+/// # Safety
+///
+/// `promise` must be null or a live Promise. `native_text` must have the same
+/// provenance contract as `thaw_promise_reject_typed_with_native_text`, and
+/// `aggregate_errors` must be null or a live invocation-arena array handle.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_reject_typed_with_aggregate(
+    promise: *mut ThawPromise,
+    error: *const u8,
+    tag: u64,
+    f64_value: f64,
+    i64_value: i64,
+    bool_value: bool,
+    object: *const u8,
+    native_text: *const u8,
+    aggregate_errors: *const u8,
+) -> u8 {
+    let settled = unsafe { thaw_promise_reject_typed_with_native_text(
+        promise, error, tag, f64_value, i64_value, bool_value, object, native_text,
+    ) };
+    if settled != 0 {
+        unsafe { (*promise).aggregate_errors = aggregate_errors; }
+    }
+    settled
+}
+
 macro_rules! promise_exception_getter {
     ($name:ident, $field:ident, $ty:ty, $default:expr) => {
         #[no_mangle]
@@ -185,6 +216,12 @@ promise_exception_getter!(thaw_promise_exception_bool, exception_bool, bool, fal
 promise_exception_getter!(
     thaw_promise_exception_object,
     exception_object,
+    *const u8,
+    std::ptr::null()
+);
+promise_exception_getter!(
+    thaw_promise_exception_aggregate_errors,
+    aggregate_errors,
     *const u8,
     std::ptr::null()
 );
@@ -219,7 +256,12 @@ fn forward_promise_rejection(
         input.exception_bool,
         input.exception_object,
     ) };
-    if settled != 0 { unsafe { (*output).rejection_text = text; } }
+    if settled != 0 {
+        unsafe {
+            (*output).rejection_text = text;
+            (*output).aggregate_errors = input.aggregate_errors;
+        }
+    }
     settled
 }
 
@@ -463,6 +505,7 @@ struct PromiseFinallyAdoptState {
     original_i64: i64,
     original_bool: bool,
     original_object: *const u8,
+    original_aggregate_errors: *const u8,
     original_text: Option<Vec<u8>>,
 }
 
@@ -480,7 +523,12 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
             state.original_bool,
             state.original_object,
         ) };
-        if settled != 0 { unsafe { (*state.output).rejection_text = state.original_text.clone(); } }
+        if settled != 0 {
+            unsafe {
+                (*state.output).rejection_text = state.original_text.clone();
+                (*state.output).aggregate_errors = state.original_aggregate_errors;
+            }
+        }
     } else {
         thaw_promise_resolve(state.output, state.original);
     }
@@ -552,6 +600,8 @@ fn finally_adopt_with_source(
         original_i64,
         original_bool,
         original_object,
+        original_aggregate_errors: unsafe { source.as_ref() }
+            .map_or(std::ptr::null(), |source| source.aggregate_errors),
         original_text: unsafe { source.as_ref() }.and_then(|source| source.rejection_text.clone()),
     }));
     thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast());
@@ -837,38 +887,128 @@ pub unsafe extern "C" fn thaw_promise_race(
     output
 }
 
+// The private 16-byte reason slot uses the same {i8 tag, i64 payload}
+// storage as a compiler Union. Tags: 0 number, 1 bigint, 2 boolean,
+// 3 string, 4 undefined, 5 null, 6 native object pointer, 7 nested
+// AggregateError record, 8 opaque pointer, 9 native error-text record.
+// This precursor exposes it only through the Promise-owned aggregate handle;
+// HIR consumers are a separate unit.
+#[derive(Clone, Copy)]
+struct PromiseAnyReason {
+    tag: u8,
+    payload: u64,
+}
+
+#[repr(C)]
+struct PromiseAnyErrorRecord {
+    text: *const u8,
+    errors: *const u8,
+    object: *const u8,
+}
+
+// Snapshot while the child Promise is still live. Native-owned text is copied
+// into the invocation arena; arbitrary opaque rejection pointers are stored
+// as opaque bits and are never dereferenced here.
+fn promise_any_reason(promise: &ThawPromise, result: *const u8) -> Option<PromiseAnyReason> {
+    if !promise.aggregate_errors.is_null()
+        || (promise.exception_tag == 0 && promise.exception_object.is_null()
+            && promise.rejection_text.is_some())
+    {
+        let text = promise.rejection_text.as_deref()?;
+        let text = thaw_arena::arena_string(text).cast::<u8>();
+        if text.is_null() { return None; }
+        let record = thaw_arena::thaw_arena_alloc(
+            size_of::<PromiseAnyErrorRecord>(), align_of::<PromiseAnyErrorRecord>(),
+        ).cast::<PromiseAnyErrorRecord>();
+        if record.is_null() { return None; }
+        unsafe { record.write(PromiseAnyErrorRecord {
+            text, errors: promise.aggregate_errors, object: promise.exception_object,
+        }); }
+        return Some(PromiseAnyReason {
+            tag: if promise.aggregate_errors.is_null() { 9 } else { 7 },
+            payload: record as u64,
+        });
+    }
+    let (tag, payload) = match promise.exception_tag {
+        1 => (0, promise.exception_f64.to_bits()),
+        2 => (1, promise.exception_i64 as u64),
+        3 => (2, u64::from(promise.exception_bool)),
+        4 => {
+            let text = match promise.rejection_text.as_deref() {
+                Some(bytes) => thaw_arena::arena_string(bytes).cast::<u8>(),
+                None => result,
+            };
+            if text.is_null() { return None; }
+            (3, text as u64)
+        }
+        5 => (4, 0),
+        6 => (5, 0), // Explicit null tag is supplied by the HIR stage.
+        0 if !promise.exception_object.is_null() => (6, promise.exception_object as u64),
+        _ => (8, result as u64), // Opaque: no text/object dereference.
+    };
+    Some(PromiseAnyReason { tag, payload })
+}
+
+fn promise_any_errors(reasons: &[Option<PromiseAnyReason>]) -> *const u8 {
+    let Some(bytes) = reasons.len().checked_mul(16).and_then(|n| n.checked_add(8)) else {
+        return std::ptr::null();
+    };
+    let buffer = thaw_arena::thaw_arena_alloc(bytes, 8);
+    if buffer.is_null() { return std::ptr::null(); }
+    unsafe { buffer.cast::<u64>().write(reasons.len() as u64) };
+    for (index, reason) in reasons.iter().enumerate() {
+        let Some(reason) = reason else { return std::ptr::null(); };
+        let slot = unsafe { buffer.add(8 + index * 16) };
+        unsafe {
+            slot.write(reason.tag);
+            slot.add(8).cast::<u64>().write_unaligned(reason.payload);
+        }
+    }
+    wrap_array_handle(buffer).cast()
+}
+
 struct PromiseAnyState {
     output: *mut ThawPromise,
     remaining: usize,
     fulfilled: bool,
+    reasons: Vec<Option<PromiseAnyReason>>,
 }
 
 struct PromiseAnyChild {
     state: *mut PromiseAnyState,
     promise: *mut ThawPromise,
+    indices: Vec<usize>,
 }
 
 extern "C" fn resume_promise_any_child(frame: *mut u8, result: *const u8) {
     let child = unsafe { Box::from_raw(frame.cast::<PromiseAnyChild>()) };
     let state = unsafe { &mut *child.state };
-    if !state.fulfilled && unsafe { thaw_promise_state(child.promise) } == 1 {
-        state.fulfilled = true;
-        thaw_promise_resolve(state.output, result);
+    if !state.fulfilled {
+        if unsafe { thaw_promise_state(child.promise) } == 1 {
+            state.fulfilled = true;
+            thaw_promise_resolve(state.output, result);
+        } else {
+            let reason = promise_any_reason(unsafe { &*child.promise }, result);
+            for index in &child.indices { state.reasons[*index] = reason; }
+        }
     }
     unsafe { thaw_promise_destroy(child.promise) };
     state.remaining -= 1;
     if state.remaining == 0 {
         if !state.fulfilled {
-            reject_native_text(state.output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
+            let errors = promise_any_errors(&state.reasons);
+            if reject_native_text(state.output, PROMISE_ANY_REJECTED_ERROR.as_ptr()) != 0 {
+                unsafe { (*state.output).aggregate_errors = errors; }
+            }
         }
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
         unsafe { drop(Box::from_raw(child.state)) };
     }
 }
 
-/// Resolves with the first fulfilled input Promise. Rejections are ignored
-/// until every distinct input has rejected, at which point an aggregate error
-/// message is used to reject the output. Slower children are still drained.
+/// Resolves with the first fulfilled input Promise. Every rejected input
+/// position keeps its own reason, even when one Promise handle occurs twice.
+/// Slower children are still drained.
 ///
 /// # Safety
 ///
@@ -880,29 +1020,40 @@ pub unsafe extern "C" fn thaw_promise_any(
     len: usize,
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
-    if len == 0 || promises.is_null() {
+    if len == 0 {
+        let errors = promise_any_errors(&[]);
+        if reject_native_text(output, PROMISE_ANY_REJECTED_ERROR.as_ptr()) != 0 {
+            unsafe { (*output).aggregate_errors = errors; }
+        }
+        return output;
+    }
+    if promises.is_null() {
         reject_native_text(output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
         return output;
     }
-    let mut unique = Vec::<*mut ThawPromise>::new();
+    let mut grouped = Vec::<(*mut ThawPromise, Vec<usize>)>::new();
     for index in 0..len {
         let promise = unsafe { *promises.add(index) };
-        if !promise.is_null() && !unique.contains(&promise) {
-            unique.push(promise);
+        if promise.is_null() { continue; }
+        if let Some((_, indices)) = grouped.iter_mut().find(|(existing, _)| *existing == promise) {
+            indices.push(index);
+        } else {
+            grouped.push((promise, vec![index]));
         }
     }
-    if unique.is_empty() {
+    if grouped.is_empty() {
         reject_native_text(output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
         return output;
     }
     let state = Box::into_raw(Box::new(PromiseAnyState {
         output,
-        remaining: unique.len(),
+        remaining: grouped.len(),
         fulfilled: false,
+        reasons: vec![None; len],
     }));
     ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
-    for promise in unique {
-        let child = Box::into_raw(Box::new(PromiseAnyChild { state, promise }));
+    for (promise, indices) in grouped {
+        let child = Box::into_raw(Box::new(PromiseAnyChild { state, promise, indices }));
         unsafe { thaw_promise_subscribe(promise, resume_promise_any_child, child.cast()) };
     }
     output
