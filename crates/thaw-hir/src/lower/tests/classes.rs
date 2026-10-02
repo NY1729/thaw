@@ -1873,3 +1873,137 @@ fn generic_type_substitution_respects_nested_type_binders_and_conditional_arms()
     assert_eq!(references["SignatureShape"], ["T", "T", "T", "T", "T", "T"]);
     assert_eq!(references["InterfaceShape"], ["T"]);
 }
+
+#[test]
+fn generic_static_and_instance_methods_keep_separate_templates_in_both_orders() {
+    for methods in [
+        "static convert<T>(value: T): string { return 'static'; } convert<T>(value: T): T { return value; }",
+        "convert<T>(value: T): T { return value; } static convert<T>(value: T): string { return 'static'; }",
+    ] {
+        let source = format!(r#"
+            class Box {{ {methods} }}
+            function main(): void {{
+                const box = new Box();
+                const text: string = Box.convert<number>(4);
+                const value: number = box.convert<number>(4);
+                const inferredText: string = Box.convert(5);
+                const inferredValue: number = box.convert(5);
+                console.log(text, value, inferredText, inferredValue);
+            }}
+        "#);
+        let program = lower(&source);
+        for symbol in [
+            class_static_method_symbol("Box", "convert__thaw_f64"),
+            class_method_symbol("Box", "convert__thaw_f64"),
+        ] {
+            assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
+        }
+    }
+}
+
+#[test]
+fn specializes_generic_static_and_instance_method_instantiations() {
+    let program = lower(r#"
+        class Source {
+            static convert<T>(value: T): string { return "static"; }
+            convert<T>(value: T): T { return value; }
+        }
+        function main(): void {
+            const source = new Source();
+            const staticMethod = Source.convert<number>;
+            const instanceMethod = source.convert<number>;
+            const text: string = staticMethod(4);
+            const number: number = instanceMethod(4);
+            console.log(text, number);
+        }
+    "#);
+    for symbol in [
+        class_static_method_symbol("Source", "convert__thaw_f64"),
+        class_method_symbol("Source", "convert__thaw_f64"),
+    ] {
+        assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
+    }
+}
+
+#[test]
+fn specializes_inherited_generic_methods_by_this_and_super_receiver_kind() {
+    let program = lower(r#"
+        class Base {
+            static convert<T>(value: T): string { return "static"; }
+            convert<T>(value: T): T { return value; }
+        }
+        class Derived extends Base {
+            static fromThis(): string { return this.convert<number>(1); }
+            fromThis(): number { return this.convert<number>(2); }
+            static fromSuper(): string { return super.convert<number>(3); }
+            fromSuper(): number { return super.convert<number>(4); }
+        }
+        function main(): void {
+            const derived = new Derived();
+            console.log(Derived.fromThis(), derived.fromThis(), Derived.fromSuper(), derived.fromSuper());
+        }
+    "#);
+    for symbol in [
+        class_static_method_symbol("Base", "convert__thaw_f64"),
+        class_method_symbol("Base", "convert__thaw_f64"),
+    ] {
+        assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
+    }
+}
+
+#[test]
+fn generic_method_collection_respects_class_name_shadowing() {
+    let program = lower(r#"
+        class Source {
+            static convert<T>(value: T): string { return "static"; }
+            convert<T>(value: T): T { return value; }
+        }
+        class Other { convert<T>(value: T): T { return value; } }
+        function shadow(Source: Other): number { return Source.convert<number>(7); }
+        function main(): void {
+            const source = new Source();
+            console.log(Source.convert<number>(1), source.convert<number>(2), shadow(new Other()));
+        }
+    "#);
+    for symbol in [
+        class_static_method_symbol("Source", "convert__thaw_f64"),
+        class_method_symbol("Source", "convert__thaw_f64"),
+        class_method_symbol("Other", "convert__thaw_f64"),
+    ] {
+        assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
+    }
+}
+
+#[test]
+fn shadowed_class_name_keeps_instance_generic_method_call_apply_bind_and_saved_this() {
+    let program = lower(r#"
+        class Box {
+            value: number = 1;
+            static value: number = 10;
+            static convert<T>(item: T): T { this.value; return item; }
+            convert<T>(item: T): T { this.value; return item; }
+        }
+        function shadow(Box: Box): number {
+            const args: [number] = [2];
+            const direct: number = Box.convert<number>.call(Box, 2);
+            const applied: number = Box.convert<number>.apply(Box, args);
+            const bound = Box.convert<number>.bind(Box, 3);
+            const saved = Box.convert<number>;
+            const stored: number = saved.call(Box, 4);
+            return direct + applied + bound() + stored;
+        }
+        function main(): void {
+            console.log(Box.convert<number>(1), shadow(new Box()));
+        }
+    "#);
+    let shadow = program.functions.iter().find(|function| function.name == "shadow").unwrap();
+    let body = format!("{:?}", shadow.body);
+    assert!(body.contains(&class_method_symbol("Box", "convert__thaw_f64")), "{body}");
+    assert!(!body.contains(&class_static_method_symbol("Box", "convert__thaw_f64")), "{body}");
+    for symbol in [
+        class_method_symbol("Box", "convert__thaw_f64"),
+        class_static_method_symbol("Box", "convert__thaw_f64"),
+    ] {
+        assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
+    }
+}

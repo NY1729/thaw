@@ -1,4 +1,8 @@
 impl<'a> FnLowerer<'a> {
+    fn is_unshadowed_class_identifier(&self, class: &str) -> bool {
+        !self.scope.contains_key(&self.resolve_binding(class))
+    }
+
     fn lower_this_parameter_call_or_apply(
         &mut self,
         call: &CallExpr,
@@ -229,8 +233,10 @@ impl<'a> FnLowerer<'a> {
                         let method = member_property_name(&member.prop)?;
                         if let Expr::Ident(class) = member.obj.as_ref() {
                             let symbol = class_static_method_symbol(class.sym.as_ref(), &method);
-                            if let Some(signature) = self.signatures.get(&symbol) {
-                                return Some(signature.ret.clone());
+                            if self.is_unshadowed_class_identifier(class.sym.as_ref()) {
+                                if let Some(signature) = self.signatures.get(&symbol) {
+                                    return Some(signature.ret.clone());
+                                }
                             }
                         }
                         let receiver = self.native_class_expression_type(&member.obj)?;
@@ -401,6 +407,9 @@ impl<'a> FnLowerer<'a> {
         let Some(method_name) = member_property_name(&method.prop) else {
             return Ok(None);
         };
+        if !self.is_unshadowed_class_identifier(class.sym.as_ref()) {
+            return Ok(None);
+        }
         let symbol = class_static_method_symbol(class.sym.as_ref(), &method_name);
         let Some(signature) = self.signatures.get(&symbol).cloned() else {
             return Ok(None);
@@ -493,7 +502,8 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<Option<HirExpr>, String> {
         if let Expr::Ident(class) = member.obj.as_ref() {
             let symbol = class_static_method_symbol(class.sym.as_ref(), method_name);
-            if let Some(signature) = self.signatures.get(&symbol) {
+            if let Some(signature) = self.signatures.get(&symbol)
+                .filter(|_| self.is_unshadowed_class_identifier(class.sym.as_ref())) {
                 if signature.uses_this {
                     let result =
                         if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
@@ -603,10 +613,9 @@ impl<'a> FnLowerer<'a> {
         let method = member_property_name(&member.prop)?;
         if let Expr::Ident(class) = member.obj.as_ref() {
             let symbol = class_static_method_symbol(class.sym.as_ref(), &method);
-            if self
-                .signatures
-                .get(&symbol)
-                .is_some_and(|signature| signature.uses_this)
+            if self.is_unshadowed_class_identifier(class.sym.as_ref())
+                && self.signatures.get(&symbol)
+                    .is_some_and(|signature| signature.uses_this)
             {
                 return Some(NativeMethodValue {
                     symbol,
@@ -1315,6 +1324,9 @@ impl<'a> FnLowerer<'a> {
         let Some(method_name) = member_property_name(&method.prop) else {
             return Ok(None);
         };
+        if !self.is_unshadowed_class_identifier(class.sym.as_ref()) {
+            return Ok(None);
+        }
         let symbol = class_static_method_symbol(class.sym.as_ref(), &method_name);
         if !self.signatures.contains_key(&symbol) {
             return Ok(None);
