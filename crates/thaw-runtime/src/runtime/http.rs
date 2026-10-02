@@ -44,9 +44,13 @@ fn parse_http_url(url: &str) -> Result<(bool, String, u16, String), String> {
     } else {
         return Err("async fetch URL must use http:// or https://".to_string());
     };
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, path)) => (authority, format!("/{path}")),
-        None => (rest, "/".to_string()),
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let suffix = &rest[authority_end..];
+    let path = if suffix.starts_with('/') {
+        suffix.to_string()
+    } else {
+        format!("/{suffix}")
     };
     if authority.is_empty() {
         return Err("HTTP URL is missing a host".to_string());
@@ -77,7 +81,7 @@ fn parse_http_url(url: &str) -> Result<(bool, String, u16, String), String> {
         .split_once('#')
         .map(|(path, _)| path.to_string())
         .unwrap_or(path);
-    Ok((tls, host, port, path))
+    Ok((tls, host, port, normalize_http_path(&path)))
 }
 
 fn tls_client_config() -> Arc<ClientConfig> {
@@ -325,43 +329,67 @@ fn http_authority(use_tls: bool, host: &str, port: u16) -> String {
 }
 
 fn normalize_http_path(path: &str) -> String {
-    let (path, suffix) = path
+    let (mut input, suffix) = path
         .find(['?', '#'])
         .map(|index| (&path[..index], &path[index..]))
         .unwrap_or((path, ""));
-    let mut parts = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
+    let mut output = String::new();
+    while !input.is_empty() {
+        if let Some(rest) = input.strip_prefix("../").or_else(|| input.strip_prefix("./")) {
+            input = rest;
+        } else if input.starts_with("/./") || input == "/." {
+            input = &input[2..];
+            if input.is_empty() {
+                input = "/";
             }
-            part => parts.push(part),
+        } else if input.starts_with("/../") || input == "/.." {
+            input = &input[3..];
+            if input.is_empty() {
+                input = "/";
+            }
+            output.truncate(output.rfind('/').unwrap_or(0));
+        } else if input == "." || input == ".." {
+            input = "";
+        } else {
+            let end = if let Some(rest) = input.strip_prefix('/') {
+                rest.find('/').map(|index| index + 1).unwrap_or(input.len())
+            } else {
+                input.find('/').unwrap_or(input.len())
+            };
+            output.push_str(&input[..end]);
+            input = &input[end..];
         }
     }
-    format!("/{}{suffix}", parts.join("/"))
+    format!("{output}{suffix}")
 }
 
-fn redirect_url(task: &AsyncHttpGet, location: &str) -> Result<String, String> {
+fn redirect_url(
+    use_tls: bool,
+    host: &str,
+    port: u16,
+    current_path: &str,
+    location: &str,
+) -> Result<String, String> {
     if location.starts_with("http://") || location.starts_with("https://") {
         return Ok(location.to_string());
     }
-    let scheme = if task.use_tls { "https" } else { "http" };
+    let scheme = if use_tls { "https" } else { "http" };
     if location.starts_with("//") {
         return Ok(format!("{scheme}:{location}"));
     }
-    let authority = http_authority(task.use_tls, &task.host, task.port);
+    let authority = http_authority(use_tls, host, port);
+    let path_without_query = current_path.split('?').next().unwrap_or(current_path);
     let path = if location.starts_with('/') {
         normalize_http_path(location)
-    } else if location.starts_with('?') || location.starts_with('#') {
-        let base = task
-            .path
-            .find(['?', '#'])
-            .map(|index| &task.path[..index])
-            .unwrap_or(&task.path);
-        format!("{base}{location}")
+    } else if location.starts_with('?') {
+        format!("{path_without_query}{location}")
+    } else if location.starts_with('#') || location.is_empty() {
+        format!("{current_path}{location}")
     } else {
-        let directory = task.path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        let directory = path_without_query
+            .rsplit_once('/')
+            .map(|(dir, _)| dir)
+            .unwrap_or("");
         normalize_http_path(&format!("{directory}/{location}"))
     };
     Ok(format!("{scheme}://{authority}{path}"))
@@ -372,7 +400,13 @@ fn restart_async_http(task: *mut AsyncHttpGet, location: &str) -> Result<(), Str
     if task_ref.redirects >= 10 {
         return Err("HTTP redirect limit exceeded (10)".to_string());
     }
-    let target = redirect_url(task_ref, location)?;
+    let target = redirect_url(
+        task_ref.use_tls,
+        &task_ref.host,
+        task_ref.port,
+        &task_ref.path,
+        location,
+    )?;
     let (use_tls, host, port, path) = parse_http_url(&target)?;
     let tls = if use_tls {
         let server_name = ServerName::try_from(host.clone())
