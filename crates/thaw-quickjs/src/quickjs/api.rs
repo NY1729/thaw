@@ -214,51 +214,85 @@ pub extern "C" fn thaw_js_run_cli() -> i32 {
     }
 }
 
-/// Emits a compiled uncaught exception through Node's process event surface.
-#[no_mangle]
-pub extern "C" fn thaw_js_emit_uncaught(message: *const c_char) -> u8 {
-    if message.is_null() {
-        return 0;
+fn process_emit_result(ctx: &Ctx<'_>, result: rquickjs::Result<bool>) -> ThawHandleResult {
+    match result {
+        Ok(handled) => ThawHandleResult { value: u64::from(handled), error: std::ptr::null() },
+        Err(error) => {
+            let error = match error {
+                rquickjs::Error::Exception => describe_tagged_exception(ctx),
+                other => other.to_string(),
+            };
+            ThawHandleResult {
+                value: 0,
+                error: thaw_arena::owned_string(error),
+            }
+        }
     }
-    let raw = to_str(message);
-    let (name, message) = tagged_error_parts(&raw);
-    let name = json_escape_string(name);
-    let message = json_escape_string(message);
-    with_active_or_context(|ctx| {
-        ctx.eval::<bool, _>(format!(
-            "typeof process !== 'undefined' && (() => {{ const error = new Error({message}); error.name = {name}; process.emit('uncaughtExceptionMonitor', error, 'uncaughtException'); return process.emit('uncaughtException', error, 'uncaughtException'); }})()"
-        ))
-        .unwrap_or(false) as u8
-    })
 }
 
-/// Emits a native Promise rejection through Node's process event surface.
+fn legacy_process_emit(result: ThawHandleResult) -> u8 {
+    // Legacy public exports keep their historical scalar ABI. Internal callers
+    // use the result variants so they can report a thrown listener separately.
+    if !result.error.is_null() {
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+    }
+    result.value as u8
+}
+
+/// Emits a compiled uncaught exception and preserves a thrown JS listener.
 #[no_mangle]
-pub extern "C" fn thaw_js_emit_unhandled_rejection(message: *const c_char) -> u8 {
+pub extern "C" fn thaw_js_emit_uncaught_result(message: *const c_char) -> ThawHandleResult {
     if message.is_null() {
-        return 0;
+        return ThawHandleResult { value: 0, error: std::ptr::null() };
     }
     let raw = to_str(message);
     let (name, message) = tagged_error_parts(&raw);
     let name = json_escape_string(name);
     let message = json_escape_string(message);
-    with_active_or_context(|ctx| {
-        ctx.eval::<bool, _>(format!(
-            "typeof process !== 'undefined' && (() => {{ const error = new Error({message}); error.name = {name}; return process.emit('unhandledRejection', error, undefined); }})()"
-        ))
-        .unwrap_or(false) as u8
-    })
+    with_active_or_context(|ctx| process_emit_result(&ctx, ctx.eval::<bool, _>(format!(
+        "typeof process !== 'undefined' && (() => {{ const error = new Error({message}); error.name = {name}; process.emit('uncaughtExceptionMonitor', error, 'uncaughtException'); return process.emit('uncaughtException', error, 'uncaughtException'); }})()"
+    ))))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_emit_uncaught(message: *const c_char) -> u8 {
+    legacy_process_emit(thaw_js_emit_uncaught_result(message))
+}
+
+/// Emits a native Promise rejection and preserves a thrown JS listener.
+#[no_mangle]
+pub extern "C" fn thaw_js_emit_unhandled_rejection_result(message: *const c_char) -> ThawHandleResult {
+    if message.is_null() {
+        return ThawHandleResult { value: 0, error: std::ptr::null() };
+    }
+    let raw = to_str(message);
+    let (name, message) = tagged_error_parts(&raw);
+    let name = json_escape_string(name);
+    let message = json_escape_string(message);
+    with_active_or_context(|ctx| process_emit_result(&ctx, ctx.eval::<bool, _>(format!(
+        "typeof process !== 'undefined' && (() => {{ const error = new Error({message}); error.name = {name}; return process.emit('unhandledRejection', error, undefined); }})()"
+    ))))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_emit_unhandled_rejection(message: *const c_char) -> u8 {
+    legacy_process_emit(thaw_js_emit_unhandled_rejection_result(message))
 }
 
 /// Emits Node's notification that a previously-unhandled Promise gained a handler.
 #[no_mangle]
-pub extern "C" fn thaw_js_emit_rejection_handled() {
+pub extern "C" fn thaw_js_emit_rejection_handled_result() -> ThawHandleResult {
     with_active_or_context(|ctx| {
         // ponytail: the Promise argument stays undefined until native Promises have JS wrappers.
-        let _ = ctx.eval::<bool, _>(
+        process_emit_result(&ctx, ctx.eval::<bool, _>(
             "typeof process !== 'undefined' && process.emit('rejectionHandled', undefined)",
-        );
-    });
+        ))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_emit_rejection_handled() {
+    let _ = legacy_process_emit(thaw_js_emit_rejection_handled_result());
 }
 
 fn tagged_error_parts(raw: &str) -> (&str, &str) {

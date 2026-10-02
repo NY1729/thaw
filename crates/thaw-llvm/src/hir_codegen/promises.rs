@@ -494,10 +494,11 @@ impl<'ctx> HirCompiler<'ctx> {
                         .into(),
                 );
             }
+            args.push(source.into());
             self.builder
                 .build_call(
                     self.module
-                        .get_function("thaw_promise_finally_adopt")
+                        .get_function("thaw_promise_finally_adopt_with_source")
                         .unwrap(),
                     &args,
                     "wait_finally_promise",
@@ -1198,6 +1199,20 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), result)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        let native_text = self.builder.build_call(
+            self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+            &[promise.into()], "blocking_await_native_text",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native text copy returned no value")?.into_pointer_value();
+        let has_native_text = self.builder.build_is_not_null(native_text, "blocking_await_native_text_present")
+            .map_err(|error| error.to_string())?;
+        let pending_value = self.builder.build_select(
+            has_native_text, native_text, result, "blocking_await_native_text_pending",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), pending_value)
+            .map_err(|error| error.to_string())?;
+        self.mark_pending_native_text(native_text)?;
         let default = llvm_type.const_zero();
         self.builder
             .build_unconditional_branch(merge)
@@ -1282,6 +1297,20 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), result)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        let native_text = self.builder.build_call(
+            self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+            &[promise.into()], "blocking_await_void_native_text",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native text copy returned no value")?.into_pointer_value();
+        let has_native_text = self.builder.build_is_not_null(native_text, "blocking_await_void_native_text_present")
+            .map_err(|error| error.to_string())?;
+        let pending_value = self.builder.build_select(
+            has_native_text, native_text, result, "blocking_await_void_native_text_pending",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), pending_value)
+            .map_err(|error| error.to_string())?;
+        self.mark_pending_native_text(native_text)?;
         self.builder
             .build_unconditional_branch(merge)
             .map_err(|error| error.to_string())?;

@@ -5503,3 +5503,42 @@ fn dynamic_reflect_predicates_preserve_thrown_error_class() {
     }
     assert_eq!(thaw_js_release_handle(handle), 1);
 }
+
+#[test]
+fn process_report_result_preserves_listener_error_and_ordered_event_identity() {
+    assert_eq!(load("process.on('uncaughtException', globalThis.__thawTestUncaught = function() { const e = new TypeError('listener'); e.code = 'E_LISTENER'; throw e; }); process.on('unhandledRejection', globalThis.__thawTestRejection = function() { throw new RangeError('rejection listener'); }); process.on('rejectionHandled', globalThis.__thawTestHandled = function() { throw new Error('handled listener'); });"), 1);
+    let uncaught = thaw_js_emit_uncaught_result(c"original".as_ptr());
+    assert_eq!(uncaught.value, 0);
+    assert!(!uncaught.error.is_null());
+    let error = unsafe { CStr::from_ptr(uncaught.error) }.to_string_lossy();
+    assert!(error.starts_with("\u{1}TypeError\u{1}listener"), "{error}");
+    assert!(error.contains("E_LISTENER"), "{error}");
+    unsafe { thaw_arena::destroy_string(uncaught.error.cast_mut()) };
+
+    let rejection = thaw_js_emit_unhandled_rejection_result(c"original rejection".as_ptr());
+    assert_eq!(rejection.value, 0);
+    assert!(!rejection.error.is_null());
+    let error = unsafe { CStr::from_ptr(rejection.error) }.to_string_lossy();
+    assert!(error.starts_with("\u{1}RangeError\u{1}rejection listener"), "{error}");
+    unsafe { thaw_arena::destroy_string(rejection.error.cast_mut()) };
+
+    let handled = thaw_js_emit_rejection_handled_result();
+    assert!(!handled.error.is_null());
+    let error = unsafe { CStr::from_ptr(handled.error) }.to_string_lossy();
+    assert!(error.contains("handled listener"), "{error}");
+    unsafe { thaw_arena::destroy_string(handled.error.cast_mut()) };
+    assert_eq!(load("process.off('uncaughtException', globalThis.__thawTestUncaught); process.off('unhandledRejection', globalThis.__thawTestRejection); process.off('rejectionHandled', globalThis.__thawTestHandled); delete globalThis.__thawTestUncaught; delete globalThis.__thawTestRejection; delete globalThis.__thawTestHandled;"), 1);
+}
+
+#[test]
+fn process_report_result_keeps_embedded_nul_from_thrown_listener() {
+    assert_eq!(load("process.on('unhandledRejection', globalThis.__thawNulListener = () => { const error = new TypeError('left\\u0000right'); error.code = 'ERR_NUL'; throw error; });"), 1);
+    let result = thaw_js_emit_unhandled_rejection_result(c"original".as_ptr());
+    assert!(!result.error.is_null());
+    let bytes = unsafe { CStr::from_ptr(result.error) }.to_bytes();
+    assert!(bytes.starts_with(b"\x01TypeError\x01"), "{bytes:?}");
+    assert!(bytes.windows(b"left\0right".len()).any(|part| part == b"left\0right"), "{bytes:?}");
+    assert!(bytes.windows(b"ERR_NUL".len()).any(|part| part == b"ERR_NUL"), "{bytes:?}");
+    unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+    assert_eq!(load("process.off('unhandledRejection', globalThis.__thawNulListener); delete globalThis.__thawNulListener;"), 1);
+}

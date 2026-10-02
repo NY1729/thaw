@@ -930,6 +930,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .as_pointer_value();
                 self.builder.build_store(self.pending_exception().as_pointer_value(), error)
                     .map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
+                self.mark_pending_native_text(error)?;
                 self.builder.build_unconditional_branch(continue_bb)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(continue_bb);
@@ -1362,6 +1364,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_is_not_null(value, "exception_object_present")
                     .map(Into::into)
                     .map_err(|error| error.to_string());
+            }
+            "__thaw_pending_exception_native_text" => {
+                return self.builder.build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    self.pending_exception_native_text().as_pointer_value(),
+                    "pending_exception_native_text",
+                ).map_err(|error| error.to_string());
             }
             "__thaw_pending_exception_tag"
             | "__thaw_pending_exception_f64"

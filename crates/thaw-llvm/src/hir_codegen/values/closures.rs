@@ -174,6 +174,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| format!("async lambda `{name}`: {error}"))?;
 
         let saved_variables = std::mem::take(&mut self.variables);
+        let saved_catch_native_text = std::mem::take(&mut self.catch_native_text);
         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
         let saved_arena_variables = std::mem::take(&mut self.arena_variables);
         let saved_catch_stack = std::mem::take(&mut self.catch_stack);
@@ -181,6 +182,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let saved_async_completion = self.active_async_completion.take();
         let compiled = self.compile_function_body(&lifted);
         self.variables = saved_variables;
+        self.catch_native_text = saved_catch_native_text;
         self.variable_hir_types = saved_variable_hir_types;
         self.arena_variables = saved_arena_variables;
         self.catch_stack = saved_catch_stack;
@@ -820,6 +822,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .collect::<HashSet<_>>();
 
         let saved_variables = std::mem::take(&mut self.variables);
+        let saved_catch_native_text = std::mem::take(&mut self.catch_native_text);
         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
         let saved_arena_variables = std::mem::replace(&mut self.arena_variables, arena_captures);
         let saved_catch_stack = std::mem::take(&mut self.catch_stack);
@@ -907,6 +910,7 @@ impl<'ctx> HirCompiler<'ctx> {
             Ok(())
         })();
         self.variables = saved_variables;
+        self.catch_native_text = saved_catch_native_text;
         self.variable_hir_types = saved_variable_hir_types;
         self.arena_variables = saved_arena_variables;
         self.catch_stack = saved_catch_stack;

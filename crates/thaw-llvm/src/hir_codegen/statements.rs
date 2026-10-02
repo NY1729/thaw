@@ -196,6 +196,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(self.pending_exception().as_pointer_value(), val)
                     .map_err(|e| e.to_string())?;
+                self.clear_pending_native_text()?;
+                if let HirExpr::Var(name) = expr {
+                    if let Some((catch_slot, native_slot)) = self.catch_native_text.get(name) {
+                        if self.variables.get(name).map(|(slot, _)| slot) == Some(catch_slot) {
+                            let provenance = self.builder.build_load(
+                                self.context.ptr_type(AddressSpace::default()), *native_slot,
+                                "rethrown_native_text_provenance",
+                            ).map_err(|error| error.to_string())?;
+                            self.mark_pending_native_text(provenance)?;
+                        }
+                    }
+                }
                 if let Some(catch_bb) = self.catch_stack.last().copied() {
                     self.builder
                         .build_unconditional_branch(catch_bb)
@@ -230,10 +242,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         let variables_before_branches = self.variables.clone();
+        let native_text_before_branches = self.catch_native_text.clone();
         let arena_variables_before_branches = self.arena_variables.clone();
         self.builder.position_at_end(then_bb);
         let then_terminated = self.compile_block(then_branch)?;
         let then_variables = self.variables.clone();
+        let then_native_text = self.catch_native_text.clone();
         let then_arena_variables = self.arena_variables.clone();
         if !then_terminated {
             self.builder
@@ -241,6 +255,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
         } else {
             self.variables = variables_before_branches.clone();
+            self.catch_native_text = native_text_before_branches.clone();
             self.arena_variables = arena_variables_before_branches.clone();
         }
 
@@ -252,6 +267,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
         } else if !then_terminated {
             self.variables = then_variables;
+            self.catch_native_text = then_native_text;
             self.arena_variables = then_arena_variables;
         }
 
@@ -311,6 +327,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         let variables_before_body = self.variables.clone();
+        let native_text_before_body = self.catch_native_text.clone();
         let variable_types_before_body = self.variable_hir_types.clone();
         let arena_variables_before_body = self.arena_variables.clone();
         self.builder.position_at_end(body_bb);
@@ -328,6 +345,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         let body_variables = std::mem::replace(&mut self.variables, variables_before_body.clone());
+        self.catch_native_text = native_text_before_body;
         let body_arena_variables =
             std::mem::replace(&mut self.arena_variables, arena_variables_before_body);
         self.variable_hir_types = variable_types_before_body;
@@ -409,12 +427,24 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(catch_slot, thrown)
             .map_err(|e| e.to_string())?;
+        let native_text_slot = self.builder.build_alloca(str_ty, "catch_native_text_slot")
+            .map_err(|e| e.to_string())?;
+        let native_text = self.builder.build_load(
+            ptr_ty, self.pending_exception_native_text().as_pointer_value(),
+            "caught_native_text_provenance",
+        ).map_err(|e| e.to_string())?;
+        self.builder.build_store(native_text_slot, native_text)
+            .map_err(|e| e.to_string())?;
+        let previous_native_text = self.catch_native_text.insert(
+            catch_name.to_string(), (catch_slot, native_text_slot),
+        );
         self.builder
             .build_store(
                 self.pending_exception().as_pointer_value(),
                 ptr_ty.const_null(),
             )
             .map_err(|e| e.to_string())?;
+        self.clear_pending_native_text()?;
         // Companion to `catch_slot` for the parallel object channel (see
         // `docs/design/exceptions.md` section 3): always captured and
         // cleared alongside the string, even though it is usually null
@@ -505,6 +535,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .insert(hidden_tag.to_string(), (catch_slot, str_ty));
         }
         let catch_terminated = self.compile_block(catch_body)?;
+        if let Some(previous) = previous_native_text {
+            self.catch_native_text.insert(catch_name.to_string(), previous);
+        } else {
+            self.catch_native_text.remove(catch_name);
+        }
         if !catch_terminated {
             self.builder
                 .build_unconditional_branch(merge_bb)

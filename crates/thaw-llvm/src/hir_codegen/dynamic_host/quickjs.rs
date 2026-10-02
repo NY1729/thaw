@@ -72,6 +72,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         let json = self
             .builder
@@ -391,6 +393,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(value)
     }
@@ -476,6 +480,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(value)
     }
@@ -516,6 +522,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         self.builder
             .build_call(
@@ -579,6 +587,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(value)
     }
@@ -689,6 +699,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         let parsed = self
             .builder
@@ -795,6 +807,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(value)
     }
@@ -834,6 +848,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         self.builder
             .build_call(
@@ -898,6 +914,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         self.builder
             .build_call(
@@ -963,6 +981,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(value)
     }
@@ -1032,6 +1052,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(value)
     }

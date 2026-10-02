@@ -1,6 +1,7 @@
 impl<'ctx> HirCompiler<'ctx> {
     fn push_async_catch_locals(locals: &mut Vec<(String, HirType)>, name: &str) {
         locals.push((name.to_string(), HirType::Str));
+        locals.push((Self::async_catch_native_name(name), HirType::Str));
         for (suffix, ty) in [
             ("object", HirType::Object(Vec::new())),
             ("tag", HirType::I64),
@@ -17,9 +18,10 @@ impl<'ctx> HirCompiler<'ctx> {
             name.to_string(),
             Box::new(error),
         ))];
-        for suffix in ["object", "tag", "f64", "i64", "bool"] {
+        for suffix in ["native_text", "object", "tag", "f64", "i64", "bool"] {
             assignments.push(HirStmt::Expr(HirExpr::Assign(
-                format!("{name}__thaw_exception_{suffix}"),
+                if suffix == "native_text" { Self::async_catch_native_name(name) }
+                else { format!("{name}__thaw_exception_{suffix}") },
                 Box::new(HirExpr::Call(
                     Box::new(HirExpr::Var(format!(
                         "__thaw_pending_exception_{suffix}"
@@ -770,6 +772,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok((param.name.clone(), param.ty.clone()))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let generated_catch_bindings = extra_locals.iter().filter_map(|(name, _)| {
+            name.strip_prefix("@@thaw_catch_native_text:").map(str::to_string)
+        }).collect::<Vec<_>>();
         locals.extend(extra_locals);
         for stmt in segments.iter().flat_map(|segment| &segment.stmts) {
             self.collect_async_frame_locals(stmt, &mut locals)?;
@@ -789,6 +794,7 @@ impl<'ctx> HirCompiler<'ctx> {
             segments,
             captures,
             locals,
+            generated_catch_bindings,
             ret: func.ret.clone(),
             guarded_rethrow_handlers,
             returns_on_all_paths,

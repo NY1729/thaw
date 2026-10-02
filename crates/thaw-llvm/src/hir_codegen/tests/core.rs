@@ -2769,3 +2769,85 @@ fn embedded_nuls_survive_native_strings_and_json_boundaries() {
     assert_eq!(compile_and_run(source, "embedded_nuls"),
         "3 0 98\nfalse 4 6\n2 0\n3 98 \"a\\u0000b\"\n3 a%00b\na\0b\n3 3\n3\n");
 }
+
+#[test]
+fn generated_main_uses_result_reporters_and_destroys_listener_errors() {
+    let module = thaw_parser::parse_typescript("function main(): void { const value: JsValue = getDynamicValue('x'); }").unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "process_report_result_abi");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_js_emit_uncaught_result"), "{ir}");
+    assert!(ir.contains("@thaw_js_emit_unhandled_rejection_result"), "{ir}");
+    assert!(ir.contains("@thaw_js_emit_rejection_handled_result"), "{ir}");
+    assert!(ir.contains("@thaw_promise_drain_unhandled_result"), "{ir}");
+    assert!(ir.contains("destroy_js_listener_exception"), "{ir}");
+    assert!(ir.contains("destroy_rejection_listener_exception"), "{ir}");
+}
+
+#[test]
+fn opaque_hir_throw_does_not_trust_user_metadata_suffix() {
+    // `opaque` can be any producer-owned byte pointer. A source binding that
+    // resembles the old synthetic suffix must never make it a native C string.
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "opaque_test".into(),
+            params: vec![HirParam { name: "opaque".into(), ty: HirType::Str }],
+            ret: HirType::Void,
+            is_async: false,
+            body: vec![
+                HirStmt::Let(
+                    "error__thaw_exception_native_text".into(), HirType::Str,
+                    HirExpr::Lit(HirLit::Str("source-controlled spoof".into())),
+                ),
+                HirStmt::Try(
+                    vec![HirStmt::Throw(HirExpr::Var("opaque".into()))],
+                    "error".into(),
+                    vec![HirStmt::Throw(HirExpr::Var("error".into()))],
+                    None,
+                ),
+            ],
+        }, HirFunction {
+            name: "main".into(),
+            params: vec![],
+            ret: HirType::Void,
+            is_async: false,
+            body: vec![HirStmt::Return(None)],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "opaque_catch_provenance");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("catch_native_text_slot"), "{ir}");
+    assert!(ir.contains("rethrown_native_text_provenance"), "{ir}");
+    assert!(ir.contains("error__thaw_exception_native_text"), "{ir}");
+}
+
+#[test]
+fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
+    let source = r#"
+        function main(): void {
+            try {
+                throw new TypeError("native failure");
+            } catch (error) {
+                const synchronous = (): number => 1;
+                const asynchronous = async (): Promise<number> => 2;
+                if (true) {
+                    synchronous();
+                }
+                throw error;
+            }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "catch_lambda_native_text_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("__thaw_async_lambda_"), "{ir}");
+    assert!(ir.contains("rethrown_native_text_provenance"), "{ir}");
+}

@@ -189,6 +189,14 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.void_type().fn_type(&[], false),
             Some(Linkage::External),
         );
+        let process_report_type = self.context.struct_type(&[i64_type.into(), i8_ptr.into()], false);
+        for name in ["thaw_js_emit_uncaught_result", "thaw_js_emit_unhandled_rejection_result"] {
+            self.module.add_function(name, process_report_type.fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_js_emit_rejection_handled_result",
+            process_report_type.fn_type(&[], false), Some(Linkage::External),
+        );
 
         // Lambda captures stdout via a pipe, not a TTY, so libc's stdio
         // fully-buffers it by default -- output could sit in the buffer
@@ -2765,6 +2773,16 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_promise_reject_native_text",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_forward_rejection",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_promise_reject_typed",
             self.context.i8_type().fn_type(
                 &[
@@ -2777,6 +2795,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     i8_ptr.into(),
                 ],
                 false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_typed_with_native_text",
+            self.context.i8_type().fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), i64_type.into(), f64_type.into(),
+                    i64_type.into(), self.context.bool_type().into(), i8_ptr.into(), i8_ptr.into(),
+                ], false,
             ),
             Some(Linkage::External),
         );
@@ -2836,6 +2864,17 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        for name in [
+            "thaw_promise_drain_unhandled_result",
+        ] {
+            self.module.add_function(name, self.context.i8_type().fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
+        for name in [
+            "thaw_promise_set_unhandled_reporter_result",
+            "thaw_promise_set_rejection_handled_reporter_result",
+        ] {
+            self.module.add_function(name, self.context.void_type().fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
         self.module.add_function(
             "thaw_promise_take_unhandled_failure",
             self.context.i8_type().fn_type(&[], false),
@@ -2881,6 +2920,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     i8_ptr.into(),
                 ],
                 false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_exception_native_text_copy",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_finally_adopt_with_source",
+            self.context.i8_type().fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), i8_ptr.into(),
+                    self.context.i8_type().into(), i64_type.into(), f64_type.into(),
+                    i64_type.into(), self.context.bool_type().into(), i8_ptr.into(), i8_ptr.into(),
+                ], false,
             ),
             Some(Linkage::External),
         );

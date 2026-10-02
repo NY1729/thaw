@@ -106,6 +106,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|e| e.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
 
         let parse_fn = self.module.get_function("thaw_json_parse").unwrap();
