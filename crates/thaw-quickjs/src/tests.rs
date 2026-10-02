@@ -6003,3 +6003,32 @@ fn event_target_skips_listeners_removed_during_dispatch() {
         r#"["a","a","a,a,b,late",1,"first,second,first"]"#
     );
 }
+
+#[test]
+fn atomics_notify_nonshared_waitable_arrays_delegate_to_native() {
+    assert_eq!(
+        load(r#"function notifyNonsharedWaitable() {
+            const ordinary = new Int32Array(1);
+            let countCalls = 0;
+            const count = { valueOf() { countCalls++; return 1; } };
+            const direct = Atomics.notify(ordinary, 0);
+            const counted = Atomics.notify(ordinary, 0, count);
+            let invalidIndex = false;
+            try { Atomics.notify(ordinary, 1); }
+            catch (error) { invalidIndex = error instanceof RangeError; }
+            let nonsharedWait = false;
+            try { Atomics.waitAsync(ordinary, 0, 0); }
+            catch (error) { nonsharedWait = error instanceof TypeError; }
+            const bigInt64 = typeof BigInt64Array !== 'function'
+                || Atomics.notify(new BigInt64Array(1), 0) === 0;
+            const shared = new Int32Array(new SharedArrayBuffer(4));
+            return [direct, counted, countCalls, invalidIndex, nonsharedWait,
+                bigInt64, Atomics.notify(shared, 0), Atomics.waitAsync(shared, 0, 1).value];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("notifyNonsharedWaitable", "[]"),
+        r#"[0,0,1,true,true,true,0,"not-equal"]"#
+    );
+}

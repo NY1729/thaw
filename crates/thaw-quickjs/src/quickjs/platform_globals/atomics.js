@@ -57,6 +57,11 @@ if (typeof Atomics === 'object' && typeof Atomics.waitAsync !== 'function') {
   };
 
   Atomics.notify = function (typedArray, index, count) {
+    if ((typedArray instanceof Int32Array
+        || (typeof BigInt64Array === 'function' && typedArray instanceof BigInt64Array))
+        && !(typedArray.buffer instanceof SharedArrayBuffer)) {
+      return nativeNotify.call(Atomics, typedArray, index, count);
+    }
     const [buffer, offset, element] = location(typedArray, index);
     let remaining = count === undefined ? Infinity : Math.max(0, Math.trunc(Number(count)));
     if (Number.isNaN(remaining)) remaining = 0;
