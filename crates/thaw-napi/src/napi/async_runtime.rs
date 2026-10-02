@@ -86,6 +86,9 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
     call_js_callback: Option<NapiThreadsafeFunctionCallJs>,
     result: *mut *mut ThreadsafeFunction,
 ) -> NapiStatus {
+    if env.is_null() || (*env).owner != std::thread::current().id() {
+        return NAPI_INVALID_ARG;
+    }
     if result.is_null()
         || initial_thread_count == 0
         || (function.is_null() && call_js_callback.is_none())
@@ -95,6 +98,9 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
             && !value_belongs_to_environment(env, async_resource_name))
     {
         return record_status(env, NAPI_INVALID_ARG);
+    }
+    if env.as_ref().is_some_and(|env| env.finalizing || env.finalized) {
+        return record_status(env, NAPI_CLOSING);
     }
     if !function.is_null() && !matches!(value_ref(function), Ok(Value::Function(_))) {
         return record_status(env, NAPI_INVALID_ARG);
@@ -445,6 +451,9 @@ pub unsafe extern "C" fn napi_create_async_work(
     data: *mut c_void,
     result: *mut *mut AsyncWork,
 ) -> NapiStatus {
+    if env.is_null() || (*env).owner != std::thread::current().id() {
+        return NAPI_INVALID_ARG;
+    }
     if execute.is_none()
         || result.is_null()
         || (!async_resource.is_null() && !value_belongs_to_environment(env, async_resource))
@@ -464,8 +473,12 @@ pub unsafe extern "C" fn napi_create_async_work(
     let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if env_ref.finalizing || env_ref.finalized {
+        return record_status(env, NAPI_CLOSING);
+    }
     let mut work = Box::new(AsyncWork {
         env: env as usize,
+        owner: std::thread::current().id(),
         execute: execute.unwrap(),
         complete,
         data: data as usize,
@@ -480,9 +493,15 @@ pub unsafe extern "C" fn napi_create_async_work(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_queue_async_work(env: NapiEnv, work: *mut AsyncWork) -> NapiStatus {
+    if env.is_null() || (*env).owner != std::thread::current().id() {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(work_ref) = async_work_ref(env, work) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
+    if env.as_ref().is_some_and(|env| env.finalizing || env.finalized) {
+        return record_status(env, NAPI_CLOSING);
+    }
     if work_ref
         .state
         .compare_exchange(
@@ -614,6 +633,9 @@ fn run_one_threadsafe_callback(address: usize) -> bool {
                 }
             }
         }
+        if !aborting {
+            unsafe { capture_shutdown_exception(function.env as NapiEnv) };
+        }
     }
 
     let finalize = {
@@ -646,6 +668,7 @@ fn run_one_threadsafe_callback(address: usize) -> bool {
                     function.finalize_data as *mut c_void,
                     function.context as *mut c_void,
                 );
+                capture_shutdown_exception(function.env as NapiEnv);
             }
         }
         UNFINALIZED_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
@@ -676,7 +699,11 @@ fn run_one_async_completion(work_address: usize) {
         unsafe { complete(env, status, data) };
     }
     if let Err(error) = unsafe { take_env_exception(env) } {
-        HOST.with(|host| host.borrow_mut().last_error = error);
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            host.last_error = error.clone();
+            host.shutdown_errors.push_back(error);
+        });
     }
 }
 
@@ -707,6 +734,7 @@ fn drain_posted_finalizers() -> usize {
             for record in records {
                 if let Some(finalize) = record.finalize {
                     unsafe { finalize(env as NapiEnv, record.data, record.hint) };
+                    unsafe { capture_shutdown_exception(env as NapiEnv) };
                     completed += 1;
                 }
             }
@@ -716,28 +744,18 @@ fn drain_posted_finalizers() -> usize {
 
 #[cfg(target_os = "linux")]
 unsafe fn poll_uv_loop() -> bool {
-    type UvDefaultLoop = unsafe extern "C" fn() -> *mut c_void;
+    let _dispatch = ForeignCallbackGuard::new();
     type UvRun = unsafe extern "C" fn(*mut c_void, i32) -> i32;
     type UvLoopAlive = unsafe extern "C" fn(*const c_void) -> i32;
 
-    let default_loop = libc::dlsym(libc::RTLD_DEFAULT, c"uv_default_loop".as_ptr());
+    let loops = known_uv_loops();
+    if loops.is_empty() { return false; }
     let run = libc::dlsym(libc::RTLD_DEFAULT, c"uv_run".as_ptr());
     let alive = libc::dlsym(libc::RTLD_DEFAULT, c"uv_loop_alive".as_ptr());
-    if default_loop.is_null() || run.is_null() || alive.is_null() {
-        return false;
-    }
-    let default_loop = std::mem::transmute::<*mut c_void, UvDefaultLoop>(default_loop);
+    if run.is_null() || alive.is_null() { return true; }
     let run = std::mem::transmute::<*mut c_void, UvRun>(run);
     let alive = std::mem::transmute::<*mut c_void, UvLoopAlive>(alive);
     const UV_RUN_NOWAIT: i32 = 2;
-    let default_loop = default_loop();
-    let mut loops = registered_uv_loops()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
-    if !default_loop.is_null() && !loops.contains(&(default_loop as usize)) {
-        loops.push(default_loop as usize);
-    }
     let mut any_alive = false;
     for event_loop in loops {
         let event_loop = event_loop as *mut c_void;
@@ -752,9 +770,39 @@ unsafe fn poll_uv_loop() -> bool {
     false
 }
 
+// uv_loop_alive omits unreferenced active handles. Every still-listed handle
+// can retain an addon callback, including one awaiting its uv_close callback.
+#[cfg(target_os = "linux")]
+unsafe fn uv_loop_has_work(event_loop: *mut c_void) -> bool {
+    type UvWalk = unsafe extern "C" fn(
+        *mut c_void, unsafe extern "C" fn(*mut c_void, *mut c_void), *mut c_void,
+    );
+    type UvLoopAlive = unsafe extern "C" fn(*const c_void) -> i32;
+    unsafe extern "C" fn count_handle(_: *mut c_void, arg: *mut c_void) {
+        *(arg as *mut usize) += 1;
+    }
+    let walk_symbol = libc::dlsym(libc::RTLD_DEFAULT, c"uv_walk".as_ptr());
+    let alive_symbol = libc::dlsym(libc::RTLD_DEFAULT, c"uv_loop_alive".as_ptr());
+    if walk_symbol.is_null() || alive_symbol.is_null() { return true; }
+    let walk = std::mem::transmute::<*mut c_void, UvWalk>(walk_symbol);
+    let alive = std::mem::transmute::<*mut c_void, UvLoopAlive>(alive_symbol);
+    let mut count = 0usize;
+    walk(event_loop, count_handle, (&mut count as *mut usize).cast());
+    // uv_loop_alive also sees active requests not represented by uv_walk.
+    count != 0 || alive(event_loop) != 0
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn uv_loop_has_work(_event_loop: *mut c_void) -> bool { true }
+
+unsafe fn uv_handles_open() -> bool {
+    known_uv_loops().into_iter().any(|event_loop| uv_loop_has_work(event_loop as *mut c_void))
+}
+
 /// Runs every callback which is ready now without waiting for producers.
 #[no_mangle]
 pub extern "C" fn thaw_napi_poll_async_work() -> usize {
+    let dispatch = ForeignCallbackGuard::new();
     let mut completed = drain_posted_finalizers();
     unsafe {
         poll_uv_loop();
@@ -762,10 +810,7 @@ pub extern "C" fn thaw_napi_poll_async_work() -> usize {
     loop {
         let mut progressed = false;
         loop {
-            let event = ready_events()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pop_front();
+            let event = take_ready_event_for_current_thread();
             let Some(event) = event else { break };
             completed += match event {
                 ReadyEvent::ThreadsafeFunction(address) => {
@@ -785,22 +830,37 @@ pub extern "C" fn thaw_napi_poll_async_work() -> usize {
             break;
         }
     }
-    if LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
-        && ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
+    drop(dispatch);
+    if !host_threadsafe_state(false)
+        && !HOST.with(|host| host.borrow().has_active_async_work())
     {
-        let pending_envs = HOST.with(|host| {
-            let mut host = host.borrow_mut();
-            host.compiled_callbacks.clear();
-            std::mem::take(&mut host.pending_call_envs)
-        });
-        drop(pending_envs);
+        retire_owned_envs();
     }
     completed
 }
 
+#[cfg(target_os = "linux")]
+unsafe fn owner_uv_loops_referenced() -> bool {
+    type UvLoopAlive = unsafe extern "C" fn(*const c_void) -> i32;
+    let loops = known_uv_loops();
+    if loops.is_empty() { return false; }
+    let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"uv_loop_alive".as_ptr());
+    if symbol.is_null() { return true; }
+    let alive = std::mem::transmute::<*mut c_void, UvLoopAlive>(symbol);
+    loops.into_iter().any(|event_loop| alive(event_loop as *const c_void) != 0)
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn owner_uv_loops_referenced() -> bool { !known_uv_loops().is_empty() }
+
 #[no_mangle]
 pub extern "C" fn thaw_napi_async_work_pending() -> u8 {
-    u8::from(ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0)
+    let owner = std::thread::current().id();
+    let ready = ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter().any(|event| unsafe { event.owner() == owner });
+    u8::from(HOST.with(|host| host.borrow().has_active_async_work())
+        || host_threadsafe_state(true) || ready
+        || unsafe { owner_uv_loops_referenced() })
 }
 
 /// Runs queued completion callbacks on the calling thread and waits until all
@@ -811,13 +871,15 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
     let mut completed = 0;
     loop {
         completed += thaw_napi_poll_async_work();
-        let ready = !ready_events()
+        let ready = ready_events()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty();
+            .iter().any(|event| unsafe { event.owner() == std::thread::current().id() });
         let uv_alive = unsafe { poll_uv_loop() };
-        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
-            && ACTIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
+        if HOST.with(|host| {
+            let host = host.borrow();
+            !host.has_active_async_work() && !host.has_active_cleanup()
+        }) && !host_threadsafe_state(true)
             && !ready
             && !uv_alive
         {
@@ -825,13 +887,8 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    if LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0 {
-        let pending_envs = HOST.with(|host| {
-            let mut host = host.borrow_mut();
-            host.compiled_callbacks.clear();
-            std::mem::take(&mut host.pending_call_envs)
-        });
-        drop(pending_envs);
+    if !host_threadsafe_state(false) {
+        retire_owned_envs();
     }
     completed
 }

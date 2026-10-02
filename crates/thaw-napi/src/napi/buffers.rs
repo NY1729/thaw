@@ -58,6 +58,9 @@ pub unsafe extern "C" fn napi_create_external_buffer(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if finalize.is_some() && (env.finalizing || env.finalized) {
+        return record_status(env as NapiEnv, NAPI_CLOSING);
+    }
     let value = env.alloc(Value::ExternalBuffer {
         data: data.cast(),
         length,
@@ -67,6 +70,7 @@ pub unsafe extern "C" fn napi_create_external_buffer(
             data,
             finalize,
             hint,
+            backing: value,
         });
     }
     write_value(out, value)
@@ -152,7 +156,7 @@ pub unsafe extern "C" fn napi_get_buffer_info(
                 Err(status) => return record_status(env, status),
             };
             if !data.is_null() {
-                *data = if detached {
+                *data = if detached || bytes.is_null() {
                     ptr::null_mut()
                 } else {
                     bytes.add(*byte_offset).cast()
@@ -190,7 +194,9 @@ unsafe fn arraybuffer_parts(value: NapiValue) -> Result<(*mut u8, usize, bool), 
             Ok((bytes.as_mut_ptr(), bytes.len(), *detached))
         }
         Some(Value::SharedArrayBuffer(bytes)) => Ok((bytes.as_mut_ptr(), bytes.len(), false)),
-        Some(Value::ExternalSharedArrayBuffer { data, length }) => Ok((*data, *length, false)),
+        Some(Value::ExternalSharedArrayBuffer { data, length, retired }) => {
+            Ok((*data, *length, *retired))
+        }
         Some(Value::ExternalArrayBuffer {
             data,
             length,
@@ -248,6 +254,9 @@ pub unsafe extern "C" fn napi_create_external_arraybuffer(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if finalize.is_some() && (env.finalizing || env.finalized) {
+        return record_status(env as NapiEnv, NAPI_CLOSING);
+    }
     let value = env.alloc(Value::ExternalArrayBuffer {
         data: data.cast(),
         length,
@@ -258,6 +267,7 @@ pub unsafe extern "C" fn napi_create_external_arraybuffer(
             data,
             finalize,
             hint,
+            backing: value,
         });
     }
     write_value(out, value)
@@ -278,15 +288,20 @@ pub unsafe extern "C" fn node_api_create_external_sharedarraybuffer(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if finalize.is_some() && (env.finalizing || env.finalized) {
+        return record_status(env as NapiEnv, NAPI_CLOSING);
+    }
     let value = env.alloc(Value::ExternalSharedArrayBuffer {
         data: data.cast(),
         length,
+        retired: false,
     });
     if finalize.is_some() {
         env.noenv_finalizers.push(NoEnvFinalizeRecord {
             data,
             finalize,
             hint,
+            backing: value,
         });
     }
     write_value(out, value)
@@ -566,7 +581,7 @@ pub unsafe extern "C" fn napi_get_dataview_info(
         *length = if detached { 0 } else { view_length };
     }
     if !data.is_null() {
-        *data = if detached {
+        *data = if detached || bytes.is_null() {
             ptr::null_mut()
         } else {
             bytes.add(offset).cast()
@@ -612,7 +627,7 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
                 *length = if detached { 0 } else { view_length };
             }
             if !data.is_null() {
-                *data = if detached {
+                *data = if detached || bytes.is_null() {
                     ptr::null_mut()
                 } else {
                     bytes.add(offset).cast()
@@ -682,7 +697,7 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
                 *length = if detached { 0 } else { *view_length };
             }
             if !data.is_null() {
-                *data = if detached {
+                *data = if detached || bytes.is_null() {
                     ptr::null_mut()
                 } else {
                     bytes.add(*offset).cast()
@@ -699,4 +714,3 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
         _ => record_status(env, NAPI_INVALID_ARG),
     }
 }
-

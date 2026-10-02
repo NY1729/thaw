@@ -105,6 +105,24 @@ type NapiBridge = (
     NapiBridgePending,
 );
 static NAPI_BRIDGE: Mutex<Option<NapiBridge>> = Mutex::new(None);
+// The worker's thread-local native Host must retire before its QuickJS Ctx.
+// Keep shutdown separate from the existing JS call bridge ABI.
+type NapiShutdownBridge = (
+    extern "C" fn() -> u8,
+    extern "C" fn() -> u8,
+    extern "C" fn() -> *mut c_char,
+    extern "C" fn() -> u8,
+);
+static NAPI_SHUTDOWN_BRIDGE: Mutex<Option<NapiShutdownBridge>> = Mutex::new(None);
+
+pub fn register_napi_shutdown_bridge(
+    begin: extern "C" fn() -> u8,
+    poll: extern "C" fn() -> u8,
+    take_error: extern "C" fn() -> *mut c_char,
+    finish: extern "C" fn() -> u8,
+) {
+    *NAPI_SHUTDOWN_BRIDGE.lock().unwrap() = Some((begin, poll, take_error, finish));
+}
 #[cfg(unix)]
 static ORIGINAL_STDIN_TERMIOS: Mutex<Option<libc::termios>> = Mutex::new(None);
 #[cfg(unix)]

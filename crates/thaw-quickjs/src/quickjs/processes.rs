@@ -176,12 +176,70 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
     Ok(())
 }
 
+fn execute_worker_pending_job(ctx: &Ctx<'_>) -> Result<bool, String> {
+    let ran = ctx.execute_pending_job();
+    // rquickjs::Ctx::execute_pending_job maps QuickJS -1 to `true`, the
+    // same value as a successful job. Inspect and consume the exception
+    // before another job or addon teardown hides its origin.
+    if ctx.has_exception() { Err(describe_exception(ctx)) } else { Ok(ran) }
+}
+
+fn close_worker_napi(ctx: &Ctx<'_>) -> Result<(), String> {
+    let Some((begin, poll, take_error, finish)) = *NAPI_SHUTDOWN_BRIDGE.lock().unwrap() else {
+        return Ok(());
+    };
+    // begin dispatches hooks; poll dispatches completions and finalizers;
+    // finish may run library destructors. All epochs retain this Worker Ctx.
+    let _active = ActiveNapiContext::enter(ctx);
+    if begin() == 0 { return Err("native addon shutdown could not start".into()); }
+    let mut errors = Vec::new();
+    loop {
+        let ready = poll();
+        loop {
+            let error = take_error();
+            if error.is_null() { break; }
+            errors.push(unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned());
+            unsafe { thaw_arena::destroy_string(error) };
+        }
+        // poll may have invoked a cleanup hook or finalizer which queued a
+        // QuickJS reaction. Drain it while the addon and Worker Ctx are live,
+        // then poll the native barrier again before final dlclose.
+        let mut ran_job = false;
+        loop {
+            let tick = match drain_next_tick_queue(ctx) {
+                Ok(tick) => tick,
+                Err(error) => {
+                    errors.push(match error {
+                        rquickjs::Error::Exception => describe_exception(ctx),
+                        error => error.to_string(),
+                    });
+                    true
+                }
+            };
+            let job = match execute_worker_pending_job(ctx) {
+                Ok(job) => job,
+                Err(error) => { errors.push(error); true }
+            };
+            ran_job |= tick || job;
+            if !tick && !job { break; }
+        }
+        if ready != 0 && !ran_job && finish() != 0 { break; }
+        // The Worker must keep its Ctx and thread-local Host alive until the
+        // exact loops it owns have no callback-capable handles or requests.
+        // An addon that never closes an unreferenced handle cannot complete
+        // this safe shutdown; returning an error would free its callback roots.
+        if !ran_job { std::thread::sleep(Duration::from_millis(1)); }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
+}
+
 fn run_host_worker(
     start: HostWorkerStart,
     commands: Receiver<HostWorkerCommand>,
     events: Sender<HostWorkerEvent>,
 ) {
     let result = with_context(|ctx| -> Result<i32, String> {
+        let work = (|| -> Result<i32, String> {
         install_shared_environment_functions(&ctx, start.shared_env.clone())?;
         if !start.bundle_source.is_empty() {
             load_impl(ctx.clone(), &start.bundle_source)?;
@@ -198,7 +256,7 @@ fn run_host_worker(
         loop {
             loop {
                 drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
-                if !ctx.execute_pending_job() {
+                if !execute_worker_pending_job(&ctx)? {
                     break;
                 }
             }
@@ -211,11 +269,18 @@ fn run_host_worker(
                 .map_err(|error| error.to_string())?;
             loop {
                 drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
-                if !ctx.execute_pending_job() {
+                if !execute_worker_pending_job(&ctx)? {
                     break;
                 }
             }
             drain_host_worker_events(&ctx, &events)?;
+            // Native completions belong to this Worker thread. Keep its Ctx
+            // active while dispatching and then run JS jobs they scheduled.
+            poll_napi_bridge(&ctx);
+            loop {
+                drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
+                if !execute_worker_pending_job(&ctx)? { break; }
+            }
 
             let should_exit: Function = ctx
                 .globals()
@@ -224,6 +289,7 @@ fn run_host_worker(
             if should_exit
                 .call::<_, bool>(())
                 .map_err(|error| error.to_string())?
+                && !napi_bridge_pending()
             {
                 return Ok(0);
             }
@@ -301,6 +367,14 @@ fn run_host_worker(
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(1),
             }
+        }
+        })();
+        let shutdown = close_worker_napi(&ctx);
+        match (work, shutdown) {
+            (Ok(code), Ok(())) => Ok(code),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(shutdown)) => Err(shutdown),
+            (Err(error), Err(shutdown)) => Err(format!("{error}\n{shutdown}")),
         }
     });
     match result {

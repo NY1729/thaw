@@ -150,7 +150,7 @@ pub unsafe extern "C" fn napi_call_function(
         new_target: ptr::null_mut(),
         data: function.data,
     };
-    let result = (function.callback)(env, &mut info);
+    let result = invoke_napi_callback(env, function.callback, &mut info);
     if env_mut(env)
         .map(|env| env.exception.is_some())
         .unwrap_or(false)

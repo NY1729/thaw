@@ -35,6 +35,14 @@ fn register_loaded_exports(
     functions: Vec<(String, Function)>,
     exported_values: Vec<(String, NapiValue)>,
 ) {
+    // An export replaced by a non-function must also retire the older
+    // callable entry; shutdown uses the exports owner to unpublish callbacks.
+    for (name, _) in &exported_values {
+        host.functions.remove(name);
+        if let Some(package) = package_name {
+            host.functions.remove(&format!("{package}::{name}"));
+        }
+    }
     if let Some(package) = package_name {
         host.qualified_packages.insert(package.into());
         host.functions.extend(functions.iter().map(|(name, function)|
@@ -51,6 +59,15 @@ fn register_loaded_exports(
 }
 
 unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&str>) -> Result<(), String> {
+    // A failed initialization can leave async cleanup hooks and a Host-owned
+    // Env. Register the Worker retirement seam before any fallible load step.
+    #[cfg(feature = "quickjs")]
+    thaw_quickjs::register_napi_shutdown_bridge(
+        thaw_napi_begin_shutdown,
+        thaw_napi_poll_shutdown,
+        thaw_napi_take_shutdown_error,
+        thaw_napi_finish_shutdown,
+    );
     if HOST.with(|host| host.borrow().unloading) {
         return Err("cannot load N-API addons while unloading".into());
     }
@@ -64,6 +81,13 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
     // libuv with global symbol visibility before resolving the addon.
     #[cfg(target_os = "linux")]
     let uv_handle = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+    // A failed addon load or init can still have exposed libuv callbacks.
+    // Keep this reference with Host from the moment symbols become visible.
+    #[cfg(target_os = "linux")]
+    if !uv_handle.is_null() {
+        HOST.with(|host| host.borrow_mut().libraries.push(uv_handle));
+        record_process_default_uv_loop();
+    }
     libc::dlerror();
     let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
     if handle.is_null() {
@@ -94,13 +118,19 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
     };
 
     let mut env = Box::new(Env::new());
+    // Both success and failed-init paths publish this Box into Host before
+    // cleanup; registration during init can therefore retain a stable Env.
+    env.host_managed = true;
     let absolute_path = std::fs::canonicalize(path_text.as_ref())
         .unwrap_or_else(|_| std::path::PathBuf::from(path_text.as_ref()));
     env.module_file_name = CString::new(format!("file://{}", absolute_path.to_string_lossy()))
         .unwrap_or_else(|_| CString::new("").unwrap());
     let env_ptr = &mut *env as NapiEnv;
     let exports = env.alloc(Value::Object(HashMap::new()));
-    let returned = init(env_ptr, exports);
+    let returned = {
+        let _dispatch = ForeignCallbackGuard::new();
+        init(env_ptr, exports)
+    };
     let exports = if returned.is_null() {
         exports
     } else {
@@ -138,36 +168,21 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
     let (functions, exported_values) = match initialized {
         Ok(values) => values,
         Err(error) => {
-            if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
-                || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
-            {
-                // Async work and threadsafe functions retain both this Env
-                // and addon callbacks. The async poller drops pending Envs
-                // after those callbacks finish; unload_all closes libraries.
-                HOST.with(|host| {
-                    let mut host = host.borrow_mut();
-                    host.pending_call_envs.push(env);
-                    host.libraries.push(handle);
-                });
-            } else {
-                drop(env); // Finalizers and cleanup hooks may call into the addon.
-                if ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) == 0 {
-                    libc::dlclose(handle);
-                } else {
-                    // An asynchronous cleanup hook can still execute addon code.
-                    HOST.with(|host| host.borrow_mut().libraries.push(handle));
-                }
-            }
+            // Publish stable Env and library ownership before cleanup callbacks
+            // run; they may remove hooks synchronously or reenter the host.
+            env.shutdown_requested = true;
+            HOST.with(|host| {
+                let mut host = host.borrow_mut();
+                host.module_envs.push(env);
+                host.libraries.push(handle);
+            });
+            retire_owned_envs();
             return Err(error);
         }
     };
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         register_loaded_exports(&mut host, env_ptr as usize, package_name, functions, exported_values);
-        #[cfg(target_os = "linux")]
-        if !uv_handle.is_null() {
-            host.libraries.push(uv_handle);
-        }
         host.libraries.push(handle);
         host.module_envs.push(env);
     });
@@ -243,7 +258,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 let env = host
                     .module_envs
                     .iter()
-                    .find(|env| env.quickjs_references.contains_key(&reference))
+                    .find(|env| !env.finalized && env.quickjs_references.contains_key(&reference))
                     .ok_or_else(|| "unknown QuickJS reference".to_string())?;
                 let value = env.quickjs_references[&reference];
                 Ok(quickjs_wire_result("value", quickjs_reference_wire(env, value, true)?))
@@ -404,7 +419,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 };
                 let mut info = CallbackInfo { args: values, this_arg: receiver as NapiValue,
                     new_target: ptr::null_mut(), data: function.data };
-                let value = callback_result(env, (function.callback)(env, &mut info));
+                let value = callback_result(env, invoke_napi_callback(env, function.callback, &mut info));
                 take_env_exception(env)?;
                 Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
             }
@@ -453,6 +468,7 @@ fn release_quickjs_reference(reference: u64) {
         host.module_envs
             .iter_mut()
             .filter_map(|env| {
+                if env.finalized { return None; }
                 let value = env.quickjs_references.remove(&reference)?;
                 for candidate in &mut env.references {
                     if candidate.count == 0 && candidate.value == value {
@@ -468,6 +484,7 @@ fn release_quickjs_reference(reference: u64) {
             .collect::<Vec<_>>()
     });
     for (env, finalizers) in released {
+        let _dispatch = ForeignCallbackGuard::new();
         for record in finalizers {
             if let Some(finalize) = record.finalize {
                 unsafe { finalize(env, record.data, record.hint) };
@@ -483,7 +500,7 @@ fn release_napi_handle(handle: u64) -> Result<(), String> {
         let env = host
             .module_envs
             .iter_mut()
-            .find(|env| env.values.contains(&(handle as NapiValue)))
+            .find(|env| !env.finalized && env.values.contains(&(handle as NapiValue)))
             .ok_or_else(|| "unknown native addon handle".to_string())?;
         let value = handle as NapiValue;
         if env
@@ -509,6 +526,7 @@ fn release_napi_handle(handle: u64) -> Result<(), String> {
     let Some((env, wrap, finalizers)) = released else {
         return Ok(());
     };
+    let _dispatch = ForeignCallbackGuard::new();
     if let Some(wrap) = wrap {
         if let Some(finalize) = wrap.finalize {
             unsafe { finalize(env, wrap.data, wrap.hint) };
@@ -566,60 +584,152 @@ pub unsafe extern "C" fn thaw_napi_load_named_qualified(
 }
 
 #[no_mangle]
-pub extern "C" fn thaw_napi_unload_all() -> u8 {
-    struct UnloadGuard;
-    impl Drop for UnloadGuard {
-        fn drop(&mut self) {
-            HOST.with(|host| host.borrow_mut().unloading = false);
-        }
-    }
-
-    let Some((pending_envs, module_envs)) = HOST.with(|host| {
+pub extern "C" fn thaw_napi_begin_shutdown() -> u8 {
+    if ForeignCallbackGuard::active() { return 0; }
+    HOST.with(|host| {
         let mut host = host.borrow_mut();
-        if host.unloading {
-            host.last_error = "N-API addon unload is already in progress".into();
-            return None;
+        if !host.unloading {
+            host.unloading = true;
+            for env in &mut host.module_envs { env.shutdown_requested = true; }
+            for env in &mut host.pending_call_envs { env.shutdown_requested = true; }
         }
-        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
-            || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
-            || ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0
+    });
+    // A prior native callback can leave an Env exception pending. Preserve it
+    // in FIFO order before cleanup callbacks set their own exceptions; keep
+    // every Box in HOST and release the borrow before describing a value.
+    let envs = HOST.with(|host| {
+        let host = host.borrow();
+        host.module_envs.iter().chain(host.pending_call_envs.iter())
+            .map(|env| (&**env as *const Env).cast_mut()).collect::<Vec<_>>()
+    });
+    for env in envs { unsafe { capture_shutdown_exception(env) }; }
+    // Hooks and finalizers may reenter HOST; do not keep its borrow here.
+    retire_owned_envs();
+    1
+}
+
+/// One bounded progress step. A zero result means the owner must continue
+/// polling and reporting errors while every Env and library stays mapped.
+#[no_mangle]
+pub extern "C" fn thaw_napi_poll_shutdown() -> u8 {
+    if ForeignCallbackGuard::active() || !HOST.with(|host| host.borrow().unloading) {
+        return 0;
+    }
+    thaw_napi_poll_async_work();
+    retire_owned_envs();
+    let owners_ready = HOST.with(|host| {
+        let host = host.borrow();
+        !host.has_active_async_work()
+            && !host.has_active_cleanup()
+            && host.module_envs.iter().chain(host.pending_call_envs.iter()).all(|env| env.finalized)
+    });
+    u8::from(owners_ready && !host_threadsafe_state(false) && registered_uv_loops().is_empty() && unsafe { !uv_handles_open() })
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn close_owned_uv_loop() -> bool {
+    type UvLoopClose = unsafe extern "C" fn(*mut c_void) -> i32;
+    let Some(address) = HOST.with(|host| host.borrow().owned_uv_loop) else { return true };
+    let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"uv_loop_close".as_ptr());
+    if symbol.is_null() { return false; }
+    let close = std::mem::transmute::<*mut c_void, UvLoopClose>(symbol);
+    if close(address as *mut c_void) != 0 { return false; }
+    HOST.with(|host| host.borrow_mut().owned_uv_loop = None);
+    libc::free(address as *mut c_void);
+    true
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn close_owned_uv_loop() -> bool { true }
+
+/// Native library destructors may reenter N-API during dlclose. A failed
+/// barrier retains Env Boxes and libraries for another poll/close attempt.
+#[no_mangle]
+pub extern "C" fn thaw_napi_finish_shutdown() -> u8 {
+    if ForeignCallbackGuard::active() { return 0; }
+    if !HOST.with(|host| host.borrow().unloading) { return 0; }
+    if HOST.with(|host| {
+        let host = host.borrow();
+        host.has_active_async_work() || host.has_active_cleanup()
+    }) || host_threadsafe_state(false)
+        || !registered_uv_loops().is_empty()
+        || unsafe { uv_handles_open() }
+    {
+        HOST.with(|host| host.borrow_mut().last_error =
+            "cannot release N-API addons while native callbacks or libuv handles remain".into());
+        return 0;
+    }
+    if !HOST.with(|host| {
+        let host = host.borrow();
+        host.shutdown_errors.is_empty()
+            && host.module_envs.iter().chain(host.pending_call_envs.iter()).all(|env| env.finalized)
+    }) {
+        HOST.with(|host| host.borrow_mut().last_error =
+            "N-API shutdown still has owners or unreported errors".into());
+        return 0;
+    }
+    if !unsafe { close_owned_uv_loop() } {
+        HOST.with(|host| host.borrow_mut().last_error =
+            "N-API host-owned libuv loop could not close".into());
+        return 0;
+    }
+    // dlclose may run addon destructors. Pin the entire release epoch so a
+    // nested shutdown cannot clear `unloading` or free the outer Env batch.
+    let _dispatch = ForeignCallbackGuard::new();
+    let Some((envs, libraries, embedded_files)) = HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        if !host.shutdown_errors.is_empty()
+            || host.module_envs.iter().chain(host.pending_call_envs.iter()).any(|env| !env.finalized)
         {
-            host.last_error =
-                "cannot unload N-API addons while asynchronous work or cleanup is active".into();
+            host.last_error = "N-API shutdown still has owners or unreported errors".into();
             return None;
         }
-        host.unloading = true;
         host.functions.clear();
         host.exports.clear();
         host.qualified_packages.clear();
         host.compiled_callbacks.clear();
-        Some((std::mem::take(&mut host.pending_call_envs), std::mem::take(&mut host.module_envs)))
-    }) else {
-        return 0;
-    };
-    let _unloading = UnloadGuard;
-    // Cleanup hooks and native finalizers may reenter HOST and addon code.
-    drop(pending_envs);
-    drop(module_envs);
-    let Some((libraries, embedded_files)) = HOST.with(|host| {
-        let mut host = host.borrow_mut();
-        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
-            || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
-            || ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0
-        {
-            host.last_error =
-                "cannot unload N-API addons while asynchronous work or cleanup is active".into();
-            return None;
-        }
-        Some((std::mem::take(&mut host.libraries), std::mem::take(&mut host.embedded_files)))
-    }) else {
-        return 0;
-    };
-    for handle in libraries.into_iter().rev() {
-        unsafe { libc::dlclose(handle) };
-    }
+        let mut envs = std::mem::take(&mut host.pending_call_envs);
+        envs.extend(std::mem::take(&mut host.module_envs));
+        host.main_default_uv_loop = None;
+        let libraries = std::mem::take(&mut host.libraries);
+        let embedded_files = std::mem::take(&mut host.embedded_files);
+        Some((envs, libraries, embedded_files))
+    }) else { return 0; };
+    // Library destructors can still hold raw napi_env pointers. Keep the
+    // finalized Boxes allocated through dlclose so those calls fail with a
+    // stable, closed Env instead of dereferencing freed memory.
+    for handle in libraries.into_iter().rev() { unsafe { libc::dlclose(handle) }; }
+    drop(envs);
     drop(embedded_files);
+    HOST.with(|host| host.borrow_mut().unloading = false);
     1
+}
+
+/// Compatibility entry. Generated main and Workers should use the phased
+/// API so they can report errors while addon code remains mapped.
+#[no_mangle]
+pub extern "C" fn thaw_napi_unload_all() -> u8 {
+    if ForeignCallbackGuard::active() { return 0; }
+    // A first call may stop at an unreferenced live uv handle or TSFN.
+    // Begin is idempotent; a later caller must resume the same pinned Host.
+    if thaw_napi_begin_shutdown() == 0 { return 0; }
+    loop {
+        if thaw_napi_poll_shutdown() != 0 { break; }
+        // A live TSFN may need an external owner to release it, even while
+        // an async cleanup hook is pending. One poll has already delivered all
+        // ready callbacks; return a retryable 0 instead of blocking that owner.
+        if host_threadsafe_state(false) { return 0; }
+        if HOST.with(|host| {
+            let host = host.borrow();
+            !host.has_active_async_work() && !host.has_active_cleanup()
+        }) {
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let errors = thaw_napi_report_shutdown_errors();
+    let released = thaw_napi_finish_shutdown();
+    u8::from(released != 0 && errors == 0)
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
@@ -1207,6 +1317,14 @@ unsafe fn quickjs_reference_json(
 
 unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, String> {
     let marker = |value| Ok(QuickJsWireValue { value, origins: Vec::new() });
+    let live_owner = HOST.with(|host| {
+        let host = host.borrow();
+        host.module_envs.iter().chain(host.pending_call_envs.iter())
+            .any(|env| !env.finalized && env.values.contains(&value))
+    });
+    if !live_owner {
+        return Err("native addon result belongs to an unknown environment".into());
+    }
     match value_ref(value) {
         Ok(Value::Promise(_)) => return marker(serde_json::json!({ "__thaw_napi_promise__": (value as u64).to_string() })),
         Ok(Value::Symbol { id, description }) => {
@@ -1225,7 +1343,7 @@ unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, Str
     }
     HOST.with(|host| {
         let host = host.borrow();
-        if let Some(env) = host.module_envs.iter().find(|env| env.values.contains(&value)) {
+        if let Some(env) = host.module_envs.iter().find(|env| !env.finalized && env.values.contains(&value)) {
             quickjs_reference_wire(env, value, false)
         } else {
             Err("native addon result belongs to an unknown environment".into())
@@ -1349,7 +1467,7 @@ fn is_native_instance(value: usize) -> bool {
         host.borrow()
             .module_envs
             .iter()
-            .any(|env| env.instances.contains_key(&value))
+            .any(|env| !env.finalized && env.instances.contains_key(&value))
     })
 }
 
@@ -1384,8 +1502,8 @@ fn wait_for_promise(value: NapiValue) -> Result<NapiValue, String> {
         if !matches!(*state.borrow(), PromiseState::Pending) {
             continue;
         }
-        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
-            && UNFINALIZED_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
+        if !HOST.with(|host| host.borrow().has_active_async_work())
+            && !host_has_unfinalized_threadsafe()
             && !unsafe { poll_uv_loop() }
         {
             return Err("native addon returned a Promise with no pending work".into());
@@ -1432,7 +1550,7 @@ unsafe fn call_value_impl(
         new_target: ptr::null_mut(),
         data: function.data,
     };
-    let result = callback_result(env, (function.callback)(env, &mut info));
+    let result = callback_result(env, invoke_napi_callback(env, function.callback, &mut info));
     take_env_exception(env)?;
     Ok(result)
 }
@@ -1540,7 +1658,7 @@ unsafe fn module_env_for_handle(handle: u64) -> Result<NapiEnv, String> {
         host.borrow()
             .module_envs
             .iter()
-            .find(|env| env.values.contains(&(handle as NapiValue)))
+            .find(|env| !env.finalized && env.values.contains(&(handle as NapiValue)))
             .map(|env| (&**env as *const Env).cast_mut())
             .ok_or_else(|| format!("unknown native addon handle {handle}"))
     })
@@ -1580,7 +1698,7 @@ unsafe fn call_function_handle(
         new_target: ptr::null_mut(),
         data: function.data,
     };
-    let value = callback_result(env, (function.callback)(env, &mut info));
+    let value = callback_result(env, invoke_napi_callback(env, function.callback, &mut info));
     take_env_exception(env)?;
     wait_for_promise(value)
 }
@@ -1718,7 +1836,7 @@ unsafe fn call_export_with_functions(
         new_target: ptr::null_mut(),
         data: exported.data,
     };
-    let value = callback_result(env, (exported.callback)(env, &mut info));
+    let value = callback_result(env, invoke_napi_callback(env, exported.callback, &mut info));
     take_env_exception(env)?;
     wait_for_promise(value)
 }
@@ -1881,7 +1999,7 @@ unsafe fn call_method_value_impl(
             new_target: ptr::null_mut(),
             data: function.data,
         };
-        let value = callback_result(env, (function.callback)(env, &mut info));
+        let value = callback_result(env, invoke_napi_callback(env, function.callback, &mut info));
         take_env_exception(env)?;
         wait_for_promise(value)
     })()
@@ -2218,7 +2336,7 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
             new_target: ptr::null_mut(),
             data: function.data,
         };
-        let value = callback_result(env_ptr, (function.callback)(env_ptr, &mut info));
+        let value = callback_result(env_ptr, invoke_napi_callback(env_ptr, function.callback, &mut info));
         if let Some(exception) = (*env_ptr).exception.take() {
             return Err(describe_env_exception(env_ptr, exception)?);
         }
@@ -2228,8 +2346,8 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
         } else {
             serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())?
         };
-        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
-            || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
+        if HOST.with(|host| host.borrow().has_active_async_work())
+            || host_threadsafe_state(false)
         {
             if let Some(callback) = created_callback {
                 HOST.with(|host| {
@@ -2239,12 +2357,8 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
                 });
             }
         } else {
-            let pending_envs = HOST.with(|host| {
-                let mut host = host.borrow_mut();
-                host.compiled_callbacks.remove(&callback_key);
-                std::mem::take(&mut host.pending_call_envs)
-            });
-            drop(pending_envs);
+            HOST.with(|host| { host.borrow_mut().compiled_callbacks.remove(&callback_key); });
+            retire_owned_envs();
         }
         Ok(value)
     })();
@@ -2337,7 +2451,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
             new_target: ptr::null_mut(),
             data: function.data,
         };
-        let value = callback_result(env, (function.callback)(env, &mut info));
+        let value = callback_result(env, invoke_napi_callback(env, function.callback, &mut info));
         take_env_exception(env)?;
         let value = wait_for_promise(value)?;
         if discard_result != 0 || value.is_null() {

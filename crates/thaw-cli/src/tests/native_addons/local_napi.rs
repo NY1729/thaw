@@ -815,3 +815,110 @@ fn native_callback_returning_a_function_keeps_it_callable() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+// Proposed thaw-cli/src/tests/native_addons/local_napi.rs integration test.
+// UNRUN: requires the separate Worker native-addon rehydration unit plus the
+// aggregate owner-thread poll/shutdown unit. It exercises an actual .node
+// addon, not a simulated Rust Env.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the separately pending native-addon Worker rehydration unit"]
+fn native_addon_async_and_tsfn_complete_in_worker_before_natural_exit() {
+    let dir = std::env::temp_dir().join(format!("thaw-worker-napi-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("worker-native");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"),
+        "export declare function schedule(asyncDone: (value: number) => void, threadDone: (value: number) => void): void;\n")
+        .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(&addon_c, r#"
+        #include <stddef.h>
+        #include <stdlib.h>
+        typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+        typedef void* napi_async_work; typedef void* napi_threadsafe_function;
+        typedef int napi_status;
+        typedef void (*napi_async_execute_callback)(napi_env, void*);
+        typedef void (*napi_async_complete_callback)(napi_env, napi_status, void*);
+        typedef void (*napi_threadsafe_function_call_js)(napi_env, napi_value, void*, void*);
+        extern napi_status napi_get_cb_info(napi_env,napi_callback_info,size_t*,napi_value*,napi_value*,void**);
+        extern napi_status napi_get_undefined(napi_env,napi_value*);
+        extern napi_status napi_create_double(napi_env,double,napi_value*);
+        extern napi_status napi_call_function(napi_env,napi_value,napi_value,size_t,const napi_value*,napi_value*);
+        extern napi_status napi_create_function(napi_env,const char*,size_t,napi_value(*)(napi_env,napi_callback_info),void*,napi_value*);
+        extern napi_status napi_set_named_property(napi_env,napi_value,const char*,napi_value);
+        extern napi_status napi_create_async_work(napi_env,napi_value,napi_value,napi_async_execute_callback,napi_async_complete_callback,void*,napi_async_work*);
+        extern napi_status napi_queue_async_work(napi_env,napi_async_work);
+        extern napi_status napi_delete_async_work(napi_env,napi_async_work);
+        extern napi_status napi_create_threadsafe_function(napi_env,napi_value,napi_value,napi_value,size_t,size_t,void*,void*,void*,napi_threadsafe_function_call_js,napi_threadsafe_function*);
+        extern napi_status napi_call_threadsafe_function(napi_threadsafe_function,void*,int);
+        extern napi_status napi_release_threadsafe_function(napi_threadsafe_function,int);
+        struct request { napi_value async_done; napi_threadsafe_function thread_done; napi_async_work work; };
+        static void deliver_thread(napi_env env,napi_value callback,void* context,void* data) {
+            (void)context; (void)data;
+            napi_value self,value,ignored;
+            napi_get_undefined(env,&self); napi_create_double(env,2,&value);
+            napi_call_function(env,self,callback,1,&value,&ignored);
+        }
+        static void execute(napi_env env,void* raw) {
+            (void)env;
+            struct request* request = raw;
+            napi_call_threadsafe_function(request->thread_done,NULL,0);
+            napi_release_threadsafe_function(request->thread_done,0);
+        }
+        static void complete(napi_env env,napi_status status,void* raw) {
+            struct request* request = raw;
+            napi_value self,value,ignored;
+            napi_get_undefined(env,&self); napi_create_double(env,status == 0 ? 1 : -1,&value);
+            napi_call_function(env,self,request->async_done,1,&value,&ignored);
+            napi_delete_async_work(env,request->work);
+            free(request);
+        }
+        static napi_value schedule(napi_env env,napi_callback_info info) {
+            napi_value args[2],result;
+            size_t argc = 2;
+            struct request* request = calloc(1,sizeof(*request));
+            napi_get_cb_info(env,info,&argc,args,NULL,NULL);
+            request->async_done = args[0];
+            napi_create_threadsafe_function(env,args[1],NULL,NULL,0,1,NULL,NULL,NULL,deliver_thread,&request->thread_done);
+            napi_create_async_work(env,NULL,NULL,execute,complete,request,&request->work);
+            napi_queue_async_work(env,request->work);
+            napi_get_undefined(env,&result);
+            return result;
+        }
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env,napi_value exports) {
+            napi_value fn;
+            napi_create_function(env,"schedule",8,schedule,NULL,&fn);
+            napi_set_named_property(env,exports,"schedule",fn);
+            return exports;
+        }
+    "#).unwrap();
+    assert!(Command::new("cc").args(["-shared", "-fPIC"])
+        .arg(&addon_c).arg("-o").arg(package.join("native.node"))
+        .status().unwrap().success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(&source, r#"
+        import { schedule } from 'worker-native';
+        import { Worker } from 'node:worker_threads';
+        async function main(): Promise<void> {
+            // Keep the package in the bundle; the Worker must independently
+            // rehydrate its addon rather than sharing main's Env or Host.
+            if (typeof schedule !== 'function') throw new Error('missing addon');
+            const worker = new Worker("var wt=require('node:worker_threads'), addon=require('worker-native'), seen=[]; function done(kind,value){ seen.push(kind+value); if(seen.length===2){ wt.parentPort.postMessage(seen.sort().join(',')); wt.parentPort.close(); } } addon.schedule(v=>done('async',v),v=>done('tsfn',v));", { eval: true });
+            const events: string[] = [];
+            await new Promise<void>((resolve,reject) => {
+                worker.on('message', value => events.push(String(value)));
+                worker.on('error', reject);
+                worker.on('exit', code => { events.push('exit'+code); resolve(); });
+            });
+            console.log(events.join('|'));
+        }
+    "#).unwrap();
+    build(&source,&output,&[],&[],&[],&registry,&[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "async1,tsfn2|exit0\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
