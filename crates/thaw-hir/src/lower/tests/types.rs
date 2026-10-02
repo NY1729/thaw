@@ -1993,3 +1993,35 @@ fn optional_call_preserves_nullable_and_nullish_result_tags() {
         }
     "#);
 }
+
+#[test]
+fn resolves_keyof_alias_target_before_its_owner_alias() {
+    let module = thaw_parser::parse_typescript(
+        "type I = { a: number }; type Keys = keyof I; function main(): void { const key: Keys = 'a'; console.log(key); }",
+    )
+    .unwrap();
+    let mut aliases = HashMap::new();
+    for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) = item {
+            aliases.insert(alias.id.sym.to_string(), alias.as_ref());
+        }
+    }
+    let mut resolved = HashMap::new();
+    assert_eq!(
+        resolve_named_type(
+            "Keys",
+            &HashMap::new(),
+            &aliases,
+            &GenericInterfaces::new(),
+            &mut resolved,
+            &mut Vec::new(),
+        )
+        .unwrap(),
+        HirType::Str,
+    );
+    assert_eq!(
+        resolved.get("I"),
+        Some(&HirType::Object(vec![("a".to_string(), HirType::F64)])),
+    );
+    lower("type I = { a: number }; type Keys = keyof I; function main(): void { const key: Keys = 'a'; console.log(key); }");
+}

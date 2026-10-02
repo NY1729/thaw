@@ -685,7 +685,8 @@ fn resolve_type_dependencies(
             in_progress,
         )?,
         TsType::TsTypeOperator(operator)
-            if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
+            if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly
+                || operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf =>
         {
             resolve_type_dependencies(
                 &operator.type_ann,
