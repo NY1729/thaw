@@ -1637,7 +1637,7 @@ module.exports = function() {
 }
 
 #[test]
-fn http2_failed_ping_callback_survives_remove_listener_throw() {
+fn http2_failed_ping_callback_ignores_remove_listener_observer() {
     use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http2_ping_remove_throw");
@@ -1650,6 +1650,7 @@ module.exports = function() {
   try {
     var session = new http2.ClientHttp2Session(999983, 'tcp'), errors = 0, callbacks = 0, thrown = false;
     session.on('error', function() { errors++; });
+    session.on('_pingAck', function() {});
     session.on('removeListener', function(name) { if (name === '_pingAck') throw marker; });
     try { session.ping(function(error) { if (error.code === 'ERR_HTTP2_ERROR') callbacks++; }); }
     catch (error) { thrown = error === marker; }
@@ -1676,7 +1677,7 @@ module.exports = function() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[true,1,true,1,0]"#);
+    assert_eq!(result, r#"[true,1,false,1,1]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -1731,7 +1732,79 @@ module.exports = function() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[[true,0,0,0,true],[2,0,0,0,0],["error","close","caught-removal","settings-failed","ping-failed"]]"#);
+    assert_eq!(result, r#"[[true,0,0,0,false],[2,0,0,0,0],["error","close","settings-failed","ping-failed"]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_ack_fifo_matches_wire_order_and_duplicate_ping_payloads() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_ack_fifo");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  var session = new http2.ClientHttp2Session(999979, 'tcp'), sent = [], events = [], payload = Buffer.from('12345678');
+  session._send = function(frame) { sent.push(Buffer.from(frame)); return true; };
+  session._start();
+  session.settings({ maxConcurrentStreams: 2 });
+  session.settings({ maxConcurrentStreams: 3 }, function(error, settings) {
+    events.push('settings:' + settings.maxConcurrentStreams);
+    session.settings({ maxConcurrentStreams: 4 }, function(error, next) { events.push('reentry:' + next.maxConcurrentStreams); });
+  });
+  var checkpoints = [];
+  session._frame(4, 1, 0, Buffer.alloc(0)); checkpoints.push([session._pendingAcks.length, events.length]);
+  session._frame(4, 1, 0, Buffer.alloc(0)); checkpoints.push([session._pendingAcks.length, events.length]);
+  session._frame(4, 1, 0, Buffer.alloc(0)); checkpoints.push([session._pendingAcks.length, events.length]);
+  session._frame(4, 1, 0, Buffer.alloc(0)); checkpoints.push([session._pendingAcks.length, events.length]);
+  session.ping(payload);
+  session.ping(payload, function(error, duration, data) { events.push('ping1:' + data.toString()); });
+  session.ping(payload, function(error, duration, data) { events.push('ping2:' + data.toString()); });
+  payload.fill(0);
+  session._frame(6, 1, 0, Buffer.from('12345678')); checkpoints.push([session._pendingAcks.length, events.length]);
+  session._frame(6, 1, 0, Buffer.from('12345678')); checkpoints.push([session._pendingAcks.length, events.length]);
+  session._frame(6, 1, 0, Buffer.from('12345678')); checkpoints.push([session._pendingAcks.length, events.length]);
+  var marker = new Error('callback'), publicSeen = 0, caught;
+  session.on('localSettings', function() { publicSeen++; throw new Error('public listener'); });
+  session.settings({}, function() { throw marker; });
+  try { session._frame(4, 1, 0, Buffer.alloc(0)); } catch (error) { caught = error === marker; }
+  var sync = new http2.ClientHttp2Session(999978, 'tcp'), syncEvents = [];
+  sync._send = function(frame) { sync._frame(frame[3] === 4 ? 4 : 6, 1, 0, frame.subarray(9)); return true; };
+  sync.settings({}, function(error) { syncEvents.push('settings:' + !error); });
+  sync.ping(Buffer.from('abcdefgh'), function(error, duration, data) { syncEvents.push('ping:' + data.toString()); });
+  var server = new http2.ServerHttp2Session(999977, 'tcp'), serverEvents = [], serverSends = [];
+  server._send = function(frame) { serverSends.push(frame[3]); return true; };
+  server.settings({ maxConcurrentStreams: 7 }, function(error, settings) { serverEvents.push(settings.maxConcurrentStreams); });
+  server._buffer = Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
+  server._parse();
+  server._frame(4, 1, 0, Buffer.alloc(0));
+  server._frame(4, 1, 0, Buffer.alloc(0));
+  var beforeFailure = [events.slice(), checkpoints, sent.map(function(frame) { return frame[0] === 80 ? frame[27] : frame[3]; }), session._pendingAcks.length, publicSeen, caught, syncEvents, sync._pendingAcks.length, serverSends, serverEvents, server._pendingAcks.length];
+  session.settings({}, function(error) { events.push('failed:' + (this === session) + ':' + !!error); });
+  session.destroy();
+  return Promise.resolve().then(function() { return [beforeFailure, events, session._pendingAcks.length]; });
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_ack_fifo_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2AckFifo = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2AckFifo").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[["settings:3","reentry:4","ping1:12345678","ping2:12345678"],[[2,0],[1,0],[1,1],[0,2],[2,2],[1,3],[0,4]],[4,4,4,4,6,6,6,4],0,1,true,["settings:true","ping:abcdefgh"],0,[4,4],[7],0],["settings:3","reentry:4","ping1:12345678","ping2:12345678","failed:true:true"],0]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
