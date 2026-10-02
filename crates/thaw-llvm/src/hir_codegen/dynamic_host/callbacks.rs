@@ -894,6 +894,7 @@ impl<'ctx> HirCompiler<'ctx> {
             (self.pending_exception(), BasicTypeEnum::from(ptr_type)),
             (self.pending_exception_native_text(), BasicTypeEnum::from(ptr_type)),
             (self.pending_exception_object(), BasicTypeEnum::from(ptr_type)),
+            (self.pending_exception_aggregate_errors(), BasicTypeEnum::from(ptr_type)),
             (self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL), BasicTypeEnum::from(self.context.i64_type())),
             (self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL), BasicTypeEnum::from(self.context.f64_type())),
             (self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL), BasicTypeEnum::from(self.context.i64_type())),

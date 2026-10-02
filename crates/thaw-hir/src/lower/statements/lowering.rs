@@ -2329,7 +2329,17 @@ impl<'a> FnLowerer<'a> {
                     vec![value],
                 );
                 if promise_rethrow {
-                    return Ok(vec![HirStmt::Throw(value)]);
+                    let binding = throw_stmt.arg.as_ident()
+                        .map(|ident| self.resolve_binding(ident.sym.as_ref()))
+                        .ok_or("Promise rejection rethrow needs a binding")?;
+                    let mut args = vec![value];
+                    for field in ["original", "native_text", "aggregate", "tag", "f64", "i64", "bool", "object"] {
+                        args.push(HirExpr::Var(Self::promise_rejection_snapshot_name(&binding, field)));
+                    }
+                    return Ok(vec![HirStmt::Throw(HirExpr::Call(
+                        Box::new(HirExpr::Var("@@thaw_rethrow_pending_exception".to_string())),
+                        args,
+                    ))]);
                 }
                 if let Some(object_name) = rethrow_object {
                     let tag_name = object_name.replace("_object", "_tag");
@@ -2407,6 +2417,7 @@ impl<'a> FnLowerer<'a> {
                 let tag = match value_type {
                     HirType::Str | HirType::StrLiteral(_) => Some(4),
                     HirType::Undefined | HirType::Void => Some(5),
+                    HirType::Null => Some(6),
                     _ => None,
                 };
                 if let Some(tag) = tag {

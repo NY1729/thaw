@@ -1230,6 +1230,11 @@ fn lower_fn_decl(
         }
     }
     let mut body = Vec::new();
+    if promise_rejection_callback {
+        if let Some(binding) = runtime_params.first() {
+            body.extend(lowerer.snapshot_promise_rejection(&binding.name));
+        }
+    }
     for (source, param) in func.params.iter().zip(runtime_params) {
         if !matches!(source.pat, Pat::Ident(_) | Pat::Rest(_)) {
             lowerer.lower_binding_pattern(

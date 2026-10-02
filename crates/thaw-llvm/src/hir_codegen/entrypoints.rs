@@ -352,6 +352,13 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(self.pending_exception().as_pointer_value(), pending_value)
                 .map_err(|error| error.to_string())?;
             self.mark_pending_native_text(native_text)?;
+            let aggregate = self.builder.build_call(
+                self.module.get_function("thaw_promise_exception_aggregate_errors").unwrap(),
+                &[promise.into()], "json_handler_aggregate_errors",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("aggregate errors getter returned no value")?;
+            self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(), aggregate)
+                .map_err(|error| error.to_string())?;
             self.builder
                 .build_call(
                     self.module.get_function("thaw_promise_destroy").unwrap(),
@@ -453,6 +460,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "\u{1}ThawError\u{1}failed to synchronize Lambda trace environment",
                 "lambda_trace_sync_error",
             ).map_err(|error| error.to_string())?;
+            self.clear_pending_native_text()?;
             self.builder.build_store(self.pending_exception().as_pointer_value(), message.as_pointer_value())
                 .map_err(|error| error.to_string())?;
             self.builder.build_return(Some(&i8_ptr.const_null()))
@@ -604,6 +612,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pending_exception(),
             self.pending_exception_native_text(),
             self.pending_exception_object(),
+            self.pending_exception_aggregate_errors(),
         ] {
             self.builder.build_store(slot.as_pointer_value(), ptr_ty.const_null()).unwrap();
         }

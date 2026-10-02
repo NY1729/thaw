@@ -773,7 +773,53 @@ fn async_catch_rethrow_carries_owned_native_text_provenance() {
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
     assert!(ir.contains("@thaw_promise_exception_native_text_copy"), "{ir}");
-    assert!(ir.contains("@thaw_promise_reject_typed_with_native_text"), "{ir}");
+    assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");
     assert!(ir.contains("caught_rethrow_native_text"), "{ir}");
     assert!(ir.contains("@@thaw_catch_native_text:"), "{ir}");
+}
+
+// Compiler transport only: this asserts the companion is copied while the
+// rejected Promise is live and forwarded through the pending/catch ABI.
+#[test]
+fn promise_any_aggregate_metadata_reaches_async_catch_and_rethrow() {
+    let source = r#"
+        async function fail(): Promise<number> { throw 1; }
+        async function main(): Promise<void> {
+            try { await Promise.any([fail(), fail()]); }
+            catch (error) { throw error; }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "promise_any_aggregate_transport_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_promise_exception_aggregate_errors"), "{ir}");
+    assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");
+    assert!(ir.contains("__thaw_pending_exception_aggregate_errors"), "{ir}");
+    assert!(ir.contains("__thaw_exception_aggregate"), "{ir}");
+}
+
+#[test]
+fn promise_catch_direct_rethrow_keeps_native_text_and_aggregate_companion() {
+    let source = r#"
+        async function main(): Promise<void> {
+            await Promise.any([Promise.reject<number>(1)]).catch(error => {
+                try { throw "inner"; } catch (inner) { console.log(inner); }
+                throw error;
+            });
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "promise_catch_aggregate_transport_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("chain_native_text"), "{ir}");
+    assert!(ir.contains("same_rejection_binding"), "{ir}");
+    assert!(ir.contains("rethrow_aggregate"), "{ir}");
+    assert!(ir.contains("@thaw_promise_exception_aggregate_errors"), "{ir}");
+    assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");
 }

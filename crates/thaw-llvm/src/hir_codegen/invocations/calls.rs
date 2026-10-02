@@ -1373,6 +1373,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(self.pending_exception_object().as_pointer_value(), value)
                     .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(
                         self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)
@@ -1381,6 +1384,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_pending_exception_aggregate" => {
+                return self.builder.build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    self.pending_exception_aggregate_errors().as_pointer_value(),
+                    "pending_exception_aggregate_errors",
+                ).map_err(|error| error.to_string());
             }
             "__thaw_pending_exception_object" => {
                 return self
@@ -1448,6 +1458,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     _ => (PENDING_EXCEPTION_BOOL_SYMBOL, 3),
                 };
                 let value = self.compile_expr(value)?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(
                         self.pending_exception_value(symbol).as_pointer_value(),
@@ -1499,6 +1512,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("exception tag setter expects one tag".into());
                 };
                 let tag = self.compile_expr(tag)?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
                 self.builder
                     .build_store(
                         self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)

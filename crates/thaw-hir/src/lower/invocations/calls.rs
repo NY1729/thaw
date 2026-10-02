@@ -1378,6 +1378,10 @@ impl<'a> FnLowerer<'a> {
                         )),
                         vec![HirExpr::Lit(HirLit::I64(5))],
                     ),
+                    HirType::Null => HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_set_pending_exception_tag".to_string())),
+                        vec![HirExpr::Lit(HirLit::I64(6))],
+                    ),
                     _ => HirExpr::Call(
                         Box::new(HirExpr::Var(
                             "__thaw_set_pending_exception_tag".to_string(),

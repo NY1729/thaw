@@ -1276,6 +1276,9 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::I64, tag, "exception typeof tag")?;
                         return Ok(HirType::Str);
                     }
+                    "@@thaw_rethrow_pending_exception" => return Ok(HirType::Str),
+                    "__thaw_pending_exception_native_text" => return Ok(HirType::Str),
+                    "__thaw_pending_exception_aggregate" => return Ok(HirType::Object(Vec::new())),
                     "__thaw_pending_exception_object" => {
                         return Ok(HirType::Object(Vec::new()));
                     }
