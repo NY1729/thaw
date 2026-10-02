@@ -747,6 +747,98 @@ fn package_imports_use_import_conditions_for_static_and_dynamic_calls() {
 }
 
 #[test]
+fn same_specifier_keeps_import_and_require_condition_targets() {
+    let root = temp_registry("mixed-condition-specifier");
+    let modules = root.join("node_modules");
+    let owner = modules.join("owner");
+    let dual = modules.join("dual");
+    fs::create_dir_all(&owner).unwrap();
+    fs::create_dir_all(&dual).unwrap();
+    fs::write(dual.join("package.json"), r#"{"name":"dual","exports":{".":{"import":"./esm.js","require":"./cjs.js"}}}"#).unwrap();
+    fs::write(dual.join("esm.js"), "export default 'import';").unwrap();
+    fs::write(dual.join("cjs.js"), "module.exports = 'require';").unwrap();
+    fs::write(owner.join("entry.js"), "import value from 'dual'; const sync = require('dual'); export default [value, sync, import('dual')];").unwrap();
+
+    let (bundle, _, file_count, _) = bundle_commonjs_package(&modules, "owner", &owner, "entry.js").unwrap();
+    assert_eq!(file_count, 3);
+    let import_maps = bundle.split("var __thaw_bundle_import_maps = {").nth(1).unwrap().split("};").next().unwrap();
+    let require_maps = bundle.split("var __thaw_bundle_require_maps = {").nth(1).unwrap().split("};").next().unwrap();
+    assert!(import_maps.contains("\"dual\": \"dual/./esm.js\""), "{import_maps}");
+    assert!(require_maps.contains("\"dual\": \"dual/./cjs.js\""), "{require_maps}");
+    assert!(bundle.contains("__thaw_bundle_target(importMap, spec)"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn package_import_same_specifier_and_nonliteral_fallback_keep_conditions() {
+    let root = temp_registry("mixed-package-import");
+    let modules = root.join("node_modules");
+    let owner = modules.join("owner");
+    let dual = modules.join("dual");
+    fs::create_dir_all(&owner).unwrap();
+    fs::create_dir_all(&dual).unwrap();
+    fs::write(owner.join("package.json"), r##"{"name":"owner","dependencies":{"dual":"1.0.0"},"imports":{"#choice":{"import":"./esm.js","require":"./cjs.js"}}}"##).unwrap();
+    fs::write(owner.join("esm.js"), "export default 'import';").unwrap();
+    fs::write(owner.join("cjs.js"), "module.exports = 'require';").unwrap();
+    fs::write(dual.join("package.json"), r#"{"name":"dual","exports":{".":{"import":"./esm.js","require":"./cjs.js"}}}"#).unwrap();
+    fs::write(dual.join("esm.js"), "export default 'import';").unwrap();
+    fs::write(dual.join("cjs.js"), "module.exports = 'require';").unwrap();
+    fs::write(owner.join("entry.js"), "import value from '#choice'; const sync = require('#choice'); const dynamic = import('#choice'); const name = 'dual'; module.exports = [value, sync, dynamic, require(name)];").unwrap();
+
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "owner", &owner, "entry.js").unwrap();
+    let import_maps = bundle.split("var __thaw_bundle_import_maps = {").nth(1).unwrap().split("};").next().unwrap();
+    let require_maps = bundle.split("var __thaw_bundle_require_maps = {").nth(1).unwrap().split("};").next().unwrap();
+    assert!(import_maps.contains("\"#choice\": \"owner/esm.js\""), "{import_maps}");
+    assert!(require_maps.contains("\"#choice\": \"owner/cjs.js\""), "{require_maps}");
+    assert!(import_maps.contains("\"dual\": \"dual/./esm.js\""), "{import_maps}");
+    assert!(require_maps.contains("\"dual\": \"dual/./cjs.js\""), "{require_maps}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn nonliteral_import_can_use_subpath_without_import_condition_at_package_root() {
+    let root = temp_registry("nonliteral-import-subpath");
+    let modules = root.join("node_modules");
+    let owner = modules.join("owner");
+    let dual = modules.join("dual");
+    fs::create_dir_all(&owner).unwrap();
+    fs::create_dir_all(&dual).unwrap();
+    fs::write(owner.join("package.json"), r#"{"name":"owner","dependencies":{"dual":"1.0.0"}}"#).unwrap();
+    fs::write(owner.join("entry.js"), "const name = 'dual/feature'; module.exports = import(name);").unwrap();
+    fs::write(dual.join("package.json"), r#"{"name":"dual","exports":{".":{"require":"./cjs.js"},"./feature":{"import":"./esm.js"}}}"#).unwrap();
+    fs::write(dual.join("cjs.js"), "module.exports = 'require';").unwrap();
+    fs::write(dual.join("esm.js"), "export default 'import';").unwrap();
+
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "owner", &owner, "entry.js").unwrap();
+    let import_maps = bundle.split("var __thaw_bundle_import_maps = {").nth(1).unwrap().split("};").next().unwrap();
+    assert!(import_maps.contains("\"dual/feature\": \"dual/./esm.js\""), "{import_maps}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn missing_import_condition_cannot_fall_back_to_require_target() {
+    let root = temp_registry("require-only-import");
+    let modules = root.join("node_modules");
+    let owner = modules.join("owner");
+    let dual = modules.join("dual");
+    fs::create_dir_all(&owner).unwrap();
+    fs::create_dir_all(&dual).unwrap();
+    fs::write(dual.join("package.json"), r#"{"name":"dual","exports":{".":{"require":"./cjs.js"}}}"#).unwrap();
+    fs::write(dual.join("cjs.js"), "module.exports = 'require';").unwrap();
+    fs::write(owner.join("entry.js"), "module.exports = [require('dual'), import('dual')];").unwrap();
+
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "owner", &owner, "entry.js").unwrap();
+    let import_maps = bundle.split("var __thaw_bundle_import_maps = {").nth(1).unwrap().split("};").next().unwrap();
+    let require_maps = bundle.split("var __thaw_bundle_require_maps = {").nth(1).unwrap().split("};").next().unwrap();
+    let known = bundle.split("var __thaw_bundle_known_package_maps = {").nth(1).unwrap().split("};").next().unwrap();
+    assert!(!import_maps.contains("\"dual\":"), "{import_maps}");
+    assert!(require_maps.contains("\"dual\": \"dual/./cjs.js\""), "{require_maps}");
+    assert!(known.contains("\"owner/entry.js\": [\"dual\"]"), "{known}");
+    assert!(bundle.contains("if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn package_imports_external_targets_use_nested_dependency_and_selected_pattern() {
     let root = temp_registry("imports-external");
     let modules = root.join("node_modules");

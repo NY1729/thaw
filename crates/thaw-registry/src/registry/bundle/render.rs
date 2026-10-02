@@ -9,7 +9,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
   }
   function graphOf(key) { return __thaw_bundle_export_graphs[factoryOf(key)]; }
   function targetOf(key, spec) {
-    return __thaw_bundle_target(__thaw_bundle_require_maps[factoryOf(key)] || {}, spec);
+    return __thaw_bundle_target(__thaw_bundle_import_maps[factoryOf(key)] || {}, spec);
   }
   var enumerable = Object.prototype.propertyIsEnumerable;
   function valueOf(target, sourceKey, spec) {
@@ -219,24 +219,40 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     out.push_str("var __thaw_bundle_factories = {\n");
     for module in modules {
         let asynchronous = if module.async_module { "async " } else { "" };
-        let require = if module.has_esm {
-            "__thaw_require"
-        } else {
-            "require"
-        };
         if let Some(origin) = &module.origin_parameter {
             out.push_str(&format!(
-                "{}: function({origin}) {{ return {asynchronous}function(module, exports, {require}, requireAsync, __filename, __dirname) {{\n{}\n}}; }},\n",
+                "{}: function({origin}) {{ return {asynchronous}function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {{\n{}\n}}; }},\n",
                 js_string_literal(&module.key),
                 module.source,
             ));
         } else {
             out.push_str(&format!(
-                "{}: {asynchronous}function(module, exports, {require}, requireAsync, __filename, __dirname) {{\n{}\n}},\n",
+                "{}: {asynchronous}function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {{\n{}\n}},\n",
                 js_string_literal(&module.key),
                 module.source,
             ));
         }
+    }
+    out.push_str("};\n");
+
+    out.push_str("var __thaw_bundle_import_maps = {\n");
+    for module in modules {
+        out.push_str(&format!("{}: {{", js_string_literal(&module.key)));
+        for (spec, target) in &module.imports {
+            out.push_str(&format!(
+                "{}: {}, ",
+                js_string_literal(spec),
+                js_string_literal(target)
+            ));
+        }
+        out.push_str("},\n");
+    }
+    out.push_str("};\n");
+
+    out.push_str("var __thaw_bundle_known_package_maps = {\n");
+    for module in modules {
+        out.push_str(&format!("{}: {},\n", js_string_literal(&module.key),
+            serde_json::to_string(&module.known_packages).expect("package names are serializable")));
     }
     out.push_str("};\n");
 
@@ -273,6 +289,17 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20var factory = map[base];\n\
          \x20\x20return { key: factory + spec.slice(suffixAt), factory: factory };\n\
          }\n\
+         function __thaw_bundle_import_missing(known, spec) {\n\
+         \x20\x20spec = String(spec);\n\
+         \x20\x20if (spec.charAt(0) === '#') return true;\n\
+         \x20\x20var query = spec.indexOf('?'), fragment = spec.indexOf('#', 1);\n\
+         \x20\x20var suffixAt = query < 0 ? fragment : (fragment < 0 ? query : Math.min(query, fragment));\n\
+         \x20\x20if (suffixAt >= 0) spec = spec.slice(0, suffixAt);\n\
+         \x20\x20var slash = spec.indexOf('/');\n\
+         \x20\x20var next = spec.charAt(0) === '@' && slash >= 0 ? spec.indexOf('/', slash + 1) : slash;\n\
+         \x20\x20var name = next < 0 ? spec : spec.slice(0, next);\n\
+         \x20\x20return known.indexOf(name) >= 0;\n\
+         }\n\
          function __thaw_bundle_require(key, factoryKey) {\n\
          \x20\x20if (String(factoryKey || key).endsWith('.node') && require.addon) return require.addon();\n\
          \x20\x20if (!(key in __thaw_bundle_cache)) {\n\
@@ -280,6 +307,8 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20var mod = { exports: {}, filename: '/thaw_modules/' + (factoryKey || key) };\n\
          \x20\x20\x20\x20__thaw_bundle_cache[key] = mod;\n\
          \x20\x20\x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
+         \x20\x20\x20\x20var importMap = __thaw_bundle_import_maps[factoryKey] || {};\n\
+         \x20\x20\x20\x20var knownPackages = __thaw_bundle_known_package_maps[factoryKey] || [];\n\
          \x20\x20\x20\x20var localRequire = function(spec) {\n\
          \x20\x20\x20\x20\x20\x20if ((spec === 'bindings' || spec === 'node-gyp-build') && typeof require.addon === 'function') return require.addon;\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
@@ -288,14 +317,15 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20localRequire.addon = require.addon;\n\
          \x20\x20\x20\x20localRequire.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
+         \x20\x20\x20\x20var localImport = function(spec) { var target = __thaw_bundle_target(importMap, spec); if (target) return __thaw_bundle_require(target.key, target.factory); if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); };\n\
          \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
-         \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
-         \x20\x20\x20\x20\x20\x20if (!target) return Promise.resolve().then(function() { return require(spec); });\n\
+         \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(importMap, spec);\n\
+         \x20\x20\x20\x20\x20\x20if (!target) return Promise.resolve().then(function() { if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); });\n\
          \x20\x20\x20\x20\x20\x20return Promise.resolve().then(function() { var value = __thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready.then(function() { return value; }); });\n\
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20var filename = '/thaw_modules/' + factoryKey, slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash);\n\
          \x20\x20\x20\x20var initialized;\n\
-         \x20\x20\x20\x20try { var factory = __thaw_bundle_factories[factoryKey]; if (Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, factoryKey)) factory = factory(__thaw_bundle_origin_for(key)); initialized = factory(mod, mod.exports, localRequire, localRequireAsync, filename, dirname); } catch (error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; }\n\
+         \x20\x20\x20\x20try { var factory = __thaw_bundle_factories[factoryKey]; if (Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, factoryKey)) factory = factory(__thaw_bundle_origin_for(key)); initialized = factory(mod, mod.exports, localRequire, localRequireAsync, filename, dirname, localImport); } catch (error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; }\n\
          \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; }, function(error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; });\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
@@ -310,6 +340,15 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20created.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
          }\n\
+         function __thaw_bundle_create_import(base) {\n\
+         \x20\x20var map = __thaw_bundle_import_maps[String(base)] || {};\n\
+         \x20\x20var known = __thaw_bundle_known_package_maps[String(base)] || [];\n\
+         \x20\x20return function(spec) { spec = String(spec); var target = __thaw_bundle_target(map, spec); if (target) return __thaw_bundle_require(target.key, target.factory); if (__thaw_bundle_import_missing(known, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); };\n\
+         }\n\
+         function __thaw_bundle_create_import_async(base) {\n\
+         \x20\x20var importModule = __thaw_bundle_create_import(base);\n\
+         \x20\x20return function(spec) { return Promise.resolve().then(function() { var target = __thaw_bundle_target(__thaw_bundle_import_maps[String(base)] || {}, String(spec)); var value = importModule(spec); return target ? __thaw_bundle_cache[target.key].ready.then(function() { return value; }) : value; }); };\n\
+         }\n\
          function __thaw_bundle_register_worker_main(key, mod) {\n\
          \x20\x20if (Object.prototype.hasOwnProperty.call(__thaw_bundle_cache, key)) throw new Error('Worker entry already initialized');\n\
          \x20\x20mod.filename = '/thaw_modules/' + key;\n\
@@ -319,13 +358,17 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20return function(succeeded, error) { if (succeeded) resolveReady(mod.exports); else rejectReady(error); };\n\
          }\n\
          globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\n\
+         globalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\n\
+         globalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\n\
          var __thaw_worker_bundle_source =\n\
          \x20\x20'(function() {\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
          \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
          \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
+         \x20\x20'var __thaw_bundle_import_maps = ' + JSON.stringify(__thaw_bundle_import_maps) + ';\\n' +\n\
+         \x20\x20'var __thaw_bundle_known_package_maps = ' + JSON.stringify(__thaw_bundle_known_package_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_export_graphs = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_export_graphs)) + ');\\n' +\n\
-         \x20\x20__thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
-         \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\nglobalThis.__thaw_bundle_worker_origin = __thaw_bundle_origin_for;\\nglobalThis.__thaw_bundle_register_worker_main = __thaw_bundle_register_worker_main;\\n})();\\n';\n\
+         \x20\x20__thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
+         \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\nglobalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\\nglobalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\\nglobalThis.__thaw_bundle_worker_origin = __thaw_bundle_origin_for;\\nglobalThis.__thaw_bundle_register_worker_main = __thaw_bundle_register_worker_main;\\n})();\\n';\n\
          globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source;\n",
     );
 
