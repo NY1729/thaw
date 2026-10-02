@@ -1131,6 +1131,36 @@ impl<'ctx> HirCompiler<'ctx> {
         self.drive_promise_to_resolved_value(promise, resolved)
     }
 
+    /// Preserve the full rejection reason before the settled Promise is destroyed.
+    /// Both value-taking and void blocking awaits enter this only on failure.
+    fn copy_blocking_promise_exception_metadata(
+        &mut self,
+        promise: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        for (getter, target) in [
+            ("thaw_promise_exception_tag", self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL)),
+            ("thaw_promise_exception_f64", self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL)),
+            ("thaw_promise_exception_i64", self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL)),
+            ("thaw_promise_exception_bool", self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL)),
+            ("thaw_promise_exception_object", self.pending_exception_object()),
+        ] {
+            let value = self.builder
+                .build_call(
+                    self.module.get_function(getter).unwrap(),
+                    &[promise.into()],
+                    "blocking_await_exception_value",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| format!("{getter} returned no value"))?;
+            self.builder
+                .build_store(target.as_pointer_value(), value)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     /// The value-taking half of `compile_typed_blocking_await`, for a
     /// caller that already has a compiled `Promise<T>` pointer in hand
     /// (rather than an `HirExpr` to compile) -- e.g. a native callback's
@@ -1213,6 +1243,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_store(self.pending_exception().as_pointer_value(), pending_value)
             .map_err(|error| error.to_string())?;
         self.mark_pending_native_text(native_text)?;
+        self.copy_blocking_promise_exception_metadata(promise)?;
         let default = llvm_type.const_zero();
         self.builder
             .build_unconditional_branch(merge)
@@ -1311,6 +1342,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_store(self.pending_exception().as_pointer_value(), pending_value)
             .map_err(|error| error.to_string())?;
         self.mark_pending_native_text(native_text)?;
+        self.copy_blocking_promise_exception_metadata(promise)?;
         self.builder
             .build_unconditional_branch(merge)
             .map_err(|error| error.to_string())?;
