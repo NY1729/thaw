@@ -3045,6 +3045,49 @@ fn resolves_main_field_missing_its_extension() {
 }
 
 #[test]
+fn same_named_file_precedes_directory_package_main() {
+    let dir = temp_registry("file_before_directory_main");
+    let directory = dir.join("foo");
+    fs::create_dir(&directory).unwrap();
+    fs::write(dir.join("foo.js"), "module.exports = 'file';").unwrap();
+    fs::write(directory.join("package.json"), r#"{"main":"./inner.js"}"#).unwrap();
+    fs::write(directory.join("inner.js"), "module.exports = 'directory';").unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, "./foo").unwrap();
+    assert_eq!(relative, "./foo.js");
+    assert_eq!(absolute, dir.join("foo.js"));
+    for directory_request in ["./foo/", "./foo/."] {
+        let (relative, absolute) = resolve_module_path(&dir, directory_request).unwrap();
+        assert_eq!(relative, "foo/inner.js");
+        assert_eq!(absolute, directory.join("inner.js"));
+    }
+    fs::remove_file(dir.join("foo.js")).unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, "./foo").unwrap();
+    assert_eq!(relative, "foo/inner.js");
+    assert_eq!(absolute, directory.join("inner.js"));
+    fs::write(dir.join(".js"), "module.exports = 'sibling';").unwrap();
+    fs::write(dir.join("package.json"), r#"{"main":"./entry.js"}"#).unwrap();
+    fs::write(dir.join("entry.js"), "module.exports = 'root';").unwrap();
+    let (relative, absolute) = resolve_module_path(&dir, ".").unwrap();
+    assert_eq!(relative, "entry.js");
+    assert_eq!(absolute, dir.join("entry.js"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bundled_trailing_slash_require_keeps_directory_intent() {
+    let package = temp_registry("bundle_directory_intent");
+    fs::create_dir(package.join("foo")).unwrap();
+    fs::write(package.join("index.js"), "module.exports = require('./foo/');").unwrap();
+    fs::write(package.join("foo.js"), "module.exports = 'file-only-value';").unwrap();
+    fs::write(package.join("foo/package.json"), r#"{"main":"./inner.js"}"#).unwrap();
+    fs::write(package.join("foo/inner.js"), "module.exports = 'directory-only-value';").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&package, "pkg", &package, "index.js").unwrap();
+    assert!(bundle.contains("directory-only-value"));
+    assert!(!bundle.contains("file-only-value"));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
 fn resolves_main_field_pointing_at_a_directory() {
     let dir = temp_registry("main_directory");
     fs::create_dir_all(dir.join("lib")).unwrap();

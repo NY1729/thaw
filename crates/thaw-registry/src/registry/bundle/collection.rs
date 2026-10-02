@@ -276,13 +276,20 @@ fn bundle_commonjs_package_cached(
                 format!("{}/{resolution_spec}", requiring_dir.display())
             };
             let normalized = normalize_path_string(&combined);
+            // Normalizing `./foo/` or `./foo/.` removes the marker that
+            // restricts CommonJS resolution to a directory.
+            let resolution_path = if is_directory_module_request(resolution_spec) {
+                if normalized.is_empty() { ".".to_string() } else { format!("{normalized}/") }
+            } else {
+                normalized
+            };
             // An unresolvable relative require (e.g. it targets a
             // `.json` file, which `resolve_module_path`'s candidates
             // don't cover) is left out of the map on purpose -- that one
             // call falls through to the external-require stub at
             // runtime instead of aborting the whole bundle.
             if let Ok((resolved_relative, resolved_abs)) =
-                resolve_module_path(&pkg_dir, &normalized)
+                resolve_module_path(&pkg_dir, &resolution_path)
             {
                 let resolved_key = format!("{pkg_name}/{resolved_relative}{suffix}");
                 requires.push((spec, resolved_key.clone()));
