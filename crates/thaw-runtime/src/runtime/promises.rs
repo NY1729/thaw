@@ -764,13 +764,31 @@ fn finally_adopt_with_source(
     1
 }
 
+thread_local! {
+    static PROMISE_ALL_STATES: RefCell<Vec<*mut PromiseAllState>> = const { RefCell::new(Vec::new()) };
+}
+
+fn uncount_pending_promise_all_states_for_invocation() {
+    // The native Promise state and its ArenaRoot may outlive one Lambda
+    // request when an input is intentionally retained. The request-local
+    // detached-work counter is reset at purge; a later child callback must
+    // not decrement a new invocation's counter.
+    PROMISE_ALL_STATES.with(|states| {
+        for pointer in states.borrow().iter().copied() {
+            unsafe { (*pointer).join_counted = false };
+        }
+    });
+}
+
 struct PromiseAllState {
     output: *mut ThawPromise,
     remaining: usize,
     rejected: bool,
-    first_error: *const u8,
     result: *mut u8,
     result_slot: *mut *const u8,
+    result_handle: *mut u8,
+    result_root: Option<thaw_arena::ArenaRoot>,
+    join_counted: bool,
     element_sizes: Vec<usize>,
     element_offsets: Vec<usize>,
 }
@@ -788,15 +806,22 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
     if child_state == 2 {
         if !state.rejected {
             state.rejected = true;
-            state.first_error = result;
             forward_promise_rejection(state.output, child.promise, result);
+            state.result_root = None;
         }
     } else if !state.rejected {
+        let record = unsafe { thaw_promise_fulfilled_provenance(child.promise) };
         for index in &child.indices {
             let destination = unsafe { state.result.add(state.element_offsets[*index]) };
             unsafe {
                 destination.write_bytes(0, state.element_sizes[*index].max(size_of::<u64>()));
                 std::ptr::copy_nonoverlapping(result, destination, state.element_sizes[*index]);
+            }
+            if unsafe { thaw_array_provenance_set(state.result_handle, *index, record) } == 0 {
+                state.rejected = true;
+                reject_native_text(state.output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+                state.result_root = None;
+                break;
             }
         }
     }
@@ -806,7 +831,11 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
         if !state.rejected {
             thaw_promise_resolve(state.output, state.result_slot.cast());
         }
-        ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
+        state.result_root = None;
+        PROMISE_ALL_STATES.with(|states| states.borrow_mut().retain(|current| *current != child.state));
+        if state.join_counted {
+            ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
+        }
         unsafe { drop(Box::from_raw(child.state)) };
     }
 }
@@ -882,8 +911,17 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
     // The Promise's own resolved value has Array/Tuple type, so it must be a
     // handle - not the raw buffer - by the time codegen's generic await
     // extraction loads it back out of `result_slot`. See `wrap_array_handle`.
-    unsafe { result_slot.write(wrap_array_handle(result).cast()) };
+    let result_handle = wrap_array_handle(result);
+    if result_handle.is_null() {
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    unsafe { result_slot.write(result_handle.cast()) };
     unsafe { result.cast::<u64>().write(len as u64) };
+    if unsafe { thaw_array_provenance_prepare(result_handle, len) } == 0 {
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
     if len == 0 {
         thaw_promise_resolve(output, result_slot.cast());
         return output;
@@ -913,21 +951,25 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
         output,
         remaining: grouped.len(),
         rejected: invalid,
-        first_error: if invalid {
-            PROMISE_ALL_INVALID_ERROR.as_ptr()
-        } else {
-            std::ptr::null()
-        },
         result,
         result_slot,
+        result_handle,
+        result_root: Some(thaw_arena::ArenaRoot::new(result_slot as usize)),
+        join_counted: !grouped.is_empty(),
         element_sizes,
         element_offsets,
     }));
     if !grouped.is_empty() {
+        PROMISE_ALL_STATES.with(|states| states.borrow_mut().push(state));
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
     }
     if invalid {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        unsafe { (*state).result_root = None };
+    }
+    if grouped.is_empty() {
+        unsafe { drop(Box::from_raw(state)) };
+        return output;
     }
     for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAllChild {
@@ -938,13 +980,6 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
         unsafe {
             thaw_promise_subscribe(promise, resume_promise_all_child, child.cast());
         }
-    }
-    if unsafe { (*state).remaining } == 0 {
-        let error = unsafe { (*state).first_error };
-        // This branch only uses PROMISE_ALL_INVALID_ERROR: the no-input
-        // error is native text, unlike arbitrary child rejection values.
-        reject_native_text(output, error);
-        unsafe { drop(Box::from_raw(state)) };
     }
     output
 }

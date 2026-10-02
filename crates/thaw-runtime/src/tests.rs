@@ -3031,3 +3031,76 @@ fn native_adopt_race_and_any_forward_fulfilled_record_without_reinterpreting_res
         unsafe { thaw_promise_destroy(output) };
     }
 }
+
+#[test]
+fn private_array_provenance_reserves_before_visible_write_and_clears_truncated_slots() {
+    let buffer = thaw_arena::thaw_arena_alloc(8 + 3 * 8, 8);
+    let handle = thaw_arena::thaw_arena_alloc(16, 8);
+    assert!(!buffer.is_null() && !handle.is_null());
+    unsafe {
+        buffer.cast::<u64>().write(3);
+        handle.cast::<*mut u8>().write(buffer);
+        handle.add(8).cast::<*mut u8>().write(std::ptr::null_mut());
+    }
+    let original = 7usize as *const u8;
+    let record = thaw_exception_provenance_new(original, std::ptr::null(),
+        std::ptr::null(), 2, 0.0, 7, 0, std::ptr::null());
+    assert!(!record.is_null());
+    assert_eq!(unsafe { thaw_array_provenance_set(handle, 2, record) }, 0);
+    assert_eq!(unsafe { thaw_array_provenance_prepare(handle, 3) }, 1);
+    assert_eq!(unsafe { thaw_array_provenance_set(handle, 2, record) }, 1);
+    assert_eq!(unsafe { thaw_array_provenance_get(handle, 2) }, record);
+    unsafe { thaw_array_provenance_truncate(handle, 1) };
+    assert!(unsafe { thaw_array_provenance_get(handle, 2) }.is_null());
+    // A later visible regrowth within the old sidecar capacity cannot
+    // resurrect the removed record.
+    assert_eq!(unsafe { thaw_array_provenance_prepare(handle, 3) }, 1);
+    assert!(unsafe { thaw_array_provenance_get(handle, 2) }.is_null());
+}
+
+#[test]
+fn promise_all_copies_fulfilled_record_to_every_duplicate_array_index() {
+    let child = thaw_promise_new();
+    let children = [child, child];
+    let sizes = [8usize, 8];
+    let joined = unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), 2) };
+    let value = 9u64;
+    let record = thaw_exception_provenance_new((&value as *const u64).cast(),
+        std::ptr::null(), std::ptr::null(), 2, 0.0, 9, 0, std::ptr::null());
+    assert!(!record.is_null());
+    assert_eq!(unsafe { thaw_promise_resolve_with_provenance(child,
+        (&value as *const u64).cast(), record) }, 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(joined) }, 1);
+    let slot = unsafe { (*joined).result.unwrap() };
+    let handle = unsafe { slot.cast::<*const u8>().read() };
+    assert_eq!(unsafe { thaw_array_provenance_get(handle, 0) }, record);
+    assert_eq!(unsafe { thaw_array_provenance_get(handle, 1) }, record);
+    unsafe { thaw_promise_destroy(joined) };
+}
+
+#[test]
+fn pending_promise_all_record_array_survives_invocation_arena_reset() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let child = thaw_promise_new();
+    let children = [child];
+    let sizes = [8usize];
+    let joined = unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), 1) };
+    // Model the request-local drain counter reset without discarding a
+    // globally reusable Promise.all result or its pinned result slot.
+    uncount_pending_promise_all_states_for_invocation();
+    ACTIVE_PROMISE_JOINS.with(|active| active.set(0));
+    thaw_arena::thaw_arena_reset();
+    let value = 23u64;
+    let record = thaw_exception_provenance_new((&value as *const u64).cast(),
+        std::ptr::null(), std::ptr::null(), 2, 0.0, 23, 0, std::ptr::null());
+    assert_eq!(unsafe { thaw_promise_resolve_with_provenance(child,
+        (&value as *const u64).cast(), record) }, 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(joined) }, 1);
+    let slot = unsafe { (*joined).result.unwrap() };
+    let handle = unsafe { slot.cast::<*const u8>().read() };
+    assert_eq!(unsafe { thaw_array_provenance_get(handle, 0) }, record);
+    assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
+    unsafe { thaw_promise_destroy(joined) };
+}

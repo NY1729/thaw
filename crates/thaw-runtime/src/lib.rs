@@ -46,6 +46,7 @@ use thaw_std as _;
 include!("runtime/native_values/numbers.rs");
 include!("runtime/native_values/strings.rs");
 include!("runtime/native_values/arrays.rs");
+include!("runtime/native_values/array_provenance.rs");
 include!("runtime/native_values/regex.rs");
 include!("runtime/native_values/template_strings.rs");
 include!("runtime/native_values/date.rs");
@@ -204,6 +205,7 @@ fn purge_pending_async_state() {
     // Abandoned aggregate callback Boxes may outlive cleared queues. Release
     // their temporary pins and make any later callback ignore arena payloads.
     cancel_pending_aggregate_states();
+    uncount_pending_promise_all_states_for_invocation();
     READY_CONTINUATIONS.with(|queue| queue.borrow_mut().clear());
     TIMERS.with(|timers| timers.borrow_mut().clear());
     FD_WAITS.with(|waits| waits.borrow_mut().clear());
