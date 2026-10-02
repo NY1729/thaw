@@ -303,18 +303,19 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                        }
                        if (terminal || active !== current || socket.destroyed) return;
                        if (!current.bodyDone) continue;
+                       if (inputEnded && !pending.length && !current.request._bodyBytes && !current.request._decoderTail && !current.request._blockedPipes() && !current.response.writableEnded) current.response._keepAlive = false;
                        if (!current.responseReusable || current.request._bodyBytes || current.request._decoderTail || current.request._blockedPipes()) return;
                        current.request._bodyReadGate = null; current.request._bodyResume = null;
                        active = null;
                      }
                    } catch (error) { if (terminal) throw error; fail(error); }
-                   finally { draining = false; if (socketClosed && active && active.bodyDone && !active.request._bodyBytes && !active.request._decoderTail) { active.request._bodyResume = null; active.request._bodyReadGate = null; active = null; pending = Buffer.alloc(0); terminal = true; } updateGate(); if (rerun && !terminal) { rerun = false; queueMicrotask(consume); } }
+                   finally { draining = false; if (socketClosed && active && active.bodyDone && !active.request._bodyBytes && !active.request._decoderTail) { active.request._bodyResume = null; active.request._bodyReadGate = null; active = null; pending = Buffer.alloc(0); terminal = true; } updateGate(); if (inputEnded && !terminal && !active && !pending.length && socket.writable && !socket.destroyed) socket.end(); if (rerun && !terminal) { rerun = false; queueMicrotask(consume); } }
                  }
                  socket.on('data', function(chunk) { if (terminal) return; pending = Buffer.concat([pending, Buffer.from(chunk)]); consume(); });
                  socket.on('end', function() { if (terminal) return; inputEnded = true; consume(); });
                  socket.on('close', function() { if (terminal) return; socketClosed = true; if (inputEnded && active && !active.bodyDone && active.request._bodyBytes >= 16384 && pending.length) return; terminal = true; if (active && !active.bodyDone) active.request._abortBody(); active = null; pending = Buffer.alloc(0); });
                };
-               this._net = transport.createServer(options, accept);
+               this._net = transport.createServer(Object.assign({}, options, { allowHalfOpen: true }), accept);
                this._net.on('listening', function() { server.listening = true; server.emit('listening'); });
                this._net.on('close', function() { server.listening = false; server.emit('close'); });
                this._net.on('error', function(error) { server.emit('error', error); });
