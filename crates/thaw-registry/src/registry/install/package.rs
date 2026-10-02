@@ -82,6 +82,106 @@ fn split_package_spec(spec: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Reserve sibling paths on the same filesystem as the package destination.
+/// The candidate directory is created exclusively; the backup name is checked
+/// before publication, so an abandoned backup from an earlier run is never reused.
+fn staged_package_paths(destination: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!("package destination `{}` has no parent", destination.display())
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create `{}`: {error}", parent.display()))?;
+    static NEXT_STAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = destination.file_name().unwrap_or_default().to_string_lossy();
+    loop {
+        let serial = NEXT_STAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let suffix = format!("{}-{serial}", std::process::id());
+        let staged = parent.join(format!(".{name}.staged-{suffix}"));
+        let backup = parent.join(format!(".{name}.previous-{suffix}"));
+        match fs::create_dir(&staged) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("failed to create `{}`: {error}", staged.display()));
+            }
+        }
+        match fs::symlink_metadata(&backup) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((staged, backup));
+            }
+            Ok(_) => {
+                fs::remove_dir(&staged)
+                    .map_err(|error| format!("failed to release `{}`: {error}", staged.display()))?;
+            }
+            Err(error) => {
+                let _ = fs::remove_dir(&staged);
+                return Err(format!("failed to inspect `{}`: {error}", backup.display()));
+            }
+        }
+    }
+}
+
+fn remove_saved_package(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn discard_staged_package(staged: &Path, cause: String) -> String {
+    match fs::remove_dir_all(staged) {
+        Ok(()) => cause,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => cause,
+        Err(error) => format!(
+            "{cause}; failed to remove staged package `{}`: {error}",
+            staged.display()
+        ),
+    }
+}
+
+fn publish_staged_package(staged: &Path, destination: &Path, backup: &Path) -> Result<(), String> {
+    let had_previous = match fs::symlink_metadata(destination) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!("failed to inspect `{}`: {error}", destination.display()));
+        }
+    };
+    if had_previous {
+        match fs::symlink_metadata(backup) {
+            Ok(_) => {
+                return Err(format!("backup path `{}` is already occupied", backup.display()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("failed to inspect `{}`: {error}", backup.display()));
+            }
+        }
+        fs::rename(destination, backup).map_err(|error| {
+            format!("failed to save `{}` as `{}`: {error}", destination.display(), backup.display())
+        })?;
+    }
+    if let Err(error) = fs::rename(staged, destination) {
+        if had_previous {
+            if let Err(restore) = fs::rename(backup, destination) {
+                return Err(format!(
+                    "failed to install `{}`: {error}; rollback failed: {restore}; previous package remains in `{}`",
+                    destination.display(), backup.display()
+                ));
+            }
+        }
+        return Err(format!("failed to install `{}`: {error}", destination.display()));
+    }
+    if had_previous {
+        // Publication succeeded. Cleanup failure leaves only an orphaned backup;
+        // it must not turn a successful replacement into a reported failed add.
+        let _ = remove_saved_package(backup);
+    }
+    Ok(())
+}
+
 fn fetch_and_copy(
     scratch: &Path,
     registry_dir: &Path,
@@ -226,123 +326,133 @@ fn add_installed_inner(
         None
     };
 
-    let dest_dir = registry_dir.join(name);
-    fs::create_dir_all(&dest_dir)
-        .map_err(|e| format!("failed to create `{}`: {e}", dest_dir.display()))?;
-
-    // Re-adding a package must never leave a stale binary selected for a
-    // previous version/target.
-    for stale in [
-        dest_dir.join("native.node"),
-        dest_dir.join("native-addon.json"),
-    ] {
-        if stale.is_file() {
-            fs::remove_file(&stale).map_err(|error| {
-                format!("failed to remove stale `{}`: {error}", stale.display())
+    let destination = registry_dir.join(name);
+    let (dest_dir, backup_dir) = staged_package_paths(&destination)?;
+    let staged_result = (|| -> Result<AddedPackage, String> {
+        let native_addon = match prepared_addon {
+            Some((bytes, metadata, metadata_json)) => {
+                fs::write(dest_dir.join("native.node"), &bytes).map_err(|error| {
+                    format!("failed to write `{}`: {error}", dest_dir.join("native.node").display())
+                })?;
+                fs::write(dest_dir.join("native-addon.json"), metadata_json).map_err(|error| {
+                    format!("failed to write `{}`: {error}", dest_dir.join("native-addon.json").display())
+                })?;
+                Some(metadata)
+            }
+            None => None,
+        };
+        let dependencies = dest_dir.join("native-dependencies");
+        let shared_libraries = platform_shared_libraries(node_modules_dir, &manifest)?;
+        if !shared_libraries.is_empty() {
+            fs::create_dir_all(&dependencies).map_err(|error| error.to_string())?;
+            for (index, source) in shared_libraries.iter().enumerate() {
+                let name = source.file_name().unwrap_or_default().to_string_lossy();
+                fs::copy(source, dependencies.join(format!("{index}-{name}")))
+                    .map_err(|error| format!("failed to copy `{}`: {error}", source.display()))?;
+            }
+        }
+        let platform_executable = dest_dir.join("platform-executable");
+        if let Some(executable) = select_optional_dependency_executable(node_modules_dir, &manifest)? {
+            fs::copy(&executable, &platform_executable).map_err(|error| {
+                format!(
+                    "failed to copy platform executable `{}`: {error}",
+                    executable.display()
+                )
             })?;
         }
-    }
-    let native_addon = match prepared_addon {
-        Some((bytes, metadata, metadata_json)) => {
-            fs::write(dest_dir.join("native.node"), &bytes).map_err(|error| {
-                format!("failed to write `{}`: {error}", dest_dir.join("native.node").display())
-            })?;
-            fs::write(dest_dir.join("native-addon.json"), metadata_json).map_err(|error| {
-                format!("failed to write `{}`: {error}", dest_dir.join("native-addon.json").display())
-            })?;
-            Some(metadata)
-        }
-        None => None,
-    };
-    let dependencies = dest_dir.join("native-dependencies");
-    if dependencies.is_dir() {
-        fs::remove_dir_all(&dependencies).map_err(|error| error.to_string())?;
-    }
-    let shared_libraries = platform_shared_libraries(node_modules_dir, &manifest)?;
-    if !shared_libraries.is_empty() {
-        fs::create_dir_all(&dependencies).map_err(|error| error.to_string())?;
-        for (index, source) in shared_libraries.iter().enumerate() {
-            let name = source.file_name().unwrap_or_default().to_string_lossy();
-            fs::copy(source, dependencies.join(format!("{index}-{name}")))
-                .map_err(|error| format!("failed to copy `{}`: {error}", source.display()))?;
-        }
-    }
-    let platform_executable = dest_dir.join("platform-executable");
-    if let Some(executable) = select_optional_dependency_executable(node_modules_dir, &manifest)? {
-        fs::copy(&executable, &platform_executable).map_err(|error| {
-            format!(
-                "failed to copy platform executable `{}`: {error}",
-                executable.display()
-            )
-        })?;
-    } else if platform_executable.is_file() {
-        fs::remove_file(&platform_executable).map_err(|error| {
-            format!("failed to remove stale `{}`: {error}", platform_executable.display())
-        })?;
-    }
-    fs::write(dest_dir.join("package.d.ts"), dts_source).map_err(|e| {
-        format!(
-            "failed to write `{}`: {e}",
-            dest_dir.join("package.d.ts").display()
-        )
-    })?;
-    write_bundle(&dest_dir, &js_source)?;
-    let subpaths_dir = dest_dir.join("subpaths");
-    if subpaths_dir.is_dir() {
-        fs::remove_dir_all(&subpaths_dir).map_err(|error| {
-            format!(
-                "failed to remove stale `{}`: {error}",
-                subpaths_dir.display()
-            )
-        })?;
-    }
-    if eager_subpaths {
-        for export in package_subpath_exports(&manifest, &package_dir)? {
-            dependency_versions.extend(write_installed_subpath(
-                registry_dir,
-                node_modules_dir,
-                name,
-                &package_dir,
-                &export,
-                &mut bundle_source_cache,
-            )?);
-        }
-    }
-    fs::write(dest_dir.join("version.txt"), &resolved_version).map_err(|e| {
-        format!(
-            "failed to write `{}`: {e}",
-            dest_dir.join("version.txt").display()
-        )
-    })?;
-    // Only worth a `lock.json` at all once there's something beyond
-    // `package`'s own entry (which `version.txt` already covers) --
-    // a single-file package with no dependencies would otherwise get an
-    // uninformative one-entry file next to `version.txt` saying the same
-    // thing twice.
-    let lock_path = dest_dir.join("lock.json");
-    if dependency_versions.len() > 1 {
-        let lock_json = serde_json::to_string_pretty(&dependency_versions)
-            .map_err(|e| format!("failed to serialize `lock.json` for `{name}`: {e}"))?;
-        fs::write(&lock_path, lock_json).map_err(|e| {
+        fs::write(dest_dir.join("package.d.ts"), dts_source).map_err(|e| {
             format!(
                 "failed to write `{}`: {e}",
-                dest_dir.join("lock.json").display()
+                dest_dir.join("package.d.ts").display()
             )
         })?;
-    } else if lock_path.is_file() {
-        fs::remove_file(&lock_path)
-            .map_err(|error| format!("failed to remove stale `{}`: {error}", lock_path.display()))?;
-    }
+        write_bundle(&dest_dir, &js_source)?;
+        if eager_subpaths {
+            for export in package_subpath_exports(&manifest, &package_dir)? {
+                dependency_versions.extend(write_installed_subpath(
+                    &dest_dir.join("subpaths").join(&export.subpath),
+                    node_modules_dir,
+                    name,
+                    &package_dir,
+                    &export,
+                    &mut bundle_source_cache,
+                )?);
+            }
+        }
+        fs::write(dest_dir.join("version.txt"), &resolved_version).map_err(|e| {
+            format!(
+                "failed to write `{}`: {e}",
+                dest_dir.join("version.txt").display()
+            )
+        })?;
+        // Only worth a `lock.json` at all once there's something beyond
+        // `package`'s own entry (which `version.txt` already covers) --
+        // a single-file package with no dependencies would otherwise get an
+        // uninformative one-entry file next to `version.txt` saying the same
+        // thing twice.
+        let lock_path = dest_dir.join("lock.json");
+        if dependency_versions.len() > 1 {
+            let lock_json = serde_json::to_string_pretty(&dependency_versions)
+                .map_err(|e| format!("failed to serialize `lock.json` for `{name}`: {e}"))?;
+            fs::write(&lock_path, lock_json).map_err(|e| {
+                format!(
+                    "failed to write `{}`: {e}",
+                    dest_dir.join("lock.json").display()
+                )
+            })?;
+        }
 
-    Ok(AddedPackage {
-        dts_relative_path,
-        js_relative_path,
-        bundled_file_count,
-        resolved_version,
-        dependency_versions,
-        native_addon,
-        native_diagnostic,
-    })
+        Ok(AddedPackage {
+            dts_relative_path,
+            js_relative_path,
+            bundled_file_count,
+            resolved_version,
+            dependency_versions,
+            native_addon,
+            native_diagnostic,
+        })
+    })();
+    let added = match staged_result {
+        Ok(added) => added,
+        Err(error) => return Err(discard_staged_package(&dest_dir, error)),
+    };
+    if let Err(error) = publish_staged_package(&dest_dir, &destination, &backup_dir) {
+        return Err(discard_staged_package(&dest_dir, error));
+    }
+    Ok(added)
+}
+
+// A lazy export can be the parent of another materialized export (`foo` and
+// `foo/bar`). Copy its existing tree before replacing its own files so the
+// staged publication retains all descendants and unrelated contents.
+fn copy_installed_subpath_tree(source: &Path, staged: &Path) -> Result<std::fs::Permissions, String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("failed to inspect `{}`: {error}", source.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("installed subpath `{}` is not a directory", source.display()));
+    }
+    for entry in fs::read_dir(source)
+        .map_err(|error| format!("failed to read `{}`: {error}", source.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read `{}`: {error}", source.display()))?;
+        let from = entry.path();
+        let to = staged.join(entry.file_name());
+        let kind = entry.file_type()
+            .map_err(|error| format!("failed to inspect `{}`: {error}", from.display()))?;
+        if kind.is_dir() {
+            fs::create_dir(&to)
+                .map_err(|error| format!("failed to create `{}`: {error}", to.display()))?;
+            let permissions = copy_installed_subpath_tree(&from, &to)?;
+            fs::set_permissions(&to, permissions)
+                .map_err(|error| format!("failed to preserve `{}` permissions: {error}", to.display()))?;
+        } else if kind.is_file() {
+            fs::copy(&from, &to)
+                .map_err(|error| format!("failed to copy `{}`: {error}", from.display()))?;
+        } else {
+            return Err(format!("cannot preserve unsupported installed entry `{}`", from.display()));
+        }
+    }
+    Ok(metadata.permissions())
 }
 
 /// Materializes one exact package export from an existing `node_modules`.
@@ -359,19 +469,71 @@ pub fn add_installed_subpath(
         .into_iter()
         .find(|export| export.subpath == subpath)
         .ok_or_else(|| format!("package `{name}` has no export named `./{subpath}`"))?;
-    write_installed_subpath(
-        registry_dir,
-        node_modules_dir,
-        name,
-        &package_dir,
-        &export,
-        &mut SourceCache::default(),
-    )?;
-    Ok(())
+    let destination = registry_dir.join(name).join("subpaths").join(&export.subpath);
+    // A first lazy subpath may need new parent directories inside the installed
+    // package. Remove only the ones this call introduced if publication fails.
+    let mut created_parents = Vec::new();
+    let mut parent = destination.parent();
+    while let Some(directory) = parent {
+        match fs::symlink_metadata(directory) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                created_parents.push(directory.to_path_buf());
+                parent = directory.parent();
+            }
+            Err(error) => {
+                return Err(format!("failed to inspect `{}`: {error}", directory.display()));
+            }
+        }
+    }
+    let result = (|| -> Result<(), String> {
+        let (staged, backup) = staged_package_paths(&destination)?;
+        let previous_permissions = match fs::symlink_metadata(&destination) {
+            Ok(_) => match copy_installed_subpath_tree(&destination, &staged) {
+                Ok(permissions) => Some(permissions),
+                Err(error) => return Err(discard_staged_package(&staged, error)),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(discard_staged_package(
+                    &staged,
+                    format!("failed to inspect `{}`: {error}", destination.display()),
+                ));
+            }
+        };
+        if let Err(error) = write_installed_subpath(
+            &staged,
+            node_modules_dir,
+            name,
+            &package_dir,
+            &export,
+            &mut SourceCache::default(),
+        ) {
+            return Err(discard_staged_package(&staged, error));
+        }
+        if let Some(permissions) = previous_permissions {
+            if let Err(error) = fs::set_permissions(&staged, permissions) {
+                return Err(discard_staged_package(
+                    &staged,
+                    format!("failed to preserve `{}` permissions: {error}", destination.display()),
+                ));
+            }
+        }
+        if let Err(error) = publish_staged_package(&staged, &destination, &backup) {
+            return Err(discard_staged_package(&staged, error));
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for directory in created_parents {
+            let _ = fs::remove_dir(directory);
+        }
+    }
+    result
 }
 
 fn write_installed_subpath(
-    registry_dir: &Path,
+    destination: &Path,
     node_modules_dir: &Path,
     name: &str,
     package_dir: &Path,
@@ -394,12 +556,11 @@ fn write_installed_subpath(
         )
     })?;
     let subpath_dts = dts_source_with_reexported_functions(&types_path, &subpath_dts)?;
-    let destination = registry_dir.join(name).join("subpaths").join(&export.subpath);
-    fs::create_dir_all(&destination)
+    fs::create_dir_all(destination)
         .map_err(|error| format!("failed to create `{}`: {error}", destination.display()))?;
     fs::write(destination.join("package.d.ts"), subpath_dts)
         .map_err(|error| format!("failed to write `{}`: {error}", destination.join("package.d.ts").display()))?;
-    write_bundle(&destination, &subpath_js)?;
+    write_bundle(destination, &subpath_js)?;
     Ok(dependencies)
 }
 
