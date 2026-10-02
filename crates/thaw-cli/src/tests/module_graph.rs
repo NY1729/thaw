@@ -1222,3 +1222,121 @@ fn registry_transform_receives_each_module_path_for_source_maps() {
     assert_eq!(overrides.borrow().len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn lambda_trace_header_reaches_warm_quickjs_string_and_json_handlers() {
+    for (name, source, expected_bodies) in [
+        (
+            "trace-string",
+            r#"function handler(event: string): string { loadScript("globalThis.lambdaTrace = () => Object.prototype.hasOwnProperty.call(process.env, '_X_AMZN_TRACE_ID') ? process.env._X_AMZN_TRACE_ID : null;"); return JSON.stringify(callDynamic("lambdaTrace", JSON.parse("[]"))); }"#,
+            ["\"Root=first\"", "\"Root=second\"", "null"],
+        ),
+        (
+            "trace-json",
+            r#"function handler(event: Json): Json { loadScript("globalThis.lambdaTrace = () => Object.prototype.hasOwnProperty.call(process.env, '_X_AMZN_TRACE_ID') ? process.env._X_AMZN_TRACE_ID : null;"); return callDynamic("lambdaTrace", JSON.parse("[]")); }"#,
+            ["\"Root=first\"", "\"Root=second\"", "null"],
+        ),
+        (
+            "trace-async-json",
+            r#"async function handler(event: Json): Promise<Json> { await sleep(1); loadScript("globalThis.lambdaTrace = () => Object.prototype.hasOwnProperty.call(process.env, '_X_AMZN_TRACE_ID') ? process.env._X_AMZN_TRACE_ID : null;"); return callDynamic("lambdaTrace", JSON.parse("[]")); }"#,
+            ["\"Root=first\"", "\"Root=second\"", "null"],
+        ),
+        (
+            "trace-native-only",
+            "function handler(event: string): string { return event; }",
+            ["first", "second", "third"],
+        ),
+    ] {
+        let dir = std::env::temp_dir().join(format!("thaw-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("handler.ts");
+        std::fs::write(&entry, source).unwrap();
+        let output = dir.join("bootstrap");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (sender, receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for (index, trace) in [Some("Root=first"), Some("Root=second"), None].into_iter().enumerate() {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                connection.read_to_end(&mut request).unwrap();
+                let event = if name == "trace-native-only" { ["first", "second", "third"][index] } else { "{}" };
+                let trace_header = trace.map(|value| format!("Lambda-Runtime-Trace-Id: {value}\r\n")).unwrap_or_default();
+                connection.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: trace-{index}\r\n{trace_header}Content-Length: {}\r\nConnection: close\r\n\r\n{event}",
+                    event.len(),
+                ).as_bytes()).unwrap();
+                drop(connection);
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut posted = Vec::new();
+                connection.read_to_end(&mut posted).unwrap();
+                sender.send(String::from_utf8_lossy(&posted).into_owned()).unwrap();
+                connection.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+        });
+        let mut child = Command::new(&output)
+            .env("AWS_LAMBDA_RUNTIME_API", address)
+            .env("_X_AMZN_TRACE_ID", "stale-parent")
+            .spawn().unwrap();
+        for (index, expected) in expected_bodies.into_iter().enumerate() {
+            let posted = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(posted.starts_with(&format!(
+                "POST /2018-06-01/runtime/invocation/trace-{index}/response"
+            )), "{posted}");
+            assert!(posted.ends_with(expected), "{posted}");
+        }
+        server.join().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn lambda_trace_sync_failure_posts_an_error_before_reentering_handler() {
+    let dir = std::env::temp_dir().join(format!("thaw-trace-sync-error-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("handler.ts");
+    std::fs::write(&entry, r#"function handler(event: string): string {
+        loadScript("if (!globalThis.traceLocked) { Object.defineProperty(process.env, '_X_AMZN_TRACE_ID', { set() { delete process.env._X_AMZN_TRACE_ID; throw new Error('blocked'); }, configurable: true }); globalThis.traceLocked = true; }");
+        return event;
+    }"#).unwrap();
+    let output = dir.join("bootstrap");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let (sender, receiver) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for (index, trace) in ["Root=first", "Root=second", "Root=third"].into_iter().enumerate() {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            connection.read_to_end(&mut request).unwrap();
+            connection.write_all(format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: trace-fail-{index}\r\nLambda-Runtime-Trace-Id: {trace}\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+            ).as_bytes()).unwrap();
+            drop(connection);
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut posted = Vec::new();
+            connection.read_to_end(&mut posted).unwrap();
+            sender.send(String::from_utf8_lossy(&posted).into_owned()).unwrap();
+            connection.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        }
+    });
+    let mut child = Command::new(&output)
+        .env("AWS_LAMBDA_RUNTIME_API", address)
+        .spawn().unwrap();
+    let first = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(first.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-0/response"));
+    assert!(first.ends_with("\r\n\r\nx"));
+    let second = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(second.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-1/error"));
+    assert!(second.contains("failed to synchronize Lambda trace environment"));
+    let third = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(third.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-2/response"));
+    assert!(third.ends_with("\r\n\r\nx"));
+    server.join().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(dir);
+}
