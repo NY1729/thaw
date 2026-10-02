@@ -1154,6 +1154,28 @@ pub unsafe extern "C" fn thaw_cstring_destroy(value: *mut c_char) {
     }
 }
 
+/// Borrows an already-owned live handle for one synchronous comparison.
+/// Unlike `thaw_json_handle_id`, this must not retain or query a Host lease:
+/// compiled strict equality runs outside the callback-only HOST_OPERATIONS scope.
+/// A quoted user property is not a trusted handle without WRAPPER_BRANDS.
+///
+/// # Safety
+/// `value` must point to a live JSON value and remain live through the call.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_borrowed_handle_id(value: *const Value) -> u64 {
+    let Some(value) = (unsafe { value.as_ref() }) else { return 0; };
+    if let Value::Host(lease) = value { return lease.handle; }
+    if !is_branded_wrapper(value) { return 0; }
+    let Some(fields) = value.as_object() else { return 0; };
+    if fields.len() != 1 { return 0; }
+    fields.get(b"__thaw_js_handle_id__".as_slice())
+        .and_then(Value::as_f64)
+        .filter(|handle| handle.is_finite() && *handle > 0.0
+            && handle.fract() == 0.0 && *handle <= u64::MAX as f64)
+        .map(|handle| handle as u64)
+        .unwrap_or(0)
+}
+
 /// Reads the internal dynamic-value handle marker without allocating a child JSON value.
 ///
 /// # Safety

@@ -189,6 +189,33 @@ fn compiles_switch_selection_default_fallthrough_and_break() {
 }
 
 #[test]
+fn switch_cases_use_strict_kind_matching_in_source_order() {
+    let source = r#"
+        function probe(label: string, value: any): any {
+            console.log(label);
+            return value;
+        }
+        function main(): void {
+            switch (1) {
+                case probe("text", "1"): console.log("wrong-text"); break;
+                case probe("bool", true): console.log("wrong-bool"); break;
+                case probe("number", 1): console.log("matched"); break;
+                case probe("late", 1): console.log("wrong-late"); break;
+            }
+            const dynamic: any = "1";
+            switch (dynamic) {
+                case 1: console.log("wrong-number"); break;
+                case "1": console.log("matched-text"); break;
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_switch_case_kinds"),
+        "text\nbool\nnumber\nmatched\nmatched-text\n"
+    );
+}
+
+#[test]
 fn compiles_for_of_with_single_source_evaluation_continue_and_break() {
     let source = r#"
         function values(): number[] {
