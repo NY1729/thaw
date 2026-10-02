@@ -873,7 +873,9 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
     for path in bridge_dts {
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read `{}`: {e}", path.display()))?;
-        let functions = thaw_bridge::parse_dts(&source)
+        let functions = thaw_bridge::parse_dts_named(
+            &source, thaw_parser::common::FileName::Real(path.clone()),
+        )
             .map_err(|e| format!("failed to parse `{}`: {e}", path.display()))?;
         // `true`: the manual `--bridge` path trusts the classification
         // as-is, since the user is already responsible for supplying a

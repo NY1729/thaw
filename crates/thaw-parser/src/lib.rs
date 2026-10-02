@@ -27,7 +27,15 @@ pub fn parse_typescript(source: &str) -> Result<Module, String> {
 /// rewrite parses the user's own `.ts` source this way, since it's real
 /// TypeScript, not plain JS).
 pub fn parse_typescript_with_source_map(source: &str) -> Result<(Module, Lrc<SourceMap>), String> {
-    parse_typescript_source(source, false)
+    parse_typescript_with_source_map_named(source, FileName::Custom("input.ts".into()))
+}
+
+/// Parse TypeScript while retaining its real or synthetic source name in diagnostics.
+pub fn parse_typescript_with_source_map_named(
+    source: &str,
+    filename: FileName,
+) -> Result<(Module, Lrc<SourceMap>), String> {
+    parse_typescript_source(source, filename, false)
 }
 
 /// Parses ambient declarations with SWC's declaration-file grammar.
@@ -38,18 +46,27 @@ pub fn parse_declarations(source: &str) -> Result<Module, String> {
 pub fn parse_declarations_with_source_map(
     source: &str,
 ) -> Result<(Module, Lrc<SourceMap>), String> {
-    parse_typescript_source(source, true)
+    parse_declarations_with_source_map_named(source, FileName::Custom("input.ts".into()))
+}
+
+/// Parse declarations while retaining their real or synthetic source name.
+pub fn parse_declarations_with_source_map_named(
+    source: &str,
+    filename: FileName,
+) -> Result<(Module, Lrc<SourceMap>), String> {
+    parse_typescript_source(source, filename, true)
 }
 
 fn parse_typescript_source(
     source: &str,
+    filename: FileName,
     declarations: bool,
 ) -> Result<(Module, Lrc<SourceMap>), String> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
 
     let fm = cm.new_source_file(
-        Lrc::new(FileName::Custom("input.ts".into())),
+        Lrc::new(filename),
         source.to_string(),
     );
 
@@ -93,10 +110,18 @@ pub fn parse_javascript(source: &str) -> Result<Module, String> {
 /// input string isn't safe to do by hand (SWC's spans aren't simply
 /// 0-based offsets into the source).
 pub fn parse_javascript_with_source_map(source: &str) -> Result<(Module, Lrc<SourceMap>), String> {
+    parse_javascript_with_source_map_named(source, FileName::Custom("input.js".into()))
+}
+
+/// Parse JavaScript while retaining its real or synthetic source name.
+pub fn parse_javascript_with_source_map_named(
+    source: &str,
+    filename: FileName,
+) -> Result<(Module, Lrc<SourceMap>), String> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
     let fm = cm.new_source_file(
-        Lrc::new(FileName::Custom("input.js".into())),
+        Lrc::new(filename),
         source.to_string(),
     );
 
@@ -122,6 +147,29 @@ pub fn parse_javascript_with_source_map(source: &str) -> Result<(Module, Lrc<Sou
 mod tests {
     use super::*;
     use swc_ecma_ast::{Decl, ModuleItem, Stmt};
+    use swc_common::Spanned;
+
+    #[test]
+    fn named_parsers_record_source_map_filename() {
+        let path = std::path::PathBuf::from("src/diagnostic.ts");
+        let filename = FileName::Real(path);
+        let (ts, ts_map) = parse_typescript_with_source_map_named("export const x: number = 1;", filename.clone()).unwrap();
+        assert_eq!(ts_map.lookup_char_pos(ts.body[0].span().lo).file.name.as_ref(), &filename);
+        let (dts, dts_map) = parse_declarations_with_source_map_named("export const x: number;", filename.clone()).unwrap();
+        assert_eq!(dts_map.lookup_char_pos(dts.body[0].span().lo).file.name.as_ref(), &filename);
+        let (js, js_map) = parse_javascript_with_source_map_named("export const x = 1;", filename.clone()).unwrap();
+        assert_eq!(js_map.lookup_char_pos(js.body[0].span().lo).file.name.as_ref(), &filename);
+    }
+
+    #[test]
+    fn source_only_wrappers_preserve_historical_filenames() {
+        let (ts, ts_map) = parse_typescript_with_source_map("export const x: number = 1;").unwrap();
+        assert_eq!(ts_map.lookup_char_pos(ts.body[0].span().lo).file.name.as_ref(), &FileName::Custom("input.ts".into()));
+        let (dts, dts_map) = parse_declarations_with_source_map("export const x: number;").unwrap();
+        assert_eq!(dts_map.lookup_char_pos(dts.body[0].span().lo).file.name.as_ref(), &FileName::Custom("input.ts".into()));
+        let (js, js_map) = parse_javascript_with_source_map("export const x = 1;").unwrap();
+        assert_eq!(js_map.lookup_char_pos(js.body[0].span().lo).file.name.as_ref(), &FileName::Custom("input.js".into()));
+    }
 
     #[test]
     fn parses_a_typed_function_declaration() {

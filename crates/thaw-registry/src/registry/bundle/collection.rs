@@ -198,18 +198,27 @@ fn bundle_commonjs_package_cached(
         } else {
             let source = fs::read_to_string(&abs_path)
                 .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
+            let had_shebang = source.starts_with("#!") && source.contains('\n');
+            let is_json = abs_path.extension().is_some_and(|ext| ext == "json");
             let source = source
                 .strip_prefix("#!")
                 .and_then(|source| source.split_once('\n').map(|(_, rest)| rest.to_string()))
                 .unwrap_or(source);
-            let source = if abs_path.extension().is_some_and(|ext| ext == "json") {
+            let source = if is_json {
                 let value: serde_json::Value = serde_json::from_str(&source)
                     .map_err(|error| format!("invalid JSON module `{key}`: {error}"))?;
                 format!("module.exports = {};", value)
             } else {
                 source
             };
-            let source = rewrite_static_worker_urls(&source, &abs_path, &pkg_key, &pkg_dir)?;
+            let source_name = if is_json {
+                thaw_parser::common::FileName::Custom(format!("{} (generated JSON module)", abs_path.display()).into())
+            } else if had_shebang {
+                thaw_parser::common::FileName::Custom(format!("{} (after shebang removal)", abs_path.display()).into())
+            } else {
+                thaw_parser::common::FileName::Real(abs_path.clone())
+            };
+            let source = rewrite_static_worker_urls_named(&source, &abs_path, source_name, &pkg_key, &pkg_dir)?;
             let analysis = analyze_module(&source);
             source_cache
                 .modules

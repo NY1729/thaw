@@ -9,7 +9,13 @@
 /// skipped: this is a function-signature extractor, not a full `.d.ts`
 /// model.
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
-    let module = thaw_parser::parse_declarations(source)?;
+    parse_dts_named(source, thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+pub fn parse_dts_named(
+    source: &str, filename: thaw_parser::common::FileName,
+) -> Result<Vec<DtsFunction>, String> {
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename)?.0;
     let generated_internals = generated_public_alias_internals(&module);
     let type_only_namespaces = type_only_namespace_names(source);
     let export_assignment = export_assignment_namespace(&module);

@@ -24,7 +24,7 @@ fn inline_triple_slash_references(
     source: &str,
     visited: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<String, String> {
-    let namespace = export_as_namespace_name(source)?;
+    let namespace = export_as_namespace_name(entry_path, source)?;
     let canonical_entry = entry_path
         .canonicalize()
         .unwrap_or_else(|_| entry_path.to_path_buf());
@@ -66,7 +66,9 @@ fn inline_triple_slash_references_inner(
             )
         })?;
         let (referenced_module, source_map) =
-            thaw_parser::parse_declarations_with_source_map(&referenced_source)?;
+            thaw_parser::parse_declarations_with_source_map_named(
+                &referenced_source, thaw_parser::common::FileName::Real(target_path.clone()),
+            )?;
         for item in &referenced_module.body {
             let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
                 // Referenced files also carry ordinary declarations. Their
@@ -181,10 +183,12 @@ fn triple_slash_reference_paths(source: &str) -> Vec<String> {
 /// value is additionally reachable under as a global namespace, and (for
 /// `inline_triple_slash_references`'s purposes) the namespace a referenced
 /// file's self-targeting module augmentation actually means to extend.
-fn export_as_namespace_name(source: &str) -> Result<Option<String>, String> {
+fn export_as_namespace_name(entry_path: &Path, source: &str) -> Result<Option<String>, String> {
     use thaw_parser::ast::{ModuleDecl, ModuleItem};
 
-    let module = thaw_parser::parse_declarations(source)?;
+    let module = thaw_parser::parse_declarations_with_source_map_named(
+        source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
+    )?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsNamespaceExport(export)) => {
             Some(export.id.sym.to_string())
@@ -226,7 +230,9 @@ fn hoisted_export_equals_namespace_members(
     };
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(entry_source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
+    )?;
     let Some(exported_name) = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref()
         {
@@ -500,7 +506,9 @@ fn dts_delegation_target(entry_path: &Path, entry_source: &str) -> Option<(PathB
         Decl, Expr, ModuleDecl, ModuleItem, Pat, Stmt, TsEntityName, TsType, TsTypeQueryExpr,
     };
 
-    let module = thaw_parser::parse_declarations(entry_source).ok()?;
+    let module = thaw_parser::parse_declarations_with_source_map_named(
+        entry_source, thaw_parser::common::FileName::Real(entry_path.to_path_buf()),
+    ).ok()?.0;
     let exported = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref()
         {
@@ -589,7 +597,9 @@ fn unwrap_self_ambient_module(entry_path: &Path, entry_source: &str) -> Result<S
     use thaw_parser::ast::{Decl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(entry_source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
+    )?;
     let canonical_entry = entry_path
         .canonicalize()
         .unwrap_or_else(|_| entry_path.to_path_buf());
@@ -1201,7 +1211,9 @@ fn all_reexported_type_declarations(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+    )?;
     let mut declarations = Vec::new();
     let value_imports = named_import_targets(path, &module);
     let type_imports = named_type_import_targets(path, &module);
@@ -1537,7 +1549,9 @@ fn self_referential_namespace_alias_snippets(
             entry_path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        &source, thaw_parser::common::FileName::Real(entry_path.to_path_buf()),
+    )?;
 
     let mut namespace_imports: std::collections::HashMap<String, (Span, Vec<Span>)> =
         std::collections::HashMap::new();
@@ -1661,7 +1675,9 @@ fn collect_namespace_reexports(
                         target_path.display()
                     )
                 })?;
-                let target_module = thaw_parser::parse_declarations(&target_source)?;
+                let target_module = thaw_parser::parse_declarations_with_source_map_named(
+                    &target_source, thaw_parser::common::FileName::Real(target_path.clone()),
+                )?.0;
                 found.extend(collect_namespace_reexports(
                     &target_path,
                     &target_module,
@@ -1803,7 +1819,9 @@ fn callable_const_declaration_snippet(
                 path.display()
             )
         })?;
-        let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
+        let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+            &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+        )?;
         let mut declarations = module
             .body
             .iter()
@@ -2185,7 +2203,9 @@ fn all_reexported_function_declarations(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+    )?;
     let mut declarations = Vec::new();
     for item in &module.body {
         if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = item {
@@ -2397,7 +2417,9 @@ fn reexported_function_declarations(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+    )?;
     let mut declarations = Vec::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = item else {
@@ -2666,7 +2688,9 @@ fn export_assignment_function_declarations(path: &Path) -> Result<Vec<String>, S
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+    )?;
     let Some(target) = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref() {
             Expr::Ident(ident) => Some(ident.sym.to_string()),
@@ -2716,7 +2740,9 @@ fn export_assignment_class_or_interface_declarations(path: &Path) -> Result<Vec<
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+    )?;
     let Some(target) = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref() {
             Expr::Ident(ident) => Some(ident.sym.to_string()),
@@ -2954,7 +2980,9 @@ fn reexport_is_type_only(
     if !visited.insert((path.to_path_buf(), name.to_string())) { return Ok(None); }
     let source = fs::read_to_string(path).map_err(|error|
         format!("failed to read re-exported declarations `{}`: {error}", path.display()))?;
-    let module = thaw_parser::parse_declarations(&source)?;
+    let module = thaw_parser::parse_declarations_with_source_map_named(
+        &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+    )?.0;
     let value_imports = named_import_targets(path, &module);
     let type_imports = named_type_import_targets(path, &module);
     let decl_kind = |declaration: &Decl, local: &str| match declaration {
@@ -3267,7 +3295,9 @@ fn reexported_class_or_interface_declarations_inner(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(&source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+    )?;
     let mut local_name = name.to_string();
     if name == "default" {
         for item in &module.body {
