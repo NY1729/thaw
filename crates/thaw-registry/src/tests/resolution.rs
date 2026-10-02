@@ -1613,6 +1613,38 @@ fn materialized_base_import_retains_other_specifiers() {
 }
 
 #[test]
+fn generated_declaration_labels_are_custom_and_keep_parse_fallbacks() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let origin = Path::new("/logical/package/index.d.ts");
+    let source_name = FileName::Custom(
+        format!("{} (unwrapped declaration entry)", origin.display()).into(),
+    );
+    let source = "import Core, { type Shape } from './core';\nexport class Child extends Core {}";
+    let (module, source_map) =
+        thaw_parser::parse_declarations_with_source_map_named(source, source_name.clone()).unwrap();
+    assert_eq!(
+        source_map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(),
+        &source_name
+    );
+    let locals = std::collections::BTreeSet::from(["Core".to_string()]);
+    let retained = without_materialized_class_imports_named(source, &locals, source_name).unwrap();
+    assert!(retained.contains("import { type Shape } from './core'"), "{retained}");
+    assert!(without_materialized_class_imports_named(
+        "import {", &locals, FileName::Custom("generated malformed declaration".into()),
+    ).is_err());
+
+    let builtin = FileName::Custom("node:stream (generated builtin declarations)".into());
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        "export declare class Readable {}", builtin.clone(),
+    ).unwrap();
+    assert_eq!(
+        source_map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(),
+        &builtin
+    );
+}
+
+#[test]
 fn type_wildcard_converts_inlined_class_value_alias() {
     // Unrun regression: a later type-only wildcard must not retain the
     // generated value export of an earlier class alias.

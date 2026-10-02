@@ -388,7 +388,7 @@ fn resolve_namespace_hoisted_import_equals(
             // property to its already-flattened type name -- the same
             // shape `thaw_bridge::nested_namespace_members` already parses
             // back out for zod's `z.coerce.number(...)`.
-            let members = exported_const_object_type_member_names(&flattened);
+            let members = exported_const_object_type_member_names(&flattened, target_path);
             if !members.is_empty() {
                 let re_exports = members
                     .iter()
@@ -404,17 +404,23 @@ fn resolve_namespace_hoisted_import_equals(
     }
 }
 
+fn parse_labeled_declarations(source: &str, label: String) -> Result<thaw_parser::ast::Module, String> {
+    thaw_parser::parse_declarations_with_source_map_named(
+        source, thaw_parser::common::FileName::Custom(label.into()),
+    ).map(|(module, _)| module)
+}
+
 /// The `(property, declared type name)` pairs of the object type a
 /// package's `export = X;` value (`declare const X: TYPE;`, `TYPE` either
 /// a bare interface name or one qualified into a namespace, `NS.TYPE`) is
 /// declared with. See the call site above for the real-world shape this
 /// exists for.
-fn exported_const_object_type_member_names(flattened_source: &str) -> Vec<(String, String)> {
+fn exported_const_object_type_member_names(flattened_source: &str, origin: &Path) -> Vec<(String, String)> {
     use thaw_parser::ast::{
         Decl, Expr, ModuleDecl, ModuleItem, Pat, Stmt, TsEntityName, TsType, TsTypeElement,
     };
 
-    let Ok(module) = thaw_parser::parse_declarations(flattened_source) else {
+    let Ok(module) = parse_labeled_declarations(flattened_source, format!("{} (flattened declarations)", origin.display())) else {
         return Vec::new();
     };
     let Some(exported) = module.body.iter().find_map(|item| match item {
@@ -663,7 +669,7 @@ fn dts_source_with_reexported_functions_inner(
 
     let unwrapped = unwrap_self_ambient_module(entry_path, entry_source)?;
     let entry_source: &str = &unwrapped;
-    let module = thaw_parser::parse_declarations(entry_source)?;
+    let module = parse_labeled_declarations(entry_source, format!("{} (unwrapped declaration entry)", entry_path.display()))?;
     let mut output = entry_source.to_string();
     let mut materialized_class_imports = std::collections::BTreeSet::new();
     output.push_str(&hoisted_export_equals_namespace_members(
@@ -1091,7 +1097,7 @@ fn dts_source_with_reexported_functions_inner(
                     reexported_class_or_interface_declarations(target_path, target_name)?;
                 if declarations.is_empty() { continue }
                 if !materialized_class_imports.insert(base.sym.to_string()) { continue }
-                for snippet in imported_class_as_local_binding(declarations, base.sym.as_ref(), true) {
+                for snippet in imported_class_as_local_binding(declarations, base.sym.as_ref(), true, target_path) {
                     output.push('\n');
                     output.push_str(&snippet);
                 }
@@ -1128,6 +1134,7 @@ fn dts_source_with_reexported_functions_inner(
                 };
                 let declarations = builtin_class_and_ancestor_declarations(
                     &builtin.dts_source,
+                    specifier,
                     base_name.sym.as_ref(),
                     &mut std::collections::BTreeSet::new(),
                 )?;
@@ -1139,7 +1146,10 @@ fn dts_source_with_reexported_functions_inner(
             _ => continue,
         }
     }
-    let retained_entry = without_materialized_class_imports(entry_source, &materialized_class_imports)?;
+    let retained_entry = without_materialized_class_imports_named(
+        entry_source, &materialized_class_imports,
+        thaw_parser::common::FileName::Custom(format!("{} (unwrapped declaration entry)", entry_path.display()).into()),
+    )?;
     output.replace_range(..entry_source.len(), &retained_entry);
     Ok(output)
 }
@@ -1153,6 +1163,7 @@ fn dts_source_with_reexported_functions_inner(
 /// follow), so this only ever needs to look within `dts_source` itself.
 fn builtin_class_and_ancestor_declarations(
     dts_source: &str,
+    specifier: &str,
     name: &str,
     visited: &mut std::collections::BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
@@ -1162,7 +1173,11 @@ fn builtin_class_and_ancestor_declarations(
     if !visited.insert(name.to_string()) {
         return Ok(Vec::new());
     }
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(dts_source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        dts_source, thaw_parser::common::FileName::Custom(
+            format!("node:{} (generated builtin declarations)", specifier.strip_prefix("node:").unwrap_or(specifier)).into(),
+        ),
+    )?;
     let mut declarations = Vec::new();
     let mut superclass = None;
     for item in &module.body {
@@ -1188,6 +1203,7 @@ fn builtin_class_and_ancestor_declarations(
     if let Some(superclass) = superclass {
         declarations.extend(builtin_class_and_ancestor_declarations(
             dts_source,
+            specifier,
             &superclass,
             visited,
         )?);
@@ -1300,7 +1316,7 @@ fn all_reexported_type_declarations(
 // exports, because even an unexported `declare class` has an instance shape.
 fn type_only_declaration(snippet: String, exported: Option<&str>) -> String {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt, TsModuleName};
-    let Ok(module) = thaw_parser::parse_declarations(&snippet) else { return snippet };
+    let Ok(module) = parse_labeled_declarations(&snippet, "generated type-only declaration snippet".to_string()) else { return snippet };
     let declaration = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
         ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
@@ -1392,7 +1408,7 @@ fn type_only_namespace_declaration(alias: &str, snippets: Vec<String>) -> String
 
 fn is_type_declaration_snippet(snippet: &str) -> bool {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt};
-    let Ok(module) = thaw_parser::parse_declarations(snippet) else { return false };
+    let Ok(module) = parse_labeled_declarations(snippet, "extracted type declaration snippet".to_string()) else { return false };
     module.body.iter().any(|item| {
         let declaration = match item {
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
@@ -1407,7 +1423,7 @@ fn is_type_declaration_snippet(snippet: &str) -> bool {
 
 fn is_runtime_declaration_snippet(snippet: &str) -> bool {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt};
-    let Ok(module) = thaw_parser::parse_declarations(snippet) else { return false };
+    let Ok(module) = parse_labeled_declarations(snippet, "extracted runtime declaration snippet".to_string()) else { return false };
     module.body.iter().any(|item| {
         let declaration = match item {
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
@@ -1421,7 +1437,7 @@ fn is_runtime_declaration_snippet(snippet: &str) -> bool {
 
 fn declaration_identity(snippet: &str) -> Option<String> {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat, Stmt, TsModuleName};
-    let module = thaw_parser::parse_declarations(snippet).ok()?;
+    let module = parse_labeled_declarations(snippet, "extracted declaration identity snippet".to_string()).ok()?;
     let declaration = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
         ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
@@ -1479,7 +1495,7 @@ fn reexported_declarations_as(
 
 fn export_value_declaration_as(snippet: String, exported: &str, origin: &Path) -> String {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt, TsModuleName};
-    let Ok(module) = thaw_parser::parse_declarations(&snippet) else { return snippet };
+    let Ok(module) = parse_labeled_declarations(&snippet, format!("{} (exported declaration snippet)", origin.display())) else { return snippet };
     let declaration = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
         ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
@@ -2067,7 +2083,9 @@ fn declared_function_name_range(snippet: &str) -> Option<(usize, usize)> {
     use thaw_parser::ast::{Decl, DefaultDecl, ModuleDecl, ModuleItem, Pat, Stmt, TsModuleName};
     use thaw_parser::common::Spanned;
 
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(snippet).ok()?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        snippet, thaw_parser::common::FileName::Custom("extracted function declaration snippet".into()),
+    ).ok()?;
     // The first declaration is the callable binding, possibly followed by
     // an interface supplying its signature. Use its AST identifier span so
     // whitespace/comments and keyword text in comments cannot move it.
@@ -3073,7 +3091,7 @@ fn reexported_class_or_interface_declarations(
 /// while leaving supporting ancestor declarations under their own names.
 /// AST spans limit self-type changes to references, never method/property
 /// names or coincidental text in comments.
-fn imported_class_as_local_binding(declarations: Vec<String>, local: &str, type_only: bool) -> Vec<String> {
+fn imported_class_as_local_binding(declarations: Vec<String>, local: &str, type_only: bool, origin: &Path) -> Vec<String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
         Class, Function, TsCallSignatureDecl, TsConditionalType, TsConstructorType,
@@ -3187,8 +3205,11 @@ fn imported_class_as_local_binding(declarations: Vec<String>, local: &str, type_
         if !is_selected || selected == local {
             return if type_only { type_only_declaration(snippet, None) } else { snippet };
         }
-        let Ok((module, source_map)) = thaw_parser::parse_declarations_with_source_map(&snippet)
-        else { return if type_only { type_only_declaration(snippet, None) } else { snippet } };
+        let Ok((module, source_map)) = thaw_parser::parse_declarations_with_source_map_named(
+            &snippet, thaw_parser::common::FileName::Custom(
+                format!("{} (imported class binding snippet)", origin.display()).into(),
+            ),
+        ) else { return if type_only { type_only_declaration(snippet, None) } else { snippet } };
         let Some((start, end)) = declared_function_name_range(&snippet) else {
             return if type_only { type_only_declaration(snippet, None) } else { snippet }
         };
@@ -3221,11 +3242,22 @@ fn imported_class_as_local_binding(declarations: Vec<String>, local: &str, type_
 /// Retain other specifiers from the same import, including their original
 /// `type` modifiers and any import attributes after the source literal.
 fn without_materialized_class_imports(source: &str, locals: &std::collections::BTreeSet<String>) -> Result<String, String> {
+    without_materialized_class_imports_named(
+        source, locals, thaw_parser::common::FileName::Custom("input.ts".into()),
+    )
+}
+
+fn without_materialized_class_imports_named(
+    source: &str, locals: &std::collections::BTreeSet<String>,
+    source_name: thaw_parser::common::FileName,
+) -> Result<String, String> {
     use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleItem};
     use thaw_parser::common::{SourceMapper, Spanned};
 
     if locals.is_empty() { return Ok(source.to_string()) }
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map(source)?;
+    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        source, source_name,
+    )?;
     let offset = |position| source_map.lookup_byte_offset(position).pos.0 as usize;
     let mut edits = Vec::new();
     for item in &module.body {
@@ -3380,7 +3412,7 @@ fn reexported_class_or_interface_declarations_inner(
                 declarations.extend(imported_class_as_local_binding(
                     reexported_class_or_interface_declarations_inner(
                         target_path, target_name, visited,
-                    )?, &superclass, true,
+                    )?, &superclass, true, target_path,
                 ));
             } else {
                 declarations.extend(reexported_class_or_interface_declarations_inner(
@@ -3454,7 +3486,7 @@ fn reexported_class_or_interface_declarations_inner(
                     .span_to_snippet(declaration.span())
                     .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?;
             if name != "default" && local_name != name {
-                snippet = imported_class_as_local_binding(vec![snippet], name, false)
+                snippet = imported_class_as_local_binding(vec![snippet], name, false, path)
                     .into_iter().next().unwrap();
             }
             if !snippet.trim_start().starts_with("export ") {
@@ -3469,7 +3501,7 @@ fn reexported_class_or_interface_declarations_inner(
             declarations.extend(imported_class_as_local_binding(
                 reexported_class_or_interface_declarations_inner(
                     target_path, target_name, visited,
-                )?, &superclass, true,
+                )?, &superclass, true, target_path,
             ));
         } else {
             // `Base` may be declared beside the selected class rather than
