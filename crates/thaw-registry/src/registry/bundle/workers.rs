@@ -404,7 +404,8 @@ fn rewrite_static_worker_urls_named(
         })?;
         let worker_relative = normalize_path_string(&worker_relative.to_string_lossy());
         let worker_key = format!("{package_instance}/{worker_relative}");
-        let origin_parameter = esm_origin_parameter(&worker_source);
+        let worker_source_name = thaw_parser::common::FileName::Real(worker_path.clone());
+        let origin_parameter = esm_origin_parameter_named(&worker_source, &worker_source_name);
         let worker_bootstrap = format!(
             "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({0});\nvar __thaw_worker_import = globalThis.__thaw_bundle_create_import({0});\nvar __thaw_worker_import_async = globalThis.__thaw_bundle_create_import_async({0});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\nrequire.addon = __thaw_worker_require.addon;\nvar __thaw_require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_import(name); }};\nvar requireAsync = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? Promise.resolve(globalThis.__thaw_worker_module) : __thaw_worker_import_async(name); }};\n",
             js_string_literal(&worker_key)
@@ -413,7 +414,7 @@ fn rewrite_static_worker_urls_named(
             format!("{worker_bootstrap}var {origin} = globalThis.__thaw_bundle_worker_origin({});\n", js_string_literal(&worker_key))
         } else { worker_bootstrap };
         let worker_source =
-            rewrite_esm_to_commonjs_mode(&worker_source, false).unwrap_or(worker_source);
+            rewrite_esm_to_commonjs_mode_named(&worker_source, false, &worker_source_name).unwrap_or(worker_source);
         // These bindings share the Worker source's function scope after the
         // QuickJS host wrapper. Choose names absent from its original text.
         let synthetic = (0..).find(|index| {
