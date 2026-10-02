@@ -64,6 +64,10 @@ pub fn set_ffi_error_abi(
                 visit_expr(consequent, symbol, abi, found);
                 visit_expr(alternate, symbol, abi, found);
             }
+            HirExpr::EvalThen(first, second) => {
+                visit_expr(first, symbol, abi, found);
+                visit_expr(second, symbol, abi, found);
+            }
             HirExpr::Call(callee, args) => {
                 visit_expr(callee, symbol, abi, found);
                 for arg in args {
@@ -121,7 +125,8 @@ pub fn set_ffi_error_abi(
             HirExpr::RecursiveClosure(_, _, closure) => visit_expr(closure, symbol, abi, found),
             HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => visit_expr(closure, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
-            HirExpr::PromiseNew(executor, _, _, _) => visit_expr(executor, symbol, abi, found),
+            HirExpr::PromiseNew(executor, _, _, _)
+            | HirExpr::PromiseNewMixed(executor, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
                 visit_expr(source, symbol, abi, found);
                 visit_expr(callback, symbol, abi, found);
@@ -257,6 +262,10 @@ pub fn set_ffi_ownership(
                     update_expr(arg, symbol, returns, errors, found);
                 }
             }
+            HirExpr::EvalThen(first, second) => {
+                update_expr(first, symbol, returns, errors, found);
+                update_expr(second, symbol, returns, errors, found);
+            }
             HirExpr::Call(callee, args) => {
                 update_expr(callee, symbol, returns, errors, found);
                 for arg in args {
@@ -343,7 +352,8 @@ pub fn set_ffi_ownership(
                 update_expr(closure, symbol, returns, errors, found)
             }
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
-            HirExpr::PromiseNew(executor, _, _, _) => {
+            HirExpr::PromiseNew(executor, _, _, _)
+            | HirExpr::PromiseNewMixed(executor, _, _) => {
                 update_expr(executor, symbol, returns, errors, found)
             }
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
@@ -501,6 +511,10 @@ pub fn set_ffi_string_abi(
                         found,
                     );
                 }
+            }
+            HirExpr::EvalThen(first, second) => {
+                update_expr(first, symbol, params, returns, calling_convention, aggregate_return_abi, found);
+                update_expr(second, symbol, params, returns, calling_convention, aggregate_return_abi, found);
             }
             HirExpr::Call(callee, values) => {
                 update_expr(
@@ -734,7 +748,8 @@ pub fn set_ffi_string_abi(
                 aggregate_return_abi,
                 found,
             ),
-            HirExpr::PromiseNew(executor, _, _, _) => update_expr(
+            HirExpr::PromiseNew(executor, _, _, _)
+            | HirExpr::PromiseNewMixed(executor, _, _) => update_expr(
                 executor,
                 symbol,
                 params,

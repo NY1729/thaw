@@ -1,3 +1,37 @@
+fn promise_resolve_value_fits(actual: &HirType, resolved: &HirType) -> bool {
+    if actual == resolved {
+        return true;
+    }
+    if *resolved == HirType::Void && *actual == HirType::Undefined {
+        return true;
+    }
+    match resolved {
+        HirType::Optional(inner) => {
+            actual == &HirType::Undefined || promise_resolve_value_fits(actual, inner)
+        }
+        HirType::Nullable(inner) => {
+            actual == &HirType::Null || promise_resolve_value_fits(actual, inner)
+        }
+        HirType::Nullish(inner) => {
+            matches!(actual, HirType::Null | HirType::Undefined)
+                || promise_resolve_value_fits(actual, inner)
+        }
+        HirType::Union(members) => match actual {
+            HirType::Union(source) => source.iter().all(|member| members.contains(member)),
+            _ => members.iter().any(|member| promise_resolve_value_fits(actual, member)),
+        },
+        _ => false,
+    }
+}
+
+fn absent_after(value: HirExpr, absent: HirExpr) -> HirExpr {
+    if matches!(value, HirExpr::Lit(_)) {
+        absent
+    } else {
+        HirExpr::EvalThen(Box::new(value), Box::new(absent))
+    }
+}
+
 impl<'a> FnLowerer<'a> {
     /// Coerces a value into its declared native layout.
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
@@ -695,6 +729,47 @@ impl<'a> FnLowerer<'a> {
             if &actual == declared {
                 return Ok(value);
             }
+            // The Promise constructor's mixed resolver has one value arm and
+            // one adoption arm. A value may itself need the usual native
+            // absence/union coercion before it can occupy the value arm.
+            if let [resolved, HirType::Promise(promised)] = elements.as_slice() {
+                if promised.as_ref() == resolved {
+                    if promise_resolve_value_fits(&actual, resolved) {
+                        let value = self.coerce_to_declared(resolved, value)?;
+                        return Ok(HirExpr::UnionInject(
+                            Box::new(value), 0, elements.clone(),
+                        ));
+                    }
+                    if let HirType::Promise(actual_result) = &actual {
+                        if actual_result.as_ref() != resolved
+                            && !matches!(resolved, HirType::Void)
+                            && promise_resolve_value_fits(actual_result, resolved)
+                        {
+                            let name = format!("__thaw_promise_widen_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let previous = self.scope.insert(name.clone(), actual_result.as_ref().clone());
+                            let converted = self.coerce_to_declared(resolved, HirExpr::Var(name.clone()));
+                            match previous {
+                                Some(previous) => { self.scope.insert(name.clone(), previous); }
+                                None => { self.scope.remove(&name); }
+                            }
+                            let callback = HirExpr::Lambda(
+                                Vec::new(),
+                                vec![HirParam { name, ty: actual_result.as_ref().clone() }],
+                                resolved.clone(),
+                                Box::new(converted?),
+                            );
+                            let widened = HirExpr::PromiseThen(
+                                Box::new(value), Box::new(callback),
+                                actual_result.as_ref().clone(), resolved.clone(), false, false,
+                            );
+                            return Ok(HirExpr::UnionInject(
+                                Box::new(widened), 1, elements.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
             if let HirType::Union(source) = &actual {
                 // Widen a source union as well as reordering equivalent
                 // members. Logical expressions can add a right-hand type
@@ -783,7 +858,13 @@ impl<'a> FnLowerer<'a> {
         }
         if let HirType::Optional(payload) = declared {
             return match self.infer_expr_type(&value)? {
-                HirType::Undefined => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
+                HirType::Undefined => Ok(absent_after(
+                    value, HirExpr::OptionalNone(payload.as_ref().clone()),
+                )),
+                HirType::Void if matches!(payload.as_ref(), HirType::Promise(result)
+                    if result.as_ref() == &HirType::Void) => {
+                    Ok(absent_after(value, HirExpr::OptionalNone(payload.as_ref().clone())))
+                }
                 actual if actual == *declared => Ok(value),
                 _ => {
                     let value = self.coerce_to_declared(payload.as_ref(), value)?;
@@ -796,7 +877,9 @@ impl<'a> FnLowerer<'a> {
         }
         if let HirType::Nullable(payload) = declared {
             return match self.infer_expr_type(&value)? {
-                HirType::Null => Ok(HirExpr::NullableNone(payload.as_ref().clone())),
+                HirType::Null => Ok(absent_after(
+                    value, HirExpr::NullableNone(payload.as_ref().clone()),
+                )),
                 actual if actual == *declared => Ok(value),
                 _ => {
                     let value = self.coerce_to_declared(payload.as_ref(), value)?;

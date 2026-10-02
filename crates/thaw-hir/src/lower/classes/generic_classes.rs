@@ -129,6 +129,36 @@ fn hir_type_as_ts_type(ty: &HirType) -> Result<TsType, String> {
         HirType::Str => keyword(TsKeywordTypeKind::TsStringKeyword),
         HirType::Bool => keyword(TsKeywordTypeKind::TsBooleanKeyword),
         HirType::Void => keyword(TsKeywordTypeKind::TsVoidKeyword),
+        HirType::Undefined => keyword(TsKeywordTypeKind::TsUndefinedKeyword),
+        HirType::Null => keyword(TsKeywordTypeKind::TsNullKeyword),
+        HirType::Union(elements) => TsType::TsUnionOrIntersectionType(
+            swc_ecma_ast::TsUnionOrIntersectionType::TsUnionType(
+                swc_ecma_ast::TsUnionType {
+                    span: swc_common::DUMMY_SP,
+                    types: elements
+                        .iter()
+                        .map(|element| hir_type_as_ts_type(element).map(Box::new))
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+            ),
+        ),
+        HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+            let mut elements = vec![Box::new(hir_type_as_ts_type(inner)?)];
+            if matches!(ty, HirType::Nullable(_) | HirType::Nullish(_)) {
+                elements.push(Box::new(keyword(TsKeywordTypeKind::TsNullKeyword)));
+            }
+            if matches!(ty, HirType::Optional(_) | HirType::Nullish(_)) {
+                elements.push(Box::new(keyword(TsKeywordTypeKind::TsUndefinedKeyword)));
+            }
+            TsType::TsUnionOrIntersectionType(
+                swc_ecma_ast::TsUnionOrIntersectionType::TsUnionType(
+                    swc_ecma_ast::TsUnionType {
+                        span: swc_common::DUMMY_SP,
+                        types: elements,
+                    },
+                ),
+            )
+        }
         HirType::Promise(result) => TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
             span: swc_common::DUMMY_SP,
             type_name: swc_ecma_ast::TsEntityName::Ident(swc_ecma_ast::Ident::new_no_ctxt(
@@ -198,10 +228,10 @@ fn hir_type_as_ts_type(ty: &HirType) -> Result<TsType, String> {
                 .collect::<Result<Vec<_>, String>>()?,
         }),
         HirType::Function(params, ret) => {
-            function_ts_type(params, None, ret)?
+            function_ts_type(params, None, None, ret)?
         }
-        HirType::CallableFunction(params, _, rest, ret) => {
-            function_ts_type(params, rest.as_deref(), ret)?
+        HirType::CallableFunction(params, optional, rest, ret) => {
+            function_ts_type(params, Some(optional), rest.as_deref(), ret)?
         }
         other => {
             return Err(format!(
@@ -216,6 +246,7 @@ fn hir_type_as_ts_type(ty: &HirType) -> Result<TsType, String> {
 /// nothing downstream reads them, only the arity and types matter.
 fn function_ts_type(
     params: &[HirType],
+    optional: Option<&HirOptionalMask>,
     rest: Option<&HirType>,
     ret: &HirType,
 ) -> Result<TsType, String> {
@@ -224,10 +255,14 @@ fn function_ts_type(
         .enumerate()
         .map(|(index, param)| {
             Ok(swc_ecma_ast::TsFnParam::Ident(swc_ecma_ast::BindingIdent {
-                id: swc_ecma_ast::Ident::new_no_ctxt(
-                    format!("arg{index}").into(),
-                    swc_common::DUMMY_SP,
-                ),
+                id: {
+                    let mut id = swc_ecma_ast::Ident::new_no_ctxt(
+                        format!("arg{index}").into(),
+                        swc_common::DUMMY_SP,
+                    );
+                    id.optional = optional.is_some_and(|mask| mask.contains(index));
+                    id
+                },
                 type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn {
                     span: swc_common::DUMMY_SP,
                     type_ann: Box::new(hir_type_as_ts_type(param)?),

@@ -85,6 +85,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             names.insert(name.clone());
         }
         HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::UnionIsEqual(left, right, _)
         | HirExpr::Index(left, right)
@@ -130,6 +131,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::Await(value)
         | HirExpr::AwaitPromise(value, _)
         | HirExpr::PromiseNew(value, _, _, _)
+        | HirExpr::PromiseNewMixed(value, _, _)
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
@@ -226,6 +228,7 @@ fn contains_await(expr: &HirExpr) -> bool {
     match expr {
         HirExpr::Await(_) | HirExpr::AwaitPromise(_, _) => true,
         HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::UnionIsEqual(left, right, _)
         | HirExpr::Index(left, right)
@@ -263,6 +266,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::PromiseAnyArray(value, _)
         | HirExpr::PromiseAllSettledArray(value, _)
         | HirExpr::PromiseNew(value, _, _, _)
+        | HirExpr::PromiseNewMixed(value, _, _)
         | HirExpr::Assign(_, value)
         | HirExpr::ArrayAlloc(value, _)
         | HirExpr::ArrayLen(value)

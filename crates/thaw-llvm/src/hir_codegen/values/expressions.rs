@@ -283,6 +283,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_conditional_value(test, consequent, alternate, ty)
             }
 
+            HirExpr::EvalThen(first, second) => {
+                self.compile_expr(first)?;
+                self.compile_expr(second)
+            }
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
             HirExpr::FunctionCallWithThis(callee, this_arg, args, params, ret) => {
                 self.compile_function_call_with_this(callee, this_arg, args, params, ret)
@@ -445,7 +449,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_typed_blocking_await(inner, resolved)
             }
             HirExpr::PromiseNew(executor, resolved, assimilates, typed_rejection) => {
-                self.compile_promise_new(executor, resolved, *assimilates, *typed_rejection)
+                self.compile_promise_new(executor, resolved, *assimilates, *typed_rejection, None)
+            }
+            HirExpr::PromiseNewMixed(executor, resolved, resolver) => {
+                self.compile_promise_new(executor, resolved, false, false, Some(resolver))
             }
             HirExpr::PromiseThen(source, callback, input, output, on_rejected, flatten) => {
                 self.compile_promise_then(source, callback, input, output, *on_rejected, *flatten)

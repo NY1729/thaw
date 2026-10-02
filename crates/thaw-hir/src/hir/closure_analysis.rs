@@ -38,6 +38,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::Var(_) | HirExpr::PostfixUpdate(_, _) => {}
         HirExpr::Assign(_, value) => collect_closure_captures_expr(value, names),
         HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::UnionIsEqual(left, right, _)
         | HirExpr::Index(left, right)
@@ -76,6 +77,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::Await(value)
         | HirExpr::AwaitPromise(value, _)
         | HirExpr::PromiseNew(value, _, _, _)
+        | HirExpr::PromiseNewMixed(value, _, _)
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)

@@ -5,6 +5,7 @@ impl<'ctx> HirCompiler<'ctx> {
         reject: bool,
         assimilates: bool,
         typed_rejection: bool,
+        mixed: bool,
     ) -> Result<FunctionValue<'ctx>, String> {
         let name = format!(
             "__thaw_promise_{}_{}",
@@ -14,12 +15,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.next_lambda += 1;
         let param = if reject {
             HirType::Str
+        } else if mixed && matches!(resolved, HirType::Void | HirType::Undefined) {
+            HirType::Optional(Box::new(HirType::Promise(Box::new(resolved.clone()))))
+        } else if mixed && resolved == &HirType::Null {
+            HirType::Nullable(Box::new(HirType::Promise(Box::new(HirType::Null))))
+        } else if mixed {
+            HirType::Union(vec![
+                resolved.clone(),
+                HirType::Promise(Box::new(resolved.clone())),
+            ])
         } else if assimilates {
             HirType::Promise(Box::new(resolved.clone()))
         } else {
             resolved.clone()
         };
-        let params = if !reject && !assimilates && resolved == &HirType::Void {
+        let params = if !reject && !assimilates && !mixed && resolved == &HirType::Void {
             &[][..]
         } else {
             std::slice::from_ref(&param)
@@ -94,6 +104,16 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_load(self.context.ptr_type(AddressSpace::default()), state, "promise")
             .map_err(|error| error.to_string())?;
+        if mixed && !reject {
+            self.compile_mixed_promise_settlement(function, promise.into_pointer_value(), resolved)?;
+            self.builder
+                .build_unconditional_branch(complete)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(complete);
+            self.builder.build_return(None).map_err(|error| error.to_string())?;
+            self.builder.position_at_end(return_block);
+            return Ok(function);
+        }
         let payload = if !reject && !assimilates && resolved == &HirType::Void {
             self.context.ptr_type(AddressSpace::default()).const_null()
         } else if reject || assimilates {
@@ -154,12 +174,110 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(function)
     }
 
+    fn compile_mixed_promise_settlement(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        promise: PointerValue<'ctx>,
+        resolved: &HirType,
+    ) -> Result<(), String> {
+        let argument = function.get_nth_param(1).unwrap().into_struct_value();
+        let discriminator = self.builder
+            .build_extract_value(argument, 0, "resolve_kind")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let is_adoption = if matches!(resolved, HirType::Void | HirType::Undefined | HirType::Null) {
+            discriminator
+        } else {
+            self.builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    discriminator,
+                    discriminator.get_type().const_int(1, false),
+                    "resolve_is_adoption",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let adopt = self.context.append_basic_block(function, "resolve_adopt");
+        let plain = self.context.append_basic_block(function, "resolve_plain");
+        let done = self.context.append_basic_block(function, "resolve_done");
+        self.builder
+            .build_conditional_branch(is_adoption, adopt, plain)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(adopt);
+        let adopted = if matches!(resolved, HirType::Void | HirType::Undefined | HirType::Null) {
+            self.builder
+                .build_extract_value(argument, 1, "resolve_promise")
+                .map_err(|error| error.to_string())?
+                .into_pointer_value()
+        } else {
+            let bits = self.builder
+                .build_extract_value(argument, 1, "resolve_promise_bits")
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            self.unpack_union_payload(bits, &HirType::Promise(Box::new(resolved.clone())))?
+                .into_pointer_value()
+        };
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_adopt").unwrap(),
+                &[promise.into(), adopted.into()],
+                "adopt_resolve_value",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(plain);
+        let payload = if resolved == &HirType::Void {
+            self.context.ptr_type(AddressSpace::default()).const_null()
+        } else if matches!(resolved, HirType::Undefined | HirType::Null) {
+            let slot = self.build_arena_cell(
+                &self.builder, self.basic_type(resolved)?, "mixed_undefined",
+            )?;
+            let absence = if resolved == &HirType::Null {
+                self.context.bool_type().const_int(1, false).into()
+            } else {
+                self.compile_zero_value(resolved)?
+            };
+            self.builder
+                .build_store(slot, absence)
+                .map_err(|error| error.to_string())?;
+            slot
+        } else {
+            let bits = self.builder
+                .build_extract_value(argument, 1, "resolve_value_bits")
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            let value = self.unpack_union_payload(bits, resolved)?;
+            let slot = self.build_arena_cell(&self.builder, self.basic_type(resolved)?, "mixed_result")?;
+            self.builder
+                .build_store(slot, value)
+                .map_err(|error| error.to_string())?;
+            slot
+        };
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_resolve").unwrap(),
+                &[promise.into(), payload.into()],
+                "settle_resolve_value",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
     fn compile_promise_new(
         &mut self,
         executor: &HirExpr,
         resolved: &HirType,
         assimilates: bool,
         typed_rejection: bool,
+        mixed_resolver: Option<&HirType>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let promise = self
             .builder
@@ -207,10 +325,19 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(called_slot, self.context.i8_type().const_zero())
             .map_err(|error| error.to_string())?;
         let executor = self.compile_expr(executor)?.into_pointer_value();
-        let resolve_fn = self.compile_promise_resolver(resolved, false, assimilates, false)?;
+        let resolve_fn = self.compile_promise_resolver(
+            resolved, false, assimilates, false, mixed_resolver.is_some(),
+        )?;
         let reject_fn =
-            self.compile_promise_resolver(resolved, true, false, typed_rejection)?;
-        let resolve_params = if assimilates {
+            self.compile_promise_resolver(resolved, true, false, typed_rejection, false)?;
+        let resolve_params = if let Some(resolver) = mixed_resolver {
+            match resolver {
+                HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _) => {
+                    params.clone()
+                }
+                _ => return Err("mixed Promise resolver must be a function".into()),
+            }
+        } else if assimilates {
             vec![HirType::Promise(Box::new(resolved.clone()))]
         } else if resolved == &HirType::Void {
             Vec::new()
@@ -228,7 +355,9 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let resolve_ty = HirType::Function(resolve_params, Box::new(HirType::Void));
+        let resolve_ty = mixed_resolver.cloned().unwrap_or_else(|| {
+            HirType::Function(resolve_params, Box::new(HirType::Void))
+        });
         let reject_ty = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
         let executor_type = self.function_type(&[resolve_ty, reject_ty], &HirType::Void)?;
         self.builder
