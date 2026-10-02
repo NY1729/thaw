@@ -1489,6 +1489,53 @@ fn async_http_and_timer_share_the_event_loop() {
 }
 
 #[test]
+fn async_http_ready_response_cannot_complete_after_absolute_deadline() {
+    let mut fds = [-1; 2];
+    assert_eq!(
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
+        0
+    );
+    let body = vec![b'x'; 16_384];
+    let mut response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(&body);
+    assert_eq!(
+        unsafe { libc::send(fds[1], response.as_ptr().cast(), response.len(), libc::MSG_NOSIGNAL) },
+        response.len() as isize
+    );
+    let completion = thaw_promise_new();
+    let readiness = thaw_promise_new();
+    assert_eq!(thaw_promise_resolve(readiness, std::ptr::dangling::<u8>()), 1);
+    let task = Box::into_raw(Box::new(AsyncHttpGet {
+        fd: fds[0],
+        request: Vec::new(),
+        written: 0,
+        response: Vec::new(),
+        state: AsyncHttpState::Reading,
+        completion,
+        readiness,
+        deadline: Instant::now() - Duration::from_millis(1),
+        tls: None,
+        tls_config: tls_client_config(),
+        use_tls: false,
+        host: "localhost".to_string(),
+        port: 80,
+        path: "/".to_string(),
+        redirects: 0,
+        resolution: None,
+    }));
+    resume_async_http(task.cast(), std::ptr::null());
+    assert_eq!(thaw_promise_state(completion), 2);
+    unsafe {
+        libc::close(fds[1]);
+        thaw_promise_destroy(completion);
+    }
+}
+
+#[test]
 fn async_http_finishes_content_length_before_keep_alive_closes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
