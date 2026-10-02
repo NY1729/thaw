@@ -83,14 +83,17 @@ fn prepare_async_modules(
                 if let Some(cached) = source_cache.rewritten.get(&cache_key) {
                     cached.clone()
                 } else {
-                    let result = rewrite_esm_to_commonjs_mode(&module.source, module.async_module);
+                    let result = rewrite_esm_to_commonjs_mode_named(&module.source, module.async_module, &module.source_name);
                     source_cache.rewritten.insert(cache_key, result.clone());
                     result
                 }
             }
-            None => rewrite_esm_to_commonjs_mode(&module.source, module.async_module),
+            None => rewrite_esm_to_commonjs_mode_named(&module.source, module.async_module, &module.source_name),
         };
         if let Some(source) = rewritten {
+            if source != module.source {
+                module.source_name = rewritten_js_source_name(&module.source_name, "CommonJS rewrite");
+            }
             module.source = source;
         }
     }

@@ -19,7 +19,16 @@ struct ModuleAnalysis {
     _commonjs_exports: Vec<String>,
 }
 
+fn rewritten_js_source_name(source_name: &thaw_parser::common::FileName, phase: &str) -> thaw_parser::common::FileName {
+    thaw_parser::common::FileName::Custom(format!("{source_name} ({phase})").into())
+}
+
+#[cfg(test)]
 fn analyze_module(source: &str) -> ModuleAnalysis {
+    analyze_module_named(source, &thaw_parser::common::FileName::Custom("input.js".into()))
+}
+
+fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileName) -> ModuleAnalysis {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
         ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, ForOfStmt, Function, Ident,
@@ -345,7 +354,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         None
     }
 
-    let Ok(module) = thaw_parser::parse_javascript(source) else {
+    let Ok((module, _)) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()) else {
         return ModuleAnalysis::default();
     };
     let mut create_require_functions = Vec::new();
@@ -461,7 +470,12 @@ fn find_module_specs(source: &str) -> Vec<String> {
 /// bundle's per-module `require` map. The `then` boundary ensures a missing or
 /// throwing module rejects the returned Promise instead of throwing before a
 /// Promise is returned.
+#[cfg(test)]
 fn rewrite_dynamic_imports(source: &str) -> Option<String> {
+    rewrite_dynamic_imports_named(source, &thaw_parser::common::FileName::Custom("input.js".into()))
+}
+
+fn rewrite_dynamic_imports_named(source: &str, source_name: &thaw_parser::common::FileName) -> Option<String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{CallExpr, Callee};
     use thaw_parser::common::Spanned;
@@ -484,7 +498,7 @@ fn rewrite_dynamic_imports(source: &str) -> Option<String> {
         }
     }
 
-    let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
+    let (module, cm) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?;
     let mut imports = Imports { spans: Vec::new() };
     module.visit_with(&mut imports);
     if imports.spans.is_empty() {
@@ -543,7 +557,7 @@ fn pattern_names(pattern: &thaw_parser::ast::Pat, names: &mut std::collections::
 
 /// Choose one unused number range for every name introduced by ESM lowering.
 /// The reference pass and declaration pass must use the same offset.
-fn esm_synthetic_offset(source: &str) -> Option<usize> {
+fn esm_synthetic_offset_named(source: &str, source_name: &thaw_parser::common::FileName) -> Option<usize> {
     use std::collections::BTreeSet;
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{Ident, ModuleDecl, ModuleItem};
@@ -556,7 +570,7 @@ fn esm_synthetic_offset(source: &str) -> Option<usize> {
         }
     }
 
-    let (module, _) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
+    let (module, _) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?;
     let mut identifiers = Identifiers::default();
     module.visit_with(&mut identifiers);
     let count = module.body.iter().filter(|item| match item {
@@ -578,7 +592,7 @@ fn esm_synthetic_offset(source: &str) -> Option<usize> {
     })
 }
 
-fn rewrite_live_import_references(source: &str, synthetic_offset: usize) -> Option<String> {
+fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, source_name: &thaw_parser::common::FileName) -> Option<String> {
     use std::collections::{BTreeMap, BTreeSet};
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
@@ -639,7 +653,7 @@ fn rewrite_live_import_references(source: &str, synthetic_offset: usize) -> Opti
         collector.0
     }
 
-    let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
+    let (module, cm) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?;
     let export_name = |name: &ModuleExportName| match name {
         ModuleExportName::Ident(identifier) => identifier.sym.to_string(),
         ModuleExportName::Str(value) => value.value.to_string_lossy().into_owned(),
@@ -889,7 +903,7 @@ fn rewrite_live_import_references(source: &str, synthetic_offset: usize) -> Opti
     Some(output)
 }
 
-fn rewrite_import_meta_urls(source: &str) -> String {
+fn rewrite_import_meta_urls_named(source: &str, source_name: &thaw_parser::common::FileName) -> String {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{Expr, Ident, MetaPropKind};
     use thaw_parser::common::Spanned;
@@ -928,7 +942,7 @@ fn rewrite_import_meta_urls(source: &str) -> String {
         }
     }
 
-    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
+    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()) else {
         return source.to_string();
     };
     let mut metas = ImportMetaExprs::default();
@@ -985,7 +999,7 @@ fn rewrite_import_meta_urls(source: &str) -> String {
 /// names, turning it into a plain reassignment of the existing
 /// parameter -- same runtime effect the shim always intended, no new
 /// lexical binding, no collision.
-fn strip_reserved_wrapper_redeclarations(source: &str) -> String {
+fn strip_reserved_wrapper_redeclarations_named(source: &str, source_name: &thaw_parser::common::FileName) -> String {
     use thaw_parser::ast::{Decl, ModuleItem, Pat, Stmt, VarDeclKind};
     use thaw_parser::common::Spanned;
 
@@ -998,7 +1012,7 @@ fn strip_reserved_wrapper_redeclarations(source: &str) -> String {
         "__dirname",
     ];
 
-    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
+    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()) else {
         return source.to_string();
     };
     let mut edits: Vec<(u32, u32)> = Vec::new();
@@ -1072,10 +1086,15 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
     {
         return None;
     }
-    rewrite_esm_to_commonjs_mode(source, false)
+    rewrite_esm_to_commonjs_mode_named(source, false, &thaw_parser::common::FileName::Custom("input.js".into()))
 }
 
+#[cfg(test)]
 fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<String> {
+    rewrite_esm_to_commonjs_mode_named(source, await_imports, &thaw_parser::common::FileName::Custom("input.js".into()))
+}
+
+fn rewrite_esm_to_commonjs_mode_named(source: &str, await_imports: bool, source_name: &thaw_parser::common::FileName) -> Option<String> {
     use std::collections::BTreeSet;
     use thaw_parser::ast::{
         Decl, DefaultDecl, ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName,
@@ -1083,18 +1102,24 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
     };
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let dynamic_source = rewrite_dynamic_imports(source);
+    let dynamic_source = rewrite_dynamic_imports_named(source, source_name);
+    let dynamic_name = dynamic_source.as_ref().filter(|rewritten| rewritten.as_str() != source)
+        .map(|_| rewritten_js_source_name(source_name, "dynamic import rewrite"));
     let source = dynamic_source.as_deref().unwrap_or(source);
-    let synthetic_offset = esm_synthetic_offset(source)?;
-    let live_source = rewrite_live_import_references(source, synthetic_offset);
+    let source_name = dynamic_name.as_ref().unwrap_or(source_name);
+    let synthetic_offset = esm_synthetic_offset_named(source, source_name)?;
+    let live_source = rewrite_live_import_references_named(source, synthetic_offset, source_name);
+    let live_name = live_source.as_ref().filter(|rewritten| rewritten.as_str() != source)
+        .map(|_| rewritten_js_source_name(source_name, "live import rewrite"));
     let source = live_source.as_deref().unwrap_or(source);
-    let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
+    let source_name = live_name.as_ref().unwrap_or(source_name);
+    let (module, cm) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?;
     let has_esm_syntax = module
         .body
         .iter()
         .any(|item| matches!(item, ModuleItem::ModuleDecl(_)));
     if !has_esm_syntax {
-        let rewritten = rewrite_import_meta_urls(source);
+        let rewritten = rewrite_import_meta_urls_named(source, source_name);
         return if rewritten == source {
             live_source.or(dynamic_source)
         } else {
@@ -1332,19 +1357,30 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
     } else {
         String::new()
     };
-    Some(strip_reserved_wrapper_redeclarations(&rewrite_import_meta_urls(
-        &format!("module.exports.__esModule = true;\n{local_export_prologue}{star_setup}{prologue}{rest}"),
-    )))
+    let generated = format!("module.exports.__esModule = true;\n{local_export_prologue}{star_setup}{prologue}{rest}");
+    let generated_name = rewritten_js_source_name(source_name, "CommonJS generation");
+    let meta_rewritten = rewrite_import_meta_urls_named(&generated, &generated_name);
+    let meta_name = if meta_rewritten != generated {
+        rewritten_js_source_name(&generated_name, "import.meta rewrite")
+    } else {
+        generated_name
+    };
+    Some(strip_reserved_wrapper_redeclarations_named(&meta_rewritten, &meta_name))
 }
 
 /// The original ESM export edges, kept separately from the generated CJS
 /// source so star resolution can follow bindings through diamond/cyclic
 /// reexports before either module has finished evaluating.
+#[cfg(test)]
 fn esm_export_graph(source: &str) -> Option<serde_json::Value> {
+    esm_export_graph_named(source, &thaw_parser::common::FileName::Custom("input.js".into()))
+}
+
+fn esm_export_graph_named(source: &str, source_name: &thaw_parser::common::FileName) -> Option<serde_json::Value> {
     use std::collections::{BTreeMap, BTreeSet};
     use thaw_parser::ast::{Decl, DefaultDecl, ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
 
-    let module = thaw_parser::parse_javascript(source).ok()?;
+    let (module, _) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?;
     let name = |value: &ModuleExportName| match value {
         ModuleExportName::Ident(id) => id.sym.to_string(),
         ModuleExportName::Str(text) => text.value.to_string_lossy().into_owned(),
@@ -1430,9 +1466,11 @@ fn esm_export_graph(source: &str) -> Option<serde_json::Value> {
     has_esm.then(|| serde_json::json!({ "local": local, "indirect": indirect, "stars": stars }))
 }
 
-fn esm_origin_parameter(source: &str) -> Option<String> {
-    esm_export_graph(source)?;
-    let dynamic_source = rewrite_dynamic_imports(source);
+fn esm_origin_parameter_named(source: &str, source_name: &thaw_parser::common::FileName) -> Option<String> {
+    esm_export_graph_named(source, source_name)?;
+    let dynamic_source = rewrite_dynamic_imports_named(source, source_name);
+    let dynamic_name = dynamic_source.as_ref().filter(|rewritten| rewritten.as_str() != source)
+        .map(|_| rewritten_js_source_name(source_name, "dynamic import rewrite"));
     let source = dynamic_source.as_deref().unwrap_or(source);
-    Some(format!("__thaw_esm_origin_{}", esm_synthetic_offset(source)?))
+    Some(format!("__thaw_esm_origin_{}", esm_synthetic_offset_named(source, dynamic_name.as_ref().unwrap_or(source_name))?))
 }

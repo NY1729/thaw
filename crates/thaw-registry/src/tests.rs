@@ -1054,3 +1054,50 @@ fn bare_subpaths_honor_exact_and_wildcard_export_conditions() {
     assert_eq!(wildcard, "./dist/features/math.cjs");
     let _ = fs::remove_dir_all(&node_modules);
 }
+
+#[test]
+fn registry_bundle_javascript_source_maps_keep_exact_or_generated_names() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let node_modules = temp_registry("bundle_js_source_names");
+    let package = node_modules.join("pkg");
+    fs::create_dir_all(&package).unwrap();
+    let raw = package.join("raw.js");
+    let shebang = package.join("shebang.js");
+    let json = package.join("data.json");
+    let worker_entry = package.join("worker-entry.js");
+    let worker = package.join("worker.js");
+    fs::write(&raw, "exports.value = 1;").unwrap();
+    fs::write(&shebang, "#!/usr/bin/env node\nexports.value = 2;").unwrap();
+    fs::write(&json, r#"{"value":3}"#).unwrap();
+    fs::write(&worker, "export const value = 4;").unwrap();
+    fs::write(&worker_entry, "var Worker = require('node:worker_threads').Worker; new Worker(new URL('./worker.js', import.meta.url));").unwrap();
+    let mut cache = SourceCache::default();
+    for entry in ["raw.js", "shebang.js", "data.json", "worker-entry.js"] {
+        bundle_commonjs_package_cached(&node_modules, "pkg", &package, entry, &mut cache).unwrap();
+    }
+    for (path, expected) in [
+        (&raw, FileName::Real(raw.clone())),
+        (&shebang, FileName::Custom(format!("{} (after shebang removal)", shebang.display()).into())),
+        (&json, FileName::Custom(format!("{} (generated JSON module)", json.display()).into())),
+        (&worker_entry, FileName::Custom(format!("{} (Worker URL rewrite)", worker_entry.display()).into())),
+    ] {
+        let (source, _, name) = cache.modules.get(&(path.clone(), "pkg".to_string())).unwrap();
+        assert_eq!(name, &expected);
+        let (module, map) = thaw_parser::parse_javascript_with_source_map_named(source, name.clone()).unwrap();
+        assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &expected);
+    }
+    let worker_name = FileName::Real(worker.clone());
+    assert!(esm_origin_parameter_named(&fs::read_to_string(&worker).unwrap(), &worker_name).is_some());
+    let (module, map) = thaw_parser::parse_javascript_with_source_map_named(&fs::read_to_string(&worker).unwrap(), worker_name.clone()).unwrap();
+    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &worker_name);
+    let malformed = "export const =;";
+    let malformed_name = FileName::Real(raw.clone());
+    assert!(analyze_module_named(malformed, &malformed_name).specs.is_empty());
+    assert!(rewrite_esm_to_commonjs_mode_named(malformed, false, &malformed_name).is_none());
+    let mut builtins = Vec::new();
+    add_builtin_module("path", "node:path".to_string(), &mut Vec::new(), &mut builtins);
+    let path_builtin = builtins.iter().find(|module| module.key == "node:path").unwrap();
+    assert_eq!(path_builtin.source_name, FileName::Custom("node:path (generated builtin module)".into()));
+    let _ = fs::remove_dir_all(node_modules);
+}
