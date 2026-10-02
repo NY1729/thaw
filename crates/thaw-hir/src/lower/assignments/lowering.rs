@@ -1413,6 +1413,11 @@ impl<'a> FnLowerer<'a> {
         ty: &HirType,
         statements: &mut Vec<HirStmt>,
     ) -> Result<(), String> {
+        let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
+            self.bind_destructure_source_once(value, ty, statements)
+        } else {
+            value
+        };
         if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             if let HirType::Optional(payload) = ty {
                 statements.push(HirStmt::If(
