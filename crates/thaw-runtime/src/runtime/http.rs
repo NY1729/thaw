@@ -267,12 +267,29 @@ impl Write for NonblockingSocket {
     }
 }
 
+const HTTP_DEADLINE_ERROR: &str = "HTTP operation timed out";
+
+fn http_deadline_expired(task: *mut AsyncHttpGet) -> bool {
+    Instant::now() >= unsafe { (*task).deadline }
+}
+
+fn expire_async_http(task: *mut AsyncHttpGet) -> bool {
+    if !http_deadline_expired(task) {
+        return false;
+    }
+    async_http_error(task, HTTP_DEADLINE_ERROR.to_string());
+    true
+}
+
 fn flush_tls(task: *mut AsyncHttpGet) -> Result<bool, String> {
     let fd = unsafe { (*task).fd };
-    let tls = unsafe { (*task).tls.as_mut().expect("TLS state is present") };
     let mut socket = NonblockingSocket(fd);
-    while tls.wants_write() {
-        match tls.write_tls(&mut socket) {
+    while unsafe { (*task).tls.as_ref().expect("TLS state is present").wants_write() } {
+        if http_deadline_expired(task) {
+            return Err(HTTP_DEADLINE_ERROR.to_string());
+        }
+        let write = unsafe { (*task).tls.as_mut().unwrap().write_tls(&mut socket) };
+        match write {
             Ok(0) => return Err("TLS socket closed while writing".to_string()),
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
@@ -284,13 +301,16 @@ fn flush_tls(task: *mut AsyncHttpGet) -> Result<bool, String> {
 
 fn read_tls_records(task: *mut AsyncHttpGet) -> Result<bool, String> {
     let fd = unsafe { (*task).fd };
-    let tls = unsafe { (*task).tls.as_mut().expect("TLS state is present") };
     let mut socket = NonblockingSocket(fd);
     loop {
-        match tls.read_tls(&mut socket) {
+        if http_deadline_expired(task) {
+            return Err(HTTP_DEADLINE_ERROR.to_string());
+        }
+        let read = unsafe { (*task).tls.as_mut().expect("TLS state is present").read_tls(&mut socket) };
+        match read {
             Ok(0) => return Ok(true),
             Ok(_) => {
-                tls.process_new_packets()
+                unsafe { (*task).tls.as_mut().unwrap().process_new_packets() }
                     .map_err(|error| format!("processing TLS records: {error}"))?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
@@ -654,7 +674,13 @@ fn schedule_async_http(task: *mut AsyncHttpGet, interests: u8) {
 }
 
 fn complete_async_http_if_ready(task: *mut AsyncHttpGet, eof: bool) -> bool {
+    if expire_async_http(task) {
+        return true;
+    }
     let parsed = unsafe { parse_http_response(&(*task).response, eof) };
+    if expire_async_http(task) {
+        return true;
+    }
     match parsed {
         Ok(Some(response)) => {
             async_http_finish(task, response);
@@ -681,8 +707,14 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
         );
         return;
     }
+    if expire_async_http(task) {
+        return;
+    }
 
     loop {
+        if expire_async_http(task) {
+            return;
+        }
         match unsafe { (*task).state } {
             AsyncHttpState::Resolving => {
                 let mut byte = [0u8; 1];
@@ -714,6 +746,9 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                 let mut last_error = None;
                 let mut socket = None;
                 for address in addresses {
+                    if expire_async_http(task) {
+                        return;
+                    }
                     match open_nonblocking_socket(address) {
                         Ok(fd) => {
                             socket = Some(fd);
@@ -790,12 +825,18 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
             }
             AsyncHttpState::Writing => {
                 if unsafe { (*task).tls.is_some() } {
-                    let task_ref = unsafe { &mut *task };
-                    while task_ref.written < task_ref.request.len() {
-                        let remaining = &task_ref.request[task_ref.written..];
-                        match task_ref.tls.as_mut().unwrap().writer().write(remaining) {
+                    while unsafe { (*task).written < (*task).request.len() } {
+                        if expire_async_http(task) {
+                            return;
+                        }
+                        let write = {
+                            let task_ref = unsafe { &mut *task };
+                            let remaining = &task_ref.request[task_ref.written..];
+                            task_ref.tls.as_mut().unwrap().writer().write(remaining)
+                        };
+                        match write {
                             Ok(0) => break,
-                            Ok(written) => task_ref.written += written,
+                            Ok(written) => unsafe { (*task).written += written },
                             Err(error) => {
                                 async_http_error(task, format!("buffering TLS request: {error}"));
                                 return;
@@ -816,19 +857,24 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     schedule_async_http(task, tls_interests(task));
                     return;
                 }
-                let task_ref = unsafe { &mut *task };
-                while task_ref.written < task_ref.request.len() {
-                    let remaining = &task_ref.request[task_ref.written..];
-                    let written = unsafe {
-                        libc::send(
-                            task_ref.fd,
-                            remaining.as_ptr().cast(),
-                            remaining.len(),
-                            libc::MSG_NOSIGNAL,
-                        )
+                while unsafe { (*task).written < (*task).request.len() } {
+                    if expire_async_http(task) {
+                        return;
+                    }
+                    let written = {
+                        let task_ref = unsafe { &*task };
+                        let remaining = &task_ref.request[task_ref.written..];
+                        unsafe {
+                            libc::send(
+                                task_ref.fd,
+                                remaining.as_ptr().cast(),
+                                remaining.len(),
+                                libc::MSG_NOSIGNAL,
+                            )
+                        }
                     };
                     if written > 0 {
-                        task_ref.written += written as usize;
+                        unsafe { (*task).written += written as usize };
                         continue;
                     }
                     let error = std::io::Error::last_os_error();
@@ -839,7 +885,7 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     }
                     return;
                 }
-                task_ref.state = AsyncHttpState::Reading;
+                unsafe { (*task).state = AsyncHttpState::Reading };
             }
             AsyncHttpState::Reading => {
                 if unsafe { (*task).tls.is_some() } {
@@ -856,6 +902,9 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     };
                     let mut plaintext = [0u8; 8192];
                     loop {
+                        if expire_async_http(task) {
+                            return;
+                        }
                         let read =
                             unsafe { (*task).tls.as_mut().unwrap().reader().read(&mut plaintext) };
                         match read {
@@ -903,6 +952,9 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                 }
                 let mut buffer = [0u8; 8192];
                 loop {
+                    if expire_async_http(task) {
+                        return;
+                    }
                     let read = unsafe {
                         libc::recv((*task).fd, buffer.as_mut_ptr().cast(), buffer.len(), 0)
                     };
