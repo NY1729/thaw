@@ -392,7 +392,7 @@ fn rewrite_static_worker_urls(
         let worker_key = format!("{package_name}/{worker_relative}");
         let origin_parameter = esm_origin_parameter(&worker_source);
         let worker_bootstrap = format!(
-            "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\nrequire.addon = __thaw_worker_require.addon;\nvar __thaw_require = require;\n",
+            "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({0});\nvar __thaw_worker_import = globalThis.__thaw_bundle_create_import({0});\nvar __thaw_worker_import_async = globalThis.__thaw_bundle_create_import_async({0});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\nrequire.addon = __thaw_worker_require.addon;\nvar __thaw_require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_import(name); }};\nvar requireAsync = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? Promise.resolve(globalThis.__thaw_worker_module) : __thaw_worker_import_async(name); }};\n",
             js_string_literal(&worker_key)
         );
         let worker_bootstrap = if let Some(origin) = origin_parameter {
