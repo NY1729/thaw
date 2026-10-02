@@ -2978,3 +2978,98 @@ module.exports = function() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn net_accepted_socket_keeps_write_half_only_when_requested() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    for allow_half_open in [true, false] {
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let peer = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
+                Err(error) => panic!("TCP connect timed out: {error}"),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.write_all(b"ping").unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+    let dir = temp_registry("builtin_net_accepted_half_close");
+    fs::write(dir.join("index.js"), r#"var net = require('node:net'); module.exports = function(port, allowHalfOpen) { return new Promise(function(resolve, reject) {
+      var server = net.createServer({ allowHalfOpen: allowHalfOpen }), socket, ends = 0, closes = 0, callbacks = 0, callbacksOnClose = -1, writableOnEnd = false;
+      var timeout = setTimeout(function() { if (socket) socket.destroy(); server.close(); }, 2000);
+      server.on('connection', function(value) { socket = value; value.on('error', reject); value.on('end', function() { ends++; writableOnEnd = value.writable; if (allowHalfOpen) setTimeout(function() { value.end('pong', function() { callbacks++; }); }, 10); else value.write('sync'); }); value.on('close', function() { closes++; callbacksOnClose = callbacks; server.close(); }); });
+      server.on('error', reject); server.on('close', function() { clearTimeout(timeout); resolve([ends, closes, writableOnEnd, callbacksOnClose]); });
+      server.listen(port, '127.0.0.1');
+    }); };"#).unwrap();
+    let modules = temp_registry("builtin_net_accepted_half_close_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {bundle} globalThis.exerciseHalfClose = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(CString::new("exerciseHalfClose").unwrap().as_ptr(), CString::new(format!("[{port},{allow_half_open}]")).unwrap().as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), if allow_half_open { "[1,1,true,1]" } else { "[1,1,true,0]" });
+    assert_eq!(peer.join().unwrap(), if allow_half_open { "pong" } else { "sync" });
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&modules);
+    }
+}
+
+#[test]
+fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let peer = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
+                Err(error) => panic!("TCP connect timed out: {error}"),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+    let dir = temp_registry("builtin_http_half_closed_pipeline");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'); module.exports = function(port) { return new Promise(function(resolve, reject) {
+      var server = http.createServer(), socket, requests = [], ends = 0, closes = 0;
+      var timeout = setTimeout(function() { if (socket) socket.destroy(); server.close(); }, 2000);
+      server.on('connection', function(value) { socket = value; value.on('error', reject); value.on('end', function() { ends++; }); value.on('close', function() { closes++; server.close(); }); });
+      server.on('request', function(req, res) { requests.push(req.url); if (req.url === '/first') { res.setHeader('Content-Length', '3'); res.flushHeaders(); } setTimeout(function() { res.end(req.url === '/first' ? 'one' : 'two'); }, 10); });
+      server.on('error', reject); server.on('close', function() { clearTimeout(timeout); resolve([requests, ends, closes]); });
+      server.listen(port, '127.0.0.1');
+    }); };"#).unwrap();
+    let modules = temp_registry("builtin_http_half_closed_pipeline_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {bundle} globalThis.exerciseHttpHalfClose = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(CString::new("exerciseHttpHalfClose").unwrap().as_ptr(), CString::new(format!("[{port}]")).unwrap().as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[\"/first\",\"/second\"],1,1]");
+    let response = peer.join().unwrap();
+    assert!(response.contains("\r\n\r\noneHTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("\r\n\r\ntwo"), "{response}");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&modules);
+}
