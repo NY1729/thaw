@@ -369,15 +369,16 @@ fn add_installed_inner(
         write_bundle(&dest_dir, &js_source)?;
         if eager_subpaths {
             for export in package_subpath_exports(&manifest, &package_dir)? {
-                dependency_versions.extend(write_installed_subpath(
+                write_installed_subpath(
                     &dest_dir.join("subpaths").join(&export.subpath),
                     node_modules_dir,
                     name,
                     &package_dir,
                     &export,
                     &mut bundle_source_cache,
-                )?);
+                )?;
             }
+            dependency_versions = project_package_versions(bundle_source_cache.package_versions.clone())?;
         }
         fs::write(dest_dir.join("version.txt"), &resolved_version).map_err(|e| {
             format!(

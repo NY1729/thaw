@@ -333,7 +333,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          function __thaw_bundle_create_require(base) {\n\
          \x20\x20var text = String(base || '');\n\
          \x20\x20var keys = Object.keys(__thaw_bundle_require_maps);\n\
-         \x20\x20var factoryKey = keys.indexOf(text) >= 0 ? text : keys.find(function(key) { return text.endsWith('/' + key) || text.endsWith(key); });\n\
+         \x20\x20var factoryKey = keys.indexOf(text) >= 0 ? text : keys.reduce(function(best, key) { return text.endsWith('/' + key) && (!best || key.length > best.length) ? key : best; }, null);\n\
          \x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
          \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && typeof require.addon === 'function') return require.addon; spec = String(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return __thaw_bundle_exports[spec]; var target = __thaw_bundle_target(map, spec); if (!target && !factoryKey) { for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec); } if (target) return __thaw_bundle_require(target.key, target.factory); return require(spec); };\n\
          \x20\x20created.addon = require.addon;\n\

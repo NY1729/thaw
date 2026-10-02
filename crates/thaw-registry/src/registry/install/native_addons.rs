@@ -24,7 +24,9 @@ pub struct AddedPackage {
     /// plus every transitive same-install dependency `bundle_commonjs_
     /// package`'s worklist actually walked into (Node builtin polyfills
     /// are not real npm packages and are never included here) -- each
-    /// mapped to the version `npm install` resolved *it* to. Always
+    /// mapped to the version `npm install` resolved *it* to. Unique names
+    /// retain their historical map keys; duplicate installed names use
+    /// node_modules-relative package instance locators. Always
     /// contains at least `package`'s own entry. Written to `lock.json`
     /// only when it has more than that one entry (see this module's
     /// top-level doc comment).

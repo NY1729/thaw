@@ -1,3 +1,33 @@
+fn package_instance_prefix(node_modules_dir: &Path, name: &str, directory: &Path) -> String {
+    let Ok(relative) = directory.strip_prefix(node_modules_dir) else {
+        // The test helper and linked packages may provide an external root.
+        // Keep its historical key; claim_module_key below rejects a collision.
+        return name.to_string();
+    };
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        return name.to_string();
+    }
+    normalize_path_string(&relative.to_string_lossy())
+}
+
+fn package_module_key(node_modules_dir: &Path, name: &str, directory: &Path, relative: &str, suffix: &str) -> String {
+    format!("{}/{}{}", package_instance_prefix(node_modules_dir, name, directory), relative, suffix)
+}
+
+fn claim_module_key(identities: &mut HashMap<String, PathBuf>, key: &str, path: &Path) -> Result<(), String> {
+    let identity = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(previous) = identities.get(key) {
+        if previous != &identity {
+            return Err(format!("bundle module key `{key}` names both `{}` and `{}`", previous.display(), identity.display()));
+        }
+    } else {
+        identities.insert(key.to_string(), identity);
+    }
+    Ok(())
+}
+
+
 /// Bundles `root_package`'s own CommonJS module graph -- starting from
 /// `main_relative` (its `main` field, or a default) -- into a single
 /// self-contained JS string with a small embedded module-system
@@ -95,15 +125,18 @@ fn bundle_builtin_module(name: &str) -> Result<String, String> {
 }
 
 /// Shared across every subpath bundle of one `registry add`: parsed module
-/// sources (`modules`) and their ESM->CommonJS rewrites (`rewritten`), so a
+/// sources (`modules`) and their ESM->CommonJS rewrites (`rewritten`), keyed
+/// by file and package instance because Worker bootstrap text embeds the
+/// instance locator, so a
 /// package with many subpaths reuses the parse of every shared dependency
 /// instead of redoing it per subpath. Real trigger: drizzle-orm has dozens
 /// of subpaths over the same large `dist/cjs` files; without this,
 /// `thaw registry add drizzle-orm` re-parsed the whole graph for each one.
 #[derive(Default)]
 struct SourceCache {
-    modules: HashMap<PathBuf, (String, ModuleAnalysis)>,
-    rewritten: HashMap<(PathBuf, bool), Option<String>>,
+    modules: HashMap<(PathBuf, String), (String, ModuleAnalysis)>,
+    rewritten: HashMap<(PathBuf, String, bool), Option<String>>,
+    package_versions: BTreeMap<PathBuf, (String, String, String)>,
 }
 
 #[cfg(test)]
@@ -130,28 +163,33 @@ fn bundle_commonjs_package_cached(
     source_cache: &mut SourceCache,
 ) -> Result<(String, String, usize, BTreeMap<String, String>), String> {
     let (main_relative_key, main_abs) = resolve_module_path(root_package_dir, main_relative)?;
-    let main_key = format!("{root_package}/{main_relative_key}");
+    let main_key = package_module_key(node_modules_dir, root_package, root_package_dir, &main_relative_key, "");
 
     let mut modules: Vec<BundledModule> = Vec::new();
     let mut visited: Vec<String> = vec![main_key.clone()];
+    let mut identities = HashMap::new();
+    claim_module_key(&mut identities, &main_key, &main_abs)?;
     let mut worklist: Vec<(String, PathBuf, String, PathBuf)> = vec![(
         main_key.clone(),
         main_abs,
         root_package.to_string(),
         root_package_dir.to_path_buf(),
     )];
-    let mut dependency_versions: BTreeMap<String, String> = BTreeMap::new();
+    let mut package_versions: BTreeMap<PathBuf, (String, String, String)> = BTreeMap::new();
     let mut uses_global_fetch = false;
-    record_package_version(&mut dependency_versions, root_package, root_package_dir);
+    record_package_version(&mut package_versions, node_modules_dir, root_package, root_package_dir);
 
     while let Some((key, abs_path, pkg_name, pkg_dir)) = worklist.pop() {
+        let pkg_key = package_instance_prefix(node_modules_dir, &pkg_name, &pkg_dir);
+        let caller_dir = abs_path.parent().unwrap_or(&pkg_dir);
         if abs_path
             .extension()
             .is_some_and(|extension| extension == "node" || extension == "wasm")
         {
             continue;
         }
-        let (source, analysis) = if let Some(cached) = source_cache.modules.get(&abs_path) {
+        let source_cache_key = (abs_path.clone(), pkg_key.clone());
+        let (source, analysis) = if let Some(cached) = source_cache.modules.get(&source_cache_key) {
             cached.clone()
         } else {
             let source = fs::read_to_string(&abs_path)
@@ -167,11 +205,11 @@ fn bundle_commonjs_package_cached(
             } else {
                 source
             };
-            let source = rewrite_static_worker_urls(&source, &abs_path, &pkg_name, &pkg_dir)?;
+            let source = rewrite_static_worker_urls(&source, &abs_path, &pkg_key, &pkg_dir)?;
             let analysis = analyze_module(&source);
             source_cache
                 .modules
-                .insert(abs_path.clone(), (source.clone(), analysis.clone()));
+                .insert(source_cache_key, (source.clone(), analysis.clone()));
             (source, analysis)
         };
         uses_global_fetch |= analysis.uses_global_fetch;
@@ -180,10 +218,9 @@ fn bundle_commonjs_package_cached(
         }
         let module_specs = analysis.specs;
 
-        let relative_in_pkg = key
-            .strip_prefix(&format!("{pkg_name}/"))
-            .unwrap_or(key.as_str());
-        let requiring_dir = Path::new(relative_in_pkg).parent().unwrap_or(Path::new(""));
+        let relative_in_pkg = abs_path.strip_prefix(&pkg_dir)
+            .map_err(|_| format!("module `{}` is outside package `{}`", abs_path.display(), pkg_dir.display()))?;
+        let requiring_dir = relative_in_pkg.parent().unwrap_or(Path::new(""));
 
         let mut requires = Vec::new();
         let mut imports = Vec::new();
@@ -195,7 +232,7 @@ fn bundle_commonjs_package_cached(
                 continue;
             }
             let (package_name, _) = split_bare_spec(resolution_spec);
-            let directory = resolve_dependency_dir(node_modules_dir, &pkg_dir, package_name);
+            let directory = resolve_dependency_dir(node_modules_dir, caller_dir, package_name);
             if read_manifest(&directory).is_ok() && !known_packages.contains(&package_name.to_string()) {
                 known_packages.push(package_name.to_string());
             }
@@ -213,7 +250,7 @@ fn bundle_commonjs_package_cached(
                         Some("js" | "cjs" | "mjs" | "json")
                     )
             }) {
-                let target_key = format!("{pkg_name}/{relative}");
+                let target_key = package_module_key(node_modules_dir, &pkg_name, &pkg_dir, &relative, "");
                 if target_key == key {
                     continue;
                 }
@@ -236,11 +273,13 @@ fn bundle_commonjs_package_cached(
                         imports.push((extensionless.to_string(), target_key.clone()));
                     }
                 }
+                let target_path = pkg_dir.join(&relative);
+                claim_module_key(&mut identities, &target_key, &target_path)?;
                 if !visited.contains(&target_key) {
                     visited.push(target_key.clone());
                     worklist.push((
                         target_key,
-                        pkg_dir.join(&relative),
+                        target_path,
                         pkg_name.clone(),
                         pkg_dir.clone(),
                     ));
@@ -248,7 +287,7 @@ fn bundle_commonjs_package_cached(
             }
             for specifier in declared_runtime_dependencies(&pkg_dir) {
                 let (dep_name, _) = split_bare_spec(&specifier);
-                let dep_dir = resolve_dependency_dir(node_modules_dir, &pkg_dir, dep_name);
+                let dep_dir = resolve_dependency_dir(node_modules_dir, caller_dir, dep_name);
                 if read_manifest(&dep_dir).is_ok() && !known_packages.contains(&dep_name.to_string()) {
                     known_packages.push(dep_name.to_string());
                 }
@@ -264,16 +303,17 @@ fn bundle_commonjs_package_cached(
                     let targets = if import_condition { &mut imports } else { &mut requires };
                     if !targets.iter().any(|(source, _)| source == &specifier) {
                         let resolved = if import_condition {
-                            resolve_bare_import(node_modules_dir, &pkg_dir, &specifier)
+                            resolve_bare_import(node_modules_dir, caller_dir, &specifier)
                         } else {
-                            resolve_bare_require(node_modules_dir, &pkg_dir, &specifier)
+                            resolve_bare_require(node_modules_dir, caller_dir, &specifier)
                         };
                         if let Some((name, relative, absolute, directory)) = resolved {
-                            let target = format!("{name}/{relative}");
+                            let target = package_module_key(node_modules_dir, &name, &directory, &relative, "");
                             targets.push((specifier.clone(), target.clone()));
+                            claim_module_key(&mut identities, &target, &absolute)?;
                             if !visited.contains(&target) {
                                 visited.push(target.clone());
-                                record_package_version(&mut dependency_versions, &name, &directory);
+                                record_package_version(&mut package_versions, node_modules_dir, &name, &directory);
                                 worklist.push((target, absolute, name, directory));
                             }
                         }
@@ -283,17 +323,19 @@ fn bundle_commonjs_package_cached(
                             continue;
                         }
                         let resolved = if import_condition {
-                            resolve_bare_import(node_modules_dir, &pkg_dir, subpath)
+                            resolve_bare_import(node_modules_dir, caller_dir, subpath)
                         } else {
-                            resolve_bare_require(node_modules_dir, &pkg_dir, subpath)
+                            resolve_bare_require(node_modules_dir, caller_dir, subpath)
                         };
                         if let Some((sub_name, relative, absolute, directory)) = resolved {
-                            let target = format!("{sub_name}/{relative}");
+                            let target = package_module_key(node_modules_dir, &sub_name, &directory, &relative, "");
                             targets.push((subpath.clone(), target.clone()));
+                            claim_module_key(&mut identities, &target, &absolute)?;
                             if !visited.contains(&target) {
                                 visited.push(target.clone());
                                 record_package_version(
-                                    &mut dependency_versions,
+                                    &mut package_versions,
+                                    node_modules_dir,
                                     &sub_name,
                                     &directory,
                                 );
@@ -336,13 +378,14 @@ fn bundle_commonjs_package_cached(
             if let Ok((resolved_relative, resolved_abs)) =
                 resolve_module_path(&pkg_dir, &resolution_path)
             {
-                let resolved_key = format!("{pkg_name}/{resolved_relative}{suffix}");
+                let resolved_key = package_module_key(node_modules_dir, &pkg_name, &pkg_dir, &resolved_relative, suffix);
                 if analysis.require_condition_specs.contains(&spec) {
                     requires.push((spec.clone(), resolved_key.clone()));
                 }
                 if analysis.import_condition_specs.contains(&spec) {
                     imports.push((spec, resolved_key.clone()));
                 }
+                claim_module_key(&mut identities, &resolved_key, &resolved_abs)?;
                 if !visited.contains(&resolved_key) {
                     visited.push(resolved_key.clone());
                     worklist.push((
@@ -409,26 +452,28 @@ fn bundle_commonjs_package_cached(
                 if relative.is_empty() {
                     continue;
                 }
-                let resolved_key = format!("{name}/{relative}{suffix}");
+                let resolved_key = package_module_key(node_modules_dir, &name, &directory, &relative, suffix);
                 targets.push((spec.clone(), resolved_key.clone()));
+                claim_module_key(&mut identities, &resolved_key, &absolute)?;
                 if !visited.contains(&resolved_key) {
                     visited.push(resolved_key.clone());
-                    record_package_version(&mut dependency_versions, &name, &directory);
+                    record_package_version(&mut package_versions, node_modules_dir, &name, &directory);
                     worklist.push((resolved_key, absolute, name, directory));
                 }
                 continue;
             }
             let resolved = if import_condition {
-                resolve_bare_import(node_modules_dir, &pkg_dir, resolution_spec)
+                resolve_bare_import(node_modules_dir, caller_dir, resolution_spec)
             } else {
-                resolve_bare_require(node_modules_dir, &pkg_dir, resolution_spec)
+                resolve_bare_require(node_modules_dir, caller_dir, resolution_spec)
             };
             if let Some((dep_name, dep_relative, dep_abs, dep_dir)) = resolved {
-                let dep_key = format!("{dep_name}/{dep_relative}{suffix}");
+                let dep_key = package_module_key(node_modules_dir, &dep_name, &dep_dir, &dep_relative, suffix);
                 targets.push((spec.clone(), dep_key.clone()));
+                claim_module_key(&mut identities, &dep_key, &dep_abs)?;
                 if !visited.contains(&dep_key) {
                     visited.push(dep_key.clone());
-                    record_package_version(&mut dependency_versions, &dep_name, &dep_dir);
+                    record_package_version(&mut package_versions, node_modules_dir, &dep_name, &dep_dir);
                     worklist.push((dep_key, dep_abs, dep_name, dep_dir));
                 }
                 continue;
@@ -478,6 +523,8 @@ fn bundle_commonjs_package_cached(
     prepare_async_modules(&mut modules, source_cache)?;
 
     let file_count = modules.len();
+    let dependency_versions = project_package_versions(package_versions.clone())?;
+    source_cache.package_versions.extend(package_versions);
     Ok((
         render_bundle(&main_key, &modules),
         main_key,
@@ -492,10 +539,31 @@ fn bundle_commonjs_package_cached(
 /// anything `npm install` actually fetched, but this is metadata, not a
 /// correctness dependency) is just silently left out rather than failing
 /// the whole bundle over it.
-fn record_package_version(versions: &mut BTreeMap<String, String>, name: &str, dir: &Path) {
+fn record_package_version(
+    versions: &mut BTreeMap<PathBuf, (String, String, String)>,
+    node_modules_dir: &Path,
+    name: &str,
+    dir: &Path,
+) {
     if let Ok(manifest) = read_manifest(dir) {
         if let Some(v) = manifest.get("version").and_then(|v| v.as_str()) {
-            versions.insert(name.to_string(), v.to_string());
+            let identity = dir.to_path_buf();
+            versions.insert(identity, (name.to_string(), package_instance_prefix(node_modules_dir, name, dir), v.to_string()));
         }
     }
+}
+
+fn project_package_versions(versions: BTreeMap<PathBuf, (String, String, String)>) -> Result<BTreeMap<String, String>, String> {
+    let mut counts = HashMap::new();
+    for (name, _, _) in versions.values() {
+        *counts.entry(name.clone()).or_insert(0usize) += 1;
+    }
+    let mut projected = BTreeMap::new();
+    for (name, locator, version) in versions.into_values() {
+        let key = if counts[&name] == 1 { name } else { locator };
+        if projected.insert(key.clone(), version).is_some() {
+            return Err(format!("package instance version key `{key}` is ambiguous"));
+        }
+    }
+    Ok(projected)
 }
