@@ -217,10 +217,7 @@ fn insert_decimal_point(integer: &str, digits: usize) -> String {
 /// significant digits, matching the digit-placement rules of
 /// `Number.prototype.toPrecision` once its sign has been stripped.
 fn format_precision_digits(magnitude: f64, precision: usize) -> String {
-    let formatted = format!("{:.*e}", precision - 1, magnitude);
-    let (mantissa, exponent) = formatted.split_once('e').expect("exponential format");
-    let exponent: i32 = exponent.parse().expect("integer exponent");
-    let digits: String = mantissa.chars().filter(|character| *character != '.').collect();
+    let (digits, exponent) = rounded_significant_digits(magnitude, precision);
     let precision = precision as i32;
     if exponent < -6 || exponent >= precision {
         let mut result = String::new();
@@ -243,6 +240,38 @@ fn format_precision_digits(magnitude: f64, precision: usize) -> String {
     } else {
         format!("0.{}{digits}", "0".repeat((-(exponent + 1)) as usize))
     }
+}
+
+/// Exact decimal digits of a binary64, rounded only once to the requested
+/// significant width. The existing decimal BigInt helpers avoid floating
+/// scaling (which could itself round before an exact decimal tie is tested).
+fn rounded_significant_digits(magnitude: f64, precision: usize) -> (String, i32) {
+    if magnitude == 0.0 {
+        return ("0".repeat(precision), 0);
+    }
+    let bits = magnitude.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = (bits & ((1u64 << 52) - 1))
+        | if exponent_bits == 0 { 0 } else { 1u64 << 52 };
+    let binary_exponent = if exponent_bits == 0 { -1074 } else { exponent_bits - 1075 };
+    let (_, mut coefficient) = decimal_digits(&mantissa.to_string());
+    let factor = if binary_exponent < 0 { 5 } else { 2 };
+    for _ in 0..binary_exponent.unsigned_abs() {
+        coefficient = decimal_mul_magnitude(&coefficient, &[factor]);
+    }
+    let exact = decimal_to_string(false, &coefficient);
+    let mut exponent = exact.len() as i32 - 1 + binary_exponent.min(0);
+    let mut digits = exact.chars().take(precision).collect::<String>();
+    digits.extend(std::iter::repeat_n('0', precision - digits.len()));
+    if exact.len() > precision && exact.as_bytes()[precision] >= b'5' {
+        let (_, retained) = decimal_digits(&digits);
+        digits = decimal_to_string(false, &decimal_add_magnitude(&retained, &[1]));
+        if digits.len() > precision {
+            digits.truncate(precision);
+            exponent += 1;
+        }
+    }
+    (digits, exponent)
 }
 
 #[no_mangle]
@@ -288,7 +317,16 @@ pub extern "C" fn thaw_number_to_exponential(value: f64, digits: f64) -> *const 
         let rendered = format!("{parsed:e}");
         normalize_exponential(rendered)
     } else {
-        normalize_exponential(format!("{magnitude:.digits$e}", digits = digits as usize))
+        let (rounded, exponent) = rounded_significant_digits(magnitude, digits as usize + 1);
+        let mut text = rounded[..1].to_string();
+        if rounded.len() > 1 {
+            text.push('.');
+            text.push_str(&rounded[1..]);
+        }
+        text.push('e');
+        if exponent >= 0 { text.push('+'); }
+        text.push_str(&exponent.to_string());
+        text
     };
     let text = if negative { format!("-{body}") } else { body };
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
@@ -657,6 +695,37 @@ mod radix_string_tests {
         ] {
             let text = thaw_number_to_exponential(value, digits);
             assert_eq!(unsafe { std::ffi::CStr::from_ptr(text) }.to_str().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn significant_digits_choose_larger_decimal_integer_on_exact_ties() {
+        let text = |pointer: *const c_char| unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_str().expect("number text").to_string();
+        for (value, precision, expected) in [
+            (2.5, 1.0, "3"),
+            (-2.5, 1.0, "-3"),
+            (1.25, 2.0, "1.3"),
+            (4.35, 2.0, "4.3"),
+            (9.5, 1.0, "1e+1"),
+            (0.0, 3.0, "0.00"),
+            (f64::from_bits(1), 1.0, "5e-324"),
+            (f64::MAX, 1.0, "2e+308"),
+        ] {
+            assert_eq!(text(thaw_number_to_precision(value, precision)), expected);
+        }
+        for (value, digits, expected) in [
+            (2.5, 0.0, "3e+0"),
+            (-2.5, 0.0, "-3e+0"),
+            (1.25, 1.0, "1.3e+0"),
+            (4.35, 1.0, "4.3e+0"),
+            (9.5, 0.0, "1e+1"),
+            (0.0, 2.0, "0.00e+0"),
+            (f64::from_bits(1), 0.0, "5e-324"),
+            (f64::MAX, 0.0, "2e+308"),
+            (12.5, -1.0, "1.25e+1"),
+        ] {
+            assert_eq!(text(thaw_number_to_exponential(value, digits)), expected);
         }
     }
 }
