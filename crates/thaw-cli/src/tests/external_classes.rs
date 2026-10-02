@@ -1673,18 +1673,109 @@ fn external_class_iteration_flow_includes_the_zero_iteration_path() {
     for loop_head in ["for (const key in {})", "for (const item of [])"] {
         let source = format!("let box = unknown; {loop_head} {{ box = new NativeBox(1); box.get(); }} box.get();");
         let rewritten = rewrite_external_class_methods(
-            &source, &classes, &methods, &Default::default()).unwrap();
+            &source, &classes, &methods).unwrap();
         assert_eq!(rewritten.matches("__thaw_get(box)").count(), 1, "{rewritten}");
         assert!(rewritten.ends_with("box.get();"), "{rewritten}");
 
         let source = format!("let box = new NativeBox(1); {loop_head} {{ box = new NativeBox(2); }} box.get();");
         let rewritten = rewrite_external_class_methods(
-            &source, &classes, &methods, &Default::default()).unwrap();
+            &source, &classes, &methods).unwrap();
         assert!(rewritten.ends_with("__thaw_get(box);"), "{rewritten}");
 
         let source = format!("let box = new NativeBox(1); {loop_head} {{ box = unknown; }} box.get();");
         let rewritten = rewrite_external_class_methods(
-            &source, &classes, &methods, &Default::default()).unwrap();
+            &source, &classes, &methods).unwrap();
         assert!(rewritten.ends_with("box.get();"), "{rewritten}");
+    }
+}
+
+#[test]
+fn external_class_latent_function_bodies_do_not_change_outer_flow() {
+    let classes = vec![("addon".into(), "NativeBox".into(),
+        vec![(1, "NativeBox_ctor".into(), vec![])])];
+    let methods = vec![("NativeBox".into(), "get".into(),
+        "__thaw_get".into(), 0, false, vec![])];
+    for latent in [
+        "function later() { box = new NativeBox(1); box.get(); }",
+        "const later = function() { box = new NativeBox(1); box.get(); };",
+        "const later = () => { box = new NativeBox(1); box.get(); };",
+        "class Later { method() { box = new NativeBox(1); box.get(); } }",
+        "class Later { constructor() { box = new NativeBox(1); box.get(); } }",
+        "function later(value = (box = new NativeBox(1))) {}",
+    ] {
+        let source = format!("let box = unknown; {latent} box.get();");
+        let rewritten = rewrite_external_class_methods(
+            &source, &classes, &methods).unwrap();
+        assert!(rewritten.ends_with("box.get();"), "{rewritten}");
+        let expected_inside = usize::from(latent.contains("box.get();"));
+        assert_eq!(rewritten.matches("__thaw_get(box)").count(), expected_inside, "{rewritten}");
+    }
+
+    let source = "let box = new NativeBox(1); const later = () => { box = unknown; }; box.get();";
+    let rewritten = rewrite_external_class_methods(
+        source, &classes, &methods).unwrap();
+    assert!(rewritten.ends_with("__thaw_get(box);"), "{rewritten}");
+}
+
+#[test]
+fn external_class_definition_time_and_block_effects_remain_visible() {
+    let classes = vec![("addon".into(), "NativeBox".into(),
+        vec![(1, "NativeBox_ctor".into(), vec![])])];
+    let methods = vec![("NativeBox".into(), "get".into(),
+        "__thaw_get".into(), 0, false, vec![])];
+    for effect in [
+        "{ box = new NativeBox(1); }",
+        "class Later { [((box = new NativeBox(1)), 'method')]() {} }",
+        "class Later { constructor() {} [((box = new NativeBox(1)), 'method')]() {} }",
+        "class Later { @decorate(box = new NativeBox(1)) method() {} }",
+    ] {
+        let source = format!("let box = unknown; {effect} box.get();");
+        let rewritten = rewrite_external_class_methods(
+            &source, &classes, &methods).unwrap();
+        assert!(rewritten.ends_with("__thaw_get(box);"), "{rewritten}");
+    }
+}
+
+#[test]
+fn external_class_callback_seed_survives_latent_flow_restore() {
+    let source = "let box = unknown; const server = new Server(); \
+        server.on('connection', (socket) => { box = new NativeBox(1); socket.send('hi'); }); \
+        box.get();";
+    let classes = vec![
+        ("pkg".into(), "Server".into(), vec![(0, "Server_ctor".into(), vec![])]),
+        ("addon".into(), "NativeBox".into(), vec![(1, "NativeBox_ctor".into(), vec![])]),
+    ];
+    let methods = vec![
+        ("Server".into(), "on".into(), "Server_on".into(), 2, true,
+            vec![thaw_hir::HirType::Str, thaw_hir::HirType::Function(
+                vec![thaw_hir::HirType::Json], Box::new(thaw_hir::HirType::Void))], None),
+        ("Socket".into(), "send".into(), "Socket_send".into(), 1, false,
+            vec![thaw_hir::HirType::Str], None),
+        ("NativeBox".into(), "get".into(), "__thaw_get".into(), 0, false, vec![], None),
+    ];
+    let contexts = vec![ClassMethodContext::CallbackInstance(
+        "Server_on".into(), 1, 0, "Socket".into())];
+    let rewritten = rewrite_external_class_methods_with_static(
+        source, &classes, &methods, &contexts, &[], &[], &[], &[], &[], &[], &[],
+    ).unwrap();
+    assert!(rewritten.contains("Socket_send(socket, 'hi')"), "{rewritten}");
+    assert!(rewritten.ends_with("box.get();"), "{rewritten}");
+}
+
+#[test]
+fn external_class_parameter_decorators_run_once_at_definition() {
+    let classes = vec![("addon".into(), "NativeBox".into(),
+        vec![(1, "NativeBox_ctor".into(), vec![])])];
+    let methods = vec![("NativeBox".into(), "get".into(),
+        "__thaw_get".into(), 0, false, vec![])];
+    for declaration in [
+        "class Later { method(@decorate(box = new NativeBox(1), box.get()) value: any) {} }",
+        "class Later { constructor(@decorate(box = new NativeBox(1), box.get()) value: any) {} }",
+        "class Later { constructor(@decorate(box = new NativeBox(1), box.get()) public value: any) {} }",
+    ] {
+        let source = format!("let box = unknown; {declaration} box.get();");
+        let rewritten = rewrite_external_class_methods(&source, &classes, &methods).unwrap();
+        assert!(rewritten.ends_with("__thaw_get(box);"), "{rewritten}");
+        assert_eq!(rewritten.matches("__thaw_get(box)").count(), 2, "{rewritten}");
     }
 }
