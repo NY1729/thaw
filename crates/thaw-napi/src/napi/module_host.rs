@@ -202,6 +202,7 @@ unsafe extern "C" fn thaw_napi_call_typed_bridge(
     name: *const c_char,
     args: *const c_char,
 ) -> *const c_char {
+    let _dispatch = ForeignCallbackGuard::new();
     let result = text(name).and_then(|name| text(args).and_then(|args| {
         let value = call_value_impl(&name, &args, true)?;
         quickjs_bridge_value(value).and_then(|wire| serde_json::to_string(&quickjs_wire_result("value", wire)).map_err(|error| error.to_string()))
@@ -231,6 +232,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
     name: *const c_char,
     args: *const c_char,
 ) -> *const c_char {
+    let _dispatch = ForeignCallbackGuard::new();
     let result = (|| -> Result<serde_json::Value, String> {
         let operation = text(operation)?;
         let target = text(target)?;
@@ -253,16 +255,16 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             let reference = target
                 .parse::<u64>()
                 .map_err(|_| "invalid QuickJS reference")?;
-            return HOST.with(|host| {
+            let (env, value) = HOST.with(|host| {
                 let host = host.borrow();
-                let env = host
-                    .module_envs
-                    .iter()
+                let env = host.module_envs.iter()
                     .find(|env| !env.finalized && env.quickjs_references.contains_key(&reference))
                     .ok_or_else(|| "unknown QuickJS reference".to_string())?;
-                let value = env.quickjs_references[&reference];
-                Ok(quickjs_wire_result("value", quickjs_reference_wire(env, value, true)?))
-            });
+                Ok::<_, String>((&**env as *const Env, env.quickjs_references[&reference]))
+            })?;
+            // The outer dispatch guard pins the owner through this encode;
+            // no HOST borrow survives a future accessor callback.
+            return Ok(quickjs_wire_result("value", quickjs_reference_wire(&*env, value, true)?));
         }
         if operation == "sync_handle" {
             let handle = target.parse::<u64>().map_err(|_| "invalid native binary handle")?;
@@ -1316,6 +1318,7 @@ unsafe fn quickjs_reference_json(
 }
 
 unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, String> {
+    let _dispatch = ForeignCallbackGuard::new();
     let marker = |value| Ok(QuickJsWireValue { value, origins: Vec::new() });
     let live_owner = HOST.with(|host| {
         let host = host.borrow();
@@ -1341,20 +1344,21 @@ unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, Str
         }
         _ => {}
     }
-    HOST.with(|host| {
+    let env = HOST.with(|host| {
         let host = host.borrow();
-        if let Some(env) = host.module_envs.iter().find(|env| !env.finalized && env.values.contains(&value)) {
-            quickjs_reference_wire(env, value, false)
-        } else {
-            Err("native addon result belongs to an unknown environment".into())
-        }
-    })
+        host.module_envs.iter()
+            .find(|env| !env.finalized && env.values.contains(&value))
+            .map(|env| &**env as *const Env)
+            .ok_or_else(|| "native addon result belongs to an unknown environment".to_string())
+    })?;
+    quickjs_reference_wire(&*env, value, false)
 }
 
 unsafe fn json_from_value_with_undefined(
     value: NapiValue,
     preserve_undefined: bool,
 ) -> Result<JsonValue, String> {
+    let _dispatch = ForeignCallbackGuard::new();
     Ok(match value_ref(value).map_err(|_| "invalid napi_value")? {
         Value::Undefined if preserve_undefined => {
             serde_json::json!({ (TYPED_UNDEFINED_KEY): true })
@@ -1517,6 +1521,7 @@ unsafe fn call_impl(
     args_json: &str,
     preserve_undefined: bool,
 ) -> Result<String, String> {
+    let _dispatch = ForeignCallbackGuard::new();
     let result = wait_for_promise(call_value_impl(name, args_json, preserve_undefined)?)?;
     serde_json::to_string(&json_from_value_with_undefined(result, preserve_undefined)?)
         .map_err(|error| error.to_string())
@@ -1527,6 +1532,7 @@ unsafe fn call_value_impl(
     args_json: &str,
     preserve_undefined: bool,
 ) -> Result<NapiValue, String> {
+    let _dispatch = ForeignCallbackGuard::new();
     let args: Vec<JsonValue> = serde_json::from_str(args_json)
         .map_err(|error| format!("invalid argument JSON: {error}"))?;
     let (function, env) = HOST
@@ -1538,12 +1544,15 @@ unsafe fn call_value_impl(
             ))
         })
         .ok_or_else(|| format!("no such native addon function `{name}`"))?;
-    let env = env_mut(env).map_err(|_| "invalid native addon environment")?;
     let args = args
         .iter()
-        .map(|value| value_from_json_with_undefined(env, value, preserve_undefined))
+        .map(|value| {
+            let env_ref = env_mut(env).map_err(|_| "invalid native addon environment")?;
+            value_from_json_with_undefined(env_ref, value, preserve_undefined)
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    let this_arg = env.alloc(Value::Undefined);
+    let this_arg = env_mut(env).map_err(|_| "invalid native addon environment")?
+        .alloc(Value::Undefined);
     let mut info = CallbackInfo {
         args,
         this_arg,
@@ -2169,12 +2178,14 @@ unsafe fn callback_native_handle_paths(args: &[NapiValue]) -> Result<Vec<JsonVal
 }
 
 unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let _dispatch = ForeignCallbackGuard::new();
     let Some(info) = info.as_ref() else {
         return ptr::null_mut();
     };
     let Some(bridge) = (info.data as *const ThawCallbackBridge).as_ref() else {
         return ptr::null_mut();
     };
+    let context = bridge.context as *mut c_void;
     let callback = match bridge.callback {
         ThawCallback::Value(callback) => Some((callback, false)),
         #[cfg(feature = "quickjs")]
@@ -2216,7 +2227,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
         else {
             return ptr::null_mut();
         };
-        let result = callback(bridge.context as *mut c_void, args.as_ptr());
+        let result = callback(context, args.as_ptr());
         let Ok(result) = text(result) else { return ptr::null_mut(); };
         if let Some(message) = result.strip_prefix('\u{2}') {
             let env = env_mut(_env).unwrap();
@@ -2262,7 +2273,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
     let error = CString::new(serde_json::to_string(&error).unwrap()).unwrap();
     let result = CString::new(serde_json::to_string(&result).unwrap()).unwrap();
     callback(
-        bridge.context as *mut c_void,
+        context,
         error.as_ptr(),
         result.as_ptr(),
     );
