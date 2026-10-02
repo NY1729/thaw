@@ -316,7 +316,9 @@ pub unsafe extern "C" fn thaw_error_to_string(message: *const c_char) -> *const 
     }
     let (_, body) = split_error_tag(&text);
     let name = resolved_error_name(&text);
-    let rendered = if body.is_empty() {
+    let rendered = if name.is_empty() {
+        body.to_string()
+    } else if body.is_empty() {
         name
     } else {
         format!("{name}: {body}")
@@ -350,7 +352,9 @@ pub unsafe extern "C" fn thaw_error_stack(message: *const c_char) -> *const c_ch
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let (_, body) = split_error_tag(&text);
     let name = resolved_error_name(&text);
-    let rendered = if body.is_empty() {
+    let rendered = if name.is_empty() {
+        body.to_string()
+    } else if body.is_empty() {
         name
     } else {
         format!("{name}: {body}")
@@ -576,6 +580,12 @@ mod error_native_tests {
         assert_eq!(call_message(tagged), "oops");
         assert_eq!(call_stack(tagged), "MyError: oops");
         assert_eq!(call_to_string(tagged), "MyError: oops");
+        let empty_name = "\u{1}MyError\u{1f}Error\u{1}oops\u{4}";
+        assert_eq!(call_name(empty_name), "");
+        assert_eq!(call_message(empty_name), "oops");
+        assert_eq!(call_to_string(empty_name), "oops");
+        assert_eq!(call_stack(empty_name), "oops");
+        assert_eq!(call_to_string("\u{1}Error\u{1}\u{4}"), "");
         assert!(call_is_instance(tagged, "MyError"));
         assert!(call_is_instance(tagged, "Error"));
 
