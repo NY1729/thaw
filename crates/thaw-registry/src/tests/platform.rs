@@ -1005,3 +1005,19 @@ fn worker_main_ready_rejects_every_falsy_thrown_value() {
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
 }
+#[test]
+fn bundled_worker_entry_require_resolve_does_not_load_target() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("worker_entry_require_resolve");
+    let modules = temp_registry("worker_entry_require_resolve_modules");
+    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
+    fs::write(package.join("worker.js"), "var wt = require('node:worker_threads'); var present = require.resolve('./dep.js'), missing; try { require.resolve('./absent.js'); } catch (error) { missing = error.code; } wt.parentPort.postMessage([present, missing, globalThis.workerResolveDepRuns || 0]); wt.parentPort.close();").unwrap();
+    fs::write(package.join("dep.js"), "globalThis.workerResolveDepRuns = (globalThis.workerResolveDepRuns || 0) + 1;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerResolveEntry = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerResolveEntry".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"pkg/dep.js\",\"MODULE_NOT_FOUND\",0]");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
