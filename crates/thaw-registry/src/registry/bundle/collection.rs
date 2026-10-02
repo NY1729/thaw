@@ -27,6 +27,39 @@ fn claim_module_key(identities: &mut HashMap<String, PathBuf>, key: &str, path: 
     Ok(())
 }
 
+fn commonjs_factory_context(path: &Path, package_dir: &Path, has_esm: bool, uses_import_meta: bool) -> bool {
+    if has_esm {
+        return false;
+    }
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("cjs" | "json") => return true,
+        Some("mjs") => return false,
+        // Explicit files with no suffix (or an arbitrary suffix) are also
+        // loaded as JavaScript by resolve_module_path's first candidate.
+        _ => {},
+    }
+    for directory in path.ancestors().skip(1) {
+        if !directory.starts_with(package_dir) {
+            break;
+        }
+        if directory.join("package.json").exists() {
+            return match read_manifest(directory) {
+                Ok(manifest) => match manifest.get("type").and_then(serde_json::Value::as_str) {
+                    Some("module") => false,
+                    Some("commonjs") => true,
+                    None if manifest.get("type").is_none() => !uses_import_meta,
+                    _ => false,
+                },
+                Err(_) => false,
+            };
+        }
+        if directory == package_dir {
+            break;
+        }
+    }
+    !uses_import_meta
+}
+
 
 /// Bundles `root_package`'s own CommonJS module graph -- starting from
 /// `main_relative` (its `main` field, or a default) -- into a single
@@ -112,6 +145,7 @@ fn add_builtin_module(
         static_esm_specs: Vec::new(),
         has_esm: false,
         has_top_level_await: false,
+        commonjs_context: true,
         async_module: false,
         source_path: None,
     });
@@ -527,6 +561,7 @@ fn bundle_commonjs_package_cached(
             static_esm_specs: analysis.static_esm_specs,
             has_esm: analysis.has_esm,
             has_top_level_await: analysis.has_top_level_await,
+            commonjs_context: commonjs_factory_context(&abs_path, &pkg_dir, analysis.has_esm, analysis.uses_import_meta),
             async_module: false,
             source_path: Some(abs_path),
         });

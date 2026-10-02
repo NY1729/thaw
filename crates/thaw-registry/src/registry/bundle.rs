@@ -17,6 +17,7 @@ struct BundledModule {
     static_esm_specs: Vec<String>,
     has_esm: bool,
     has_top_level_await: bool,
+    commonjs_context: bool,
     async_module: bool,
     /// The file this module was read from, when it is a real file (a Node
     /// builtin polyfill has none). Keys the shared ESM->CommonJS rewrite

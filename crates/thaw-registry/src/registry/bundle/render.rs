@@ -275,6 +275,11 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     }).collect::<serde_json::Map<String, serde_json::Value>>();
     let export_graph_json = serde_json::Value::Object(export_graphs).to_string();
     out.push_str(&format!("var __thaw_bundle_export_graphs = JSON.parse({});\n", js_string_literal(&export_graph_json)));
+    let commonjs_contexts = modules.iter().filter(|module| module.commonjs_context)
+        .map(|module| (module.key.clone(), serde_json::Value::Bool(true)))
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    out.push_str(&format!("var __thaw_bundle_commonjs_contexts = JSON.parse({});\n",
+        js_string_literal(&serde_json::Value::Object(commonjs_contexts).to_string())));
     out.push_str(STAR_ORIGIN_RUNTIME);
 
     out.push_str(
@@ -317,6 +322,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20localRequire.addon = require.addon;\n\
          \x20\x20\x20\x20localRequire.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
+         \x20\x20\x20\x20localRequire.cache = __thaw_bundle_cache;\n\
          \x20\x20\x20\x20var localImport = function(spec) { var target = __thaw_bundle_target(importMap, spec); if (target) return __thaw_bundle_require(target.key, target.factory); if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); };\n\
          \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(importMap, spec);\n\
@@ -325,7 +331,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20var filename = '/thaw_modules/' + factoryKey, slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash);\n\
          \x20\x20\x20\x20var initialized;\n\
-         \x20\x20\x20\x20try { var factory = __thaw_bundle_factories[factoryKey]; if (Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, factoryKey)) factory = factory(__thaw_bundle_origin_for(key)); initialized = factory(mod, mod.exports, localRequire, localRequireAsync, filename, dirname, localImport); } catch (error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; }\n\
+         \x20\x20\x20\x20try { var factory = __thaw_bundle_factories[factoryKey]; if (Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, factoryKey)) factory = factory(__thaw_bundle_origin_for(key)); initialized = Object.prototype.hasOwnProperty.call(__thaw_bundle_commonjs_contexts, factoryKey) ? factory.call(mod.exports, mod, mod.exports, localRequire, localRequireAsync, filename, dirname, localImport) : factory(mod, mod.exports, localRequire, localRequireAsync, filename, dirname, localImport); } catch (error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; }\n\
          \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; }, function(error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; });\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
@@ -367,6 +373,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20'var __thaw_bundle_import_maps = ' + JSON.stringify(__thaw_bundle_import_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_known_package_maps = ' + JSON.stringify(__thaw_bundle_known_package_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_export_graphs = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_export_graphs)) + ');\\n' +\n\
+         \x20\x20'var __thaw_bundle_commonjs_contexts = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_commonjs_contexts)) + ');\\n' +\n\
          \x20\x20__thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
          \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\nglobalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\\nglobalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\\nglobalThis.__thaw_bundle_worker_origin = __thaw_bundle_origin_for;\\nglobalThis.__thaw_bundle_register_worker_main = __thaw_bundle_register_worker_main;\\n})();\\n';\n\
          globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source;\n",

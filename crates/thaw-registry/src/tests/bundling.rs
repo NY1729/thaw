@@ -457,12 +457,12 @@ fn bundle_exports_self_contained_worker_runtime_source() {
     let dir = temp_registry("worker_runtime_source");
     fs::write(
         dir.join("index.js"),
-        "module.exports = function () { return require('./value')(); };",
+        "module.exports = function () { return require('./value').answer; };",
     )
     .unwrap();
     fs::write(
         dir.join("value.js"),
-        "module.exports = function () { return 42; };",
+        "this.answer = 42;",
     )
     .unwrap();
     let (bundle, _, file_count, _) =
@@ -475,7 +475,7 @@ fn bundle_exports_self_contained_worker_runtime_source() {
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
 
     let result = thaw_quickjs::eval_json(
-            "Function('require', __thaw_worker_bundle_source + \"return __thaw_bundle_create_require('pkg/index.js')('./value')();\")(function(name) { throw new Error(name); })",
+            "Function('require', __thaw_worker_bundle_source + \"return __thaw_bundle_create_require('pkg/index.js')('./value').answer;\")(function(name) { throw new Error(name); })",
         )
         .unwrap();
     assert_eq!(result.as_deref(), Some("42"));
@@ -1369,4 +1369,53 @@ fn esm_star_diamond_coalesces_same_namespace_reexport() {
     let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[7,true]");
     let _ = fs::remove_dir_all(root);
+}
+#[test]
+fn bundled_require_cache_and_commonjs_this_respect_module_format() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("bundle_factory_context");
+    let modules = temp_registry("bundle_factory_context_modules");
+    fs::create_dir_all(package.join("esm_sub/nested")).unwrap();
+    fs::create_dir_all(package.join("esm_sub/bad")).unwrap();
+    fs::write(package.join("esm_sub/package.json"), r#"{"type":"module"}"#).unwrap();
+    fs::write(package.join("esm_sub/nested/package.json"), r#"{"type":"commonjs"}"#).unwrap();
+    fs::write(package.join("esm_sub/bad/package.json"), "{bad").unwrap();
+    fs::write(package.join("index.js"), "var cache = require.cache, same = cache === globalThis.__thaw_bundle_create_require('pkg/index.js').cache, self = cache['pkg/index.js'].exports === exports; var sloppy = require('./sloppy.js'), strict = require('./strict.cjs'), hybrid = require('./hybrid.cjs'), plain = require('./plain'), custom = require('./custom.xyz'); require('./meta.js'); require('./bare.mjs'); require('./esm_sub/bare.js'); require('./esm_sub/bad/inner.js'); var override = require('./esm_sub/override.cjs'), nested = require('./esm_sub/nested/inner.js'), graph = require('./graph.js'); var first = require('./child.cjs'); delete cache['pkg/child.cjs']; var second = require('./child.cjs'); try { require('./boom.cjs'); } catch (error) {} module.exports = [same, self, sloppy.value, strict.value, hybrid.value, plain.value, custom.value, override.value, nested.value, graph.x, first.n, second.n, !Object.prototype.hasOwnProperty.call(cache, 'pkg/boom.cjs'), globalThis.metaThis === globalThis, globalThis.mjsThis === globalThis, globalThis.typedThis === globalThis, globalThis.badThis === globalThis, globalThis.graphThis === globalThis];").unwrap();
+    fs::write(package.join("sloppy.js"), "var text = 'import.meta'; // import.meta is not syntax\nthis.value = 1;").unwrap();
+    fs::write(package.join("strict.cjs"), "'use strict'; this.value = 2;").unwrap();
+    fs::write(package.join("hybrid.cjs"), "import.meta.url; this.value = 3;").unwrap();
+    fs::write(package.join("plain"), "this.value = 7;").unwrap();
+    fs::write(package.join("custom.xyz"), "this.value = 8;").unwrap();
+    fs::write(package.join("meta.js"), "import.meta.url; globalThis.metaThis = this;").unwrap();
+    fs::write(package.join("bare.mjs"), "globalThis.mjsThis = this;").unwrap();
+    fs::write(package.join("esm_sub/bare.js"), "globalThis.typedThis = this;").unwrap();
+    fs::write(package.join("esm_sub/bad/inner.js"), "globalThis.badThis = this;").unwrap();
+    fs::write(package.join("esm_sub/override.cjs"), "this.value = 4;").unwrap();
+    fs::write(package.join("esm_sub/nested/inner.js"), "this.value = 5;").unwrap();
+    fs::write(package.join("graph.js"), "globalThis.graphThis = this; export const x = 6;").unwrap();
+    fs::write(package.join("child.cjs"), "globalThis.childRuns = (globalThis.childRuns || 0) + 1; this.n = globalThis.childRuns;").unwrap();
+    fs::write(package.join("boom.cjs"), "throw new Error('boom');").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.factoryContext = function() {{ return module.exports; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"factoryContext".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,1,2,3,7,8,4,5,6,1,2,true,true,true,true,true,true]");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn async_commonjs_factory_keeps_top_level_this_after_await() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("bundle_async_factory_context");
+    let modules = temp_registry("bundle_async_factory_context_modules");
+    fs::write(package.join("index.js"), "module.exports = async function() { var value = await import('./late.cjs'); return value.answer; };").unwrap();
+    fs::write(package.join("late.cjs"), "await Promise.resolve(); this.answer = 42;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.asyncFactoryContext = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"asyncFactoryContext".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
 }
