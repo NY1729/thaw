@@ -2558,3 +2558,15 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn nested_ffi_tuples_use_their_full_storage_layout() {
+    let pair = HirType::Tuple(vec![HirType::F64, HirType::F64]);
+    let object = HirType::Object(vec![("pair".into(), pair.clone()), ("z".into(), HirType::F64)]);
+    let tuple = HirType::Tuple(vec![pair, HirType::F64]);
+    for value in [&object, &tuple] {
+        assert_eq!(HirCompiler::ffi_aggregate_storage_layout(value, FfiAggregateAbi::Portable), (24, 8));
+        assert_eq!(HirCompiler::ffi_aggregate_storage_layout(value, FfiAggregateAbi::Packed), (24, 1));
+    }
+    assert_eq!(HirCompiler::ffi_aggregate_storage_layout(&object, FfiAggregateAbi::Internal), (8, 8));
+}
