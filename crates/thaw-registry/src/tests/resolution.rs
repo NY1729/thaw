@@ -4228,6 +4228,36 @@ fn reserved_aliases_from_distinct_modules_keep_distinct_internal_signatures() {
 }
 
 #[test]
+fn non_callable_value_alias_extracts_only_the_selected_declarator() {
+    // Unrun regression: the public names must inherit the second value's
+    // string type without renaming the unrelated first declarator.
+    let scratch = temp_registry("installed-dts-value-multidecl-scratch");
+    let registry = temp_registry("installed-dts-value-multidecl-registry");
+    let package = scratch.join("node_modules/value-multidecl-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"),
+        r#"{"name":"value-multidecl-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#).unwrap();
+    fs::write(package.join("index.d.ts"),
+        "export { second as chosen, lb as selectedLet, vb as selectedVar } from './impl.js';\n").unwrap();
+    fs::write(package.join("impl.d.ts"),
+        "export declare const first: number, second: string;\n\
+         export declare let la: number, lb: string;\n\
+         export declare var va: number, vb: string;\n").unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "value-multidecl-kit").unwrap();
+    let declarations = resolve(&registry, "value-multidecl-kit").unwrap().dts_source;
+    assert!(declarations.contains("const chosen: string;"), "{declarations}");
+    assert!(declarations.contains("let selectedLet: string;"), "{declarations}");
+    assert!(declarations.contains("var selectedVar: string;"), "{declarations}");
+    assert!(!declarations.contains("const chosen: number"), "{declarations}");
+    assert!(!declarations.contains("const first: number, chosen"), "{declarations}");
+    assert!(thaw_parser::parse_declarations(&declarations).is_ok(), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn callable_const_alias_extracts_only_its_own_declarator() {
     // Unrun regression: selecting `b` must not rename the first `a` in the
     // same statement or borrow `a`'s number-returning signature.
