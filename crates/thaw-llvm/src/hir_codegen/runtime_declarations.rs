@@ -2190,6 +2190,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
+        self.module.add_function(
+            "thaw_json_array_push_hole",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         for (name, value_type) in [
             ("thaw_json_array_push_number", f64_type.into()),
             ("thaw_json_array_push_string", i8_ptr.into()),

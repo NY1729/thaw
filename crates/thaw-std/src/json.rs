@@ -3423,6 +3423,15 @@ pub extern "C" fn thaw_json_array_push_bool(array: *mut Value, value: u8) {
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_json_array_push_hole(array: *mut Value) {
+    if let Some(Value::Array(items)) = unsafe { array.as_ref() } {
+        let index = shared_array_ref(items).len();
+        shared_array_ref_mut(items).push(napi_undefined_value());
+        mark_array_holes(items, std::iter::once(index));
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_array_push_json(array: *mut Value, value: *mut Value) {
     let Some(value) = (unsafe { value.as_ref() }).cloned() else {
         return;

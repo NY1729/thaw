@@ -906,21 +906,54 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(hole_block);
-        let null = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_null").unwrap(),
-                &[],
-                "array_hole_json_null",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("thaw_json_null returned no value")?;
-        self.compile_json_array_push_owned(json, null)?;
-        self.builder
-            .build_unconditional_branch(pushed)
-            .map_err(|error| error.to_string())?;
+        if preserve_undefined {
+            let absent = self.context.append_basic_block(function, "console_array_absent");
+            let explicit_undefined = self.context.append_basic_block(function, "console_array_explicit_undefined");
+            let is_absent = self.builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    state,
+                    self.context.i8_type().const_zero(),
+                    "console_array_is_hole",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(is_absent, absent, explicit_undefined)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(absent);
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_array_push_hole").unwrap(),
+                    &[json.into()],
+                    "array_hole_json_hole",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(pushed)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(explicit_undefined);
+            let undefined = self.compile_napi_undefined_json()?;
+            self.compile_json_array_push_owned(json, undefined)?;
+            self.builder
+                .build_unconditional_branch(pushed)
+                .map_err(|error| error.to_string())?;
+        } else {
+            let null = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_null").unwrap(),
+                    &[],
+                    "array_hole_json_null",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_null returned no value")?;
+            self.compile_json_array_push_owned(json, null)?;
+            self.builder
+                .build_unconditional_branch(pushed)
+                .map_err(|error| error.to_string())?;
+        }
 
         self.builder.position_at_end(pushed);
         let next = self
