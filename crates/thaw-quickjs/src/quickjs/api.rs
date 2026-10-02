@@ -1050,6 +1050,9 @@ fn object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, St
 /// QuickJS's own implementation rejects non-object targets too.
 fn boxed_object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, String> {
     let value = value_for_handle(ctx, handle)?;
+    if value.is_null() || value.is_undefined() {
+        return Err("\u{1}TypeError\u{1}Cannot convert undefined or null to object".into());
+    }
     if value.is_object() {
         return object_for_handle(ctx, handle);
     }
@@ -1931,14 +1934,23 @@ fn dynamic_property_predicate(
         let reflect: Object = ctx
             .globals()
             .get("Reflect")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+                error => error.to_string(),
+            })?;
         let operation: Function = reflect
             .get(if delete { "deleteProperty" } else { "has" })
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+                error => error.to_string(),
+            })?;
         operation
             .call::<_, bool>((object, key))
             .map(u64::from)
-            .map_err(|error| error.to_string())
+            .map_err(|error| match error {
+                rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+                error => error.to_string(),
+            })
     });
     match result {
         Ok(value) => ThawHandleResult {
