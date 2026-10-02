@@ -212,6 +212,9 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     let mut out = String::from("module.exports = (function(require) {\n");
 
     out.push_str("var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\n");
+    out.push_str("var __thaw_bundle_builtin_names = Object.freeze(");
+    out.push_str(NODE_BUILTIN_MODULES_JSON);
+    out.push_str(");\n");
     out.push_str("var __thaw_bundle_cache = {};\n");
     out.push_str("var __thaw_bundle_edges = Object.create(null);\n");
     out.push_str("var __thaw_bundle_star_linkers = Object.create(null);\n");
@@ -305,6 +308,18 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20var name = next < 0 ? spec : spec.slice(0, next);\n\
          \x20\x20return known.indexOf(name) >= 0;\n\
          }\n\
+         function __thaw_bundle_resolve(map, spec, keys, searchAll, allowExports) {\n\
+         \x20\x20spec = String(spec);\n\
+         \x20\x20if (allowExports && Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return spec;\n\
+         \x20\x20var target = __thaw_bundle_target(map, spec);\n\
+         \x20\x20if (!target && searchAll) for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec);\n\
+         \x20\x20if (target) return target.key;\n\
+         \x20\x20var builtin = spec.slice(0, 5) === 'node:' ? spec.slice(5) : spec;\n\
+         \x20\x20if (__thaw_bundle_builtin_names.indexOf(builtin) >= 0) return spec;\n\
+         \x20\x20var error = new Error('Cannot find module ' + spec);\n\
+         \x20\x20error.code = 'MODULE_NOT_FOUND';\n\
+         \x20\x20throw error;\n\
+         }\n\
          function __thaw_bundle_require(key, factoryKey) {\n\
          \x20\x20if (String(factoryKey || key).endsWith('.node') && require.addon) return require.addon();\n\
          \x20\x20if (!(key in __thaw_bundle_cache)) {\n\
@@ -321,7 +336,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20localRequire.addon = require.addon;\n\
-         \x20\x20\x20\x20localRequire.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
+         \x20\x20\x20\x20localRequire.resolve = function(spec) { return __thaw_bundle_resolve(map, spec, null, false, false); };\n\
          \x20\x20\x20\x20localRequire.cache = __thaw_bundle_cache;\n\
          \x20\x20\x20\x20var localImport = function(spec) { var target = __thaw_bundle_target(importMap, spec); if (target) return __thaw_bundle_require(target.key, target.factory); if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); };\n\
          \x20\x20\x20\x20var localRequireAsync = __thaw_bundle_create_import_async(factoryKey, globalThis.__thaw_worker_module);\n\
@@ -339,7 +354,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
          \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && typeof require.addon === 'function') return require.addon; spec = String(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return __thaw_bundle_exports[spec]; var target = __thaw_bundle_target(map, spec); if (!target && !factoryKey) { for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec); } if (target) return __thaw_bundle_require(target.key, target.factory); return require(spec); };\n\
          \x20\x20created.addon = require.addon;\n\
-         \x20\x20created.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
+         \x20\x20created.resolve = function(spec) { return __thaw_bundle_resolve(map, spec, keys, !factoryKey, true); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
          }\n\
          function __thaw_bundle_create_import(base) {\n\
@@ -373,14 +388,14 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          globalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\n\
          globalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\n\
          var __thaw_worker_bundle_source =\n\
-         \x20\x20'(function() {\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
+         \x20\x20'(function() {\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_builtin_names = Object.freeze(' + JSON.stringify(__thaw_bundle_builtin_names) + ');\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
          \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
          \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_import_maps = ' + JSON.stringify(__thaw_bundle_import_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_known_package_maps = ' + JSON.stringify(__thaw_bundle_known_package_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_export_graphs = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_export_graphs)) + ');\\n' +\n\
          \x20\x20'var __thaw_bundle_commonjs_contexts = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_commonjs_contexts)) + ');\\n' +\n\
-         \x20\x20__thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
+         \x20\x20__thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_resolve.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
          \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\nglobalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\\nglobalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\\nglobalThis.__thaw_bundle_worker_origin = __thaw_bundle_origin_for;\\nglobalThis.__thaw_bundle_register_worker_main = __thaw_bundle_register_worker_main;\\n})();\\n';\n\
          globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source;\n",
     );

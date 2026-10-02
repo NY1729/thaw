@@ -462,17 +462,23 @@ fn bundle_exports_self_contained_worker_runtime_source() {
     .unwrap();
     fs::write(
         dir.join("value.js"),
-        "this.answer = 42;",
+        "globalThis.workerResolveValueRuns = (globalThis.workerResolveValueRuns || 0) + 1; this.answer = 42;",
     )
     .unwrap();
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules_dir, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 2);
     let source = CString::new(format!(
-            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle}"
+            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.workerResolveValueRuns = 0; {bundle}"
         ))
         .unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+
+    let resolved = thaw_quickjs::eval_json(
+            "Function('require', __thaw_worker_bundle_source + \"return [__thaw_bundle_create_require('pkg/index.js').resolve('./value'), globalThis.workerResolveValueRuns || 0];\")(function(name) { throw new Error(name); })",
+        )
+        .unwrap();
+    assert_eq!(resolved.as_deref(), Some("[\"pkg/value.js\",0]"));
 
     let result = thaw_quickjs::eval_json(
             "Function('require', __thaw_worker_bundle_source + \"return __thaw_bundle_create_require('pkg/index.js')('./value').answer;\")(function(name) { throw new Error(name); })",
@@ -1416,6 +1422,28 @@ fn async_commonjs_factory_keeps_top_level_this_after_await() {
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
     let result = thaw_quickjs::thaw_js_call(c"asyncFactoryContext".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+#[test]
+fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("bundle_require_resolve_only");
+    let modules = temp_registry("bundle_require_resolve_only_modules");
+    fs::create_dir_all(package.join("sub")).unwrap();
+    fs::create_dir_all(modules.join("present-package")).unwrap();
+    fs::write(modules.join("present-package/package.json"), r#"{"main":"index.js"}"#).unwrap();
+    fs::write(modules.join("present-package/index.js"), "globalThis.resolveOnlyRuns = (globalThis.resolveOnlyRuns || 0) + 1;").unwrap();
+    fs::write(package.join("index.js"), "import { createRequire } from 'node:module'; var made = createRequire(__filename); module.exports = function() { var only = require['resolve']('./' + 'only.js'), created = made.resolve('./created.js'), other = require.resolve('./sub/other.js'), bare = require.resolve('present-package'); var all = globalThis.__thaw_bundle_create_require('unmatched/base').resolve('./elsewhere.js'), exported = made.resolve('pkg/index.js'); var scoped, missingLocal, missingBare; try { made.resolve('./elsewhere.js'); } catch (error) { scoped = error.code; } try { require.resolve('./absent.js'); } catch (error) { missingLocal = error.code; } try { made.resolve('uninstalled-optional'); } catch (error) { missingBare = error.code; } require('node:module').builtinModules.length = 0; return [only, created, other, bare, all, exported, scoped, missingLocal, missingBare, require.resolve('node:inspector/promises'), globalThis.resolveOnlyRuns || 0]; };").unwrap();
+    fs::write(package.join("only.js"), "globalThis.resolveOnlyRuns = (globalThis.resolveOnlyRuns || 0) + 1;").unwrap();
+    fs::write(package.join("created.js"), "globalThis.resolveOnlyRuns = (globalThis.resolveOnlyRuns || 0) + 1;").unwrap();
+    fs::write(package.join("sub/other.js"), "module.exports = require('./elsewhere.js');").unwrap();
+    fs::write(package.join("sub/elsewhere.js"), "globalThis.resolveOnlyRuns = (globalThis.resolveOnlyRuns || 0) + 1;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.resolveOnlyRuns = 0; {bundle} globalThis.resolveOnly = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"resolveOnly".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"pkg/only.js\",\"pkg/created.js\",\"pkg/sub/other.js\",\"present-package/index.js\",\"pkg/sub/elsewhere.js\",\"pkg/index.js\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\",\"node:inspector/promises\",0]");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
 }
