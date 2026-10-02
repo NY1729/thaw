@@ -599,17 +599,26 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(failed_block);
-        let framed = self
-            .builder
-            .build_call(
+        let framed = if defer_promise && matches!(ret, HirType::Promise(_)) {
+            // A deferred callback has a Promise-pointer ABI even when its
+            // synchronous body throws before producing a Promise.
+            let rejected = self.builder.build_call(
+                self.module.get_function("thaw_promise_new").unwrap(),
+                &[], "callback_synchronous_failure_promise",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("callback rejection has no Promise")?;
+            self.reject_promise_with_pending_exception(
+                rejected.into_pointer_value(), pending,
+                "reject_synchronous_callback_failure",
+            )?;
+            rejected
+        } else {
+            self.builder.build_call(
                 self.module.get_function("thaw_json_callback_error").unwrap(),
-                &[pending.into()],
-                "callback_error_result",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("thaw_json_callback_error returned no value")?;
+                &[pending.into()], "callback_error_result",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("thaw_json_callback_error returned no value")?
+        };
         self.builder
             .build_store(
                 pending_slot,
@@ -667,9 +676,10 @@ impl<'ctx> HirCompiler<'ctx> {
             let HirType::Promise(resolved) = ret else {
                 unreachable!()
             };
+            let guarded = self.compile_host_callback_pending_guard(adapter, true)?;
             let finish = self.compile_native_promise_callback_finisher(resolved)?;
             return Ok((
-                adapter.as_global_value().as_pointer_value(),
+                guarded,
                 closure,
                 Some(finish),
             ));
@@ -849,7 +859,95 @@ impl<'ctx> HirCompiler<'ctx> {
         self.catch_stack = outer_catch_stack;
         self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(return_block);
-        Ok((adapter.as_global_value().as_pointer_value(), closure, None))
+        let guarded = self.compile_host_callback_pending_guard(adapter, false)?;
+        Ok((guarded, closure, None))
+    }
+
+    /// A host may invoke this adapter while an outer generated frame has an
+    /// unrelated pending exception. Isolate the callback's slot for its whole
+    /// body, including compiler-generated early returns from Promise driving.
+    fn compile_host_callback_pending_guard(
+        &mut self,
+        body: FunctionValue<'ctx>,
+        returns_promise: bool,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let parent = self.builder.get_insert_block().ok_or("callback guard has no parent")?;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let name = format!("__thaw_callback_pending_guard_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let wrapper = self.module.add_function(
+            &name,
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            Some(Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(wrapper, "entry");
+        let failed = self.context.append_basic_block(wrapper, "callback_raised");
+        let succeeded = self.context.append_basic_block(wrapper, "callback_returned");
+        self.builder.position_at_end(entry);
+        // The exception string, native Error object, and typed thrown-value
+        // fields are one logical state. Snapshot them together before invoking
+        // foreign code so a callback cannot consume an outer exception or
+        // replace its typed payload.
+        let exception_slots = [
+            (self.pending_exception(), BasicTypeEnum::from(ptr_type)),
+            (self.pending_exception_object(), BasicTypeEnum::from(ptr_type)),
+            (self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL), BasicTypeEnum::from(self.context.i64_type())),
+            (self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL), BasicTypeEnum::from(self.context.f64_type())),
+            (self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL), BasicTypeEnum::from(self.context.i64_type())),
+            (self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL), BasicTypeEnum::from(self.context.bool_type())),
+        ];
+        let mut previous = Vec::with_capacity(exception_slots.len());
+        for (slot, ty) in exception_slots {
+            let value = self.builder.build_load(ty, slot.as_pointer_value(), "outer_exception_field")
+                .map_err(|error| error.to_string())?;
+            previous.push((slot, value));
+            self.builder.build_store(slot.as_pointer_value(), ty.const_zero())
+                .map_err(|error| error.to_string())?;
+        }
+        let pending_slot = self.pending_exception().as_pointer_value();
+        let result = self.builder.build_call(body,
+            &[wrapper.get_nth_param(0).unwrap().into(), wrapper.get_nth_param(1).unwrap().into()],
+            "run_isolated_host_callback")
+            .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("host callback returned no value")?.into_pointer_value();
+        let raised = self.builder.build_load(ptr_type, pending_slot, "own_callback_exception")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        let has_error = self.builder.build_is_not_null(raised, "callback_has_own_exception")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(has_error, failed, succeeded)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        // The body's implicit exception return is a null pointer. Do not
+        // destroy a speculative non-null graph result or Promise here: its
+        // ownership and subscribers belong to the body/host ABI.
+        let fallback = if returns_promise {
+            let rejected = self.builder.build_call(self.module.get_function("thaw_promise_new").unwrap(),
+                &[], "rejected_callback_promise")
+                .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("thaw_promise_new returned no value")?.into_pointer_value();
+            self.reject_promise_with_pending_exception(
+                rejected, raised, "reject_callback_exception",
+            )?;
+            rejected
+        } else {
+            self.builder.build_call(self.module.get_function("thaw_json_callback_error").unwrap(),
+                &[raised.into()], "frame_isolated_callback_exception")
+                .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("thaw_json_callback_error returned no value")?.into_pointer_value()
+        };
+        for (slot, value) in &previous {
+            self.builder.build_store(slot.as_pointer_value(), *value)
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.build_return(Some(&fallback)).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(succeeded);
+        for (slot, value) in &previous {
+            self.builder.build_store(slot.as_pointer_value(), *value)
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.build_return(Some(&result)).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(parent);
+        Ok(wrapper.as_global_value().as_pointer_value())
     }
 
     fn compile_native_promise_callback_finisher(
@@ -870,13 +968,6 @@ impl<'ctx> HirCompiler<'ctx> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
         let promise = function.get_nth_param(0).unwrap().into_pointer_value();
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_runtime_poll_one").unwrap(),
-                &[],
-                "poll_native_promise",
-            )
-            .map_err(|error| error.to_string())?;
         let state = self
             .builder
             .build_call(
@@ -1014,7 +1105,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.catch_stack = outer_catch_stack;
         self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(return_block);
-        Ok(function.as_global_value().as_pointer_value())
+        self.compile_host_callback_pending_guard(function, false)
     }
 
     /// Wraps a real compiled (native) closure as a live, retained QuickJS
