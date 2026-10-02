@@ -2363,7 +2363,7 @@ fn selects_the_current_targets_bundled_node_prebuild() {
         fs::write(target.join(opposite), b"wrong libc").unwrap();
     }
 
-    let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+    let selected = select_prebuilt_addon_with(&package, &mut Vec::new(), |_| Ok(true)).unwrap().unwrap();
     assert_eq!(selected.path, target.join(filename));
     assert_eq!(selected.platform, platform);
     assert_eq!(selected.arch, arch);
@@ -2392,7 +2392,7 @@ fn selects_a_flat_bundled_node_prebuild() {
     let file = package.join("prebuilds").join(&filename);
     fs::write(&file, b"native bytes").unwrap();
 
-    let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+    let selected = select_prebuilt_addon_with(&package, &mut Vec::new(), |_| Ok(true)).unwrap().unwrap();
     assert_eq!(selected.path, file);
     assert_eq!(selected.platform, platform);
     assert_eq!(selected.arch, arch);
@@ -2409,8 +2409,189 @@ fn prefers_node_over_electron_prebuilds() {
     fs::write(target.join("electron.napi.node"), b"electron").unwrap();
     fs::write(target.join("node.napi.node"), b"node").unwrap();
 
-    let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+    let selected = select_prebuilt_addon_with(&package, &mut Vec::new(), |_| Ok(true)).unwrap().unwrap();
     assert_eq!(selected.path, target.join("node.napi.node"));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
+fn skips_node_abi_prebuild_before_napi_prebuild() {
+    let package = temp_registry("skip_node_abi_prebuild");
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("node.abi108.node"), b"node ABI").unwrap();
+    fs::write(target.join("node.napi.node"), b"Node-API").unwrap();
+    assert!(!usable_napi_prebuild(&target.join("node.abi108.node")).unwrap());
+    let mut diagnostics = Vec::new();
+    let selected = select_prebuilt_addon_with(&package, &mut diagnostics, |path| {
+        Ok(path.file_name().unwrap() != "node.abi108.node")
+    }).unwrap().unwrap();
+    assert_eq!(selected.path, target.join("node.napi.node"));
+    assert!(diagnostics.iter().any(|message| message.contains("node.abi108.node")));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
+fn incompatible_flat_prebuild_does_not_hide_compatible_target_prebuild() {
+    let package = temp_registry("flat_native_candidate_fallback");
+    let (platform, arch, libc) = target_prebuild_components();
+    let prebuilds = package.join("prebuilds");
+    let flat = prebuilds.join(flat_prebuild_file_name(platform, arch, libc));
+    let target = prebuilds.join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(&flat, b"node ABI").unwrap();
+    fs::write(target.join("node.napi.node"), b"Node-API").unwrap();
+    let mut diagnostics = Vec::new();
+    let selected = select_prebuilt_addon_with(&package, &mut diagnostics, |path| {
+        Ok(path != flat.as_path())
+    }).unwrap().unwrap();
+    assert_eq!(selected.path, target.join("node.napi.node"));
+    assert!(diagnostics.iter().any(|message| message.contains("not a supported N-API")));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
+fn native_symbol_gate_requires_napi_entry_without_node_internals() {
+    assert!(napi_symbol_suitability("00000000 T napi_register_module_v1\n U napi_get_version"));
+    let registered = if cfg!(target_os = "macos") {
+        " U _napi_module_register\n U _napi_create_object"
+    } else {
+        " U napi_module_register\n U napi_create_object"
+    };
+    assert!(napi_symbol_suitability(registered));
+    let node_internal = if cfg!(target_os = "macos") {
+        "00000000 T _napi_register_module_v1\n U __ZN2v8Something"
+    } else {
+        "00000000 T napi_register_module_v1\n U _ZN2v8Something"
+    };
+    assert!(!napi_symbol_suitability(node_internal));
+    assert!(!napi_symbol_suitability("00000000 T napi_register_module_v1\n U node_module_register"));
+    if !cfg!(target_os = "macos") {
+        assert!(!napi_symbol_suitability("00000000 T _napi_register_module_v1"));
+    }
+    assert!(!napi_symbol_suitability("00000000 V napi_register_module_v1"));
+    assert!(!napi_symbol_suitability("00000000 T unrelated_entry"));
+}
+
+#[test]
+fn incompatible_bundled_prebuild_falls_back_to_platform_optional_addon() {
+    let node_modules = temp_registry("native_candidate_fallback");
+    let package = node_modules.join("example");
+    let (platform, arch, libc) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("node.abi108.node"), b"node ABI").unwrap();
+    let dependency = if platform == "linux" {
+        format!("@example/addon-{platform}-{arch}-{libc}")
+    } else {
+        format!("@example/addon-{platform}-{arch}")
+    };
+    let dependency_dir = node_modules.join(&dependency);
+    fs::create_dir_all(&dependency_dir).unwrap();
+    fs::write(dependency_dir.join("package.json"), r#"{"main":"binding.node"}"#).unwrap();
+    fs::write(dependency_dir.join("binding.node"), b"Node-API").unwrap();
+    let manifest = serde_json::json!({"optionalDependencies": {dependency.clone(): "1.0.0"}});
+    let mut diagnostics = Vec::new();
+    let selected = select_installed_addon_with(
+        &package, &node_modules, &manifest, Some("module.exports = {};"), &mut diagnostics,
+        |path| Ok(path.file_name().unwrap() == "binding.node"),
+    ).unwrap().unwrap();
+    assert_eq!(selected.path, dependency_dir.join("binding.node"));
+    assert!(diagnostics.iter().any(|message| message.contains("node.abi108.node")));
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn incompatible_optional_main_uses_compatible_sibling() {
+    let node_modules = temp_registry("optional_main_abi_sibling_napi");
+    let (platform, arch, libc) = target_prebuild_components();
+    let dependency = if platform == "linux" {
+        format!("@example/addon-{platform}-{arch}-{libc}")
+    } else {
+        format!("@example/addon-{platform}-{arch}")
+    };
+    let root = node_modules.join(&dependency);
+    fs::create_dir_all(root.join("lib")).unwrap();
+    fs::write(root.join("package.json"), r#"{"main":"node.abi108.node"}"#).unwrap();
+    fs::write(root.join("node.abi108.node"), b"node ABI").unwrap();
+    fs::write(root.join("lib/binding.napi.node"), b"Node-API").unwrap();
+    let manifest = serde_json::json!({"optionalDependencies": {dependency.clone(): "1.0.0"}});
+    let mut diagnostics = Vec::new();
+    let selected = select_optional_dependency_addon_with(
+        &node_modules, &manifest, &mut diagnostics,
+        |path| Ok(path.file_name().unwrap() == "binding.napi.node"),
+    ).unwrap().unwrap();
+    assert_eq!(selected.path, root.join("lib/binding.napi.node"));
+    assert!(diagnostics.iter().any(|message| message.contains("node.abi108.node")));
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn generated_napi_addon_is_found_before_prebuild_download_decision() {
+    let node_modules = temp_registry("generated_before_download");
+    let package = node_modules.join("example");
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("node.abi108.node"), b"node ABI").unwrap();
+    let generated = node_modules.join(".generated/client/addon.node");
+    fs::create_dir_all(generated.parent().unwrap()).unwrap();
+    fs::write(&generated, b"Node-API").unwrap();
+    let manifest = serde_json::json!({"binary": {"napi_versions": [10]}});
+    let mut diagnostics = Vec::new();
+    let selected = select_installed_addon_with(
+        &package, &node_modules, &manifest,
+        Some("module.exports = require('.generated/client')"), &mut diagnostics,
+        |path| Ok(path == generated.as_path()),
+    ).unwrap().unwrap();
+    assert_eq!(selected.path, generated);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn missing_native_main_can_be_supplied_after_predownload_probe() {
+    let node_modules = temp_registry("downloaded_native_main");
+    let package = node_modules.join("example");
+    let (platform, arch, _) = target_prebuild_components();
+    let main = format!("prebuilds/{platform}-{arch}/binding.node");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), format!(r#"{{"name":"example","main":"{main}"}}"#)).unwrap();
+    let early_bundle = bundle_commonjs_package_cached(
+        &node_modules, "example", &package, &main, &mut SourceCache::default(),
+    );
+    assert!(early_bundle.is_err());
+    let mut diagnostics = Vec::new();
+    assert!(select_installed_addon_with(
+        &package, &node_modules, &serde_json::json!({}), None, &mut diagnostics,
+        |_| Ok(true),
+    ).unwrap().is_none());
+    let addon = package.join(&main);
+    fs::create_dir_all(addon.parent().unwrap()).unwrap();
+    fs::write(&addon, b"downloaded Node-API addon").unwrap();
+    let (source, _, _, _) = bundle_commonjs_package_cached(
+        &node_modules, "example", &package, &main, &mut SourceCache::default(),
+    ).unwrap();
+    assert!(select_installed_addon_with(
+        &package, &node_modules, &serde_json::json!({}), Some(source.as_str()), &mut diagnostics,
+        |_| Ok(true),
+    ).unwrap().is_some());
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn native_candidate_inspection_failure_does_not_become_fallback() {
+    let package = temp_registry("native_candidate_inspection_error");
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("node.napi.node"), b"candidate").unwrap();
+    let mut diagnostics = Vec::new();
+    let error = select_prebuilt_addon_with(&package, &mut diagnostics, |_| {
+        Err("permission denied during inspection".to_string())
+    }).unwrap_err();
+    assert!(error.contains("permission denied"));
+    assert!(diagnostics.is_empty());
     let _ = fs::remove_dir_all(package);
 }
 
@@ -2468,7 +2649,10 @@ fn reports_available_targets_when_no_prebuild_matches() {
     let target = package.join("prebuilds/imaginary-other");
     fs::create_dir_all(&target).unwrap();
     fs::write(target.join("binding.node"), b"native bytes").unwrap();
-    let diagnostic = select_prebuilt_addon(&package).unwrap_err();
+    let mut diagnostics = Vec::new();
+    assert!(select_prebuilt_addon_with(&package, &mut diagnostics, |_| Ok(true))
+        .unwrap().is_none());
+    let diagnostic = diagnostics.join("; ");
     assert!(diagnostic.contains("no bundled native addon matches"));
     assert!(diagnostic.contains("imaginary-other"));
     let _ = fs::remove_dir_all(package);
@@ -2494,7 +2678,7 @@ fn selects_a_platform_optional_dependency_node_addon() {
     let manifest = serde_json::json!({
         "optionalDependencies": { dependency.clone(): "1.0.0" }
     });
-    let selected = select_optional_dependency_addon(&node_modules, &manifest)
+    let selected = select_optional_dependency_addon_with(&node_modules, &manifest, &mut Vec::new(), |_| Ok(true))
         .unwrap()
         .unwrap();
     assert_eq!(selected.path, dependency_dir.join("binding.node"));
@@ -2524,7 +2708,7 @@ fn selects_a_gnu_named_linux_optional_dependency_node_addon() {
     let manifest = serde_json::json!({
         "optionalDependencies": { dependency.clone(): "1.0.0" }
     });
-    let selected = select_optional_dependency_addon(&node_modules, &manifest)
+    let selected = select_optional_dependency_addon_with(&node_modules, &manifest, &mut Vec::new(), |_| Ok(true))
         .unwrap()
         .unwrap();
     assert_eq!(selected.path, dependency_dir.join("binding.node"));
@@ -2553,7 +2737,7 @@ fn selects_a_node_addon_behind_a_platform_dependency_js_entry() {
         "optionalDependencies": { dependency.clone(): "1.0.0" }
     });
 
-    let selected = select_optional_dependency_addon(&node_modules, &manifest)
+    let selected = select_optional_dependency_addon_with(&node_modules, &manifest, &mut Vec::new(), |_| Ok(true))
         .unwrap()
         .unwrap();
     assert_eq!(selected.path, dependency_dir.join("lib/addon.node"));
@@ -3256,13 +3440,13 @@ fn selects_a_single_addon_from_a_hidden_generated_package() {
     fs::write(&addon, b"addon").unwrap();
 
     assert_eq!(
-        select_generated_addon(&node_modules, "require('.generated/client')")
+        select_generated_addon_with(&node_modules, "require('.generated/client')", &mut Vec::new(), |_| Ok(true))
             .unwrap()
             .unwrap()
             .path,
         addon
     );
-    assert!(select_generated_addon(&node_modules, "module.exports = {}")
+    assert!(select_generated_addon_with(&node_modules, "module.exports = {}", &mut Vec::new(), |_| Ok(true))
         .unwrap()
         .is_none());
 
