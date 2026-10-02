@@ -85,8 +85,9 @@ fn add_builtin_module(
         return;
     };
     visited.push(key.clone());
+    let source_name = thaw_parser::common::FileName::Custom(format!("node:{name} (generated builtin module)").into());
     let mut requires = Vec::new();
-    for specifier in analyze_module(source).specs {
+    for specifier in analyze_module_named(source, &source_name).specs {
         let (resolution, suffix) = split_module_suffix(&specifier);
         let dependency_name = resolution
             .strip_prefix("node:")
@@ -102,6 +103,7 @@ fn add_builtin_module(
     modules.push(BundledModule {
         key,
         source: source.to_string(),
+        source_name,
         export_graph: None,
         origin_parameter: None,
         requires,
@@ -134,7 +136,7 @@ fn bundle_builtin_module(name: &str) -> Result<String, String> {
 /// `thaw registry add drizzle-orm` re-parsed the whole graph for each one.
 #[derive(Default)]
 struct SourceCache {
-    modules: HashMap<(PathBuf, String), (String, ModuleAnalysis)>,
+    modules: HashMap<(PathBuf, String), (String, ModuleAnalysis, thaw_parser::common::FileName)>,
     rewritten: HashMap<(PathBuf, String, bool), Option<String>>,
     package_versions: BTreeMap<PathBuf, (String, String, String)>,
     // Raw identities for the most recently completed bundle. The cumulative
@@ -193,7 +195,7 @@ fn bundle_commonjs_package_cached(
             continue;
         }
         let source_cache_key = (abs_path.clone(), pkg_key.clone());
-        let (source, analysis) = if let Some(cached) = source_cache.modules.get(&source_cache_key) {
+        let (source, analysis, source_name) = if let Some(cached) = source_cache.modules.get(&source_cache_key) {
             cached.clone()
         } else {
             let source = fs::read_to_string(&abs_path)
@@ -218,12 +220,17 @@ fn bundle_commonjs_package_cached(
             } else {
                 thaw_parser::common::FileName::Real(abs_path.clone())
             };
-            let source = rewrite_static_worker_urls_named(&source, &abs_path, source_name, &pkg_key, &pkg_dir)?;
-            let analysis = analyze_module(&source);
+            let rewritten = rewrite_static_worker_urls_named(&source, &abs_path, source_name.clone(), &pkg_key, &pkg_dir)?;
+            let source_name = if rewritten != source {
+                rewritten_js_source_name(&source_name, "Worker URL rewrite")
+            } else {
+                source_name
+            };
+            let analysis = analyze_module_named(&rewritten, &source_name);
             source_cache
                 .modules
-                .insert(source_cache_key, (source.clone(), analysis.clone()));
-            (source, analysis)
+                .insert(source_cache_key, (rewritten.clone(), analysis.clone(), source_name.clone()));
+            (rewritten, analysis, source_name)
         };
         uses_global_fetch |= analysis.uses_global_fetch;
         if let Some(error) = &analysis.attribute_error {
@@ -510,9 +517,10 @@ fn bundle_commonjs_package_cached(
 
         modules.push(BundledModule {
             key,
-            export_graph: esm_export_graph(&source),
-            origin_parameter: esm_origin_parameter(&source),
+            export_graph: esm_export_graph_named(&source, &source_name),
+            origin_parameter: esm_origin_parameter_named(&source, &source_name),
             source,
+            source_name,
             requires,
             imports,
             known_packages,

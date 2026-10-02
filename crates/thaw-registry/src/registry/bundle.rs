@@ -8,6 +8,7 @@
 struct BundledModule {
     key: String,
     source: String,
+    source_name: thaw_parser::common::FileName,
     export_graph: Option<serde_json::Value>,
     origin_parameter: Option<String>,
     requires: Vec<(String, String)>,
