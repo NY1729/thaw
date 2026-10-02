@@ -1302,6 +1302,59 @@ fn parses_async_http_urls() {
         parse_http_url("https://[::1]/").unwrap(),
         (true, "::1".to_string(), 443, "/".to_string())
     );
+    assert_eq!(
+        parse_http_url("http://example.com?x=1#fragment").unwrap(),
+        (false, "example.com".to_string(), 80, "/?x=1".to_string())
+    );
+    assert_eq!(
+        parse_http_url("https://[::1]:8443?x=1#fragment").unwrap(),
+        (true, "::1".to_string(), 8443, "/?x=1".to_string())
+    );
+    assert_eq!(
+        parse_http_url("http://example.com#fragment").unwrap().3,
+        "/"
+    );
+    assert_eq!(
+        parse_http_url("http://example.com/a/./b/../?x=1").unwrap().3,
+        "/a/?x=1"
+    );
+}
+
+#[test]
+fn resolves_async_http_redirect_paths_without_losing_query_or_slashes() {
+    let redirect = |current_path: &str, location: &str| {
+        redirect_url(false, "example.com", 80, current_path, location).unwrap()
+    };
+    assert_eq!(
+        redirect("/a/page?next=/x/y", "child"),
+        "http://example.com/a/child"
+    );
+    assert_eq!(
+        redirect("/a/page?next=/x/y", "#fragment"),
+        "http://example.com/a/page?next=/x/y#fragment"
+    );
+    assert_eq!(
+        parse_http_url(&redirect("/a/page?next=/x/y", "#fragment"))
+            .unwrap()
+            .3,
+        "/a/page?next=/x/y"
+    );
+    assert_eq!(
+        redirect("/a/page?old=1", "?new=2"),
+        "http://example.com/a/page?new=2"
+    );
+    assert_eq!(redirect("/a/page?old=1", ""), "http://example.com/a/page?old=1");
+    assert_eq!(redirect("/a/page", "/dir/"), "http://example.com/dir/");
+    assert_eq!(redirect("/a/page", "child/../"), "http://example.com/a/");
+    assert_eq!(redirect("/a/page", "../"), "http://example.com/");
+    assert_eq!(
+        redirect("/a/page", "/a//b/./../c/"),
+        "http://example.com/a//c/"
+    );
+    assert_eq!(
+        redirect("/a/page", "//other.example/dir/"),
+        "http://other.example/dir/"
+    );
 }
 
 #[test]
