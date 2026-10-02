@@ -1,7 +1,7 @@
 fn rewrite_static_worker_urls(
     source: &str,
     module_path: &Path,
-    package_name: &str,
+    package_instance: &str,
     package_dir: &Path,
 ) -> Result<String, String> {
     use std::collections::{BTreeMap, BTreeSet};
@@ -389,7 +389,7 @@ fn rewrite_static_worker_urls(
             )
         })?;
         let worker_relative = normalize_path_string(&worker_relative.to_string_lossy());
-        let worker_key = format!("{package_name}/{worker_relative}");
+        let worker_key = format!("{package_instance}/{worker_relative}");
         let origin_parameter = esm_origin_parameter(&worker_source);
         let worker_bootstrap = format!(
             "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({0});\nvar __thaw_worker_import = globalThis.__thaw_bundle_create_import({0});\nvar __thaw_worker_import_async = globalThis.__thaw_bundle_create_import_async({0});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\nrequire.addon = __thaw_worker_require.addon;\nvar __thaw_require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_import(name); }};\nvar requireAsync = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? Promise.resolve(globalThis.__thaw_worker_module) : __thaw_worker_import_async(name); }};\n",

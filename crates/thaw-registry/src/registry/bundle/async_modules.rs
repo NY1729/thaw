@@ -79,7 +79,7 @@ fn prepare_async_modules(
         // unconditionally, which is cheap and rare.
         let rewritten = match &module.source_path {
             Some(path) => {
-                let cache_key = (path.clone(), module.async_module);
+                let cache_key = (path.clone(), module.key.clone(), module.async_module);
                 if let Some(cached) = source_cache.rewritten.get(&cache_key) {
                     cached.clone()
                 } else {

@@ -17,7 +17,9 @@ pub struct ResolvedPackage {
     /// this field existed) -- see `AddedPackage::resolved_version`.
     pub version: Option<String>,
     /// Every *other* real npm package `add` folded into `bundle.js`,
-    /// mapped to its resolved version, read back from `lock.json` -- see
+    /// mapped to its resolved version, read back from `lock.json`. Duplicate
+    /// installed names use node_modules-relative locator keys; unique names
+    /// retain their historical keys. See
     /// `AddedPackage::dependency_versions`. `None` if there's no
     /// `lock.json` (a single-file package with no dependencies never gets
     /// one written; nor does a hand-curated or pre-`lock.json` package).

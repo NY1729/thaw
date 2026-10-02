@@ -839,6 +839,180 @@ fn missing_import_condition_cannot_fall_back_to_require_target() {
 }
 
 #[test]
+fn two_nested_copies_of_one_package_keep_distinct_factories_and_versions() {
+    let root = temp_registry("nested-two-copies");
+    let modules = root.join("node_modules");
+    let app = modules.join("app");
+    let left = modules.join("left");
+    let right = modules.join("right");
+    let left_shared = left.join("node_modules/shared");
+    let right_shared = right.join("node_modules/shared");
+    for directory in [&app, &left, &right, &left_shared, &right_shared] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    fs::write(app.join("package.json"), r#"{"name":"app","version":"1.0.0"}"#).unwrap();
+    fs::write(app.join("index.js"), "module.exports = [require('left'), require('right')];").unwrap();
+    fs::write(left.join("package.json"), r#"{"name":"left","version":"1.0.0"}"#).unwrap();
+    fs::write(right.join("package.json"), r#"{"name":"right","version":"1.0.0"}"#).unwrap();
+    fs::write(left.join("index.js"), "module.exports = require('shared');").unwrap();
+    fs::write(right.join("index.js"), "module.exports = require('shared');").unwrap();
+    fs::write(left_shared.join("package.json"), r#"{"name":"shared","version":"1.0.0"}"#).unwrap();
+    fs::write(right_shared.join("package.json"), r#"{"name":"shared","version":"2.0.0"}"#).unwrap();
+    fs::write(left_shared.join("index.js"), "module.exports = 'left-v1';").unwrap();
+    fs::write(right_shared.join("index.js"), "module.exports = 'right-v2';").unwrap();
+
+    let (bundle, main, file_count, versions) = bundle_commonjs_package(&modules, "app", &app, "index.js").unwrap();
+    assert_eq!(main, "app/index.js");
+    assert_eq!(file_count, 5);
+    assert!(bundle.contains("\"left/node_modules/shared/index.js\""));
+    assert!(bundle.contains("\"right/node_modules/shared/index.js\""));
+    assert!(bundle.contains("\"shared\": \"left/node_modules/shared/index.js\""));
+    assert!(bundle.contains("\"shared\": \"right/node_modules/shared/index.js\""));
+    assert_eq!(versions.get("left/node_modules/shared").map(String::as_str), Some("1.0.0"));
+    assert_eq!(versions.get("right/node_modules/shared").map(String::as_str), Some("2.0.0"));
+    assert_eq!(versions.get("app").map(String::as_str), Some("1.0.0"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bare_requests_use_calling_file_but_package_import_targets_use_manifest_root() {
+    let root = temp_registry("file-origin-dependency");
+    let modules = root.join("node_modules");
+    let app = modules.join("app");
+    let near = app.join("lib/node_modules/dep");
+    let far = app.join("node_modules/dep");
+    for directory in [&near, &far] { fs::create_dir_all(directory).unwrap(); }
+    fs::write(app.join("package.json"), r##"{"name":"app","version":"1.0.0","dependencies":{"dep":"*"},"imports":{"#dep":"dep"}}"##).unwrap();
+    fs::write(app.join("lib/entry.js"), "const name = 'dep'; module.exports = [require('dep'), require('#dep'), import('dep'), require(name)];").unwrap();
+    fs::write(near.join("package.json"), r#"{"name":"dep","version":"3.0.0"}"#).unwrap();
+    fs::write(far.join("package.json"), r#"{"name":"dep","version":"2.0.0"}"#).unwrap();
+    fs::write(near.join("index.js"), "module.exports = 'near-v3';").unwrap();
+    fs::write(far.join("index.js"), "module.exports = 'far-v2';").unwrap();
+
+    let (bundle, _, file_count, versions) = bundle_commonjs_package(&modules, "app", &app, "lib/entry.js").unwrap();
+    assert_eq!(file_count, 3);
+    assert!(bundle.contains("\"dep\": \"app/lib/node_modules/dep/index.js\""), "{bundle}");
+    assert!(bundle.contains("\"#dep\": \"app/node_modules/dep/index.js\""), "{bundle}");
+    assert!(bundle.contains("near-v3"));
+    assert!(bundle.contains("far-v2"));
+    assert_eq!(versions.get("app/lib/node_modules/dep").map(String::as_str), Some("3.0.0"));
+    assert_eq!(versions.get("app/node_modules/dep").map(String::as_str), Some("2.0.0"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn create_require_uses_the_longest_nested_instance_owner() {
+    use std::ffi::CString;
+    let root = temp_registry("nested-create-require-owner");
+    let modules = root.join("node_modules");
+    let app = modules.join("app");
+    let left = modules.join("left");
+    let top = modules.join("shared");
+    let nested = left.join("node_modules/shared");
+    for directory in [&app, &left, &top, &nested] { fs::create_dir_all(directory).unwrap(); }
+    fs::write(app.join("index.js"), "module.exports = [require('left'), require('shared')];").unwrap();
+    fs::write(left.join("package.json"), r#"{"name":"left","main":"index.js"}"#).unwrap();
+    fs::write(left.join("index.js"), "module.exports = require('shared');").unwrap();
+    fs::write(top.join("package.json"), r#"{"name":"shared","main":"index.js"}"#).unwrap();
+    fs::write(nested.join("package.json"), r#"{"name":"shared","main":"index.js"}"#).unwrap();
+    fs::write(top.join("index.js"), "module.exports = require('./other');").unwrap();
+    fs::write(nested.join("index.js"), "module.exports = require('./other');").unwrap();
+    fs::write(top.join("other.js"), "module.exports = 'top';").unwrap();
+    fs::write(nested.join("other.js"), "module.exports = 'nested';").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "app", &app, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle}")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::eval_json("__thaw_bundle_create_require('/thaw_modules/left/node_modules/shared/index.js').resolve('./other')").unwrap();
+    assert_eq!(result.as_deref(), Some("\"left/node_modules/shared/other.js\""));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn nested_worker_bootstrap_uses_its_package_instance_key() {
+    let root = temp_registry("nested-worker-key");
+    let modules = root.join("node_modules");
+    let app = modules.join("app");
+    let child = app.join("node_modules/child");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(app.join("index.js"), "module.exports = require('child');").unwrap();
+    fs::write(child.join("package.json"), r#"{"name":"child","main":"index.js"}"#).unwrap();
+    fs::write(child.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = new Worker(new URL('./worker.js', import.meta.url));").unwrap();
+    fs::write(child.join("worker.js"), "module.exports = 7;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "app", &app, "index.js").unwrap();
+    let worker_key = "app/node_modules/child/worker.js";
+    let encoded_key = worker_key.bytes().map(|byte| format!("%{byte:02X}")).collect::<String>();
+    assert!(bundle.contains(&format!("\"{worker_key}\"")));
+    assert!(bundle.contains(&encoded_key), "Worker bootstrap must use its factory key");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn external_root_alias_collision_reports_both_files() {
+    let root = temp_registry("external-root-key-collision");
+    let modules = root.join("node_modules");
+    let outside = root.join("outside-dep");
+    let installed = modules.join("dep");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(&installed).unwrap();
+    fs::write(outside.join("index.js"), "module.exports = require('dep');").unwrap();
+    fs::write(installed.join("package.json"), r#"{"name":"dep","main":"index.js"}"#).unwrap();
+    fs::write(installed.join("index.js"), "module.exports = 2;").unwrap();
+    let error = bundle_commonjs_package(&modules, "dep", &outside, "index.js").unwrap_err();
+    assert!(error.contains("bundle module key `dep/index.js` names both"), "{error}");
+    assert!(error.contains("outside-dep/index.js"), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn shared_source_cache_projects_versions_after_all_subpath_bundles() {
+    let root = temp_registry("subpaths-two-nested-versions");
+    let modules = root.join("node_modules");
+    let app = modules.join("app");
+    let left = modules.join("left");
+    let right = modules.join("right");
+    let left_shared = left.join("node_modules/shared");
+    let right_shared = right.join("node_modules/shared");
+    for directory in [&app, &left, &right, &left_shared, &right_shared] { fs::create_dir_all(directory).unwrap(); }
+    fs::write(app.join("package.json"), r#"{"name":"app","version":"1.0.0"}"#).unwrap();
+    fs::write(app.join("main.js"), "module.exports = require('left');").unwrap();
+    fs::write(app.join("subpath.js"), "module.exports = require('right');").unwrap();
+    for (owner, name, version) in [(&left, "left", "1.0.0"), (&right, "right", "2.0.0")] {
+        fs::write(owner.join("package.json"), format!(r#"{{"name":"{name}","main":"index.js"}}"#)).unwrap();
+        fs::write(owner.join("index.js"), "module.exports = require('shared');").unwrap();
+        let shared = owner.join("node_modules/shared");
+        fs::write(shared.join("package.json"), format!(r#"{{"name":"shared","version":"{version}"}}"#)).unwrap();
+        fs::write(shared.join("index.js"), "module.exports = 1;").unwrap();
+    }
+    let mut cache = SourceCache::default();
+    let (_, _, _, main_versions) = bundle_commonjs_package_cached(&modules, "app", &app, "main.js", &mut cache).unwrap();
+    assert_eq!(main_versions.get("shared").map(String::as_str), Some("1.0.0"));
+    bundle_commonjs_package_cached(&modules, "app", &app, "subpath.js", &mut cache).unwrap();
+    let versions = project_package_versions(cache.package_versions.clone()).unwrap();
+    assert_eq!(versions.get("left/node_modules/shared").map(String::as_str), Some("1.0.0"));
+    assert_eq!(versions.get("right/node_modules/shared").map(String::as_str), Some("2.0.0"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn source_cache_separates_the_same_file_by_package_owner() {
+    let root = temp_registry("source-cache-owner");
+    let modules = root.join("node_modules");
+    let app = modules.join("app");
+    let child = app.join("node_modules/child");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(child.join("package.json"), r#"{"name":"child","main":"index.js"}"#).unwrap();
+    fs::write(child.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = new Worker(new URL('./worker.js', import.meta.url));").unwrap();
+    fs::write(child.join("worker.js"), "module.exports = 1;").unwrap();
+    let mut cache = SourceCache::default();
+    bundle_commonjs_package_cached(&modules, "app", &app, "node_modules/child/index.js", &mut cache).unwrap();
+    bundle_commonjs_package_cached(&modules, "child", &child, "index.js", &mut cache).unwrap();
+    let file = child.join("index.js");
+    assert!(cache.modules.contains_key(&(file.clone(), "app".to_string())));
+    assert!(cache.modules.contains_key(&(file, "app/node_modules/child".to_string())));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn package_imports_external_targets_use_nested_dependency_and_selected_pattern() {
     let root = temp_registry("imports-external");
     let modules = root.join("node_modules");
@@ -857,9 +1031,9 @@ fn package_imports_external_targets_use_nested_dependency_and_selected_pattern()
     fs::write(shadow.join("public/feature.js"), "module.exports = 9;").unwrap();
     let (bundle, _, file_count, versions) = bundle_commonjs_package(&modules, "owner", &package, "lib/entry.js").unwrap();
     assert_eq!(file_count, 2);
-    assert!(bundle.contains("dependency/public/feature.js"));
+    assert!(bundle.contains("owner/node_modules/dependency/public/feature.js"));
     assert_eq!(versions.get("dependency").map(String::as_str), Some("2.0.0"));
-    assert!(!bundle.contains("module.exports = 9"), "nested source-directory dependency must not shadow the imports manifest scope");
+    assert!(!bundle.contains("module.exports = 9"), "external imports target must resolve from the defining package root");
     assert!(matches!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#dep/private/hidden", &["require", "node", "default"]), None));
     assert!(matches!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#builtin", &["require", "node", "default"]), Some(PackageImportResolution::Builtin(name)) if name == "fs"));
     let _ = fs::remove_dir_all(root);
