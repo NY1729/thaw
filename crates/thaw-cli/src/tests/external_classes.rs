@@ -1663,3 +1663,28 @@ fn explicitly_type_only_callable_has_no_runtime_function_classification() {
     functions.retain(|function| !only_types.contains(&function.name));
     assert!(functions.is_empty());
 }
+
+#[test]
+fn external_class_iteration_flow_includes_the_zero_iteration_path() {
+    let classes = vec![("addon".into(), "NativeBox".into(),
+        vec![(1, "NativeBox_ctor".into(), vec![])])];
+    let methods = vec![("NativeBox".into(), "get".into(),
+        "__thaw_get".into(), 0, false, vec![])];
+    for loop_head in ["for (const key in {})", "for (const item of [])"] {
+        let source = format!("let box = unknown; {loop_head} {{ box = new NativeBox(1); box.get(); }} box.get();");
+        let rewritten = rewrite_external_class_methods(
+            &source, &classes, &methods, &Default::default()).unwrap();
+        assert_eq!(rewritten.matches("__thaw_get(box)").count(), 1, "{rewritten}");
+        assert!(rewritten.ends_with("box.get();"), "{rewritten}");
+
+        let source = format!("let box = new NativeBox(1); {loop_head} {{ box = new NativeBox(2); }} box.get();");
+        let rewritten = rewrite_external_class_methods(
+            &source, &classes, &methods, &Default::default()).unwrap();
+        assert!(rewritten.ends_with("__thaw_get(box);"), "{rewritten}");
+
+        let source = format!("let box = new NativeBox(1); {loop_head} {{ box = unknown; }} box.get();");
+        let rewritten = rewrite_external_class_methods(
+            &source, &classes, &methods, &Default::default()).unwrap();
+        assert!(rewritten.ends_with("box.get();"), "{rewritten}");
+    }
+}
