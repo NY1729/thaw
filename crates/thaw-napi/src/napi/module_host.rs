@@ -137,8 +137,8 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
         returned
     };
     let initialized = (|| -> Result<_, String> {
-        if let Some(exception) = env.exception {
-            let message = json_from_value(exception)?.to_string();
+        if let Some(exception) = env.exception.take() {
+            let message = describe_env_exception(env_ptr, exception)?;
             return Err(format!("addon initialization threw: {message}"));
         }
         let mut functions = Vec::new();
@@ -264,12 +264,12 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             })?;
             // The outer dispatch guard pins the owner through this encode;
             // no HOST borrow survives a future accessor callback.
-            return Ok(quickjs_wire_result("value", quickjs_reference_wire(&*env, value, true)?));
+            return Ok(quickjs_wire_result("value", quickjs_reference_wire(env as NapiEnv, value, true)?));
         }
         if operation == "sync_handle" {
             let handle = target.parse::<u64>().map_err(|_| "invalid native binary handle")?;
             let env = module_env_for_handle(handle)?;
-            let wire = quickjs_reference_wire(&*env, handle as NapiValue, true)?;
+            let wire = quickjs_reference_wire(env, handle as NapiValue, true)?;
             return Ok(quickjs_wire_result("value", wire));
         }
         if operation == "promise_state" {
@@ -280,12 +280,20 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 Value::Promise(state) => Rc::clone(state),
                 _ => return Err("native handle is not a Promise".into()),
             };
-            let settled = match *state.borrow() {
-                PromiseState::Pending => Ok(serde_json::json!({ "kind": "pending" })),
-                PromiseState::Resolved(value) => Ok(quickjs_wire_result("resolved", quickjs_bridge_value(value)?)),
-                PromiseState::Rejected(value) => Ok(quickjs_wire_result("rejected", quickjs_bridge_value(value)?)),
+            // A settled value may contain an accessor that reenters deferred settlement.
+            // Copy the handle before bridging so no RefCell borrow spans that callback.
+            let settled = {
+                let state = state.borrow();
+                match *state {
+                    PromiseState::Pending => None,
+                    PromiseState::Resolved(value) => Some(("resolved", value)),
+                    PromiseState::Rejected(value) => Some(("rejected", value)),
+                }
             };
-            return settled;
+            return match settled {
+                Some((kind, value)) => Ok(quickjs_wire_result(kind, quickjs_bridge_value(value)?)),
+                None => Ok(serde_json::json!({ "kind": "pending" })),
+            };
         }
         let handle = if operation == "construct" {
             let target = CString::new(target).map_err(|_| "export contains NUL")?;
@@ -1224,7 +1232,105 @@ fn quickjs_child_path(path: &[JsonValue], segment: JsonValue) -> Vec<JsonValue> 
     child
 }
 
-unsafe fn quickjs_reference_wire(env: &Env, value: NapiValue, root: bool) -> Result<QuickJsWireValue, String> {
+// The N-API enumerator allocates a result array and one key Value per name.
+// Keep those handles through property dispatch, then retire only these private
+// enumeration temporaries on every success or error path.
+struct OwnKeySnapshot {
+    env: NapiEnv,
+    items: Vec<(String, NapiValue)>,
+    allocated: Vec<NapiValue>,
+}
+
+impl Drop for OwnKeySnapshot {
+    fn drop(&mut self) {
+        let Ok(env) = (unsafe { env_mut(self.env) }) else { return };
+        for value in self.allocated.drain(..) {
+            if let Some(index) = env.values.iter().position(|item| *item == value) {
+                env.values.swap_remove(index);
+                unsafe { drop(Box::from_raw(value)); }
+            }
+        }
+    }
+}
+
+// Copy the own string key set before any accessor can reenter the bridge.
+unsafe fn snapshot_own_string_keys(env: NapiEnv, object: NapiValue) -> Result<OwnKeySnapshot, String> {
+    let mut snapshot = OwnKeySnapshot { env, items: Vec::new(), allocated: Vec::new() };
+    let mut names = ptr::null_mut();
+    let status = napi_get_all_property_names(env, object, NAPI_KEY_OWN_ONLY,
+        NAPI_KEY_ALL_PROPERTIES | NAPI_KEY_SKIP_SYMBOLS, NAPI_KEY_NUMBERS_TO_STRINGS, &mut names);
+    if !names.is_null() {
+        snapshot.allocated.push(names);
+        let Value::Array(keys) = value_ref(names).map_err(|_| "invalid native property names")? else {
+            return Err("native property names were not an array".into());
+        };
+        let keys = keys.clone();
+        for key in keys {
+            let key = key.ok_or("invalid native property name")?;
+            snapshot.allocated.push(key);
+            let Value::String(name) = value_ref(key).map_err(|_| "invalid native property name")? else {
+                return Err("native property name was not a string".into());
+            };
+            snapshot.items.push((name.clone(), key));
+        }
+    }
+    take_env_exception(env)?;
+    if status != NAPI_OK { return Err(format!("failed to enumerate native properties: status {status}")); }
+    if names.is_null() { return Err("native property names were not an array".into()); }
+    Ok(snapshot)
+}
+
+// Use the N-API dispatcher so descriptor callbacks receive the original object as `this`.
+unsafe fn snapshot_property(env: NapiEnv, object: NapiValue, name: &str, key: NapiValue) -> Result<NapiValue, String> {
+    let mut value = ptr::null_mut();
+    let status = napi_get_property(env, object, key, &mut value);
+    take_env_exception(env)?;
+    if status != NAPI_OK || value.is_null() {
+        return Err(format!("failed to read native property `{name}`: status {status}"));
+    }
+    Ok(value)
+}
+
+// JSON arrays preserve their entry count and holes, but an own numeric
+// accessor at an existing index must be read through the same dispatcher.
+unsafe fn snapshot_array_keys(env: NapiEnv, array: NapiValue) -> Result<(OwnKeySnapshot, Vec<Option<NapiValue>>), String> {
+    let length = match value_ref(array).map_err(|_| "invalid native array")? {
+        Value::Array(values) => values.len(),
+        _ => return Err("native value was not an array".into()),
+    };
+    let keys = snapshot_own_string_keys(env, array)?;
+    let lookup = keys.items.iter().map(|(name, value)| (name.as_str(), *value))
+        .collect::<HashMap<_, _>>();
+    let mut items = Vec::with_capacity(length);
+    for index in 0..length {
+        items.push(lookup.get(index.to_string().as_str()).copied());
+    }
+    Ok((keys, items))
+}
+
+unsafe fn owner_env_for_value(value: NapiValue) -> Result<NapiEnv, String> {
+    HOST.with(|host| {
+        let host = host.borrow();
+        host.module_envs.iter().chain(host.pending_call_envs.iter())
+            .find(|env| !env.finalized && env.values.contains(&value))
+            .map(|env| &**env as *const Env as NapiEnv)
+            .ok_or_else(|| "native addon result belongs to an unknown environment".into())
+    })
+}
+
+// A callback may place another loaded Env's value into an object or Promise.
+// Prefer the explicit pending owner for its own values, otherwise use the
+// actual registered owner for accessor metadata and temporary key storage.
+unsafe fn snapshot_owner_env(preferred: NapiEnv, value: NapiValue) -> Result<NapiEnv, String> {
+    if preferred.as_ref().is_some_and(|env| !env.finalized && env.values.contains(&value)) {
+        Ok(preferred)
+    } else {
+        owner_env_for_value(value)
+    }
+}
+
+unsafe fn quickjs_reference_wire(env: NapiEnv, value: NapiValue, root: bool) -> Result<QuickJsWireValue, String> {
+    let _dispatch = ForeignCallbackGuard::new();
     let mut origins = Vec::new();
     let value = quickjs_reference_json(env, value, root, &mut HashSet::new(), &[], &mut origins)?;
     Ok(QuickJsWireValue { value, origins })
@@ -1232,46 +1338,54 @@ unsafe fn quickjs_reference_wire(env: &Env, value: NapiValue, root: bool) -> Res
 
 /// Snapshot one reference while keeping child identities on the existing wire ID.
 unsafe fn quickjs_reference_json(
-    env: &Env,
+    env: NapiEnv,
     value: NapiValue,
     root: bool,
     seen: &mut HashSet<usize>,
     path: &[JsonValue],
     origins: &mut Vec<JsonValue>,
 ) -> Result<JsonValue, String> {
+    let env = snapshot_owner_env(env, value)?;
     if !root {
-        if let Some((reference, _)) = env.quickjs_references.iter().find(|(_, item)| **item == value) {
+        if let Some(reference) = env.as_ref().and_then(|env| env.quickjs_references.iter()
+            .find(|(_, item)| **item == value).map(|(reference, _)| *reference)) {
             return Ok(serde_json::json!({ "__thaw_napi_ref__": reference }));
         }
     }
     if !seen.insert(value as usize) {
         return Ok(serde_json::json!({ "__thaw_napi_handle__": (value as u64).to_string() }));
     }
-    let result = match value_ref(value).map_err(|_| "invalid napi_value")? {
-        Value::Object(properties) if !env.instances.contains_key(&(value as usize)) => {
-            // The normal object is data, even if its own keys resemble native markers.
-            origins.push(serde_json::json!([path, "plain"]));
-            let mut out = serde_json::Map::new();
-            for (key, child) in properties {
-                if let PropertyKey::String(key) = key {
-                    if !matches!(value_ref(*child), Ok(Value::Symbol { .. }))
-                        && (!matches!(value_ref(*child), Ok(Value::Function(_)))
-                            || env.quickjs_references.values().any(|reference| *reference == *child))
-                    {
-                        let child_path = quickjs_child_path(path, JsonValue::String(key.clone()));
-                        out.insert(key.clone(), quickjs_reference_json(env, *child, false, seen, &child_path, origins)?);
-                    }
-                }
+    let plain_object = matches!(value_ref(value), Ok(Value::Object(_)))
+        && !env.as_ref().is_some_and(|env| env.instances.contains_key(&(value as usize)));
+    let array = matches!(value_ref(value), Ok(Value::Array(_)));
+    let array = if array { Some(snapshot_array_keys(env, value)?) } else { None };
+    let result = if plain_object {
+        origins.push(serde_json::json!([path, "plain"]));
+        let keys = snapshot_own_string_keys(env, value)?;
+        let mut out = serde_json::Map::new();
+        for (key, key_value) in keys.items.iter().cloned() {
+            let child = snapshot_property(env, value, &key, key_value)?;
+            let child_owner = snapshot_owner_env(env, child)?;
+            let is_reference = child_owner.as_ref().is_some_and(|env|
+                env.quickjs_references.values().any(|item| *item == child));
+            if !matches!(value_ref(child), Ok(Value::Symbol { .. }))
+                && (!matches!(value_ref(child), Ok(Value::Function(_))) || is_reference) {
+                let child_path = quickjs_child_path(path, JsonValue::String(key.clone()));
+                out.insert(key, quickjs_reference_json(env, child, false, seen, &child_path, origins)?);
             }
-            JsonValue::Object(out)
         }
-        Value::Array(values) => JsonValue::Array(values.iter().enumerate().map(|(index, child)| match child {
-            Some(child) => {
+        JsonValue::Object(out)
+    } else if let Some((_array_keys, children)) = array {
+        JsonValue::Array(children.into_iter().enumerate().map(|(index, child)| match child {
+            Some(key) => {
+                let child = snapshot_property(env, value, &index.to_string(), key)?;
                 let child_path = quickjs_child_path(path, serde_json::json!(index));
-                quickjs_reference_json(env, *child, false, seen, &child_path, origins)
+                quickjs_reference_json(env, child, false, seen, &child_path, origins)
             }
             None => Ok(JsonValue::Null),
-        }).collect::<Result<_, _>>()?),
+        }).collect::<Result<_, _>>()?)
+    } else {
+        match value_ref(value).map_err(|_| "invalid napi_value")? {
         Value::Buffer(bytes) if root => JsonValue::Array(bytes.iter().map(|byte| serde_json::json!(byte)).collect()),
         Value::Buffer(bytes) => buffer_json(bytes, true),
         Value::ArrayBuffer { .. } | Value::SharedArrayBuffer(_) |
@@ -1312,6 +1426,7 @@ unsafe fn quickjs_reference_json(
             JsonValue::Null
         }
         _ => json_from_value_with_undefined(value, true)?,
+        }
     };
     seen.remove(&(value as usize));
     Ok(result)
@@ -1346,19 +1461,115 @@ unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, Str
     }
     let env = HOST.with(|host| {
         let host = host.borrow();
-        host.module_envs.iter()
+        host.module_envs.iter().chain(host.pending_call_envs.iter())
             .find(|env| !env.finalized && env.values.contains(&value))
             .map(|env| &**env as *const Env)
             .ok_or_else(|| "native addon result belongs to an unknown environment".to_string())
     })?;
-    quickjs_reference_wire(&*env, value, false)
+    quickjs_reference_wire(env as NapiEnv, value, false)
 }
 
 unsafe fn json_from_value_with_undefined(
     value: NapiValue,
     preserve_undefined: bool,
 ) -> Result<JsonValue, String> {
+    json_from_value_with_undefined_for_env(ptr::null_mut(), value, preserve_undefined)
+}
+
+unsafe fn json_from_value_with_undefined_for_env(
+    env: NapiEnv,
+    value: NapiValue,
+    preserve_undefined: bool,
+) -> Result<JsonValue, String> {
+    json_from_value_with_undefined_for_env_mode(env, value, preserve_undefined, true)
+}
+
+// Exception reporting walks stored data only. Calling an accessor while
+// describing an already-thrown value can throw again and replace that failure.
+unsafe fn json_from_value_with_undefined_for_env_mode(
+    env: NapiEnv,
+    value: NapiValue,
+    preserve_undefined: bool,
+    read_accessors: bool,
+) -> Result<JsonValue, String> {
+    json_from_value_with_undefined_for_env_mode_inner(
+        env, value, preserve_undefined, read_accessors, &mut HashSet::new(),
+    )
+}
+
+unsafe fn json_from_value_with_undefined_for_env_mode_inner(
+    env: NapiEnv,
+    value: NapiValue,
+    preserve_undefined: bool,
+    read_accessors: bool,
+    seen: &mut HashSet<usize>,
+) -> Result<JsonValue, String> {
     let _dispatch = ForeignCallbackGuard::new();
+    // Path-local tracking applies only to data-only exception reports.
+    // A repeated child reached through a different branch is not a cycle.
+    let tracked = !read_accessors && matches!(value_ref(value),
+        Ok(Value::Object(_) | Value::Array(_) | Value::Promise(_)));
+    if tracked && !seen.insert(value as usize) {
+        return Err("cyclic native exception value".into());
+    }
+    let result = (|| -> Result<JsonValue, String> {
+    if matches!(value_ref(value), Ok(Value::Object(_))) {
+        if is_native_instance(value as usize) {
+            return Ok(serde_json::json!({ "__thaw_napi_handle__": (value as u64).to_string() }));
+        }
+        if !read_accessors {
+            let Value::Object(fields) = value_ref(value).map_err(|_| "invalid napi_value")? else { unreachable!() };
+            let fields = fields.iter().filter_map(|(key, child)| match key {
+                PropertyKey::String(name) => Some((name.clone(), *child)),
+                PropertyKey::Symbol(_) => None,
+            }).collect::<Vec<_>>();
+            let mut out = serde_json::Map::new();
+            for (key, child) in fields {
+                if !matches!(value_ref(child), Ok(Value::Function(_) | Value::Symbol { .. })) {
+                    out.insert(key, json_from_value_with_undefined_for_env_mode_inner(env, child, preserve_undefined, false, seen)?);
+                }
+            }
+            return Ok(JsonValue::Object(out));
+        }
+        let env = snapshot_owner_env(env, value)?;
+        let keys = snapshot_own_string_keys(env, value)?;
+        let mut out = serde_json::Map::new();
+        for (key, key_value) in keys.items.iter().cloned() {
+            let child = snapshot_property(env, value, &key, key_value)?;
+            if !matches!(value_ref(child), Ok(Value::Function(_) | Value::Symbol { .. })) {
+                out.insert(key, json_from_value_with_undefined_for_env_mode_inner(env, child, preserve_undefined, read_accessors, seen)?);
+            }
+        }
+        return Ok(JsonValue::Object(out));
+    }
+    let array = matches!(value_ref(value), Ok(Value::Array(_)));
+    let array = if array && read_accessors {
+        let env = snapshot_owner_env(env, value)?;
+        Some(snapshot_array_keys(env, value)?)
+    } else { None };
+    if !read_accessors && matches!(value_ref(value), Ok(Value::Array(_))) {
+        let Value::Array(values) = value_ref(value).map_err(|_| "invalid napi_value")? else { unreachable!() };
+        let values = values.clone();
+        return Ok(JsonValue::Array(values.into_iter().map(|child| match child {
+            Some(child) if matches!(value_ref(child), Ok(Value::Function(_) | Value::Symbol { .. })) => Ok(JsonValue::Null),
+            Some(child) => json_from_value_with_undefined_for_env_mode_inner(env, child, preserve_undefined, false, seen),
+            None => Ok(JsonValue::Null),
+        }).collect::<Result<_, _>>()?));
+    }
+    if let Some((_array_keys, values)) = array {
+        let env = snapshot_owner_env(env, value)?;
+        return Ok(JsonValue::Array(values.into_iter().enumerate().map(|(index, key)| match key {
+            Some(key) => {
+                let child = snapshot_property(env, value, &index.to_string(), key)?;
+                if matches!(value_ref(child), Ok(Value::Function(_) | Value::Symbol { .. })) {
+                    Ok(JsonValue::Null)
+                } else {
+                    json_from_value_with_undefined_for_env_mode_inner(env, child, preserve_undefined, read_accessors, seen)
+                }
+            }
+            None => Ok(JsonValue::Null),
+        }).collect::<Result<_, _>>()?));
+    }
     Ok(match value_ref(value).map_err(|_| "invalid napi_value")? {
         Value::Undefined if preserve_undefined => {
             serde_json::json!({ (TYPED_UNDEFINED_KEY): true })
@@ -1371,40 +1582,7 @@ unsafe fn json_from_value_with_undefined(
             .unwrap_or(JsonValue::Null),
         Value::String(value) | Value::Error(value) => JsonValue::String(value.clone()),
         Value::Symbol { .. } => return Err("cannot JSON-encode a Symbol".into()),
-        Value::Array(values) => JsonValue::Array(
-            values
-                .iter()
-                .map(|value| match value {
-                    Some(value)
-                        if matches!(value_ref(*value), Ok(Value::Function(_) | Value::Symbol { .. })) =>
-                    {
-                        Ok(JsonValue::Null)
-                    }
-                    Some(value) => json_from_value_with_undefined(*value, preserve_undefined),
-                    None => Ok(JsonValue::Null),
-                })
-                .collect::<Result<_, _>>()?,
-        ),
-        Value::Object(_) if is_native_instance(value as usize) => {
-            serde_json::json!({ "__thaw_napi_handle__": (value as u64).to_string() })
-        }
-        Value::Object(values) => JsonValue::Object(
-            values
-                .iter()
-                .filter_map(|(key, value)| match key {
-                    PropertyKey::String(_)
-                        if matches!(value_ref(*value), Ok(Value::Function(_) | Value::Symbol { .. })) =>
-                    {
-                        None
-                    }
-                    PropertyKey::String(key) => Some(
-                        json_from_value_with_undefined(*value, preserve_undefined)
-                            .map(|value| (key.clone(), value)),
-                    ),
-                    PropertyKey::Symbol(_) => None,
-                })
-                .collect::<Result<_, String>>()?,
-        ),
+        Value::Array(_) | Value::Object(_) => unreachable!("containers handled before scalar match"),
         Value::Buffer(values) => buffer_json(values, preserve_undefined),
         Value::ExternalBuffer { data, length } => {
             let bytes = if *length == 0 {
@@ -1439,18 +1617,34 @@ unsafe fn json_from_value_with_undefined(
         Value::Function(_) => return Err("cannot JSON-encode a function".into()),
         Value::External(_) => return Err("cannot JSON-encode an external value".into()),
         Value::BigInt { .. } => return Err("cannot JSON-encode a BigInt".into()),
-        Value::Promise(state) => match &*state.borrow() {
-            PromiseState::Pending => return Err("native addon returned a pending Promise".into()),
-            PromiseState::Resolved(value) => json_from_value(*value)?,
-            PromiseState::Rejected(value) => {
-                let message = match value_ref(*value).map_err(|_| "invalid Promise rejection")? {
+        Value::Promise(state) => {
+            // Getter dispatch during recursive JSON encoding can settle the same
+            // deferred again. Keep only the settled tag and handle across it.
+            let settled = {
+                let state = state.borrow();
+                match *state {
+                    PromiseState::Pending => None,
+                    PromiseState::Resolved(value) => Some((true, value)),
+                    PromiseState::Rejected(value) => Some((false, value)),
+                }
+            };
+            let Some((resolved, settled_value)) = settled else {
+                return Err("native addon returned a pending Promise".into());
+            };
+            if resolved {
+                json_from_value_with_undefined_for_env_mode_inner(env, settled_value, preserve_undefined, read_accessors, seen)?
+            } else {
+                let message = match value_ref(settled_value).map_err(|_| "invalid Promise rejection")? {
                     Value::Error(message) | Value::String(message) => message.clone(),
-                    _ => json_from_value(*value)?.to_string(),
+                    _ => json_from_value_with_undefined_for_env_mode_inner(env, settled_value, preserve_undefined, read_accessors, seen)?.to_string(),
                 };
                 return Err(message);
             }
         },
     })
+    })();
+    if tracked { seen.remove(&(value as usize)); }
+    result
 }
 
 fn buffer_json(bytes: &[u8], typed: bool) -> JsonValue {
@@ -1904,11 +2098,18 @@ pub unsafe extern "C" fn thaw_napi_call_handle_typed_result(
 // catching Thaw code's catch site instead of collapsing to an untagged
 // (default-`Error`) string.
 unsafe fn describe_env_exception(env: NapiEnv, exception: NapiValue) -> Result<String, String> {
+    let _dispatch = ForeignCallbackGuard::new();
+    let name = error_name_for_owner(env, exception as usize);
     let message = match value_ref(exception).map_err(|_| "invalid exception")? {
         Value::Error(message) | Value::String(message) => message.clone(),
-        _ => json_from_value(exception)?.to_string(),
+        _ => json_from_value_with_undefined_for_env_mode(env, exception, false, false)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| "native addon threw an unserializable exception value".into()),
     };
-    Ok(match error_name_for_owner(env, exception as usize) {
+    // A report must leave no newly thrown exception in the Env. The data-only
+    // walk above does not invoke accessors; this also clears any nested failure.
+    if let Ok(env_ref) = env_mut(env) { env_ref.exception.take(); }
+    Ok(match name {
         Some(name) => format!("\u{1}{name}\u{1}{message}"),
         None => message,
     })
@@ -2196,7 +2397,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
         let args = info
             .args
             .iter()
-            .map(|value| json_from_value_with_undefined(*value, true))
+            .map(|value| json_from_value_with_undefined_for_env(_env, *value, true))
             .collect::<Result<Vec<_>, _>>();
         #[cfg(feature = "quickjs")]
         let args = if _is_quickjs {

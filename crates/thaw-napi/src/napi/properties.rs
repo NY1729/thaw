@@ -195,13 +195,10 @@ unsafe fn get_property_key(
     key: &PropertyKey,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if let PropertyKey::String(name) = key {
-        let Ok(name) = CString::new(name.as_str()) else {
-            return record_status(env, NAPI_INVALID_ARG);
-        };
-        return napi_get_named_property(env, object, name.as_ptr(), out);
-    }
-    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+    // The named-string API historically returns undefined for non-objects;
+    // preserve that path while accepting strings with embedded NUL here.
+    if !matches!(key, PropertyKey::String(_))
+        && !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let value = find_property_value(env, object, key);
