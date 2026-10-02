@@ -9979,3 +9979,25 @@ fn splice_without_arguments_preserves_populated_and_sparse_receivers() {
         "0 3 1,2,3\n0 3 true false true\n0 4,5\n8,9 7\n6,7 0\n"
     );
 }
+
+#[test]
+fn uint8array_set_returns_undefined_after_copy() {
+    let source = r#"
+        const bytes: Uint8Array = new Uint8Array(3);
+        let order = "";
+        function receiver(): Uint8Array { order += "R"; return bytes; }
+        function source(): number[] { order += "S"; return [4, 5]; }
+        function offset(): number { order += "O"; return 1; }
+        function main(): void {
+            const result = receiver().set(source(), offset());
+            console.log(order, typeof result, result === undefined, bytes.join(","));
+            const target: Uint8Array = new Uint8Array(3);
+            const count = Buffer.from([7, 8]).copy(target);
+            console.log(count, target.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "uint8array_set_result"),
+        "RSO undefined true 0,4,5\n2 7,8,0\n"
+    );
+}
