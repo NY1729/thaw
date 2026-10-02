@@ -129,14 +129,15 @@ fn generate_registry_shims(
     static_packages: &std::collections::HashSet<String>,
     dynamic_packages: &std::collections::HashSet<String>,
     user_source: &str,
+    user_source_name: &thaw_parser::common::FileName,
     embed_native_addons: bool,
     output: &Path,
     external_native_staging: Option<&Path>,
 ) -> Result<RegistryShims, String> {
-    let observed_arities = observed_member_call_arities(user_source)?;
-    let observed_constructor_arities = observed_constructor_arities(user_source)?;
-    let observed_identifier_arities = observed_identifier_call_arities(user_source)?;
-    let observed_bare_member_objects = observed_bare_member_object_identifiers(user_source)?;
+    let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
+    let observed_constructor_arities = observed_constructor_arities_named(user_source, user_source_name)?;
+    let observed_identifier_arities = observed_identifier_call_arities_named(user_source, user_source_name)?;
+    let observed_bare_member_objects = observed_bare_member_object_identifiers_named(user_source, user_source_name)?;
     let mut observed_function_arities = observed_identifier_arities.clone();
     for (name, arities) in &observed_arities {
         observed_function_arities
@@ -342,7 +343,7 @@ fn generate_registry_shims(
         .collect();
     let qualifier_by_package =
         package_qualifier_identifiers(resolved.iter().map(|package| package.name.as_str()));
-    let constructor_module = thaw_parser::parse_typescript(user_source)?;
+    let (constructor_module, _) = thaw_parser::parse_typescript_with_source_map_named(user_source, user_source_name.clone())?;
     let (constructor_named_imports, constructor_namespace_imports, _) =
         constructor_imports(&constructor_module, &qualifier_by_package);
 

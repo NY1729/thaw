@@ -57,6 +57,15 @@ fn rewrite_external_class_constructors(
     classes: &[ClassConstructorRewrite],
     package_qualifiers: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
+    rewrite_external_class_constructors_named(source, classes, package_qualifiers, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+fn rewrite_external_class_constructors_named(
+    source: &str,
+    classes: &[ClassConstructorRewrite],
+    package_qualifiers: &std::collections::HashMap<String, String>,
+    source_name: &thaw_parser::common::FileName,
+) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
         ArrowExpr, BlockStmt, CatchClause, ClassExpr, Constructor, Decl, DefaultDecl, Expr,
@@ -67,7 +76,7 @@ fn rewrite_external_class_constructors(
     use thaw_parser::common::Spanned;
 
     if classes.is_empty() { return Ok(source.to_string()); }
-    let module = thaw_parser::parse_typescript(source)?;
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let (named_imports, namespace_imports, imported_names) =
         constructor_imports(&module, package_qualifiers);
     let mut top_level = std::collections::HashSet::new();
@@ -344,6 +353,15 @@ fn rewrite_qualified_calls(
     rewrites: &[QualifiedCallRewrite],
     imported_overload_aliases: &std::collections::HashSet<String>,
 ) -> Result<String, String> {
+    rewrite_qualified_calls_named(source, rewrites, imported_overload_aliases, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+fn rewrite_qualified_calls_named(
+    source: &str,
+    rewrites: &[QualifiedCallRewrite],
+    imported_overload_aliases: &std::collections::HashSet<String>,
+    source_name: &thaw_parser::common::FileName,
+) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{CallExpr, Callee, Expr, ImportSpecifier, MemberProp, ModuleDecl, ModuleItem};
     use thaw_parser::common::Spanned;
@@ -398,7 +416,7 @@ fn rewrite_qualified_calls(
         }
     }
 
-    let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
+    let (module, cm) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut imported_names = std::collections::HashSet::new();
     let mut imported_packages = std::collections::HashMap::new();
     for item in &module.body {

@@ -88,6 +88,29 @@ fn rewrite_external_class_methods_with_static_qualified(
     functions: &[FallbackFunctionOverloadRewrite],
     package_qualifiers: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
+    rewrite_external_class_methods_with_static_qualified_named(
+        source, classes, methods, method_contexts, static_methods, getters, setters,
+        static_getters, static_setters, factories, functions, package_qualifiers,
+        &thaw_parser::common::FileName::Custom("input.ts".into()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_external_class_methods_with_static_qualified_named(
+    source: &str,
+    classes: &[ClassConstructorRewrite],
+    methods: &[ClassMethodRewrite],
+    method_contexts: &[ClassMethodContext],
+    static_methods: &[StaticClassMethodRewrite],
+    getters: &[ClassGetterRewrite],
+    setters: &[ClassSetterRewrite],
+    static_getters: &[StaticClassGetterRewrite],
+    static_setters: &[StaticClassSetterRewrite],
+    factories: &[FactoryClassRewrite],
+    functions: &[FallbackFunctionOverloadRewrite],
+    package_qualifiers: &std::collections::HashMap<String, String>,
+    source_name: &thaw_parser::common::FileName,
+) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
         ArrowExpr, ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BlockStmt,
@@ -3109,7 +3132,7 @@ fn rewrite_external_class_methods_with_static_qualified(
         }
     }
 
-    let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
+    let (module, cm) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut imported_from: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut import_aliases = std::collections::HashMap::new();
     for item in &module.body {

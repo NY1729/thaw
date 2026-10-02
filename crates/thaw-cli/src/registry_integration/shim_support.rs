@@ -757,8 +757,9 @@ fn constructor_imports(
     (named, namespaces, imported)
 }
 
-fn observed_constructor_arities(
+fn observed_constructor_arities_named(
     source: &str,
+    source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{Expr, MemberProp, NewExpr};
@@ -797,14 +798,15 @@ fn observed_constructor_arities(
             expression.visit_children_with(self);
         }
     }
-    let module = thaw_parser::parse_typescript(source)?;
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut finder = Finder::default();
     module.visit_with(&mut finder);
     Ok(finder.arities)
 }
 
-fn observed_member_call_arities(
+fn observed_member_call_arities_named(
     source: &str,
+    source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp};
@@ -830,7 +832,7 @@ fn observed_member_call_arities(
         }
     }
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut finder = Finder::default();
     module.visit_with(&mut finder);
     Ok(finder.arities)
@@ -842,8 +844,9 @@ fn observed_member_call_arities(
 /// once imported. Keyed by that bare name only, same limitation as the
 /// member version: two same-named imports from different packages share
 /// one observed-arity set.
-fn observed_identifier_call_arities(
+fn observed_identifier_call_arities_named(
     source: &str,
+    source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{CallExpr, Callee, Expr};
@@ -867,7 +870,7 @@ fn observed_identifier_call_arities(
         }
     }
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut finder = Finder::default();
     module.visit_with(&mut finder);
     Ok(finder.arities)
@@ -888,8 +891,9 @@ fn observed_identifier_call_arities(
 /// counterpart at all (real example: socket.io's own
 /// `StrictEventEmitter`, never referenced directly by name in real user
 /// code) to a value that would silently read back `undefined`.
-fn observed_bare_member_object_identifiers(
+fn observed_bare_member_object_identifiers_named(
     source: &str,
+    source_name: &thaw_parser::common::FileName,
 ) -> Result<std::collections::HashSet<String>, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{Expr, MemberExpr};
@@ -908,7 +912,7 @@ fn observed_bare_member_object_identifiers(
         }
     }
 
-    let module = thaw_parser::parse_typescript(source)?;
+    let (module, _) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut finder = Finder::default();
     module.visit_with(&mut finder);
     Ok(finder.names)
