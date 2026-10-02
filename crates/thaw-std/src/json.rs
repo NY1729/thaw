@@ -2679,11 +2679,24 @@ pub unsafe extern "C" fn thaw_json_is_array(value: *const Value) -> u8 {
     (!value.is_null() && matches!(unsafe { &*value }, Value::Array(_))).into()
 }
 
+/// Native array presence uses null for dense arrays and a `[length][state...]`
+/// mask otherwise. State zero is a hole; states one and two are present.
+fn native_array_slot_present(presence: *const u8, index: usize) -> bool {
+    if presence.is_null() {
+        return true;
+    }
+    let mask_len = unsafe { presence.cast::<u64>().read() as usize };
+    index >= mask_len || unsafe { presence.add(8 + index).read() } != 0
+}
+
 fn flatten_json_value(value: Value, depth: usize, out: &mut Vec<Value>) {
     match value {
         Value::Array(items) if depth > 0 => {
-            for item in shared_array_ref(&items).clone() {
-                flatten_json_value(item, depth - 1, out);
+            let elements = shared_array_ref(&items);
+            for (index, item) in elements.iter().enumerate() {
+                if array_has_index(&items, index) {
+                    flatten_json_value(item.clone(), depth - 1, out);
+                }
             }
         }
         other => out.push(other),
@@ -2703,8 +2716,9 @@ fn flatten_json_value(value: Value, depth: usize, out: &mut Vec<Value>) {
 /// # Safety
 /// `array` must be null or point to a valid native `[length][Json
 /// ptr...]` buffer (every slot a `*const Value`, `HirType::Json`'s
-/// native array element width).
-pub unsafe extern "C" fn thaw_any_array_flat(array: *const u8, depth: f64) -> *mut u8 {
+/// native array element width). `presence` must be null or point to the
+/// matching native `[length][state...]` mask.
+pub unsafe extern "C" fn thaw_any_array_flat(array: *const u8, presence: *const u8, depth: f64) -> *mut u8 {
     let depth = if depth.is_nan() || depth <= 0.0 {
         0
     } else if depth == f64::INFINITY {
@@ -2719,6 +2733,9 @@ pub unsafe extern "C" fn thaw_any_array_flat(array: *const u8, depth: f64) -> *m
     };
     let mut out = Vec::with_capacity(length);
     for index in 0..length {
+        if !native_array_slot_present(presence, index) {
+            continue;
+        }
         let element = unsafe {
             array
                 .add(8 + index * 8)
