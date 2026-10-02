@@ -279,6 +279,12 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Lit(HirLit::F64(-1.0)),
             ],
         );
+        // `Uint8Array.prototype.set` mutates the receiver but returns undefined.
+        // Keep `__thaw_bytes_copy`'s numeric result for Buffer.copy callers.
+        let result = HirExpr::EvalThen(
+            Box::new(result),
+            Box::new(HirExpr::Lit(HirLit::Undefined)),
+        );
         self.wrap_call_argument_bindings(result, &bindings)
     }
 
