@@ -35,6 +35,32 @@ impl HirOptionalMask {
         Self::Extended(Box::new(words))
     }
 
+    pub fn insert(&mut self, index: usize) {
+        match self {
+            Self::Inline(mask) if index < u64::BITS as usize => *mask |= 1u64 << index,
+            Self::Inline(mask) => {
+                let mut words = vec![0; index / u64::BITS as usize + 1];
+                words[0] = *mask;
+                words[index / u64::BITS as usize] |= 1u64 << (index % u64::BITS as usize);
+                *self = Self::Extended(Box::new(words));
+            }
+            Self::Extended(words) => {
+                words.resize(words.len().max(index / u64::BITS as usize + 1), 0);
+                words[index / u64::BITS as usize] |= 1u64 << (index % u64::BITS as usize);
+            }
+        }
+    }
+
+    pub fn offset_by(&self, offset: usize) -> Self {
+        let mut shifted = Self::default();
+        let mut next = self.first_at_or_after(0);
+        while let Some(index) = next {
+            shifted.insert(index + offset);
+            next = self.first_at_or_after(index + 1);
+        }
+        shifted
+    }
+
     pub fn contains(&self, index: usize) -> bool {
         match self {
             Self::Inline(mask) => index < u64::BITS as usize && mask & (1u64 << index) != 0,
@@ -89,6 +115,20 @@ impl HirOptionalMask {
 #[cfg(test)]
 mod optional_mask_tests {
     use super::HirOptionalMask;
+
+    #[test]
+    fn omission_bits_keep_identity_across_word_boundaries() {
+        let mut mask = HirOptionalMask::default();
+        mask.insert(0);
+        mask.insert(64);
+        assert!(mask.contains(0));
+        assert!(mask.contains(64));
+        assert!(!mask.contains(63));
+        let initializer = mask.offset_by(1);
+        assert!(initializer.contains(1));
+        assert!(initializer.contains(65));
+        assert!(!initializer.contains(64));
+    }
 
     #[test]
     fn optional_masks_scale_beyond_one_machine_word() {

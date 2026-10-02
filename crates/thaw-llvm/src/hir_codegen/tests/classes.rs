@@ -1,4 +1,41 @@
 #[test]
+fn compiles_omittable_arguments_beyond_one_mask_word() {
+    let required = (0..64)
+        .map(|index| format!("p{index}: number"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let args = vec!["1"; 64].join(", ");
+    let source = format!(
+        "function wide({required}, last: number = 7): number {{ return last; }} \
+         function main(): void {{ \
+         console.log(wide({args}), wide({args}, undefined)); \
+         const callable: ({required}, last?: number) => number = wide; \
+         console.log(callable({args})); }}"
+    );
+    assert_eq!(compile_and_run(&source, "wide_optional_function"), "7 7\n7\n");
+
+    let method_required = (0..63)
+        .map(|index| format!("p{index}: number"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let method_args = vec!["1"; 63].join(", ");
+    let source = format!(
+        "let defaultRuns = 0; \
+         function fallback(): number {{ defaultRuns++; return 7; }} \
+         class Base {{ value: number; \
+         constructor({method_required}, last: number = fallback()) {{ this.value = last; }} \
+         method({method_required}, last: number = fallback()): number {{ return last + 2; }} }} \
+         class Middle extends Base {{}} class Derived extends Middle {{}} \
+         function main(): void {{ \
+         const first = new Derived({method_args}); \
+         console.log(first.value, first.method({method_args}), defaultRuns); \
+         const second = new Derived({method_args}, undefined); \
+         console.log(second.value, second.method({method_args}, undefined), defaultRuns); }}"
+    );
+    assert_eq!(compile_and_run(&source, "wide_optional_class"), "7 9 2\n7 9 4\n");
+}
+
+#[test]
 fn compiles_classic_for_loop_over_a_number_array() {
     let source = r#"
         function main(): void {

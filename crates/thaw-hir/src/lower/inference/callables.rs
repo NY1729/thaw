@@ -50,7 +50,7 @@ impl<'a> FnLowerer<'a> {
             rest.as_deref(),
             &parameters,
             0,
-            0,
+            HirOptionalMask::default(),
         )?);
         let closure = HirExpr::Lambda(Vec::new(), parameters, ret.as_ref().clone(), Box::new(body));
         Ok(Some(HirExpr::TypedClosure(
@@ -68,16 +68,16 @@ impl<'a> FnLowerer<'a> {
         rest: Option<&HirType>,
         parameters: &[HirParam],
         index: usize,
-        omitted_mask: usize,
+        omitted_mask: HirOptionalMask,
     ) -> Result<Vec<HirStmt>, String> {
         let Some(next) = optional
             .first_at_or_after(index)
             .filter(|next| *next < fixed.len())
         else {
-            let target = if omitted_mask == 0 {
+            let target = if omitted_mask.is_empty() {
                 symbol.to_string()
             } else {
-                omitted_parameter_symbol(symbol, omitted_mask)
+                omitted_parameter_symbol(symbol, &omitted_mask)
             };
             let signature = self.signatures.get(&target).ok_or_else(|| {
                 format!(
@@ -87,7 +87,7 @@ impl<'a> FnLowerer<'a> {
             let mut arguments = Vec::with_capacity(signature.params.len());
             let mut source_index = 0usize;
             for (position, parameter) in parameters.iter().take(fixed.len()).enumerate() {
-                if omitted_mask & (1usize << position) != 0 {
+                if omitted_mask.contains(position) {
                     continue;
                 }
                 let expected = &signature.params[source_index];
@@ -136,6 +136,8 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
         };
+        let mut absent_mask = omitted_mask.clone();
+        absent_mask.insert(next);
         let absent = self.build_callable_adapter_dispatch(
             symbol,
             fixed,
@@ -143,7 +145,7 @@ impl<'a> FnLowerer<'a> {
             rest,
             parameters,
             next + 1,
-            omitted_mask | (1usize << next),
+            absent_mask,
         )?;
         let present = self.build_callable_adapter_dispatch(
             symbol,
