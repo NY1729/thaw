@@ -1147,37 +1147,35 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     );
                 }
             }
-            if base_params.len() <= 16 {
-                for mask in 1usize..(1usize << base_params.len()) {
-                    let base_constructor = omitted_parameter_symbol(
-                        &class_constructor_symbol(base.sym.as_ref()),
-                        mask,
-                    );
-                    if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
-                        let mut derived_wrapper = base_wrapper;
-                        derived_wrapper.ret = interfaces[derived_name].clone();
-                        signatures.insert(
-                            omitted_parameter_symbol(&class_constructor_symbol(derived_name), mask),
-                            derived_wrapper,
-                        );
-                    }
-                    let initializer_mask = mask << 1;
-                    let base_initializer = omitted_parameter_symbol(
-                        &class_initializer_symbol(base.sym.as_ref()),
-                        initializer_mask,
-                    );
-                    if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
-                        let mut derived_wrapper = base_wrapper;
-                        derived_wrapper.params[0] = interfaces[derived_name].clone();
-                        derived_wrapper.ret = interfaces[derived_name].clone();
-                        signatures.insert(
-                            omitted_parameter_symbol(
-                                &class_initializer_symbol(derived_name),
-                                initializer_mask,
-                            ),
-                            derived_wrapper,
-                        );
-                    }
+            for mask in omitted_parameter_masks_in_signatures(&signatures, &base_symbol) {
+                let base_constructor = omitted_parameter_symbol(
+                    &base_symbol,
+                    &mask,
+                );
+                if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
+                    let mut derived_wrapper = base_wrapper;
+                    derived_wrapper.ret = interfaces[derived_name].clone();
+                    changed |= signatures.insert(
+                        omitted_parameter_symbol(&class_constructor_symbol(derived_name), &mask),
+                        derived_wrapper,
+                    ).is_none();
+                }
+                let initializer_mask = mask.offset_by(1);
+                let base_initializer = omitted_parameter_symbol(
+                    &class_initializer_symbol(base.sym.as_ref()),
+                    &initializer_mask,
+                );
+                if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
+                    let mut derived_wrapper = base_wrapper;
+                    derived_wrapper.params[0] = interfaces[derived_name].clone();
+                    derived_wrapper.ret = interfaces[derived_name].clone();
+                    changed |= signatures.insert(
+                        omitted_parameter_symbol(
+                            &class_initializer_symbol(derived_name),
+                            &initializer_mask,
+                        ),
+                        derived_wrapper,
+                    ).is_none();
                 }
             }
         }
@@ -1321,8 +1319,8 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     }
                 }
                 for mask in omitted_parameter_masks(&patterns, receiver_count)? {
-                    let base_wrapper = omitted_parameter_symbol(&base_symbol, mask);
-                    let derived_wrapper = omitted_parameter_symbol(&derived_symbol, mask);
+                    let base_wrapper = omitted_parameter_symbol(&base_symbol, &mask);
+                    let derived_wrapper = omitted_parameter_symbol(&derived_symbol, &mask);
                     let Some(mut wrapper_signature) = signatures.get(&base_wrapper).cloned() else {
                         continue;
                     };
@@ -1344,8 +1342,8 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         }
                     }
                     for mask in omitted_parameter_masks(&patterns, 0)? {
-                        let base_wrapper = omitted_parameter_symbol(&base_unbound, mask);
-                        let derived_wrapper = omitted_parameter_symbol(&derived_unbound, mask);
+                        let base_wrapper = omitted_parameter_symbol(&base_unbound, &mask);
+                        let derived_wrapper = omitted_parameter_symbol(&derived_unbound, &mask);
                         if let Some(wrapper) = signatures.get(&base_wrapper).cloned() {
                             signatures.insert(derived_wrapper, wrapper);
                         }

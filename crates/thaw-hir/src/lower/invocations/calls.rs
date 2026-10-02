@@ -2014,27 +2014,26 @@ impl<'a> FnLowerer<'a> {
             let logical_param_count =
                 full_signature.params.len() - usize::from(full_signature.native_rest.is_some());
             if full_signature.variadic.is_none()
-                && logical_param_count < usize::BITS as usize
                 && lowered_arguments.len() <= logical_param_count
             {
-                let mut omitted_mask = 0usize;
+                let mut omitted_mask = HirOptionalMask::default();
                 for index in 0..logical_param_count {
                     let omitted = match lowered_arguments.get(index) {
                         None => true,
                         Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
                     };
                     if omitted {
-                        omitted_mask |= 1usize << index;
+                        omitted_mask.insert(index);
                     }
                 }
-                if omitted_mask != 0 {
-                    let wrapper = omitted_parameter_symbol(&callee_name, omitted_mask);
+                if !omitted_mask.is_empty() {
+                    let wrapper = omitted_parameter_symbol(&callee_name, &omitted_mask);
                     if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
                         lowered_arguments = lowered_arguments
                             .into_iter()
                             .enumerate()
                             .filter_map(|(index, argument)| {
-                                (omitted_mask & (1usize << index) == 0).then_some(argument)
+                                (!omitted_mask.contains(index)).then_some(argument)
                             })
                             .collect();
                         callee_name = wrapper;

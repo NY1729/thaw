@@ -361,8 +361,38 @@ fn default_arity_symbol(symbol: &str, arity: usize) -> Symbol {
     format!("{symbol}__thawdefault_arity_{arity}")
 }
 
-fn omitted_parameter_symbol(symbol: &str, mask: usize) -> Symbol {
-    format!("{symbol}__thawomitted_mask_{mask:x}")
+fn omitted_parameter_symbol(symbol: &str, mask: &HirOptionalMask) -> Symbol {
+    let suffix = match mask {
+        HirOptionalMask::Inline(bits) => format!("{bits:x}"),
+        HirOptionalMask::Extended(words) => format!(
+            "x{}",
+            words.iter().map(|word| format!("{word:x}")).collect::<Vec<_>>().join("_")
+        ),
+    };
+    format!("{symbol}__thawomitted_mask_{suffix}")
+}
+
+fn omitted_parameter_mask_from_symbol(symbol: &str, base: &str) -> Option<HirOptionalMask> {
+    let suffix = symbol.strip_prefix(&format!("{base}__thawomitted_mask_"))?;
+    if let Some(words) = suffix.strip_prefix('x') {
+        let words = words
+            .split('_')
+            .map(|word| u64::from_str_radix(word, 16).ok())
+            .collect::<Option<Vec<_>>>()?;
+        return (words.len() > 1 && words.last().copied() != Some(0))
+            .then_some(HirOptionalMask::Extended(Box::new(words)));
+    }
+    u64::from_str_radix(suffix, 16).ok().map(HirOptionalMask::Inline)
+}
+
+fn omitted_parameter_masks_in_signatures(
+    signatures: &HashMap<Symbol, FnSignature>,
+    base: &str,
+) -> Vec<HirOptionalMask> {
+    signatures
+        .keys()
+        .filter_map(|symbol| omitted_parameter_mask_from_symbol(symbol, base))
+        .collect()
 }
 
 fn pattern_is_omittable(pattern: &Pat) -> bool {
@@ -417,7 +447,10 @@ fn trailing_omittable_start(patterns: &[Pat]) -> Option<usize> {
     (start < patterns.len()).then_some(start)
 }
 
-fn omitted_parameter_masks(patterns: &[Pat], receiver_count: usize) -> Result<Vec<usize>, String> {
+fn omitted_parameter_masks(
+    patterns: &[Pat],
+    receiver_count: usize,
+) -> Result<Vec<HirOptionalMask>, String> {
     let omittable = patterns
         .iter()
         .enumerate()
@@ -430,10 +463,10 @@ fn omitted_parameter_masks(patterns: &[Pat], receiver_count: usize) -> Result<Ve
     }
     let mut masks = Vec::with_capacity((1usize << omittable.len()).saturating_sub(1));
     for subset in 1usize..(1usize << omittable.len()) {
-        let mut mask = 0usize;
+        let mut mask = HirOptionalMask::default();
         for (bit, parameter) in omittable.iter().enumerate() {
             if subset & (1usize << bit) != 0 {
-                mask |= 1usize << parameter;
+                mask.insert(*parameter);
             }
         }
         masks.push(mask);
@@ -489,9 +522,9 @@ fn insert_omitted_parameter_signatures(
             .params
             .into_iter()
             .enumerate()
-            .filter_map(|(index, parameter)| (mask & (1usize << index) == 0).then_some(parameter))
+            .filter_map(|(index, parameter)| (!mask.contains(index)).then_some(parameter))
             .collect();
-        signatures.insert(omitted_parameter_symbol(symbol, mask), wrapper);
+        signatures.insert(omitted_parameter_symbol(symbol, &mask), wrapper);
     }
     Ok(())
 }

@@ -168,7 +168,7 @@ fn lower_callable_omitted_parameter_wrappers(
             .iter()
             .enumerate()
             .filter_map(|(index, parameter)| {
-                (mask & (1usize << index) == 0).then_some(parameter.clone())
+                (!mask.contains(index)).then_some(parameter.clone())
             })
             .collect::<Vec<_>>();
         let mut lowerer = FnLowerer::new(
@@ -200,7 +200,7 @@ fn lower_callable_omitted_parameter_wrappers(
         for (index, pattern) in patterns.iter().enumerate() {
             let parameter_index = receiver_count + index;
             let parameter = &params[parameter_index];
-            if mask & (1usize << parameter_index) == 0 {
+            if !mask.contains(parameter_index) {
                 lowerer
                     .scope
                     .insert(parameter.name.clone(), parameter.ty.clone());
@@ -265,7 +265,7 @@ fn lower_callable_omitted_parameter_wrappers(
             body.push(HirStmt::Return(Some(call)));
         }
         wrappers.push(HirFunction {
-            name: omitted_parameter_symbol(symbol, mask),
+            name: omitted_parameter_symbol(symbol, &mask),
             params: wrapper_params,
             ret: ret.clone(),
             is_async,
@@ -671,79 +671,77 @@ fn lower_class_constructor(
                     body,
                 });
             }
-            if params.len() <= 16 {
-                for mask in 1usize..(1usize << params.len()) {
-                    let derived_constructor_wrapper =
-                        omitted_parameter_symbol(&constructor_symbol, mask);
-                    let initializer_mask = mask << 1;
-                    let derived_initializer_wrapper =
-                        omitted_parameter_symbol(&initializer_symbol, initializer_mask);
-                    if !signatures.contains_key(&derived_constructor_wrapper)
-                        || !signatures.contains_key(&derived_initializer_wrapper)
-                    {
-                        continue;
-                    }
-                    let wrapper_params = params
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, parameter)| {
-                            (mask & (1usize << index) == 0).then_some(parameter.clone())
-                        })
-                        .collect::<Vec<_>>();
-                    let wrapper_this = "__thaw_this".to_string();
-                    let mut initialize_args = vec![HirExpr::Var(wrapper_this.clone())];
-                    initialize_args.extend(
-                        wrapper_params
-                            .iter()
-                            .map(|parameter| HirExpr::Var(parameter.name.clone())),
-                    );
-                    functions.push(HirFunction {
-                        name: derived_constructor_wrapper,
-                        params: wrapper_params.clone(),
-                        ret: instance_type.clone(),
-                        is_async: false,
-                        body: vec![
-                            HirStmt::Let(
-                                wrapper_this.clone(),
-                                instance_type.clone(),
-                                HirExpr::ClassAlloc(instance_type.clone()),
-                            ),
-                            HirStmt::Return(Some(HirExpr::Call(
-                                Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
-                                initialize_args,
-                            ))),
-                        ],
-                    });
-
-                    let mut initializer_params = vec![HirParam {
-                        name: wrapper_this.clone(),
-                        ty: instance_type.clone(),
-                    }];
-                    initializer_params.extend(wrapper_params);
-                    let base_initializer_wrapper = omitted_parameter_symbol(
-                        &class_initializer_symbol(base.sym.as_ref()),
-                        initializer_mask,
-                    );
-                    let mut base_args = vec![HirExpr::Var(wrapper_this.clone())];
-                    base_args.extend(
-                        initializer_params[1..]
-                            .iter()
-                            .map(|parameter| HirExpr::Var(parameter.name.clone())),
-                    );
-                    let mut body = vec![HirStmt::Expr(HirExpr::Call(
-                        Box::new(HirExpr::Var(base_initializer_wrapper)),
-                        base_args,
-                    ))];
-                    body.extend(implicit_own_initializers.iter().cloned());
-                    body.push(HirStmt::Return(Some(HirExpr::Var(wrapper_this))));
-                    functions.push(HirFunction {
-                        name: derived_initializer_wrapper,
-                        params: initializer_params,
-                        ret: instance_type.clone(),
-                        is_async: false,
-                        body,
-                    });
+            for mask in omitted_parameter_masks_in_signatures(signatures, &constructor_symbol) {
+                let derived_constructor_wrapper =
+                    omitted_parameter_symbol(&constructor_symbol, &mask);
+                let initializer_mask = mask.offset_by(1);
+                let derived_initializer_wrapper =
+                    omitted_parameter_symbol(&initializer_symbol, &initializer_mask);
+                if !signatures.contains_key(&derived_constructor_wrapper)
+                    || !signatures.contains_key(&derived_initializer_wrapper)
+                {
+                    continue;
                 }
+                let wrapper_params = params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, parameter)| {
+                        (!mask.contains(index)).then_some(parameter.clone())
+                    })
+                    .collect::<Vec<_>>();
+                let wrapper_this = "__thaw_this".to_string();
+                let mut initialize_args = vec![HirExpr::Var(wrapper_this.clone())];
+                initialize_args.extend(
+                    wrapper_params
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                );
+                functions.push(HirFunction {
+                    name: derived_constructor_wrapper,
+                    params: wrapper_params.clone(),
+                    ret: instance_type.clone(),
+                    is_async: false,
+                    body: vec![
+                        HirStmt::Let(
+                            wrapper_this.clone(),
+                            instance_type.clone(),
+                            HirExpr::ClassAlloc(instance_type.clone()),
+                        ),
+                        HirStmt::Return(Some(HirExpr::Call(
+                            Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
+                            initialize_args,
+                        ))),
+                    ],
+                });
+
+                let mut initializer_params = vec![HirParam {
+                    name: wrapper_this.clone(),
+                    ty: instance_type.clone(),
+                }];
+                initializer_params.extend(wrapper_params);
+                let base_initializer_wrapper = omitted_parameter_symbol(
+                    &class_initializer_symbol(base.sym.as_ref()),
+                    &initializer_mask,
+                );
+                let mut base_args = vec![HirExpr::Var(wrapper_this.clone())];
+                base_args.extend(
+                    initializer_params[1..]
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                );
+                let mut body = vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var(base_initializer_wrapper)),
+                    base_args,
+                ))];
+                body.extend(implicit_own_initializers.iter().cloned());
+                body.push(HirStmt::Return(Some(HirExpr::Var(wrapper_this))));
+                functions.push(HirFunction {
+                    name: derived_initializer_wrapper,
+                    params: initializer_params,
+                    ret: instance_type.clone(),
+                    is_async: false,
+                    body,
+                });
             }
         }
     }
