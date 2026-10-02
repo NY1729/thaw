@@ -1403,6 +1403,24 @@ impl<'a> FnLowerer<'a> {
                             let result = self.lower_has_own_value(target, key.clone())?;
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        if property.sym == *"deleteProperty" {
+                            let mut array_target = target.clone();
+                            let mut array_type = self.infer_expr_type(&array_target)?;
+                            if let HirType::Union(members) = &array_type {
+                                if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                                    (array_target, array_type) =
+                                        self.lower_union_array_sequence(array_target, members)?;
+                                }
+                            }
+                            if matches!(array_type, HirType::Array(_)) {
+                                let key = self.coerce_primitive_to_string(key.clone())?;
+                                let result = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_delete_reflect".into())),
+                                    vec![array_target, key],
+                                );
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
+                        }
                         // A literal key resolves against a fixed object's
                         // own fields at lowering time; a `Json` receiver
                         // defers to the runtime.

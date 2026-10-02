@@ -508,7 +508,8 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "array presence index")?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_array_has_property" | "__thaw_array_has_own"
+                    "__thaw_array_delete_strict" | "__thaw_array_delete_reflect"
+                    | "__thaw_array_has_property" | "__thaw_array_has_own"
                     | "__thaw_array_property_is_enumerable" => {
                         let [array, key] = args.as_slice() else {
                             return Err("array property check expects two operands".into());

@@ -105,6 +105,44 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return result;
             }
+            "__thaw_array_delete_strict" | "__thaw_array_delete_reflect" => {
+                let [array, key] = args else {
+                    return Err("array delete expects a receiver and key".into());
+                };
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                let status = self.builder.build_call(
+                    self.module.get_function("thaw_array_delete_property").unwrap(),
+                    &[handle.into(), key.into()], "array_delete_status",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("array delete returned no status")?.into_int_value();
+                let function = self.current_function();
+                let allocation_failed = self.context.append_basic_block(function, "array_delete_allocation_failed");
+                let checked = self.context.append_basic_block(function, "array_delete_checked");
+                let failed = self.builder.build_int_compare(
+                    IntPredicate::EQ, status, self.context.i8_type().const_int(2, false),
+                    "array_delete_failed_allocation",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(failed, allocation_failed, checked)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(allocation_failed);
+                self.compile_throw_builtin_error("Error", "Array delete allocation failed")?;
+                self.builder.position_at_end(checked);
+                let deleted = self.builder.build_int_compare(
+                    IntPredicate::EQ, status, self.context.i8_type().const_int(1, false),
+                    "array_delete_success",
+                ).map_err(|error| error.to_string())?;
+                if name == "__thaw_array_delete_strict" {
+                    let denied = self.context.append_basic_block(function, "array_delete_denied");
+                    let allowed = self.context.append_basic_block(function, "array_delete_allowed");
+                    self.builder.build_conditional_branch(deleted, allowed, denied)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(denied);
+                    self.compile_throw_type_error("Cannot delete property")?;
+                    self.builder.position_at_end(allowed);
+                }
+                return Ok(deleted.into());
+            }
             "__thaw_array_has_index" => {
                 let [array, index] = args else {
                     return Err("array presence check expects two operands".into());

@@ -2049,6 +2049,31 @@ impl<'a> FnLowerer<'a> {
                             vec![object, key],
                         ));
                     }
+                    let array_union = match &object_type {
+                        HirType::Union(members) if members.iter().all(|member| matches!(member, HirType::Array(_))) => Some(members.clone()),
+                        _ => None,
+                    };
+                    let (object, object_type) = if let Some(members) = array_union {
+                        self.lower_union_array_sequence(object, &members)?
+                    } else {
+                        (object, object_type)
+                    };
+                    if matches!(object_type, HirType::Array(_)) {
+                        let key = match &member.prop {
+                            MemberProp::Ident(property) => HirExpr::Lit(HirLit::Str(property.sym.to_string())),
+                            MemberProp::Computed(computed) => {
+                                let key = self.lower_expr(&computed.expr)?;
+                                self.coerce_primitive_to_string(key)?
+                            }
+                            MemberProp::PrivateName(_) => {
+                                return Err("native `delete` does not support private properties".into())
+                            }
+                        };
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_delete_strict".into())),
+                            vec![object, key],
+                        ));
+                    }
                     if !matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         return Err(format!(
                             "native `delete` requires a JSON or dictionary receiver, got {object_type:?}"

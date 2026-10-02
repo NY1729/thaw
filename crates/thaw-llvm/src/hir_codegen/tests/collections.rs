@@ -1014,6 +1014,72 @@ fn dynamic_flat_skips_deleted_slots_and_preserves_present_nullish_values() {
 }
 
 #[test]
+fn native_array_delete_keeps_length_and_presence_distinct() {
+    let source = r#"
+        function main(): void {
+            const numbers: number[] = [1, 2, 3];
+            console.log(delete numbers[1], numbers.length, Object.hasOwn(numbers, 1), "1" in numbers);
+            console.log(numbers[1] === undefined, JSON.stringify(numbers), JSON.stringify(numbers.flat()));
+            console.log(JSON.stringify(numbers.toSpliced(0, 0)));
+            let visited = "";
+            console.log(numbers.reduce((total, value) => { visited += String(value); return total + value; }, 0), visited);
+            try { Math.sumPrecise(numbers); console.log("sum accepted"); }
+            catch (error) { console.log(error instanceof TypeError); }
+            const keys: string[] = ["a", "b"];
+            delete keys[0];
+            console.log(JSON.stringify({ a: 1, b: 2 }, keys));
+            numbers[1] = undefined;
+            console.log(Object.hasOwn(numbers, 1), JSON.stringify(numbers.flat()));
+            const words: string[] = ["a", "b"];
+            console.log(delete words[0], Object.hasOwn(words, 0), JSON.stringify(words));
+            const mixed: any[] = [1, null, undefined];
+            console.log(delete mixed[1], Object.hasOwn(mixed, 1), Object.hasOwn(mixed, 2), JSON.stringify(mixed.flat()));
+            console.log(delete numbers[999], delete numbers[-1], delete numbers["01"], delete numbers.extra, numbers.length);
+            console.log(delete numbers[Symbol.iterator], Reflect.has(numbers, Symbol.iterator));
+            try { delete numbers.length; } catch (error) { console.log(error.name); }
+            console.log(Reflect.deleteProperty(numbers, "length"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_array_delete_presence"),
+        "true 3 false false\ntrue [1,null,3] [1,3]\n[1,null,3]\n4 13\ntrue\n{\"b\":2}\ntrue [1,null,3]\ntrue false [null,\"b\"]\ntrue false true [1,null]\ntrue true true true 3\ntrue true\nTypeError\nfalse\n"
+    );
+}
+
+#[test]
+fn native_array_delete_reflect_integrity_and_evaluation_order() {
+    let source = r#"
+        function main(): void {
+            const sealed: number[] = [1, , 3];
+            Object.seal(sealed);
+            console.log(Reflect.deleteProperty(sealed, "1"), Reflect.deleteProperty(sealed, "0"), Reflect.deleteProperty(sealed, "99"));
+            try { delete sealed[0]; } catch (error) { console.log(error.name); }
+            const frozen: number[] = [undefined, 5];
+            Object.freeze(frozen);
+            console.log(Reflect.deleteProperty(frozen, "0"), Object.hasOwn(frozen, 0));
+            const stopped: number[] = [4, 5];
+            Object.preventExtensions(stopped);
+            console.log(delete stopped[0], Object.hasOwn(stopped, 0), stopped.length);
+            let order = "";
+            const values: number[] = [7, 8];
+            function getArray(): number[] { order += "A"; return values; }
+            function getKey(): number { order += "K"; return 0; }
+            console.log(delete getArray()[getKey()], order, values.length);
+            order = "";
+            console.log(Reflect.deleteProperty(getArray(), getKey()), order, Object.hasOwn(values, 0));
+            order = "";
+            function badKey(): number { order += "K"; throw new Error("bad key"); }
+            try { delete getArray()[badKey()]; }
+            catch (error) { console.log(order, Object.hasOwn(values, 1)); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_array_delete_integrity"),
+        "true false true\nTypeError\nfalse true\ntrue false 2\ntrue AK 2\ntrue AK false\nAK true\n"
+    );
+}
+
+#[test]
 fn native_array_to_json_retains_holes_for_nested_dynamic_values() {
     let source = r#"
         declare function __thaw_typed_js_70726f6265486f6c65(values: number[]): string;
