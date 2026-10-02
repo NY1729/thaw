@@ -1311,13 +1311,71 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err(format!("{name} expects two operands"));
                 };
                 let value = self.compile_expr(value)?;
-                let bits = self.compile_expr(bits)?;
+                let bits = self.compile_expr(bits)?.into_float_value();
+                let zero = self.context.f64_type().const_zero();
+                let truncated = self.builder.build_call(
+                    self.module.get_function("llvm.trunc.f64").unwrap(),
+                    &[bits.into()], "bigint_integer_argument",
+                ).map_err(|error| error.to_string())?
+                    .try_as_basic_value().basic()
+                    .ok_or("BigInt integer argument truncation returned no value")?
+                    .into_float_value();
+                let invalid_or_normalized = if name == "__thaw_i64_to_radix_string" {
+                    let not_number = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::UNO, bits, bits, "bigint_radix_nan",
+                    ).map_err(|error| error.to_string())?;
+                    let too_small = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::OLT, truncated,
+                        self.context.f64_type().const_float(2.0), "bigint_radix_small",
+                    ).map_err(|error| error.to_string())?;
+                    let too_large = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::OGT, truncated,
+                        self.context.f64_type().const_float(36.0), "bigint_radix_large",
+                    ).map_err(|error| error.to_string())?;
+                    let outside = self.builder.build_or(not_number, too_small, "bigint_radix_invalid")
+                        .map_err(|error| error.to_string())?;
+                    (self.builder.build_or(outside, too_large, "bigint_radix_invalid")
+                        .map_err(|error| error.to_string())?, truncated)
+                } else {
+                    // ToIndex maps NaN and negative fractions to zero after
+                    // truncation, but rejects negative integers, infinities,
+                    // and values beyond MAX_SAFE_INTEGER.
+                    let not_number = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::UNO, bits, bits, "bigint_bits_nan",
+                    ).map_err(|error| error.to_string())?;
+                    let normalized = self.builder.build_select(
+                        not_number, zero, truncated, "bigint_bits_integer",
+                    ).map_err(|error| error.to_string())?.into_float_value();
+                    let negative = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::OLT, normalized, zero, "bigint_bits_negative",
+                    ).map_err(|error| error.to_string())?;
+                    let too_large = self.builder.build_float_compare(
+                        inkwell::FloatPredicate::OGT, normalized,
+                        self.context.f64_type().const_float(9_007_199_254_740_991.0),
+                        "bigint_bits_large",
+                    ).map_err(|error| error.to_string())?;
+                    (self.builder.build_or(negative, too_large, "bigint_bits_invalid")
+                        .map_err(|error| error.to_string())?, normalized)
+                };
+                let (invalid, normalized) = invalid_or_normalized;
+                let function = self.current_function();
+                let error_bb = self.context.append_basic_block(function, "bigint_index_error");
+                let continue_bb = self.context.append_basic_block(function, "bigint_index_valid");
+                self.builder.build_conditional_branch(invalid, error_bb, continue_bb)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(error_bb);
+                self.compile_throw_builtin_error("RangeError", if name == "__thaw_i64_to_radix_string" {
+                    "BigInt radix must be between 2 and 36"
+                } else {
+                    "BigInt bits must be a valid index"
+                })?;
+                self.builder.position_at_end(continue_bb);
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 return self
                     .builder
                     .build_call(
                         self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
-                        &[value.into(), bits.into()],
+                        &[value.into(), normalized.into()],
                         "bigint_radix",
                     )
                     .map_err(|error| error.to_string())?
