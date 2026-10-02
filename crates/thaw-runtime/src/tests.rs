@@ -1682,6 +1682,43 @@ fn async_https_handshakes_and_reads_a_verified_response() {
 }
 
 #[test]
+fn async_https_drains_plaintext_while_receiving_large_response() {
+    let (client_config, server_config) = local_tls_configs();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = vec![b'x'; 256 * 1024];
+    let expected = body.clone();
+    let server = std::thread::spawn(move || {
+        let (connection, _) = listener.accept().unwrap();
+        let tls = ServerConnection::new(server_config).unwrap();
+        let mut stream = StreamOwned::new(tls, connection);
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).unwrap();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).unwrap();
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+    });
+
+    let url = CString::new(format!("https://{addr}/large")).unwrap();
+    let promise = thaw_http_get_async_with_config(url.as_ptr(), 5_000, Some(client_config));
+    let result = thaw_runtime_run_until_resolved(promise);
+    assert_eq!(
+        thaw_promise_state(promise),
+        1,
+        "large TLS fetch rejected: {}",
+        unsafe { CStr::from_ptr(result.cast()) }.to_string_lossy()
+    );
+    let result_slot = result as *const *const c_char;
+    assert_eq!(unsafe { CStr::from_ptr(*result_slot) }.to_bytes(), expected.as_slice());
+    server.join().unwrap();
+    unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
 fn async_https_rejects_an_untrusted_certificate() {
     let (_client_config, server_config) = local_tls_configs();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
