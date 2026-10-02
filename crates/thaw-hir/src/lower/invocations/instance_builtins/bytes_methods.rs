@@ -1,4 +1,18 @@
 impl<'a> FnLowerer<'a> {
+    // Bind the byte buffer before argument bindings; use the raw Bytes type
+    // so chained byte methods retain their native dispatch identity.
+    fn bind_native_bytes_receiver(
+        &mut self,
+        receiver: HirExpr,
+        bindings: &mut Vec<LoweredBinding>,
+    ) -> HirExpr {
+        let name = format!("__thaw_bytes_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Bytes);
+        bindings.insert(0, (name.clone(), HirType::Bytes, receiver));
+        HirExpr::Var(name)
+    }
+
     /// `buf.readUInt16BE(offset)` / `buf.writeInt32LE(value, offset)` /
     /// `buf.readDoubleLE(offset)` &c. -- fixed-width integer / float
     /// reads and writes over the native byte layout, dispatched by
@@ -24,8 +38,9 @@ impl<'a> FnLowerer<'a> {
                 property.sym
             ));
         }
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         let kind = if float {
             2.0
         } else if signed {
@@ -89,8 +104,9 @@ impl<'a> FnLowerer<'a> {
                 property.sym
             ));
         }
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         let kind_lit = HirExpr::Lit(HirLit::F64(if signed { 1.0 } else { 0.0 }));
         let le_lit = HirExpr::Lit(HirLit::F64(if big_endian { 0.0 } else { 1.0 }));
         let number = |lowerer: &mut Self, value: HirExpr| lowerer.coerce_primitive_to_number(value);
@@ -153,8 +169,9 @@ impl<'a> FnLowerer<'a> {
                 property.sym
             ));
         }
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         let le_lit = HirExpr::Lit(HirLit::F64(if big_endian { 0.0 } else { 1.0 }));
         let result = if write {
             let [value, offset] = arguments.as_slice() else {
@@ -203,8 +220,9 @@ impl<'a> FnLowerer<'a> {
         if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
             return Err("`.copy()` is only supported on a Buffer / Uint8Array".into());
         }
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, "Buffer.copy")?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         if arguments.is_empty() || arguments.len() > 4 {
             return Err(
                 "`Buffer.prototype.copy` expects a target and up to three offsets".into(),
@@ -242,8 +260,9 @@ impl<'a> FnLowerer<'a> {
         receiver: HirExpr,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
-        let (arguments, bindings) =
+        let (arguments, mut bindings) =
             self.lower_native_spread_values(&call.args, "Uint8Array.set")?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         let (source, offset) = match arguments.as_slice() {
             [source] => (source.clone(), HirExpr::Lit(HirLit::F64(0.0))),
             [source, offset] => (source.clone(), offset.clone()),
@@ -276,8 +295,9 @@ impl<'a> FnLowerer<'a> {
         receiver: HirExpr,
         method: &str,
         arguments: Vec<HirExpr>,
-        spread_bindings: Vec<(Symbol, HirType, HirExpr)>,
+        mut spread_bindings: Vec<(Symbol, HirType, HirExpr)>,
     ) -> Result<HirExpr, String> {
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut spread_bindings);
         let needle = arguments[0].clone();
         let needle_type = self.infer_expr_type(&needle)?;
         let needle_bytes = match &needle_type {
@@ -344,8 +364,9 @@ impl<'a> FnLowerer<'a> {
             "base64"
         };
         let encoding_lit = HirExpr::Lit(HirLit::Str(encoding.to_string()));
-        let (arguments, bindings) = self
+        let (arguments, mut bindings) = self
             .lower_native_spread_values(&call.args, &format!("Uint8Array.{}", property.sym))?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
         if matches!(property.sym.as_ref(), "toHex" | "toBase64") {
             if !arguments.is_empty() {
                 return Err(format!("`{}` expects no arguments", property.sym));
@@ -397,7 +418,6 @@ impl<'a> FnLowerer<'a> {
             ("read".to_string(), read),
             ("written".to_string(), written),
         ]);
-        let mut bindings = bindings;
         bindings.push((written_name, HirType::F64, written_call));
         self.wrap_call_argument_bindings(result, &bindings)
     }
