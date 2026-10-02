@@ -1,4 +1,38 @@
 impl<'a> FnLowerer<'a> {
+    fn save_narrowings(&self) -> NarrowingSnapshot {
+        NarrowingSnapshot {
+            optional: self.narrowings.clone(),
+            nullable: self.nullable_narrowings.clone(),
+            nullish: self.nullish_narrowings.clone(),
+            partial_nullable: self.partial_nullable_narrowings.clone(),
+            write_versions: self.narrowing_write_versions.clone(),
+        }
+    }
+
+    fn restore_narrowings_for_sibling(&mut self, saved: &NarrowingSnapshot) {
+        self.narrowings = saved.optional.clone();
+        self.nullable_narrowings = saved.nullable.clone();
+        self.nullish_narrowings = saved.nullish.clone();
+        self.partial_nullable_narrowings = saved.partial_nullable.clone();
+    }
+
+    fn restore_narrowings(&mut self, saved: NarrowingSnapshot) {
+        let versions = &self.narrowing_write_versions;
+        let unchanged = |name: &Symbol| versions.get(name) == saved.write_versions.get(name);
+        self.narrowings = saved.optional.into_iter().filter(|(name, _)| unchanged(name)).collect();
+        self.nullable_narrowings = saved.nullable.into_iter().filter(|(name, _)| unchanged(name)).collect();
+        self.nullish_narrowings = saved.nullish.into_iter().filter(|(name, _)| unchanged(name)).collect();
+        self.partial_nullable_narrowings = saved.partial_nullable.into_iter().filter(|(name, _)| unchanged(name)).collect();
+    }
+
+    fn record_binding_write(&mut self, name: &str) {
+        self.narrowings.remove(name);
+        self.nullable_narrowings.remove(name);
+        self.nullish_narrowings.remove(name);
+        self.partial_nullable_narrowings.remove(name);
+        *self.narrowing_write_versions.entry(name.to_string()).or_default() += 1;
+    }
+
     fn bind_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
         let hir_name = if self.scope.contains_key(source_name)
             || self.signatures.contains_key(source_name)
@@ -28,9 +62,7 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_scoped_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let saved = self.bindings.clone();
-        let saved_narrowings = self.narrowings.clone();
-        let saved_nullable_narrowings = self.nullable_narrowings.clone();
-        let saved_nullish_narrowings = self.nullish_narrowings.clone();
+        let saved_narrowings = self.save_narrowings();
         let saved_json_narrowings = self.json_narrowings.clone();
         let saved_union_narrowings = self.union_narrowings.clone();
         let saved_generic_arrows = self.generic_arrows.clone();
@@ -43,9 +75,7 @@ impl<'a> FnLowerer<'a> {
         let saved_native_method_values = self.native_method_values.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
-        self.narrowings = saved_narrowings;
-        self.nullable_narrowings = saved_nullable_narrowings;
-        self.nullish_narrowings = saved_nullish_narrowings;
+        self.restore_narrowings(saved_narrowings);
         self.json_narrowings = saved_json_narrowings;
         self.union_narrowings = saved_union_narrowings;
         self.generic_arrows = saved_generic_arrows;
@@ -110,9 +140,10 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             if let Stmt::If(if_stmt) = stmt {
+                let condition_narrowing = self.last_if_condition_narrowing.take();
                 if if_stmt.alt.is_none() && Self::stmt_definitely_exits(&if_stmt.cons) {
                     if let Some((name, payload, present_when_true, absence_kind)) =
-                        self.optional_undefined_narrowing(&if_stmt.test)
+                        condition_narrowing
                     {
                         if !present_when_true {
                             match absence_kind {
@@ -124,6 +155,9 @@ impl<'a> FnLowerer<'a> {
                                 }
                                 2 => {
                                     self.nullish_narrowings.insert(name, payload);
+                                }
+                                3 => {
+                                    self.partial_nullable_narrowings.insert(name, payload);
                                 }
                                 _ => unreachable!(),
                             }
@@ -475,9 +509,7 @@ impl<'a> FnLowerer<'a> {
         stmt: &Stmt,
         narrowing: Option<&(Symbol, HirType, u8)>,
     ) -> Result<Vec<HirStmt>, String> {
-        let saved = self.narrowings.clone();
-        let saved_nullable = self.nullable_narrowings.clone();
-        let saved_nullish = self.nullish_narrowings.clone();
+        let saved_narrowings = self.save_narrowings();
         if let Some((name, payload, absence_kind)) = narrowing {
             match absence_kind {
                 0 => {
@@ -491,13 +523,15 @@ impl<'a> FnLowerer<'a> {
                     self.nullish_narrowings
                         .insert(name.clone(), payload.clone());
                 }
+                3 => {
+                    self.partial_nullable_narrowings
+                        .insert(name.clone(), payload.clone());
+                }
                 _ => unreachable!(),
             }
         }
         let lowered = self.lower_body(stmt);
-        self.narrowings = saved;
-        self.nullable_narrowings = saved_nullable;
-        self.nullish_narrowings = saved_nullish;
+        self.restore_narrowings(saved_narrowings);
         lowered
     }
 
@@ -506,9 +540,7 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         narrowing: Option<&(Symbol, HirType, u8)>,
     ) -> Result<HirExpr, String> {
-        let saved = self.narrowings.clone();
-        let saved_nullable = self.nullable_narrowings.clone();
-        let saved_nullish = self.nullish_narrowings.clone();
+        let saved_narrowings = self.save_narrowings();
         if let Some((name, payload, absence_kind)) = narrowing {
             match absence_kind {
                 0 => {
@@ -522,13 +554,15 @@ impl<'a> FnLowerer<'a> {
                     self.nullish_narrowings
                         .insert(name.clone(), payload.clone());
                 }
+                3 => {
+                    self.partial_nullable_narrowings
+                        .insert(name.clone(), payload.clone());
+                }
                 _ => unreachable!(),
             }
         }
         let lowered = self.lower_expr(expr);
-        self.narrowings = saved;
-        self.nullable_narrowings = saved_nullable;
-        self.nullish_narrowings = saved_nullish;
+        self.restore_narrowings(saved_narrowings);
         lowered
     }
 
@@ -552,8 +586,9 @@ impl<'a> FnLowerer<'a> {
         lowered
     }
 
-    /// Returns the optional binding tested by an undefined comparison and
-    /// whether its payload is present in the true branch.
+    /// Returns the optional binding tested by an absence check and the branch
+    /// where narrowing applies. Kind 3 keeps null after excluding undefined
+    /// from a Nullish payload.
     fn optional_undefined_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool, u8)> {
         if let Some((name, predicate)) = self.predicate_call_target(expr) {
             if matches!(self.scope.get(&name), Some(HirType::Optional(payload)) if payload.as_ref() == &predicate)
@@ -631,15 +666,18 @@ impl<'a> FnLowerer<'a> {
                 HirType::Nullish(payload) => (payload.as_ref().clone(), 2),
                 _ => return None,
             };
-            // `typeof x === "undefined"` -- x is *absent* when the test
-            // holds (only meaningful for the `undefined`-carrying kinds).
+            // Excluding undefined from Nullish<T> leaves T | null. Keep
+            // the null tag until a later guard excludes it too.
             if type_lit.value == *"undefined" && absence_kind != 1 {
-                return Some((name, payload, present_when_true, absence_kind));
+                return Some((name, payload, present_when_true,
+                    if absence_kind == 2 { 3 } else { absence_kind }));
             }
-            // `typeof x === "<payload's own type>"` -- x is *present*
-            // when the test holds (inverting `present_when_true`, which
-            // was computed for the `=== undefined` sense).
             if native_typeof_name(&payload).is_some_and(|kind| type_lit.value == *kind) {
+                // JavaScript reports null as "object", so that test cannot
+                // extract an object payload from Nullable/Nullish.
+                if type_lit.value == *"object" && absence_kind != 0 {
+                    return (absence_kind == 2).then_some((name, payload, !present_when_true, 3));
+                }
                 return Some((name, payload, !present_when_true, absence_kind));
             }
             return None;
@@ -663,7 +701,8 @@ impl<'a> FnLowerer<'a> {
             (HirType::Optional(payload), false) => (payload, 0),
             (HirType::Nullable(payload), true) => (payload, 1),
             (HirType::Nullish(payload), _)
-                if matches!(binary.op, BinaryOp::EqEq | BinaryOp::NotEq) =>
+                if matches!(binary.op, BinaryOp::EqEq | BinaryOp::NotEq)
+                    || (self.partial_nullable_narrowings.contains_key(&name) && nullable) =>
             {
                 (payload, 2)
             }
