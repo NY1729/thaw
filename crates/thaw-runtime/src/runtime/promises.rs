@@ -1,9 +1,50 @@
+/// Private, source-proven exception tuple. This is pointer-aligned arena
+/// storage; user objects cannot acquire this type by matching its fields.
+#[repr(C)]
+pub struct ExceptionProvenance {
+    pub original: *const u8,
+    pub native_text: *const u8,
+    pub aggregate_errors: *const u8,
+    pub tag: u64,
+    pub f64_value: f64,
+    pub i64_value: i64,
+    pub bool_value: u64,
+    pub object: *const u8,
+}
+const _: [(); 64] = [(); std::mem::size_of::<ExceptionProvenance>()];
+
+/// Allocates one immutable compiler-private tuple. Null means allocation
+/// failed, not a provenance-free value. The caller must handle that failure.
+#[no_mangle]
+pub extern "C" fn thaw_exception_provenance_new(
+    original: *const u8,
+    native_text: *const u8,
+    aggregate_errors: *const u8,
+    tag: u64,
+    f64_value: f64,
+    i64_value: i64,
+    bool_value: u64,
+    object: *const u8,
+) -> *const ExceptionProvenance {
+    let allocation = thaw_arena::thaw_arena_alloc(
+        std::mem::size_of::<ExceptionProvenance>(),
+        std::mem::align_of::<ExceptionProvenance>(),
+    ).cast::<ExceptionProvenance>();
+    if allocation.is_null() { return std::ptr::null(); }
+    unsafe { allocation.write(ExceptionProvenance {
+        original, native_text, aggregate_errors, tag, f64_value, i64_value,
+        bool_value, object,
+    }) };
+    allocation
+}
+
 /// Allocates an unresolved promise. Pair every successful call with
 /// `thaw_promise_destroy` after no coroutine can reference the handle.
 #[no_mangle]
 pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
     let promise = Box::into_raw(Box::new(ThawPromise {
         result: None,
+        fulfilled_provenance: std::ptr::null(),
         rejection_text: None,
         rejected: false,
         exception_tag: 0,
@@ -90,7 +131,45 @@ pub unsafe extern "C" fn thaw_promise_subscribe(
 /// registration order. Returns 0 for a null handle or repeated resolution.
 #[no_mangle]
 pub extern "C" fn thaw_promise_resolve(promise: *mut ThawPromise, result: *const u8) -> u8 {
-    settle_promise(promise, result, false)
+    settle_promise(promise, result, false, std::ptr::null())
+}
+
+/// Compiler-private fulfillment with a trusted provenance record. The record
+/// is attached only if this call wins settlement. Repeated calls return zero.
+///
+/// # Safety
+/// `promise` must be null or a live Promise, and `provenance` null or a live
+/// `ExceptionProvenance` in the invocation arena.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_resolve_with_provenance(
+    promise: *mut ThawPromise,
+    result: *const u8,
+    provenance: *const ExceptionProvenance,
+) -> u8 {
+    settle_promise(promise, result, false, provenance)
+}
+
+/// Returns the record attached to an already fulfilled promise, or null.
+/// Rejected, pending, and invalid promises never expose a fulfilled record.
+///
+/// # Safety
+/// `promise` must be null or a live Promise.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_fulfilled_provenance(
+    promise: *const ThawPromise,
+) -> *const ExceptionProvenance {
+    let Some(promise) = (unsafe { promise.as_ref() }) else { return std::ptr::null(); };
+    if promise.result.is_none() || promise.rejected { return std::ptr::null(); }
+    promise.fulfilled_provenance
+}
+
+fn forward_promise_fulfillment(
+    output: *mut ThawPromise,
+    input: *const ThawPromise,
+    result: *const u8,
+) -> u8 {
+    let record = unsafe { thaw_promise_fulfilled_provenance(input) };
+    unsafe { thaw_promise_resolve_with_provenance(output, result, record) }
 }
 
 /// Rejects a promise exactly once and queues all subscribers. The error is an
@@ -98,7 +177,7 @@ pub extern "C" fn thaw_promise_resolve(promise: *mut ThawPromise, result: *const
 /// fulfilled result. Returns 0 for a null handle or repeated settlement.
 #[no_mangle]
 pub extern "C" fn thaw_promise_reject(promise: *mut ThawPromise, error: *const u8) -> u8 {
-    settle_promise(promise, error, true)
+    settle_promise(promise, error, true, std::ptr::null())
 }
 
 /// Native runtime error producers call this only for known native/C strings.
@@ -113,7 +192,7 @@ pub unsafe extern "C" fn thaw_promise_reject_native_text(promise: *mut ThawPromi
 fn reject_native_text(promise: *mut ThawPromise, error: *const u8) -> u8 {
     let text = (!error.is_null())
         .then(|| unsafe { CStr::from_ptr(error.cast()).to_bytes().to_vec() });
-    if settle_promise(promise, error, true) == 0 { return 0; }
+    if settle_promise(promise, error, true, std::ptr::null()) == 0 { return 0; }
     unsafe { (*promise).rejection_text = text; }
     1
 }
@@ -132,7 +211,7 @@ pub unsafe extern "C" fn thaw_promise_reject_typed(
     bool_value: bool,
     object: *const u8,
 ) -> u8 {
-    if settle_promise(promise, error, true) == 0 {
+    if settle_promise(promise, error, true, std::ptr::null()) == 0 {
         return 0;
     }
     let promise = unsafe { &mut *promise };
@@ -390,7 +469,7 @@ extern "C" fn resume_promise_chain(frame: *mut u8, result: *const u8) {
     } else if rejected {
         forward_promise_rejection(state.output, state.input, result);
     } else {
-        thaw_promise_resolve(state.output, result);
+        forward_promise_fulfillment(state.output, state.input, result);
     }
     unsafe { thaw_promise_destroy(state.input) };
 }
@@ -436,7 +515,7 @@ extern "C" fn resume_promise_adopt(frame: *mut u8, result: *const u8) {
     if unsafe { thaw_promise_state(state.input) } == 2 {
         forward_promise_rejection(state.output, state.input, result);
     } else {
-        thaw_promise_resolve(state.output, result);
+        forward_promise_fulfillment(state.output, state.input, result);
     }
     unsafe { thaw_promise_destroy(state.input) };
 }
@@ -559,6 +638,7 @@ struct PromiseFinallyAdoptState {
     original_bool: bool,
     original_object: *const u8,
     original_aggregate_errors: *const u8,
+    original_provenance: *const ExceptionProvenance,
     original_text: Option<Vec<u8>>,
     original_roots: Vec<(usize, thaw_arena::ArenaRoot)>,
     cancelled: bool,
@@ -592,7 +672,9 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
             }
         }
     } else {
-        thaw_promise_resolve(state.output, state.original);
+        unsafe { thaw_promise_resolve_with_provenance(
+            state.output, state.original, state.original_provenance,
+        ) };
     }
     unsafe { thaw_promise_destroy(state.input) };
 }
@@ -654,8 +736,11 @@ fn finally_adopt_with_source(
     }
     let aggregate_errors = unsafe { source.as_ref() }
         .map_or(std::ptr::null(), |source| source.aggregate_errors);
+    let original_provenance = if original_rejected == 0 {
+        unsafe { thaw_promise_fulfilled_provenance(source) }
+    } else { std::ptr::null() };
     let mut original_roots = Vec::new();
-    for pointer in [original, original_object, aggregate_errors] {
+    for pointer in [original, original_object, aggregate_errors, original_provenance.cast()] {
         pin_promise_pointer_once(&mut original_roots, pointer as usize);
     }
     let state = Box::into_raw(Box::new(PromiseFinallyAdoptState {
@@ -669,6 +754,7 @@ fn finally_adopt_with_source(
         original_bool,
         original_object,
         original_aggregate_errors: aggregate_errors,
+        original_provenance,
         original_text: unsafe { source.as_ref() }.and_then(|source| source.rejection_text.clone()),
         original_roots,
         cancelled: false,
@@ -895,7 +981,7 @@ extern "C" fn resume_promise_race_child(frame: *mut u8, result: *const u8) {
         if unsafe { thaw_promise_state(child.promise) } == 2 {
             forward_promise_rejection(state.output, child.promise, result);
         } else {
-            thaw_promise_resolve(state.output, result);
+            forward_promise_fulfillment(state.output, child.promise, result);
         }
     }
     unsafe { thaw_promise_destroy(child.promise) };
@@ -1070,7 +1156,7 @@ extern "C" fn resume_promise_any_child(frame: *mut u8, result: *const u8) {
         if unsafe { thaw_promise_state(child.promise) } == 1 {
             state.fulfilled = true;
             state.reason_roots.clear();
-            thaw_promise_resolve(state.output, result);
+            forward_promise_fulfillment(state.output, child.promise, result);
         } else {
             let reason = promise_any_reason(unsafe { &*child.promise }, result);
             if let Some(reason) = reason {
@@ -1296,7 +1382,10 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     output
 }
 
-fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) -> u8 {
+fn settle_promise(
+    promise: *mut ThawPromise, result: *const u8, rejected: bool,
+    provenance: *const ExceptionProvenance,
+) -> u8 {
     let Some(promise) = (unsafe { promise.as_mut() }) else {
         return 0;
     };
@@ -1304,7 +1393,12 @@ fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) 
         return 0;
     }
     promise.result = Some(result);
-    thaw_arena::replace_reference(promise as *mut ThawPromise as usize, 0, result as usize);
+    let owner = promise as *mut ThawPromise as usize;
+    thaw_arena::replace_reference(owner, 0, result as usize);
+    if !rejected && !provenance.is_null() {
+        thaw_arena::replace_reference(owner, 0, provenance as usize);
+        promise.fulfilled_provenance = provenance;
+    }
     promise.rejected = rejected;
     let subscribers = std::mem::take(&mut promise.subscribers);
     for subscriber in subscribers {
