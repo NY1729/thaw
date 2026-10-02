@@ -2302,3 +2302,108 @@ fn http_server_reuse_callback_stays_bound_to_its_own_request() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn http_response_framing_keeps_pipelined_messages_aligned() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut requests = Vec::new();
+        for (method, path) in [("GET", "/explicit"), ("GET", "/empty"), ("HEAD", "/head"), ("GET", "/204"), ("GET", "/304"), ("GET", "/last")] {
+            requests.extend_from_slice(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes());
+        }
+        stream.write_all(&requests).unwrap();
+        fn read_head(stream: &mut TcpStream) -> String {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            String::from_utf8(head).unwrap()
+        }
+        let first = read_head(&mut stream);
+        assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "{first}");
+        assert!(first.contains("Transfer-Encoding: chunked\r\n"), "{first}");
+        let mut chunk = [0; 11];
+        stream.read_exact(&mut chunk).unwrap();
+        assert_eq!(&chunk, b"1\r\nx\r\n0\r\n\r\n");
+        let second = read_head(&mut stream);
+        assert!(second.contains("Transfer-Encoding: chunked\r\n"), "{second}");
+        stream.read_exact(&mut chunk).unwrap();
+        assert_eq!(&chunk, b"1\r\ny\r\n0\r\n\r\n");
+        let head = read_head(&mut stream);
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        assert!(head.contains("Content-Length: 4\r\n"), "{head}");
+        let no_content = read_head(&mut stream);
+        assert!(no_content.starts_with("HTTP/1.1 204 No Content\r\n"), "{no_content}");
+        let not_modified = read_head(&mut stream);
+        assert!(not_modified.starts_with("HTTP/1.1 304 Not Modified\r\n"), "{not_modified}");
+        let last = read_head(&mut stream);
+        assert!(last.starts_with("HTTP/1.1 200 OK\r\n"), "{last}");
+        assert!(last.contains("Content-Length: 2\r\n"), "{last}");
+        let mut body = [0; 2];
+        stream.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"ok");
+    });
+
+    let dir = temp_registry("builtin_http_response_framing");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'); module.exports = async function(port) {
+      var callbacks = [], guards = [], server = http.createServer(function(request, response) {
+        if (request.url === '/explicit') { response.setHeader('Transfer-Encoding', 'chunked'); response.writeHead(200); response.statusCode = 204; response.end('x'); }
+        else if (request.url === '/empty') { response.write('', function() { callbacks.push('empty-head'); }); response.write('', function() { callbacks.push('empty-no-packet'); }); response.write('y', function() { callbacks.push('data'); }); response.end(function() { callbacks.push('end'); }); }
+        else if (request.url === '/head') { response.setHeader('Content-Length', '4'); response.writeHead(200); for (var change of [function() { response.setHeader('X-Late', 'x'); }, function() { response.removeHeader('Content-Length'); }, function() { response.writeHead(201); }]) { try { change(); guards.push(false); } catch (error) { guards.push(error.code === 'ERR_HTTP_HEADERS_SENT'); } } response.write('drop'); response.end(); }
+        else if (request.url === '/204') { response.statusCode = 204; response.write('bad'); response.end(); }
+        else if (request.url === '/304') { response.statusCode = 304; response.setHeader('Transfer-Encoding', 'chunked'); response.write('bad'); response.end(); }
+        else response.end('ok', function() { server.close(); });
+      });
+      await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); });
+      return [callbacks.sort(), guards];
+    };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_response_framing_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpResponseFraming = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpResponseFraming").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["data","empty-head","empty-no-packet","end"],[true,true,true]]"#);
+    client.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_client_write_accepts_second_argument_callback() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_client_write_callback");
+    fs::write(dir.join("index.js"), "var http = require('node:http'); module.exports = async function() { var calls = 0, request = http.request('http://localhost/'); request.write(Buffer.from('x'), function() { calls++; }); await Promise.resolve(); return calls; };").unwrap();
+    let empty_node_modules = temp_registry("builtin_http_client_write_callback_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpClientWriteCallback = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpClientWriteCallback").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "1");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
