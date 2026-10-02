@@ -36,23 +36,63 @@ impl<'ctx> HirCompiler<'ctx> {
             .context
             .i64_type()
             .const_int(CLOSURE_CAPTURE_BASE, false);
-        let promise_slot = unsafe {
+        let state_slot = unsafe {
             self.builder
                 .build_in_bounds_gep(
                     self.context.i8_type(),
                     environment,
                     &[offset],
-                    "promise_capture",
+                    "resolver_state_capture",
                 )
                 .map_err(|error| error.to_string())?
         };
-        let promise = self
+        let state = self
             .builder
             .build_load(
                 self.context.ptr_type(AddressSpace::default()),
-                promise_slot,
-                "promise",
+                state_slot,
+                "resolver_state",
             )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let called_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    state,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "resolver_called_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let called = self
+            .builder
+            .build_load(self.context.i8_type(), called_slot, "resolver_called")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let first_call = self
+            .context
+            .append_basic_block(function, "resolver_first_call");
+        let complete = self.context.append_basic_block(function, "resolver_complete");
+        let uncalled = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                called,
+                self.context.i8_type().const_zero(),
+                "resolver_uncalled",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(uncalled, first_call, complete)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(first_call);
+        self.builder
+            .build_store(called_slot, self.context.i8_type().const_int(1, false))
+            .map_err(|error| error.to_string())?;
+        let promise = self
+            .builder
+            .build_load(self.context.ptr_type(AddressSpace::default()), state, "promise")
             .map_err(|error| error.to_string())?;
         let payload = if !reject && !assimilates && resolved == &HirType::Void {
             self.context.ptr_type(AddressSpace::default()).const_null()
@@ -60,7 +100,8 @@ impl<'ctx> HirCompiler<'ctx> {
             function.get_nth_param(1).unwrap().into_pointer_value()
         } else {
             let value = function.get_nth_param(1).unwrap();
-            let slot = self.allocate_arena_cell(self.basic_type(resolved)?, "promise_result")?;
+            let value_type = self.basic_type(resolved)?;
+            let slot = self.build_arena_cell(&self.builder, value_type, "promise_result")?;
             self.builder
                 .build_store(slot, value)
                 .map_err(|error| error.to_string())?;
@@ -101,6 +142,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?;
         }
+        self.builder
+            .build_unconditional_branch(complete)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(complete);
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(return_block);
         Ok(function)
@@ -125,6 +170,39 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap()
             .into_pointer_value();
+        // The two escaping resolver closures and the executor's thrown-error path
+        // must share the same first-call decision while adoption is still pending.
+        let resolver_state = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    self.context.i64_type().const_int(16, false).into(),
+                    self.context.i64_type().const_int(8, false).into(),
+                ],
+                "resolver_state",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("resolver state allocation returned no value")?
+            .into_pointer_value();
+        self.builder
+            .build_store(resolver_state, promise)
+            .map_err(|error| error.to_string())?;
+        let called_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    resolver_state,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "resolver_called_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(called_slot, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
         let executor = self.compile_expr(executor)?.into_pointer_value();
         let resolve_fn = self.compile_promise_resolver(resolved, false, assimilates, false)?;
         let reject_fn =
@@ -136,8 +214,8 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             vec![resolved.clone()]
         };
-        let resolve = self.allocate_special_closure(resolve_fn, promise, &resolve_params, "resolve_closure")?;
-        let reject = self.allocate_special_closure(reject_fn, promise, &[HirType::Str], "reject_closure")?;
+        let resolve = self.allocate_special_closure(resolve_fn, resolver_state, &resolve_params, "resolve_closure")?;
+        let reject = self.allocate_special_closure(reject_fn, resolver_state, &[HirType::Str], "reject_closure")?;
         let code = self
             .builder
             .build_load(
@@ -188,7 +266,34 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_conditional_branch(has_error, rejected, complete)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(rejected);
+        let called = self
+            .builder
+            .build_load(self.context.i8_type(), called_slot, "executor_resolver_called")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let reject_first = self.context.append_basic_block(function, "executor_reject_first");
+        let clear_error = self.context.append_basic_block(function, "executor_clear_error");
+        let uncalled = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                called,
+                self.context.i8_type().const_zero(),
+                "executor_resolver_uncalled",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(uncalled, reject_first, clear_error)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(reject_first);
+        self.builder
+            .build_store(called_slot, self.context.i8_type().const_int(1, false))
+            .map_err(|error| error.to_string())?;
         self.reject_promise_with_pending_exception(promise, pending, "reject_executor_throw")?;
+        self.builder
+            .build_unconditional_branch(clear_error)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(clear_error);
         self.builder
             .build_store(
                 pending_slot,
