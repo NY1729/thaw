@@ -5952,3 +5952,54 @@ fn worker_transport_codec_preserves_sparse_array_slots_and_graph_references() {
         "[6,false,true,false,true,false,false,true,true,true,true,3,0]"
     );
 }
+
+#[test]
+fn event_target_skips_listeners_removed_during_dispatch() {
+    assert_eq!(
+        load(r#"function removedDuringDispatch() {
+            const removed = new EventTarget(), removedCalls = [];
+            const oldB = () => removedCalls.push('b');
+            removed.addEventListener('work', () => { removedCalls.push('a'); removed.removeEventListener('work', oldB); });
+            removed.addEventListener('work', oldB);
+            removed.dispatchEvent(new Event('work'));
+
+            const readded = new EventTarget(), readdedCalls = [];
+            const nextB = () => readdedCalls.push('b');
+            const late = () => readdedCalls.push('late');
+            let first = true;
+            readded.addEventListener('work', () => {
+                readdedCalls.push('a');
+                if (first) {
+                    first = false;
+                    readded.removeEventListener('work', nextB);
+                    readded.addEventListener('work', nextB);
+                    readded.addEventListener('work', late);
+                }
+            });
+            readded.addEventListener('work', nextB);
+            readded.dispatchEvent(new Event('work'));
+            const firstDispatch = readdedCalls.join(',');
+            readded.dispatchEvent(new Event('work'));
+
+            const nested = new EventTarget();
+            let onceCount = 0;
+            nested.addEventListener('work', () => {
+                onceCount++;
+                nested.dispatchEvent(new Event('work'));
+            }, { once: true });
+            nested.dispatchEvent(new Event('work'));
+
+            const changed = new EventTarget(), changedCalls = [];
+            changed.addEventListener('work', event => { changedCalls.push('first'); event.type = 'other'; });
+            changed.addEventListener('work', () => changedCalls.push('second'), { once: true });
+            changed.dispatchEvent(new Event('work'));
+            changed.dispatchEvent(new Event('work'));
+            return [removedCalls.join(','), firstDispatch, readdedCalls.join(','), onceCount, changedCalls.join(',')];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("removedDuringDispatch", "[]"),
+        r#"["a","a","a,a,b,late",1,"first,second,first"]"#
+    );
+}

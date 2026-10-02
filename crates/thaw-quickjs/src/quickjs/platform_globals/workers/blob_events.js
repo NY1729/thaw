@@ -85,9 +85,12 @@
         event.target = this;
         event.currentTarget = this;
         event.__thawImmediateStopped = false;
-        const listeners = (this.__thawListeners.get(event.type) || []).slice();
+        const type = event.type;
+        const listeners = (this.__thawListeners.get(type) || []).slice();
         for (const entry of listeners) {
-          if (entry.once) this.removeEventListener(event.type, entry.callback);
+          // ponytail: scan the live list; use removal flags if dispatch lists grow large.
+          if (!(this.__thawListeners.get(type) || []).includes(entry)) continue;
+          if (entry.once) this.removeEventListener(type, entry.callback);
           if (typeof entry.callback === 'function') entry.callback.call(this, event);
           else entry.callback.handleEvent(event);
           if (event.__thawImmediateStopped) break;
