@@ -40,6 +40,8 @@ struct ResolvedPackage {
     /// at all -- both are bound purely by an `import *`).
     namespace_self_aliases: std::collections::HashSet<String>,
     type_only_exports: std::collections::HashSet<String>,
+    /// Source-owned support shapes: never public named imports or runtime values.
+    internal_support_classes: std::collections::HashSet<String>,
     /// Explicit type exports with no corresponding public value export.
     /// Their class instance signatures remain available, but they do not
     /// have a constructor, static member, or module value at runtime.

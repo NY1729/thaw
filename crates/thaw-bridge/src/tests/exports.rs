@@ -1202,3 +1202,122 @@ fn reserved_callable_let_and_var_aliases_keep_their_own_types() {
     assert_eq!(null.ret, DtsType::Native(HirType::F64));
     assert!(!functions.iter().any(|function| function.name.starts_with("__thaw_public_")));
 }
+
+#[test]
+fn internal_support_namespace_retains_class_shape_without_runtime_members() {
+    // Unrun regression: an exact internal marker hides only the generated
+    // namespace's values. An ordinary unexported namespace stays observable.
+    let source = "declare namespace __thaw_support_abc {\n\
+        type __thaw_private_support_marker__ = never;\n\
+        export class Base { inherited(): string; }\n\
+    }\n\
+    export declare class Public extends __thaw_support_abc.Base {}\n\
+    declare namespace Normal { export class Live {} }\n";
+    let filename = thaw_parser::common::FileName::Custom("support-test.d.ts".into());
+    let support = internal_support_namespace_names_named(source, &filename);
+    assert_eq!(support, std::collections::HashSet::from(["__thaw_support_abc".to_string()]));
+    let nested = nested_namespace_members_named(source, &filename);
+    assert!(!nested.contains_key("__thaw_support_abc"));
+    assert!(nested.contains_key("Normal"));
+    let classes = parse_dts_classes_named(source, &filename).unwrap();
+    let public = classes.iter().find(|class| class.name == "Public").unwrap();
+    assert!(public.methods.iter().any(|method| method.name == "inherited"));
+    assert!(classes.iter().any(|class| class.name == "__thaw_support_abc.Base"));
+}
+
+#[test]
+fn marked_owned_origin_namespace_keeps_shape_without_runtime_capture() {
+    // Unrun: exact marker, not the reserved prefix, suppresses runtime
+    // namespace enumeration; public alias remains available separately.
+    let source = "declare namespace __thaw_owned_abcd {\n\
+        type __thaw_owned_origin_marker_abcd = never;\n\
+        export namespace Source { export class Client { run(): string; } }\n\
+    }\n\
+    declare namespace __thaw_owned_user { export class Live {} }\n\
+    declare namespace api { export import Client = __thaw_owned_abcd.Source.Client; }\n";
+    let filename = thaw_parser::common::FileName::Custom("owned-origin-marker.d.ts".into());
+    let owned = internal_owned_namespace_names_named(source, &filename);
+    assert_eq!(owned, std::collections::HashSet::from(["__thaw_owned_abcd".to_string()]));
+    let nested = nested_namespace_members_named(source, &filename);
+    assert!(!nested.contains_key("__thaw_owned_abcd"));
+    assert!(nested.contains_key("__thaw_owned_user"));
+    assert!(nested.contains_key("api"));
+    let classes = parse_dts_classes_named(source, &filename).unwrap();
+    assert!(classes.iter().any(|class| class.name == "__thaw_owned_abcd.Source.Client"));
+}
+
+#[test]
+fn nested_type_only_namespace_class_has_shape_without_runtime_member() {
+    // Unrun: a public parent does not turn an explicitly type-only child
+    // into a runtime class property.
+    let source = "declare namespace parts {\n\
+        export namespace Shapes {\n\
+            type __thaw_type_only_namespace_marker_0123456789abcdef = never;\n\
+            export class Model { id: string; }\n\
+        }\n\
+        export class Live {}\n\
+    }\n";
+    let filename = thaw_parser::common::FileName::Custom("nested-type-only.d.ts".into());
+    let type_only = type_only_namespace_names_named(source, &filename);
+    assert!(type_only.contains("parts.Shapes"), "{type_only:?}");
+    let nested = nested_namespace_members_named(source, &filename);
+    assert!(!nested.get("parts").is_some_and(|members| members.contains_key("Shapes.Model")));
+    assert!(nested.get("parts").is_some_and(|members| members.contains_key("Live")));
+    let classes = parse_dts_classes_named(source, &filename).unwrap();
+    assert!(classes.iter().any(|class| class.name == "parts.Shapes.Model"));
+}
+
+#[test]
+fn qualified_import_equals_exposes_direct_function() {
+    // Unrun: copying only `Owner.make.*` descendants misses `make` itself.
+    let source = "declare namespace __thaw_owned_a {\n\
+        type __thaw_owned_origin_marker_a = never;\n\
+        export function make(value: string): string;\n\
+    }\n\
+    declare namespace api { export import create = __thaw_owned_a.make; }\n";
+    let functions = parse_dts(source).unwrap();
+    assert!(functions.iter().any(|function| function.name == "api.create"));
+}
+
+#[test]
+fn scoped_composite_properties_keep_instance_and_generic_constructor_roles() {
+    // Unrun: a projected generic property retains its type arguments.
+    // Only the property explicitly declared `typeof C` is constructible;
+    // the adjacent `instance: C` remains an ordinary value.
+    let source = "declare namespace __thaw_support_abc {\n\
+        type __thaw_private_support_marker__ = never;\n\
+        export class C { constructor(name: string); }\n\
+        export interface Constructor<U> { new (value: U): C; }\n\
+        export interface Members<T> { item: T; instance: C; ctor: typeof __thaw_support_abc.C; factory: Constructor<T>; }\n\
+    }\n\
+    declare namespace api {\n\
+        export const item: __thaw_support_abc.Members<string>[\"item\"];\n\
+        export const instance: __thaw_support_abc.Members<string>[\"instance\"];\n\
+        export const ctor: __thaw_support_abc.Members<string>[\"ctor\"];\n\
+        export const factory: __thaw_support_abc.Members<string>[\"factory\"];\n\
+    }\n";
+    let classes = parse_dts_classes(source).unwrap();
+    assert!(classes.iter().any(|class|
+        class.name == "api.ctor" && class.constructible));
+    let factory = classes.iter().find(|class| class.name == "api.factory").unwrap();
+    assert!(factory.constructible);
+    assert_eq!(factory.constructors[0].params[0].1, DtsType::Native(HirType::Str));
+    assert!(!classes.iter().any(|class|
+        class.name == "api.instance" && class.constructible));
+    assert!(!classes.iter().any(|class|
+        class.name == "api.item" && class.constructible));
+}
+
+#[test]
+fn scoped_import_equals_alias_preserves_ordinary_value_type() {
+    // Unrun: selected owner containers expose an ordinary const through
+    // a public qualified import-equals alias, not only functions/classes.
+    let source = "declare namespace __thaw_owned_a {\n\
+        type __thaw_owned_origin_marker_a = never;\n\
+        export const version: string;\n\
+    }\n\
+    declare namespace api { export import version = __thaw_owned_a.version; }\n";
+    let values = parse_dts_values(source).unwrap();
+    assert!(values.iter().any(|value|
+        value.name == "api.version" && value.ty == DtsType::Native(HirType::Str)));
+}

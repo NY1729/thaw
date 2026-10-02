@@ -1579,6 +1579,37 @@ fn type_only_namespace_gates_nested_class_runtime_value() {
 }
 
 #[test]
+fn scoped_type_only_namespace_keeps_class_shape_without_constructor_capture() {
+    // Unrun: `parts` remains a live namespace, but its marked Shapes child
+    // contributes only instance type shape, not a runtime class value.
+    let source = r#"
+        declare namespace parts {
+            export namespace Shapes {
+                type __thaw_type_only_namespace_marker_0123456789abcdef = never;
+                export class Model { constructor(); method(): string; static create(): Model; }
+            }
+            export class Live { constructor(); }
+        }
+    "#;
+    let type_only = thaw_bridge::type_only_namespace_names(source);
+    assert!(type_only.contains("parts.Shapes"));
+    let nested = thaw_bridge::nested_namespace_members(source);
+    assert!(!nested["parts"].contains_key("Shapes.Model"));
+    assert!(nested["parts"].contains_key("Live"));
+    let mut classes = thaw_bridge::parse_dts_classes(source).unwrap();
+    let only_types = classes.iter().filter(|class|
+        type_only.iter().any(|namespace| class.name.starts_with(&format!("{namespace}."))))
+        .map(|class| class.name.clone()).collect();
+    restrict_type_only_class_values(&mut classes, &only_types);
+    let model = classes.iter().find(|class| class.name == "parts.Shapes.Model").unwrap();
+    assert!(!model.constructible);
+    assert!(model.methods.iter().any(|method| method.name == "method"));
+    assert!(!model.methods.iter().any(|method| method.is_static));
+    let live = classes.iter().find(|class| class.name == "parts.Live").unwrap();
+    assert!(live.constructible);
+}
+
+#[test]
 fn qualified_namespace_functions_keep_separate_runtime_keys() {
     // Unrun regression: two live `make` methods are distinct, while a
     // type-only namespace contributes no captured runtime member.
