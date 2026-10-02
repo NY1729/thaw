@@ -177,7 +177,7 @@ fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
     } else if matches!(left, JitKind::Number | JitKind::Boolean)
         && matches!(right, JitKind::Number | JitKind::Boolean)
     {
-        Some(JitKind::Boolean)
+        Some(JitKind::Dynamic)
     } else if matches!(
         (left, right),
         (JitKind::Number, JitKind::String)

@@ -3230,3 +3230,37 @@ fn external_native_addons_keep_colliding_package_names_in_separate_sidecars() {
     assert!(native_addon_path_component(&"a".repeat(214)).len() <= 255);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn mixed_number_boolean_ternaries_stringify_the_selected_jit_value() {
+    // Unrun regression: both branch orders must retain their scalar tag
+    // through JIT normalization before the surrounding string addition.
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-jit-number-bool-string-{}", std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("mixed-scalar-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numberFirst(flag: boolean): string;\nexport declare function booleanFirst(flag: boolean): string;\n",
+    ).unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.numberFirst = flag => '' + (flag ? 42 : false); module.exports.booleanFirst = flag => '' + (flag ? false : 42);\n",
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numberFirst, booleanFirst } from 'mixed-scalar-kit';\nfunction main(): void { console.log(numberFirst(true)); console.log(numberFirst(false)); console.log(booleanFirst(true)); console.log(booleanFirst(false)); }\n",
+    ).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nfalse\nfalse\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
