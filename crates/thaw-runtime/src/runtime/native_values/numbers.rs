@@ -495,6 +495,14 @@ fn javascript_parse_int(text: &str, radix: f64) -> f64 {
     if radix == 16 && has_hex_prefix {
         text = &text[2..];
     }
+    if matches!(radix, 2 | 4 | 8 | 16 | 32) {
+        let end = text.char_indices()
+            .take_while(|(_, character)| character.to_digit(radix).is_some())
+            .map(|(index, character)| index + character.len_utf8())
+            .last().unwrap_or(0);
+        let value = power_of_two_radix_number(&text[..end], radix.trailing_zeros() as usize);
+        return if negative { -value } else { value };
+    }
     let mut value = 0.0;
     let mut digits = 0;
     for character in text.chars() {
@@ -1397,4 +1405,29 @@ pub unsafe extern "C" fn thaw_math_sum_precise(
         });
     }
     1
+}
+
+#[cfg(test)]
+mod parse_int_power_radix_tests {
+    use super::*;
+
+    #[test]
+    fn parse_int_rounds_power_of_two_radices_after_all_digits() {
+        let integer = 0x2000000000000101_u64;
+        let expected = 2_305_843_009_213_694_464.0_f64;
+        for radix in [2_u32, 4, 8, 16, 32] {
+            let mut remaining = integer;
+            let mut digits = Vec::new();
+            while remaining != 0 {
+                digits.push(char::from_digit((remaining % u64::from(radix)) as u32, radix).unwrap());
+                remaining /= u64::from(radix);
+            }
+            let digits: String = digits.into_iter().rev().collect();
+            assert_eq!(javascript_parse_int(&digits, f64::from(radix)), expected);
+            assert_eq!(javascript_parse_int(&format!("-{digits}!ignored"), f64::from(radix)), -expected);
+        }
+        assert_eq!(javascript_parse_int("0x2000000000000101suffix", 0.0), expected);
+        assert_eq!(javascript_parse_int("-0", 2.0).to_bits(), (-0.0_f64).to_bits());
+        assert!(javascript_parse_int("!", 32.0).is_nan());
+    }
 }
