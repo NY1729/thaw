@@ -2766,3 +2766,23 @@ fn explicit_null_exception_tag_reports_null_without_reading_an_opaque_pointer() 
     assert_eq!(promise_report_bytes(unsafe { &*promise }).as_slice(), b"null");
     unsafe { thaw_promise_destroy(promise) };
 }
+
+#[test]
+fn promise_any_errors_handle_is_rooted_with_live_promise() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let promise = thaw_promise_new();
+    let root = thaw_arena::ArenaRoot::new(promise as usize);
+    let errors = promise_any_errors(&[]);
+    assert!(!errors.is_null());
+    let text = c"AggregateError".as_ptr().cast::<u8>();
+    assert_eq!(unsafe { thaw_promise_reject_typed_with_aggregate(
+        promise, text, 0, 0.0, 0, false, std::ptr::null(), text, errors,
+    ) }, 1);
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(errors as usize));
+    assert_eq!(unsafe { thaw_promise_exception_aggregate_errors(promise) }, errors);
+    unsafe { thaw_promise_destroy(promise) };
+    drop(root);
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(errors as usize));
+}
