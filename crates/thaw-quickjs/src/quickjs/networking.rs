@@ -59,26 +59,40 @@ fn net_shutdown_write(handle: u32) -> String {
 fn net_poll_read(handle: u32) -> String {
     NET_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
-        let Some(stream) = streams.1.get_mut(&handle) else {
-            return "err:socket is closed".to_string();
-        };
-        if let Err(error) = stream.set_nonblocking(true) {
-            return format!("err:{error}");
-        }
         let mut value = vec![0u8; 16 * 1024];
-        let result = stream.read(&mut value);
-        let _ = stream.set_nonblocking(false);
-        match result {
-            Ok(0) => {
+        let outcome = {
+            let Some(stream) = streams.1.get_mut(&handle) else {
+                return "err:socket is closed".to_string();
+            };
+            match stream.set_nonblocking(true) {
+                Err(error) => Err(error),
+                Ok(()) => {
+                    let read = stream.read(&mut value);
+                    let restore = stream.set_nonblocking(false);
+                    match read {
+                        Ok(length) => restore.map(|_| Some(length)),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            restore.map(|_| None)
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+            }
+        };
+        match outcome {
+            Ok(Some(0)) => {
                 streams.1.remove(&handle);
                 "eof".to_string()
             }
-            Ok(length) => {
+            Ok(Some(length)) => {
                 value.truncate(length);
                 format!("ok:{}", hex_encode(&value))
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => "pending".to_string(),
-            Err(error) => format!("err:{error}"),
+            Ok(None) => "pending".to_string(),
+            Err(error) => {
+                streams.1.remove(&handle);
+                format!("err:{error}")
+            }
         }
     })
 }
@@ -977,3 +991,43 @@ fn tls_alpn(_: u32) -> String { String::new() }
 fn tls_certificate(_: u32, _: bool) -> String { String::new() }
 #[cfg(not(feature = "tls"))]
 fn tls_certificate_metadata(_: u32, _: bool) -> String { "{}".to_string() }
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn net_poll_read_retires_stream_after_peer_reset() {
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connected = net_connect("127.0.0.1", port);
+    let handle: u32 = connected.strip_prefix("ok:").unwrap().parse().unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    let configured = unsafe {
+        libc::setsockopt(
+            peer.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&linger as *const libc::linger).cast(),
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(configured, 0);
+    drop(peer);
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let outcome = loop {
+        let outcome = net_poll_read(handle);
+        if outcome != "pending" || Instant::now() >= deadline {
+            break outcome;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(outcome.starts_with("err:"), "{outcome}");
+    assert_eq!(net_poll_read(handle), "err:socket is closed");
+    NET_STREAMS.with(|streams| assert!(!streams.borrow().1.contains_key(&handle)));
+}
