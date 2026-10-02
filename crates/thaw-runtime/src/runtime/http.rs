@@ -292,7 +292,7 @@ fn tls_interests(task: *mut AsyncHttpGet) -> u8 {
 fn async_http_error(task: *mut AsyncHttpGet, message: String) {
     let task = unsafe { Box::from_raw(task) };
     let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
-    thaw_promise_reject(task.completion, error);
+    reject_native_text(task.completion, error);
 }
 
 fn arena_c_string(value: &str) -> Option<*const u8> {
@@ -554,7 +554,7 @@ fn async_http_finish(task: *mut AsyncHttpGet, response: ParsedHttpResponse) {
         let message = format!("HTTP request failed with status {}", response.status);
         drop(task);
         let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
-        thaw_promise_reject(completion, error);
+        reject_native_text(completion, error);
         return;
     }
     let body = std::str::from_utf8(&response.body)
@@ -567,13 +567,13 @@ fn async_http_finish(task: *mut AsyncHttpGet, response: ParsedHttpResponse) {
             if let Some(result_slot) = arena_pointer_slot(body) {
                 thaw_promise_resolve(completion, result_slot);
             } else {
-                thaw_promise_reject(completion, INVALID_FD_ERROR.as_ptr());
+                reject_native_text(completion, INVALID_FD_ERROR.as_ptr());
             }
         }
         Err(_) => {
             let error = arena_c_string("HTTP body contains a NUL byte")
                 .unwrap_or(INVALID_FD_ERROR.as_ptr());
-            thaw_promise_reject(completion, error);
+            reject_native_text(completion, error);
         }
     }
 }
@@ -937,7 +937,7 @@ fn thaw_http_get_async_with_config(
         Ok(task) => schedule_async_http(task, THAW_FD_READABLE),
         Err(message) => {
             let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
-            thaw_promise_reject(completion, error);
+            reject_native_text(completion, error);
         }
     }
     completion

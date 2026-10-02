@@ -35,6 +35,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let entry = self.context.append_basic_block(ramp, "entry");
         self.builder.position_at_end(entry);
         self.variables.clear();
+        self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
         self.catch_stack.clear();
@@ -81,6 +82,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(waiting_slot, ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
         self.bind_async_frame_locals(frame, plan)?;
+        // Arena allocation is not zeroed outside tracing mode. Initialize
+        // compiler-private provenance before any source statement executes.
+        for (_, native_slot) in self.catch_native_text.values() {
+            self.builder.build_store(*native_slot, ptr_ty.const_null())
+                .map_err(|error| error.to_string())?;
+        }
         for (index, (param_value, param)) in ramp.get_param_iter().zip(&func.params).enumerate() {
             if index < plan.captures.len() {
                 let capture_slot = self.async_frame_field(
@@ -111,6 +118,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let resume_entry = self.context.append_basic_block(resume, "entry");
         self.builder.position_at_end(resume_entry);
         self.variables.clear();
+        self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
         self.catch_stack.clear();
@@ -238,21 +246,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(slot, self.context.bool_type().const_zero())
                     .map_err(|e| e.to_string())?;
             }
-            let binding_index = plan
-                .locals
-                .iter()
-                .position(|(local, _)| local == &handler.catch_binding)
-                .ok_or_else(|| {
-                    format!("missing async catch binding `{}`", handler.catch_binding)
-                })?;
-            let binding_slot = self.async_frame_field(
-                resume_frame,
-                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * binding_index as u64,
-                &format!("frame_{}", handler.catch_binding),
-            )?;
-            self.builder
-                .build_store(binding_slot, resume_result)
+            let binding_slot = self.catch_native_text.get(&handler.catch_binding)
+                .map(|(binding, _)| *binding)
+                .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
+            let native_text = self.builder.build_call(
+                self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+                &[waiting.into()], "caught_promise_native_text",
+            ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+                .ok_or("native text copy returned no value")?.into_pointer_value();
+            let has_native_text = self.builder.build_is_not_null(native_text, "caught_native_text_present")
                 .map_err(|e| e.to_string())?;
+            let caught_value = self.builder.build_select(
+                has_native_text, native_text, resume_result, "caught_promise_value",
+            ).map_err(|e| e.to_string())?;
+            self.builder.build_store(binding_slot, caught_value)
+                .map_err(|e| e.to_string())?;
+            let native_slot = self.catch_native_text.get(&handler.catch_binding)
+                .map(|(_, native)| *native)
+                .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
+            self.builder.build_store(native_slot, native_text).map_err(|e| e.to_string())?;
             for (suffix, getter) in [
                 ("object", "thaw_promise_exception_object"),
                 ("tag", "thaw_promise_exception_tag"),
@@ -362,6 +374,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, block) in case_blocks.into_iter().enumerate() {
             self.builder.position_at_end(block);
             self.variables.clear();
+            self.catch_native_text.clear();
             self.variable_hir_types.clear();
             self.arena_variables.clear();
             self.catch_stack.clear();
@@ -538,6 +551,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
                 .map_err(|e| e.to_string())?;
+            self.clear_pending_native_text()?;
             self.builder
                 .build_store(self.pending_exception_object().as_pointer_value(), ptr_ty.const_null())
                 .map_err(|e| e.to_string())?;
@@ -655,6 +669,7 @@ impl<'ctx> HirCompiler<'ctx> {
         frame: PointerValue<'ctx>,
         plan: &FrameAsyncPlan,
     ) -> Result<(), String> {
+        self.catch_native_text.clear();
         for (index, (name, ty)) in plan.locals.iter().enumerate() {
             let slot = self.async_frame_field(
                 frame,
@@ -665,6 +680,14 @@ impl<'ctx> HirCompiler<'ctx> {
             self.variables
                 .insert(name.clone(), (slot, self.basic_type(ty)?));
             self.variable_hir_types.insert(name.clone(), ty.clone());
+        }
+        for binding in &plan.generated_catch_bindings {
+            let name = Self::async_catch_native_name(binding);
+            let catch_slot = self.variables.get(binding).map(|(slot, _)| *slot)
+                .ok_or_else(|| format!("missing async catch binding `{binding}`"))?;
+            let native_slot = self.variables.get(&name).map(|(slot, _)| *slot)
+                .ok_or_else(|| format!("missing async native text cell `{name}`"))?;
+            self.catch_native_text.insert(binding.clone(), (catch_slot, native_slot));
         }
         Ok(())
     }
@@ -776,15 +799,11 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|e| e.to_string())?;
                     self.builder.position_at_end(return_block);
                     match value {
-                        Some(HirExpr::ThrowValue(error, _)) => {
-                            let error = self.compile_expr(error)?.into_pointer_value();
-                            self.builder
-                                .build_call(
-                                    self.module.get_function("thaw_promise_reject").unwrap(),
-                                    &[completion.into(), error.into()],
-                                    "reject_throw_value",
-                                )
-                                .map_err(|error| error.to_string())?;
+                        Some(HirExpr::ThrowValue(error_expr, _)) => {
+                            let error = self.compile_expr(error_expr)?.into_pointer_value();
+                            self.reject_caught_or_opaque_value(
+                                completion, error, error_expr, "reject_throw_value",
+                            )?;
                             if function.get_type().get_return_type().is_some() {
                                 self.builder
                                     .build_return(Some(&completion))
@@ -828,7 +847,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                     continue;
                 }
-                if let Some((HirStmt::Throw(error), expected)) = guarded {
+                if let Some((HirStmt::Throw(error_expr), expected)) = guarded {
                     let enclosing_handler = match guard {
                         HirExpr::Var(name) => plan.guarded_rethrow_handlers.get(name).cloned(),
                         _ => None,
@@ -848,7 +867,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .build_conditional_branch(condition, reject, continue_block)
                         .map_err(|e| e.to_string())?;
                     self.builder.position_at_end(reject);
-                    let error = self.compile_expr(error)?.into_pointer_value();
+                    let error = self.compile_expr(error_expr)?.into_pointer_value();
                     if let Some(handler) = enclosing_handler {
                         let catch_index = plan
                             .locals
@@ -892,13 +911,9 @@ impl<'ctx> HirCompiler<'ctx> {
                             .build_unconditional_branch(continue_block)
                             .map_err(|e| e.to_string())?;
                     } else {
-                        self.builder
-                            .build_call(
-                                self.module.get_function("thaw_promise_reject").unwrap(),
-                                &[completion.into(), error.into()],
-                                "rethrow_rejection",
-                            )
-                            .map_err(|e| e.to_string())?;
+                        self.reject_caught_or_opaque_value(
+                            completion, error, error_expr, "rethrow_rejection",
+                        )?;
                         if function.get_type().get_return_type().is_some() {
                             self.builder
                                 .build_return(Some(&completion))
@@ -1016,15 +1031,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(slot, self.context.bool_type().const_int(enabled as u64, false))
                 .map_err(|e| e.to_string())?;
         }
-        let binding_index = plan.locals.iter().position(|(local, _)| local == &handler.catch_binding)
-            .ok_or_else(|| format!("missing async catch binding `{}`", handler.catch_binding))?;
-        let binding_slot = self.async_frame_field(
-            frame,
-            self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * binding_index as u64,
-            "caught_sync_binding",
-        )?;
+        let binding_slot = self.catch_native_text.get(&handler.catch_binding)
+            .map(|(binding, _)| *binding)
+            .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
         self.builder.build_store(binding_slot, pending).map_err(|e| e.to_string())?;
-        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 5] = [
+        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 6] = [
+            ("native_text", PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, ptr_ty.into()),
             ("object", PENDING_EXCEPTION_OBJECT_SYMBOL, ptr_ty.into()),
             ("tag", PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
             ("f64", PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
@@ -1032,7 +1044,11 @@ impl<'ctx> HirCompiler<'ctx> {
             ("bool", PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
         ];
         for (suffix, symbol, ty) in pending_metadata {
-            let name = format!("{}__thaw_exception_{suffix}", handler.catch_binding);
+            let name = if suffix == "native_text" {
+                Self::async_catch_native_name(&handler.catch_binding)
+            } else {
+                format!("{}__thaw_exception_{suffix}", handler.catch_binding)
+            };
             let index = plan.locals.iter().position(|(local, _)| local == &name)
                 .ok_or_else(|| format!("missing async catch metadata `{name}`"))?;
             let slot = self.async_frame_field(
@@ -1048,6 +1064,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         self.builder.build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
+        self.clear_pending_native_text()?;
         self.builder.build_store(self.pending_exception_object().as_pointer_value(), ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
         self.builder.build_store(

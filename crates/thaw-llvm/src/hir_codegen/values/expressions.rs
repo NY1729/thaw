@@ -47,6 +47,10 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), value)
             .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.builder
+            .build_store(self.pending_exception_native_text().as_pointer_value(), value)
+            .map_err(|error| error.to_string())?;
         if let Some(catch_bb) = self.catch_stack.last().copied() {
             self.builder
                 .build_unconditional_branch(catch_bb)
@@ -557,13 +561,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::ThrowValue(error, fallback) => {
                 let value = self.compile_expr(error)?;
                 if let Some(completion) = self.active_async_completion {
-                    self.builder
-                        .build_call(
-                            self.module.get_function("thaw_promise_reject").unwrap(),
-                            &[completion.into(), value.into()],
-                            "reject_throw_value",
-                        )
-                        .map_err(|error| error.to_string())?;
+                    self.reject_caught_or_opaque_value(
+                        completion, value.into_pointer_value(), error, "reject_throw_value",
+                    )?;
                     let function = self.current_function();
                     if function.get_type().get_return_type().is_some() {
                         self.builder
@@ -583,6 +583,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(self.pending_exception().as_pointer_value(), value)
                     .map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
                 if let Some(catch_block) = self.catch_stack.last().copied() {
                     self.builder
                         .build_unconditional_branch(catch_block)

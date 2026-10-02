@@ -4,6 +4,7 @@
 pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
     let promise = Box::into_raw(Box::new(ThawPromise {
         result: None,
+        rejection_text: None,
         rejected: false,
         exception_tag: 0,
         exception_f64: 0.0,
@@ -99,6 +100,23 @@ pub extern "C" fn thaw_promise_reject(promise: *mut ThawPromise, error: *const u
     settle_promise(promise, error, true)
 }
 
+/// Native runtime error producers call this only for known native/C strings.
+/// The public `thaw_promise_reject` remains an opaque pointer ABI.
+/// # Safety
+/// `error` must be null or a live NUL-terminated native string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_reject_native_text(promise: *mut ThawPromise, error: *const u8) -> u8 {
+    reject_native_text(promise, error)
+}
+
+fn reject_native_text(promise: *mut ThawPromise, error: *const u8) -> u8 {
+    let text = (!error.is_null())
+        .then(|| unsafe { CStr::from_ptr(error.cast()).to_bytes().to_vec() });
+    if settle_promise(promise, error, true) == 0 { return 0; }
+    unsafe { (*promise).rejection_text = text; }
+    1
+}
+
 #[no_mangle]
 /// Rejects a live promise and attaches typed exception metadata.
 ///
@@ -125,6 +143,28 @@ pub unsafe extern "C" fn thaw_promise_reject_typed(
     1
 }
 
+/// Compiler-only typed rejection. `native_text` is the exact static/native
+/// pointer proven by the producer; no arbitrary rejection pointer is read.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_reject_typed_with_native_text(
+    promise: *mut ThawPromise,
+    error: *const u8,
+    tag: u64,
+    f64_value: f64,
+    i64_value: i64,
+    bool_value: bool,
+    object: *const u8,
+    native_text: *const u8,
+) -> u8 {
+    let settled = unsafe { thaw_promise_reject_typed(
+        promise, error, tag, f64_value, i64_value, bool_value, object,
+    ) };
+    if settled != 0 && !error.is_null() && error == native_text {
+        unsafe { (*promise).rejection_text = Some(CStr::from_ptr(error.cast()).to_bytes().to_vec()); }
+    }
+    settled
+}
+
 macro_rules! promise_exception_getter {
     ($name:ident, $field:ident, $ty:ty, $default:expr) => {
         #[no_mangle]
@@ -149,6 +189,18 @@ promise_exception_getter!(
     std::ptr::null()
 );
 
+/// Copies trusted rejection text into the same invocation arena as an async
+/// frame. Null means the Promise carries only an opaque producer value.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_exception_native_text_copy(
+    promise: *const ThawPromise,
+) -> *const u8 {
+    unsafe { promise.as_ref() }
+        .and_then(|promise| promise.rejection_text.as_ref())
+        .map_or(std::ptr::null(), |text| thaw_arena::arena_string(text).cast())
+}
+
+
 fn forward_promise_rejection(
     output: *mut ThawPromise,
     input: *const ThawPromise,
@@ -157,7 +209,8 @@ fn forward_promise_rejection(
     let Some(input) = (unsafe { input.as_ref() }) else {
         return thaw_promise_reject(output, error);
     };
-    unsafe { thaw_promise_reject_typed(
+    let text = input.rejection_text.clone();
+    let settled = unsafe { thaw_promise_reject_typed(
         output,
         error,
         input.exception_tag,
@@ -165,7 +218,21 @@ fn forward_promise_rejection(
         input.exception_i64,
         input.exception_bool,
         input.exception_object,
-    ) }
+    ) };
+    if settled != 0 { unsafe { (*output).rejection_text = text; } }
+    settled
+}
+
+/// For compiler-generated forwarding from a live source Promise. Preserve
+/// both typed exception fields and the explicitly owned native-text snapshot.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_forward_rejection(
+    output: *mut ThawPromise,
+    source: *const ThawPromise,
+    error: *const u8,
+) -> u8 {
+    if output.cast_const() == source { return 0; }
+    forward_promise_rejection(output, source, error)
 }
 
 struct DetachedPromise {
@@ -248,7 +315,7 @@ pub unsafe extern "C" fn thaw_promise_chain(
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
     if input.is_null() {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let state = Box::into_raw(Box::new(PromiseChainState {
@@ -292,7 +359,7 @@ pub unsafe extern "C" fn thaw_promise_adopt(
         return 0;
     }
     if output == input {
-        thaw_promise_reject(output, PROMISE_CYCLE_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_CYCLE_ERROR.as_ptr());
         return 0;
     }
     let state = Box::into_raw(Box::new(PromiseAdoptState { output, input }));
@@ -335,7 +402,7 @@ pub unsafe extern "C" fn thaw_promise_finally(
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
     if input.is_null() {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let state = Box::into_raw(Box::new(PromiseFinallyState {
@@ -358,6 +425,7 @@ struct PromiseFinallyAdoptState {
     original_i64: i64,
     original_bool: bool,
     original_object: *const u8,
+    original_text: Option<Vec<u8>>,
 }
 
 extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
@@ -365,7 +433,7 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
     if unsafe { thaw_promise_state(state.input) } == 2 {
         forward_promise_rejection(state.output, state.input, result);
     } else if state.original_rejected {
-        unsafe { thaw_promise_reject_typed(
+        let settled = unsafe { thaw_promise_reject_typed(
             state.output,
             state.original,
             state.original_tag,
@@ -374,6 +442,7 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
             state.original_bool,
             state.original_object,
         ) };
+        if settled != 0 { unsafe { (*state.output).rejection_text = state.original_text.clone(); } }
     } else {
         thaw_promise_resolve(state.output, state.original);
     }
@@ -399,6 +468,39 @@ pub unsafe extern "C" fn thaw_promise_finally_adopt(
     original_bool: bool,
     original_object: *const u8,
 ) -> u8 {
+    finally_adopt_with_source(output, input, original, original_rejected, original_tag,
+        original_f64, original_i64, original_bool, original_object, std::ptr::null())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_finally_adopt_with_source(
+    output: *mut ThawPromise,
+    input: *mut ThawPromise,
+    original: *const u8,
+    original_rejected: u8,
+    original_tag: u64,
+    original_f64: f64,
+    original_i64: i64,
+    original_bool: bool,
+    original_object: *const u8,
+    source: *const ThawPromise,
+) -> u8 {
+    finally_adopt_with_source(output, input, original, original_rejected, original_tag,
+        original_f64, original_i64, original_bool, original_object, source)
+}
+
+fn finally_adopt_with_source(
+    output: *mut ThawPromise,
+    input: *mut ThawPromise,
+    original: *const u8,
+    original_rejected: u8,
+    original_tag: u64,
+    original_f64: f64,
+    original_i64: i64,
+    original_bool: bool,
+    original_object: *const u8,
+    source: *const ThawPromise,
+) -> u8 {
     if output.is_null() || input.is_null() || output == input {
         return 0;
     }
@@ -412,6 +514,7 @@ pub unsafe extern "C" fn thaw_promise_finally_adopt(
         original_i64,
         original_bool,
         original_object,
+        original_text: unsafe { source.as_ref() }.and_then(|source| source.rejection_text.clone()),
     }));
     thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast());
     1
@@ -499,7 +602,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
     if len != 0 && element_sizes.is_null() {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let element_sizes = if len == 0 {
@@ -508,7 +611,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
         unsafe { std::slice::from_raw_parts(element_sizes, len) }.to_vec()
     };
     if element_sizes.contains(&0) {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let mut element_offsets = Vec::with_capacity(len);
@@ -516,18 +619,18 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
     for size in &element_sizes {
         element_offsets.push(result_bytes);
         let Some(next) = result_bytes.checked_add((*size).max(size_of::<u64>())) else {
-            thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+            reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
             return output;
         };
         result_bytes = next;
     }
     let Some(allocation_bytes) = result_bytes.checked_add(size_of::<*const u8>()) else {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     };
     let allocation = thaw_arena::thaw_arena_alloc(allocation_bytes, align_of::<u64>());
     if allocation.is_null() {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let result_slot = allocation.cast::<*const u8>();
@@ -542,7 +645,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
         return output;
     }
     if promises.is_null() {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let mut grouped = Vec::<(*mut ThawPromise, Vec<usize>)>::new();
@@ -580,7 +683,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
     }
     if invalid {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
     }
     for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAllChild {
@@ -594,7 +697,9 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
     }
     if unsafe { (*state).remaining } == 0 {
         let error = unsafe { (*state).first_error };
-        thaw_promise_reject(output, error);
+        // This branch only uses PROMISE_ALL_INVALID_ERROR: the no-input
+        // error is native text, unlike arbitrary child rejection values.
+        reject_native_text(output, error);
         unsafe { drop(Box::from_raw(state)) };
     }
     output
@@ -660,7 +765,7 @@ pub unsafe extern "C" fn thaw_promise_race(
         return output;
     }
     if promises.is_null() {
-        thaw_promise_reject(output, PROMISE_RACE_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_RACE_INVALID_ERROR.as_ptr());
         return output;
     }
     let mut unique = Vec::<*mut ThawPromise>::new();
@@ -682,7 +787,7 @@ pub unsafe extern "C" fn thaw_promise_race(
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
     }
     if invalid {
-        thaw_promise_reject(output, PROMISE_RACE_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_RACE_INVALID_ERROR.as_ptr());
     }
     for promise in unique {
         let child = Box::into_raw(Box::new(PromiseRaceChild { state, promise }));
@@ -716,7 +821,7 @@ extern "C" fn resume_promise_any_child(frame: *mut u8, result: *const u8) {
     state.remaining -= 1;
     if state.remaining == 0 {
         if !state.fulfilled {
-            thaw_promise_reject(state.output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
+            reject_native_text(state.output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
         }
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
         unsafe { drop(Box::from_raw(child.state)) };
@@ -738,7 +843,7 @@ pub unsafe extern "C" fn thaw_promise_any(
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
     if len == 0 || promises.is_null() {
-        thaw_promise_reject(output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
         return output;
     }
     let mut unique = Vec::<*mut ThawPromise>::new();
@@ -749,7 +854,7 @@ pub unsafe extern "C" fn thaw_promise_any(
         }
     }
     if unique.is_empty() {
-        thaw_promise_reject(output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
         return output;
     }
     let state = Box::into_raw(Box::new(PromiseAnyState {
@@ -832,7 +937,7 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
     if element_size == 0 || (len != 0 && promises.is_null()) {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let allocation =
@@ -841,16 +946,16 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
         .checked_add(element_size.max(size_of::<u64>()))
         .and_then(|size| size.checked_add(size_of::<u64>()))
     else {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     };
     let Some(objects_size) = len.checked_mul(object_stride) else {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     };
     let objects = thaw_arena::thaw_arena_alloc(objects_size, align_of::<u64>());
     if allocation.is_null() || (len != 0 && objects.is_null()) {
-        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let result_slot = allocation.cast::<*const u8>();
@@ -872,7 +977,7 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     for index in 0..len {
         let promise = unsafe { *promises.add(index) };
         if promise.is_null() {
-            thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+            reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
             return output;
         }
         if let Some((_, indices)) = grouped
@@ -943,9 +1048,45 @@ pub unsafe extern "C" fn thaw_promise_destroy(promise: *mut ThawPromise) {
 pub type PromiseUnhandledFn = extern "C" fn(*const u8) -> u8;
 pub type PromiseRejectionHandledFn = extern "C" fn();
 
+/// Same C layout as thaw-quickjs::ThawHandleResult; keep runtime independent
+/// of the QuickJS crate. `error` is an owned C string, null on success.
+#[repr(C)]
+pub struct PromiseReportResult {
+    pub value: u64,
+    pub error: *const c_char,
+}
+pub type PromiseUnhandledResultFn = extern "C" fn(*const u8) -> PromiseReportResult;
+pub type PromiseRejectionHandledResultFn = extern "C" fn() -> PromiseReportResult;
+
+fn report_listener_error(error: *const c_char) -> bool {
+    if error.is_null() { return false; }
+    unsafe {
+        thaw_runtime_report_uncaught(error);
+        thaw_arena::destroy_string(error.cast_mut());
+    }
+    UNHANDLED_FAILURE.with(|failed| failed.set(true));
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_promise_set_unhandled_reporter_result(reporter: Option<PromiseUnhandledResultFn>) {
+    UNHANDLED_REPORTER_RESULT.with(|registered| registered.set(reporter));
+    UNHANDLED_REPORTER.with(|registered| registered.set(None));
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_promise_set_rejection_handled_reporter_result(
+    reporter: Option<PromiseRejectionHandledResultFn>,
+) {
+    REJECTION_HANDLED_REPORTER_RESULT.with(|registered| registered.set(reporter));
+    REJECTION_HANDLED_REPORTER.with(|registered| registered.set(None));
+}
+
+
 #[no_mangle]
 pub extern "C" fn thaw_promise_set_unhandled_reporter(reporter: Option<PromiseUnhandledFn>) {
     UNHANDLED_REPORTER.with(|registered| registered.set(reporter));
+    UNHANDLED_REPORTER_RESULT.with(|registered| registered.set(None));
 }
 
 #[no_mangle]
@@ -953,11 +1094,18 @@ pub extern "C" fn thaw_promise_set_rejection_handled_reporter(
     reporter: Option<PromiseRejectionHandledFn>,
 ) {
     REJECTION_HANDLED_REPORTER.with(|registered| registered.set(reporter));
+    REJECTION_HANDLED_REPORTER_RESULT.with(|registered| registered.set(None));
 }
 
 fn report_registered_unhandled_rejections() {
     let reporter = UNHANDLED_REPORTER.with(Cell::get);
-    if thaw_promise_drain_unhandled(reporter) != 0 {
+    let result_reporter = UNHANDLED_REPORTER_RESULT.with(Cell::get);
+    let failed = if result_reporter.is_some() {
+        thaw_promise_drain_unhandled_result(result_reporter)
+    } else {
+        thaw_promise_drain_unhandled(reporter)
+    };
+    if failed != 0 {
         UNHANDLED_FAILURE.with(|failed| failed.set(true));
     }
     report_pending_rejection_handled();
@@ -965,7 +1113,11 @@ fn report_registered_unhandled_rejections() {
 
 fn report_pending_rejection_handled() {
     let count = PENDING_REJECTION_HANDLED.with(|pending| pending.replace(0));
-    if let Some(reporter) = REJECTION_HANDLED_REPORTER.with(Cell::get) {
+    if let Some(reporter) = REJECTION_HANDLED_REPORTER_RESULT.with(Cell::get) {
+        for _ in 0..count {
+            report_listener_error(reporter().error);
+        }
+    } else if let Some(reporter) = REJECTION_HANDLED_REPORTER.with(Cell::get) {
         for _ in 0..count {
             reporter();
         }
@@ -977,13 +1129,65 @@ pub extern "C" fn thaw_promise_take_unhandled_failure() -> u8 {
     UNHANDLED_FAILURE.with(|failed| u8::from(failed.replace(false)))
 }
 
+// Only rejection_text marks a pointer as a native C string. Public reject
+// values are opaque, so an unhandled one needs a safe generic diagnostic.
+fn unhandled_rejection_report_text(error: *const u8, trusted_text: bool) -> *const c_char {
+    if trusted_text { error.cast() } else { c"Unhandled opaque Promise rejection".as_ptr() }
+}
+
 /// Reports every live rejected Promise which never gained a subscriber.
 /// Returns 1 when at least one rejection had no host handler.
+#[no_mangle]
+pub extern "C" fn thaw_promise_drain_unhandled_result(
+    reporter: Option<PromiseUnhandledResultFn>,
+) -> u8 {
+    let rejected = collect_unhandled_rejections();
+    let mut failed = false;
+    for rejection in rejected {
+        let text = rejection.text.as_ref().map(thaw_arena::owned_string);
+        let error_ptr = text.as_ref().map_or(rejection.error, |text| text.cast_const().cast());
+        let result = reporter.map(|reporter| reporter(error_ptr));
+        let handled = result.as_ref().is_some_and(|result| result.value != 0 && result.error.is_null());
+        if !handled {
+            unsafe { thaw_runtime_report_uncaught(unhandled_rejection_report_text(error_ptr, text.is_some())) };
+            failed = true;
+        }
+        if let Some(result) = result {
+            failed |= report_listener_error(result.error);
+        }
+        if let Some(text) = text { unsafe { thaw_arena::destroy_string(text) }; }
+    }
+    u8::from(failed)
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_promise_drain_unhandled(
     reporter: Option<PromiseUnhandledFn>,
 ) -> u8 {
-    let rejected = ACTIVE_PROMISES.with(|active| {
+    let rejected = collect_unhandled_rejections();
+    let mut failed = false;
+    for rejection in rejected {
+        let text = rejection.text.as_ref().map(thaw_arena::owned_string);
+        let error_ptr = text.as_ref().map_or(rejection.error, |text| text.cast_const().cast());
+        let handled = reporter.is_some_and(|reporter| reporter(error_ptr) != 0);
+        if !handled {
+            unsafe { thaw_runtime_report_uncaught(unhandled_rejection_report_text(error_ptr, text.is_some())) };
+            failed = true;
+        }
+        if let Some(text) = text { unsafe { thaw_arena::destroy_string(text) }; }
+    }
+    u8::from(failed)
+}
+
+// Snapshot only the text explicitly supplied by trusted native producers.
+// Public reject/typed reject errors remain opaque and are forwarded unchanged.
+struct UnhandledRejection {
+    error: *const u8,
+    text: Option<Vec<u8>>,
+}
+
+fn collect_unhandled_rejections() -> Vec<UnhandledRejection> {
+    ACTIVE_PROMISES.with(|active| {
         active
             .borrow()
             .iter()
@@ -991,18 +1195,12 @@ pub extern "C" fn thaw_promise_drain_unhandled(
                 let promise = unsafe { &mut **promise };
                 (promise.rejected && !promise.handled && !promise.reported_unhandled).then(|| {
                     promise.reported_unhandled = true;
-                    promise.result.unwrap_or(std::ptr::null())
+                    UnhandledRejection {
+                        error: promise.result.unwrap_or(std::ptr::null()),
+                        text: promise.rejection_text.clone(),
+                    }
                 })
             })
             .collect::<Vec<_>>()
-    });
-    let mut failed = false;
-    for error in rejected {
-        let handled = reporter.is_some_and(|reporter| reporter(error) != 0);
-        if !handled {
-            unsafe { thaw_runtime_report_uncaught(error.cast()) };
-            failed = true;
-        }
-    }
-    u8::from(failed)
+    })
 }
