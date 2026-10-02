@@ -191,9 +191,20 @@ pub unsafe extern "C" fn thaw_promise_reject_typed_with_aggregate(
         promise, error, tag, f64_value, i64_value, bool_value, object, native_text,
     ) };
     if settled != 0 {
-        unsafe { (*promise).aggregate_errors = aggregate_errors; }
+        set_promise_aggregate_errors(promise, aggregate_errors);
     }
     settled
+}
+
+/// Tracks the Promise's aggregate handle beside its ordinary result edge.
+/// `replace_reference` takes the previous child pointer, not a slot number;
+/// retaining both children under the same boxed Promise owner lets a rooted
+/// Promise keep the errors array alive across invocation-arena resets.
+fn set_promise_aggregate_errors(promise: *mut ThawPromise, errors: *const u8) {
+    let Some(promise_ref) = (unsafe { promise.as_mut() }) else { return; };
+    let previous = promise_ref.aggregate_errors;
+    thaw_arena::replace_reference(promise as usize, previous as usize, errors as usize);
+    promise_ref.aggregate_errors = errors;
 }
 
 macro_rules! promise_exception_getter {
@@ -259,7 +270,7 @@ fn forward_promise_rejection(
     if settled != 0 {
         unsafe {
             (*output).rejection_text = text;
-            (*output).aggregate_errors = input.aggregate_errors;
+            set_promise_aggregate_errors(output, input.aggregate_errors);
         }
     }
     settled
@@ -527,7 +538,7 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
         if settled != 0 {
             unsafe {
                 (*state.output).rejection_text = state.original_text.clone();
-                (*state.output).aggregate_errors = state.original_aggregate_errors;
+                set_promise_aggregate_errors(state.output, state.original_aggregate_errors);
             }
         }
     } else {
@@ -999,7 +1010,7 @@ extern "C" fn resume_promise_any_child(frame: *mut u8, result: *const u8) {
         if !state.fulfilled {
             let errors = promise_any_errors(&state.reasons);
             if reject_native_text(state.output, PROMISE_ANY_REJECTED_ERROR.as_ptr()) != 0 {
-                unsafe { (*state.output).aggregate_errors = errors; }
+                set_promise_aggregate_errors(state.output, errors);
             }
         }
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
@@ -1024,7 +1035,7 @@ pub unsafe extern "C" fn thaw_promise_any(
     if len == 0 {
         let errors = promise_any_errors(&[]);
         if reject_native_text(output, PROMISE_ANY_REJECTED_ERROR.as_ptr()) != 0 {
-            unsafe { (*output).aggregate_errors = errors; }
+            set_promise_aggregate_errors(output, errors);
         }
         return output;
     }
