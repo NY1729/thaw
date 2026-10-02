@@ -519,6 +519,44 @@ fn bundled_bindings_require_uses_the_loaded_addon() {
 }
 
 #[test]
+fn delayed_native_require_keeps_each_bundles_addon() {
+    use std::ffi::{CStr, CString};
+
+    let first = temp_registry("bundle_delayed_first");
+    let second = temp_registry("bundle_delayed_second");
+    let empty_node_modules = temp_registry("bundle_delayed_node_modules");
+    let source = "var nodeProcess = require('node:process'), nodeModule = require('node:module'); module.exports = function() { var target = { exports: {}, filename: __filename }, builtinTarget = { exports: {}, filename: __filename }; process.dlopen(target, __dirname + '/native.node'); nodeProcess.dlopen(builtinTarget, __dirname + '/native.node'); process.exitCode = target.exports.answer; process.title = 'pkg' + target.exports.answer; process.argv = [String(target.exports.answer)]; Object.defineProperty(process, 'phase', {value: target.exports.answer, configurable: true}); delete process.marker; return [require('bindings')('native.node').answer, target.exports.answer, builtinTarget.exports.answer, nodeModule.createRequire(__filename)('bindings')('native.node').answer, nodeProcess === process, process === globalThis.process]; };";
+    fs::write(first.join("index.js"), source).unwrap();
+    fs::write(second.join("index.js"), source).unwrap();
+    let (first_bundle, _, first_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "first-pkg", &first, "index.js").unwrap();
+    let (second_bundle, _, second_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "second-pkg", &second, "index.js").unwrap();
+    assert_eq!(first_count, 3, "entry plus process and module builtins");
+    assert_eq!(second_count, 3, "entry plus process and module builtins");
+    let script = format!(
+        "globalThis.__thaw_saved_process = globalThis.process; \
+         globalThis.process = {{ marker: true, dlopen: function(target) {{ target.exports = {{ answer: target.filename.indexOf('/first-pkg/') >= 0 ? 11 : 22 }}; return target.exports; }} }}; \
+         globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; \
+         globalThis.require.addon = function() {{ return {{ answer: 11 }}; }}; \
+         {first_bundle} globalThis.firstDelayed = module.exports; \
+         \
+         globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; \
+         globalThis.require.addon = function() {{ return {{ answer: 22 }}; }}; \
+         {second_bundle} globalThis.secondDelayed = module.exports; \
+         globalThis.delayedAddonValues = function() {{ var first = firstDelayed(), firstState = [process.exitCode, process.title, process.argv[0], process.phase, 'marker' in process], second = secondDelayed(), secondState = [process.exitCode, process.title, process.argv[0], process.phase, 'marker' in process]; globalThis.process = globalThis.__thaw_saved_process; delete globalThis.__thaw_saved_process; return [first, firstState, second, secondState]; }};"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"delayedAddonValues".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[11,11,11,11,true,true],[11,\"pkg11\",\"11\",11,false],[22,22,22,22,true,true],[22,\"pkg22\",\"22\",22,false]]");
+    let _ = fs::remove_dir_all(first);
+    let _ = fs::remove_dir_all(second);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
 fn bundled_node_gyp_build_uses_the_loaded_addon() {
     use std::ffi::{CStr, CString};
 
