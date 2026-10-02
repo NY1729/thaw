@@ -3183,3 +3183,50 @@ fn object_from_entries_with_a_literal_array_of_pairs_uses_jit_without_quickjs() 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "10,20,2\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn external_native_addons_keep_colliding_package_names_in_separate_sidecars() {
+    // Unrun regression: the old identifier sanitizer mapped both names to
+    // foo_bar, overwriting the first addon and its same-named dependency.
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-native-sidecar-names-{}", std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let staging = dir.join("staging");
+    for (name, function, addon, dependency) in [
+        ("foo-bar", "first", b"first addon".as_slice(), b"first dependency".as_slice()),
+        ("foo_bar", "second", b"second addon".as_slice(), b"second dependency".as_slice()),
+    ] {
+        let package = registry.join(name);
+        let dependencies = package.join("native-dependencies");
+        std::fs::create_dir_all(&dependencies).unwrap();
+        std::fs::write(package.join("package.d.ts"),
+            format!("export declare function {function}(): number;\n")).unwrap();
+        std::fs::write(package.join("native.node"), addon).unwrap();
+        std::fs::write(dependencies.join("libshared.so"), dependency).unwrap();
+    }
+    let packages = ["foo-bar".to_string(), "foo_bar".to_string()];
+    let active = packages.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let generated = generate_registry_shims(
+        &registry, &packages, &active, &active, &std::collections::HashSet::new(),
+        "function main(): void {}",
+        &thaw_parser::common::FileName::Custom("sidecar fixture.ts".into()),
+        false, &dir.join("app"), Some(&staging),
+    ).unwrap();
+    for (name, addon, dependency) in [
+        ("foo-bar", b"first addon".as_slice(), b"first dependency".as_slice()),
+        ("foo_bar", b"second addon".as_slice(), b"second dependency".as_slice()),
+    ] {
+        let component = native_addon_path_component(name);
+        assert_eq!(std::fs::read(staging.join(&component).join("native.node")).unwrap(), addon);
+        assert_eq!(std::fs::read(staging.join(&component).join("libshared.so")).unwrap(), dependency);
+        assert!(generated.0.contains(&format!("@executable/app.native/{component}/native.node")));
+        assert!(generated.0.contains(&format!("@executable/app.native/{component}/libshared.so")));
+    }
+    assert_ne!(native_addon_path_component("foo-bar"), native_addon_path_component("foo_bar"));
+    assert_eq!(native_addon_path_component("@scope/name"), "p-%40scope%2Fname");
+    assert_eq!(native_addon_path_component("@scope%2Fname"), "p-%40scope%252Fname");
+    assert_ne!(native_addon_path_component("."), native_addon_path_component(".."));
+    assert!(native_addon_path_component(&"a".repeat(214)).len() <= 255);
+    let _ = std::fs::remove_dir_all(dir);
+}
