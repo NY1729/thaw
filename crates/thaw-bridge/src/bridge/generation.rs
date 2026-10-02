@@ -490,35 +490,15 @@ pub struct ModuleBundle<'a> {
     pub class_names: &'a [String],
 }
 
-/// Wraps a real npm package's CommonJS source so it can run inside
-/// QuickJS-NG's bare global scope: defines `module`/`exports`/`require`
-/// as *globals* before the source runs (real CommonJS/UMD source
-/// references them unconditionally, and QuickJS-NG's global scope has
-/// none of them), runs the source completely unwrapped/at top level
-/// (deliberately -- nesting it inside a function scope would break the
-/// existing simple case of a hand-authored bundle using bare top-level
-/// `function` declarations, which rely on top-level scope becoming
-/// global properties directly, the same way `loadScript` already worked
-/// before this), then copies whatever the source assigned to
-/// `module.exports` into still-unoccupied global names, so package
-/// exports cannot replace platform globals such as `setTimeout`.
-/// Package-qualified aliases are captured directly from `module.exports`.
-///
-/// Validated by running real, unmodified npm packages through the
-/// Fallback path: `left-pad` (`module.exports = leftPad`) and `slugify`
-/// (a UMD wrapper that takes the CommonJS branch once `module`/`exports`
-/// exist) both load and run correctly, and a plain hand-authored bundle
-/// with no `module.exports` at all keeps working exactly as before.
-/// `is-odd` -- which calls `require('is-number')` at load time -- fails
-/// with a clear error instead of the pre-existing opaque
-/// `ReferenceError: module is not defined`, correctly surfacing a real,
-/// documented limitation (see below) rather than silently misbehaving.
-///
-/// `require` is a stub that throws immediately: resolving a real
-/// inter-package dependency graph inside QuickJS-NG remains out of scope
-/// (docs/design/bridge.md section 7's "未解決の論点"/"unresolved
-/// questions"). This only unblocks packages with no runtime dependencies
-/// of their own, which covers plenty of real small utility packages.
+/// Wraps package source in a CommonJS factory with stable local
+/// `module`/`exports`/`require`/filename bindings. The factory keeps
+/// delayed package functions tied to their own addon after another package
+/// is loaded. A bare declared fallback or class is published explicitly,
+/// while named `module.exports` values are copied to available globals;
+/// qualified aliases read the package's own `module.exports` directly.
+/// The base `require` resolves native `.node` requests through this package's
+/// captured addon and reports unsupported requests as `MODULE_NOT_FOUND`.
+/// Bundled package dependencies use the registry bundle's local resolver.
 ///
 /// A `fallback_names` binding also checks `module.exports.default`, not
 /// just `module.exports` itself, being a function: thaw-registry's ESM
@@ -566,7 +546,10 @@ fn wrap_as_commonjs_module(
     fallback_names: &[String],
     class_names: &[String],
     nested_namespace_aliases: &[(String, String)],
+    package_name: &str,
 ) -> String {
+    let native_prefix = escape_ts_string_literal(&format!("{package_name}::"));
+    let native_package = escape_ts_string_literal(package_name);
     // `name` is always a valid JS identifier here: it's a function name
     // SWC already parsed out of a `.d.ts` `declare function` statement,
     // not arbitrary text, so splicing it directly as a property-access
@@ -596,6 +579,14 @@ fn wrap_as_commonjs_module(
         .chain(class_names)
         .map(|name| bind_default_export(name))
         .collect();
+    // A hand-authored bundle can declare a bare function without assigning
+    // module.exports. Publish its declared fallback/class name from the
+    // CommonJS-local scope before normal export binding takes precedence.
+    let bind_bare_globals: String = fallback_names
+        .iter()
+        .chain(class_names)
+        .map(|name| format!("if (typeof {name} !== 'undefined') globalThis.{name} = {name};\n"))
+        .collect();
     // Captured *here*, inside the same wrapped script that just set
     // `module.exports` (not via a separate, later `loadScript` call the
     // way `ModuleBundle::qualified_aliases` is) -- see
@@ -613,7 +604,7 @@ fn wrap_as_commonjs_module(
         })
         .collect();
     format!(
-        "globalThis.module = {{ exports: {{}} }};\n\
+        "globalThis.module = {{ exports: {{}}, filename: \"/thaw_modules/{native_package}/index.js\" }};\n\
          globalThis.exports = globalThis.module.exports;\n\
          // A package's own JS glue can load its native addon by\n\
          // computing a filesystem path at runtime and handing it\n\
@@ -630,7 +621,7 @@ fn wrap_as_commonjs_module(
          // its own static map doesn't recognize) ultimately reaches\n\
          // this one base case, so checking here covers every call site\n\
          // at once rather than duplicating the check at each fallback.\n\
-         globalThis.require = function(name) {{ if (String(name).endsWith('.node') && typeof globalThis.require.addon === 'function') return globalThis.require.addon(); var error = new Error(\"Cannot find module '\" + name + \"'\"); error.code = 'MODULE_NOT_FOUND'; throw error; }};\n\
+         globalThis.require = (function() {{ function nativeRequire(name) {{ if (String(name).endsWith('.node') && typeof nativeRequire.addon === 'function') return nativeRequire.addon(); var error = new Error(\"Cannot find module '\" + name + \"'\"); error.code = 'MODULE_NOT_FOUND'; throw error; }} return nativeRequire; }})();\n\
          // Real packages commonly *guard* Node-only globals before using\n\
          // them (`Buffer && Buffer.isBuffer(x)`, `Buffer?.from(x)`) for\n\
          // exactly this situation -- a non-Node environment. But an\n\
@@ -659,18 +650,20 @@ fn wrap_as_commonjs_module(
          if (typeof globalThis.process === 'undefined') {{\n\
          \x20\x20globalThis.process = {{ argv: [], env: {{}}, platform: 'linux', version: '', execPath: 'node', config: {{ variables: {{}} }}, versions: {{ node: '', modules: '', uv: '' }}, nextTick: function(fn) {{ var args = Array.prototype.slice.call(arguments, 1); var run = function() {{ fn.apply(undefined, args); }}; if (typeof queueMicrotask === 'function') queueMicrotask(run); else Promise.resolve().then(run); }} }};\n\
          }}\n\
-         // Likewise `__dirname`/`__filename`: real per-module Node\n\
-         // locals, but every package here already runs unwrapped at\n\
-         // global scope (see this function's doc comment), so a shared\n\
-         // global stand-in is consistent with the rest of this wrapper.\n\
-         // The exact path is inert -- `fs` above always reports \"nothing\n\
-         // here\", so no real lookup ever depends on this value being\n\
-         // accurate, only present as a string.\n\
+         // Preserve ambient stand-ins for callbacks outside the CommonJS\n\
+         // factory. Package source itself receives its own filename and\n\
+         // dirname arguments below, so delayed closures keep their owner.\n\
          if (typeof globalThis.__dirname === 'undefined') {{ globalThis.__dirname = '/thaw_modules/package'; }}\n\
          if (typeof globalThis.__filename === 'undefined') {{ globalThis.__filename = '/thaw_modules/package/index.js'; }}\n\
          if (typeof globalThis.__thaw_napi_bridge_exports === 'function') {{\n\
+         \x20\x20var __thaw_addon = (function() {{\n\
          \x20\x20var __thaw_addon = {{}};\n\
-         \x20\x20var __thaw_napi_reference_id = 0;\n\
+         \x20\x20var __thaw_napi_allocator_key = Symbol.for('thaw.napi.reference.allocator');\n\
+         \x20\x20if (!Object.prototype.hasOwnProperty.call(globalThis, __thaw_napi_allocator_key)) Object.defineProperty(globalThis, __thaw_napi_allocator_key, {{ value: {{ next: 0 }} }});\n\
+         \x20\x20var __thaw_napi_reference_allocator = globalThis[__thaw_napi_allocator_key];\n\
+         \x20\x20var __thaw_napi_proxy_owners_key = Symbol.for('thaw.napi.proxy.owners');\n\
+         \x20\x20if (!Object.prototype.hasOwnProperty.call(globalThis, __thaw_napi_proxy_owners_key)) Object.defineProperty(globalThis, __thaw_napi_proxy_owners_key, {{ value: new WeakMap() }});\n\
+         \x20\x20var __thaw_napi_proxy_owners = globalThis[__thaw_napi_proxy_owners_key];\n\
          \x20\x20var __thaw_napi_reference_ids = new WeakMap();\n\
          \x20\x20var __thaw_napi_reference_values = new Map();\n\
          \x20\x20var __thaw_napi_handles = new WeakMap();\n\
@@ -683,11 +676,11 @@ fn wrap_as_commonjs_module(
          \x20\x20var __thaw_napi_reference_value = function(id, active) {{ var stored = __thaw_napi_reference_values.get(id), value = stored && typeof stored.deref === 'function' ? stored.deref() : stored, properties = {{}}; if (!value) return properties; Object.keys(value).forEach(function(key) {{ properties[key] = __thaw_napi_argument(value[key], active); }}); return properties; }};\n\
          \x20\x20var __thaw_napi_argument = function(value, active) {{\n\
          \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
-         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) return {{ __thaw_napi_handle__: handle }};\n\
+         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) return {{ __thaw_napi_handle__: handle }}; if (__thaw_napi_proxy_owners.has(value)) throw new TypeError('native object belongs to another addon');\n\
          \x20\x20\x20\x20active = active || new WeakSet();\n\
          \x20\x20\x20\x20var id = __thaw_napi_reference_ids.get(value);\n\
          \x20\x20\x20\x20if (id && active.has(value)) return {{ __thaw_napi_ref__: id }};\n\
-         \x20\x20\x20\x20var fresh = !id; if (fresh) {{ id = ++__thaw_napi_reference_id; __thaw_napi_reference_ids.set(value, id); }}\n\
+         \x20\x20\x20\x20var fresh = !id; if (fresh) {{ if (__thaw_napi_reference_allocator.next >= Number.MAX_SAFE_INTEGER) throw new RangeError('native reference limit exceeded'); id = ++__thaw_napi_reference_allocator.next; __thaw_napi_reference_ids.set(value, id); }}\n\
          \x20\x20\x20\x20if (typeof value === 'function') {{ if (fresh) {{ __thaw_napi_reference_values.set(id, typeof WeakRef === 'function' ? new WeakRef(value) : value); globalThis['__thaw_napi_reference_' + id] = function() {{ var args = Array.prototype.slice.call(arguments), meta = args.shift(), receiver; if (meta && meta.__thaw_napi_argument_handles__) meta.__thaw_napi_argument_handles__.forEach(function(entry) {{ var path = entry[0], parent = args; for (var i = 0; i + 1 < path.length; i++) {{ var own = Object.getOwnPropertyDescriptor(parent, path[i]); if (!own) throw new TypeError('invalid native callback path'); parent = own.value; }} Object.defineProperty(parent, path[path.length - 1], {{ value: __thaw_napi_proxy(entry[1]), writable: true, enumerable: true, configurable: true }}); }}); if (meta && meta.__thaw_napi_this_handle__) {{ var stored = __thaw_napi_proxies.get(meta.__thaw_napi_this_handle__); receiver = stored && typeof stored.deref === 'function' ? stored.deref() : stored; if (!receiver) receiver = __thaw_napi_proxy(meta.__thaw_napi_this_handle__); }} var returned = value.apply(receiver, args); return typeof returned === 'function' ? __thaw_napi_argument(returned) : returned; }}; }} return {{ __thaw_napi_function__: id }}; }}\n\
          \x20\x20\x20\x20__thaw_napi_reference_values.set(id, typeof WeakRef === 'function' ? new WeakRef(value) : value);\n\
          \x20\x20\x20\x20if (fresh && __thaw_napi_finalizers) __thaw_napi_finalizers.register(value, id);\n\
@@ -712,7 +705,7 @@ fn wrap_as_commonjs_module(
          \x20\x20// nothing meaningful to \"sync\" for one -- skip a key the\n\
          \x20\x20// assignment itself rejects instead of crashing the whole\n\
          \x20\x20// call.\n\
-         \x20\x20var __thaw_napi_decode = function(value, origins, path) {{ path = path || []; if (Array.isArray(origins)) origins = new Map(origins.map(function(entry) {{ return [JSON.stringify(entry[0]), entry]; }})); var origin = origins && origins.get(JSON.stringify(path)); if (origin && origin[1] === 'date') return new Date(origin[2] === null ? NaN : origin[2]); if (origin && origin[1] === 'nonfinite') return Number(origin[2]); var plain = origin && origin[1] === 'plain'; if (value && typeof value === 'object') {{ if (!plain && value['$__thaw_napi_undefined$'] === true) return undefined; if (!plain && Object.prototype.hasOwnProperty.call(value, '__thaw_napi_error__')) {{ var ctor = value.name === 'TypeError' ? TypeError : value.name === 'RangeError' ? RangeError : Error, error = new ctor(value.__thaw_napi_error__); if (value.name && error.name !== value.name) error.name = value.name; return error; }} if (!plain && value.__thaw_napi_symbol__) {{ var symbol = __thaw_napi_symbol_values.get(value.__thaw_napi_symbol__); if (!symbol) {{ symbol = value.global ? Symbol.for(value.description) : Symbol(value.description); __thaw_napi_symbol_values.set(value.__thaw_napi_symbol__, symbol); __thaw_napi_symbol_ids.set(symbol, value.__thaw_napi_symbol__); }} return symbol; }} if (!plain && value.__thaw_napi_ref__) {{ var stored = __thaw_napi_reference_values.get(value.__thaw_napi_ref__); return stored && typeof stored.deref === 'function' ? stored.deref() : stored; }} if (!plain && value.__thaw_napi_handle__) return __thaw_napi_proxy(value.__thaw_napi_handle__); if (!plain && value.__thaw_napi_promise__) return __thaw_napi_result_value(value); if (!plain && value.__thaw_napi_binary__) {{ var id = value.__thaw_napi_binary__, stored = __thaw_napi_binary_values.get(id), existing = stored && typeof stored.deref === 'function' ? stored.deref() : stored; if (existing) return existing; var binary; if (value.kind === 'ArrayBuffer' || value.kind === 'SharedArrayBuffer') {{ binary = value.kind === 'SharedArrayBuffer' ? new SharedArrayBuffer(value.data.length) : new ArrayBuffer(value.data.length); new Uint8Array(binary).set(value.data); }} else {{ var backing = __thaw_napi_decode(value.buffer, origins, path.concat('buffer')); if (value.kind === 'DataView') binary = new DataView(backing, value.byte_offset, value.length); else {{ var constructors = [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, globalThis.BigInt64Array, globalThis.BigUint64Array], viewCtor = constructors[value.array_type]; if (!viewCtor) throw new TypeError('unsupported native typed array kind'); binary = new viewCtor(backing, value.byte_offset, value.length); }} }} var entry = typeof WeakRef === 'function' ? new WeakRef(binary) : binary; __thaw_napi_binary_values.set(id, entry); __thaw_napi_handles.set(binary, id); if (__thaw_napi_binary_finalizers) __thaw_napi_binary_finalizers.register(binary, {{ id: id, entry: entry }}); return binary; }} if (!plain && value.type === 'Buffer' && Array.isArray(value.data) && typeof Buffer !== 'undefined') return Buffer.from(value.data); if (Array.isArray(value)) return value.map(function(child, index) {{ return __thaw_napi_decode(child, origins, path.concat(index)); }}); var decoded = {{}}; Object.keys(value).forEach(function(key) {{ Object.defineProperty(decoded, key, {{ value: __thaw_napi_decode(value[key], origins, path.concat(key)), enumerable: true, configurable: true, writable: true }}); }}); return decoded; }} return value; }};\n\
+         \x20\x20var __thaw_napi_decode = function(value, origins, path) {{ path = path || []; if (Array.isArray(origins)) origins = new Map(origins.map(function(entry) {{ return [JSON.stringify(entry[0]), entry]; }})); var origin = origins && origins.get(JSON.stringify(path)); if (origin && origin[1] === 'date') return new Date(origin[2] === null ? NaN : origin[2]); if (origin && origin[1] === 'nonfinite') return Number(origin[2]); var plain = origin && origin[1] === 'plain'; if (value && typeof value === 'object') {{ if (!plain && value['$__thaw_napi_undefined$'] === true) return undefined; if (!plain && Object.prototype.hasOwnProperty.call(value, '__thaw_napi_error__')) {{ var ctor = value.name === 'TypeError' ? TypeError : value.name === 'RangeError' ? RangeError : Error, error = new ctor(value.__thaw_napi_error__); if (value.name && error.name !== value.name) error.name = value.name; return error; }} if (!plain && value.__thaw_napi_symbol__) {{ var symbol = __thaw_napi_symbol_values.get(value.__thaw_napi_symbol__); if (!symbol) {{ symbol = value.global ? Symbol.for(value.description) : Symbol(value.description); __thaw_napi_symbol_values.set(value.__thaw_napi_symbol__, symbol); __thaw_napi_symbol_ids.set(symbol, value.__thaw_napi_symbol__); }} return symbol; }} if (!plain && value.__thaw_napi_ref__) {{ var stored = __thaw_napi_reference_values.get(value.__thaw_napi_ref__); return stored && typeof stored.deref === 'function' ? stored.deref() : stored; }} if (!plain && value.__thaw_napi_handle__) return __thaw_napi_proxy(value.__thaw_napi_handle__); if (!plain && value.__thaw_napi_promise__) return __thaw_napi_result_value(value); if (!plain && value.__thaw_napi_binary__) {{ var id = value.__thaw_napi_binary__, stored = __thaw_napi_binary_values.get(id), existing = stored && typeof stored.deref === 'function' ? stored.deref() : stored; if (existing) return existing; var binary; if (value.kind === 'ArrayBuffer' || value.kind === 'SharedArrayBuffer') {{ binary = value.kind === 'SharedArrayBuffer' ? new SharedArrayBuffer(value.data.length) : new ArrayBuffer(value.data.length); new Uint8Array(binary).set(value.data); }} else {{ var backing = __thaw_napi_decode(value.buffer, origins, path.concat('buffer')); if (value.kind === 'DataView') binary = new DataView(backing, value.byte_offset, value.length); else {{ var constructors = [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, globalThis.BigInt64Array, globalThis.BigUint64Array], viewCtor = constructors[value.array_type]; if (!viewCtor) throw new TypeError('unsupported native typed array kind'); binary = new viewCtor(backing, value.byte_offset, value.length); }} }} var entry = typeof WeakRef === 'function' ? new WeakRef(binary) : binary; __thaw_napi_binary_values.set(id, entry); __thaw_napi_handles.set(binary, id); __thaw_napi_proxy_owners.set(binary, __thaw_addon); if (__thaw_napi_binary_finalizers) __thaw_napi_binary_finalizers.register(binary, {{ id: id, entry: entry }}); return binary; }} if (!plain && value.type === 'Buffer' && Array.isArray(value.data) && typeof Buffer !== 'undefined') return Buffer.from(value.data); if (Array.isArray(value)) return value.map(function(child, index) {{ return __thaw_napi_decode(child, origins, path.concat(index)); }}); var decoded = {{}}; Object.keys(value).forEach(function(key) {{ Object.defineProperty(decoded, key, {{ value: __thaw_napi_decode(value[key], origins, path.concat(key)), enumerable: true, configurable: true, writable: true }}); }}); return decoded; }} return value; }};\n\
          \x20\x20var __thaw_napi_sync_arguments = function(args) {{ var seen = new WeakSet(); var sync = function(value) {{ if (value === null || typeof value !== 'object' || seen.has(value)) return; seen.add(value); if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(value) && !(typeof Buffer !== 'undefined' && Buffer.isBuffer(value))) {{ sync(value.buffer); return; }} var handle = __thaw_napi_handles.get(value), id = __thaw_napi_reference_ids.get(value); if (!handle && !id) return; var response = __thaw_napi_handle(handle ? 'sync_handle' : 'sync_reference', handle || id, '', []), updated = response.value, originMap = new Map((response.origins || []).map(function(entry) {{ return [JSON.stringify(entry[0]), entry]; }})); if (typeof ArrayBuffer !== 'undefined' && (value instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer))) {{ new Uint8Array(value).set(updated.slice(0, value.byteLength)); return; }} if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {{ for (var i = 0; i < Math.min(value.length, updated.length); i++) value[i] = updated[i]; return; }} if (handle) return; if (Array.isArray(value)) value.length = updated.length; else Object.keys(value).forEach(function(key) {{ if (!Object.prototype.hasOwnProperty.call(updated, key)) {{ try {{ delete value[key]; }} catch (e) {{}} }} }}); Object.keys(updated).forEach(function(key) {{ var next = handle ? updated[key] : __thaw_napi_decode(updated[key], originMap, [Array.isArray(updated) ? Number(key) : key]); if (key === '__proto__') Object.defineProperty(value, key, {{ value: next, writable: true, enumerable: true, configurable: true }}); else if (value[key] !== next) {{ try {{ value[key] = next; }} catch (e) {{}} }} if (next && typeof next === 'object') sync(next); }}); }}; Array.prototype.forEach.call(args, sync); }};\n\
          \x20\x20var __thaw_napi_promises = new Map();\n\
          \x20\x20var __thaw_napi_promise_finalizers = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(function(held) {{ if (__thaw_napi_promises.get(held.id) === held.entry) __thaw_napi_promises.delete(held.id); }}) : null;\n\
@@ -739,27 +732,53 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20ownKeys: function(_) {{ var keys = __thaw_napi_handle('own_keys', handle, '', []).value; Reflect.ownKeys(_).forEach(function(key) {{ if (keys.indexOf(key) < 0) keys.push(key); }}); keys.forEach(function(key) {{ descriptor(key); }}); return keys; }},\n\
          \x20\x20\x20\x20getOwnPropertyDescriptor: function(_, name) {{ return descriptor(name) || Reflect.getOwnPropertyDescriptor(_, name); }},\n\
          \x20\x20\x20\x20preventExtensions: function() {{ return false; }}\n\
-         \x20\x20}}); __thaw_napi_handles.set(proxy, handle); var entry = typeof WeakRef === 'function' ? new WeakRef(proxy) : proxy, id = String(handle); __thaw_napi_proxies.set(id, entry); if (__thaw_napi_proxy_finalizers) __thaw_napi_proxy_finalizers.register(proxy, {{ id: id, entry: entry }}); return proxy; }};\n\
-         \x20\x20JSON.parse(globalThis.__thaw_napi_bridge_exports()).forEach(function(name) {{\n\
-         \x20\x20\x20\x20__thaw_addon[name] = function() {{\n\
+         \x20\x20}}); __thaw_napi_handles.set(proxy, handle); __thaw_napi_proxy_owners.set(proxy, __thaw_addon); var entry = typeof WeakRef === 'function' ? new WeakRef(proxy) : proxy, id = String(handle); __thaw_napi_proxies.set(id, entry); if (__thaw_napi_proxy_finalizers) __thaw_napi_proxy_finalizers.register(proxy, {{ id: id, entry: entry }}); return proxy; }};\n\
+         \x20\x20var __thaw_native_info = JSON.parse(globalThis.__thaw_napi_bridge_exports()), __thaw_native_names = __thaw_native_info.names, __thaw_native_prefix = \"{native_prefix}\";\n\
+         \x20\x20var __thaw_native_qualified = __thaw_native_info.qualifiedPackages.indexOf(\"{native_package}\") !== -1;\n\
+         \x20\x20__thaw_native_names.forEach(function(name) {{\n\
+         \x20\x20\x20\x20var bare = name;\n\
+         \x20\x20\x20\x20if (__thaw_native_qualified) {{ if (!name.startsWith(__thaw_native_prefix)) return; bare = name.slice(__thaw_native_prefix.length); }}\n\
+         \x20\x20\x20\x20else if (name.indexOf('::') !== -1) return;\n\
+         \x20\x20\x20\x20__thaw_addon[bare] = function() {{\n\
          \x20\x20\x20\x20\x20\x20if (new.target) {{ var created = __thaw_napi_handle('construct', name, '', Array.prototype.slice.call(arguments)), prototype = new.target.prototype; Object.keys(prototype).forEach(function(key) {{ __thaw_napi_handle('set', created.value, key, [prototype[key]]); }}); return __thaw_napi_proxy(created.value, prototype); }}\n\
          \x20\x20\x20\x20\x20\x20var originalArguments = arguments, result = JSON.parse(globalThis.__thaw_napi_bridge_call(name, JSON.stringify(__thaw_napi_arguments(arguments))));\n\
          \x20\x20\x20\x20\x20\x20if (result && Object.prototype.hasOwnProperty.call(result, '__thaw_error__')) throw new Error(result.__thaw_error__);\n\
          \x20\x20\x20\x20\x20\x20__thaw_napi_sync_arguments(originalArguments); return __thaw_napi_result_value(result.value, result.origins);\n\
          \x20\x20\x20\x20}};\n\
          \x20\x20}});\n\
-         \x20\x20globalThis.require.addon = function() {{ return __thaw_addon; }};\n\
-         \x20\x20globalThis.process.dlopen = function(target) {{ target.exports = __thaw_addon; return target.exports; }};\n\
+         \x20\x20globalThis.require.addon = (function(addon) {{ return function() {{ return addon; }}; }})(__thaw_addon);\n\
+         \x20\x20if (!globalThis.process.dlopen || !globalThis.process.dlopen.__thaw_addons) {{\n\
+         \x20\x20\x20\x20globalThis.process.dlopen = (function(previous) {{\n\
+         \x20\x20\x20\x20\x20\x20var addons = Object.create(null);\n\
+         \x20\x20\x20\x20\x20\x20var dispatch = function(target, filename, flags) {{\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20var nativePath = typeof filename === 'string' ? filename : '', modulePath = target && typeof target.filename === 'string' ? target.filename : '';\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20var ownerPath = nativePath.indexOf('/thaw_modules/') >= 0 ? nativePath : modulePath;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20var marker = '/thaw_modules/', prefixAt = ownerPath.indexOf(marker), packagePath = prefixAt < 0 ? '' : ownerPath.slice(prefixAt + marker.length);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20var packageName = Object.keys(addons).filter(function(name) {{ return name && packagePath.indexOf(name + '/') === 0; }}).sort(function(a, b) {{ return b.length - a.length; }})[0];\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (!packageName && (prefixAt < 0 || packagePath.charAt(0) === '/') && Object.prototype.hasOwnProperty.call(addons, '')) packageName = '';\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (packageName !== undefined) {{ target.exports = addons[packageName]; return target.exports; }}\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (typeof previous === 'function') return previous.call(globalThis.process, target, filename, flags);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20var error = new Error('Cannot load native addon ' + nativePath); error.code = 'ERR_DLOPEN_FAILED'; throw error;\n\
+         \x20\x20\x20\x20\x20\x20}};\n\
+         \x20\x20\x20\x20\x20\x20dispatch.__thaw_addons = addons; return dispatch;\n\
+         \x20\x20\x20\x20}})(globalThis.process.dlopen);\n\
+         \x20\x20}}\n\
+         \x20\x20globalThis.process.dlopen.__thaw_addons["{native_package}"] = __thaw_addon;\n\
          \x20\x20if (__thaw_addon.QueryEngine && !globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY) globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY = '/proc/self/exe';\n\
+         \x20\x20return __thaw_addon;\n\
+         \x20\x20}})();\n\
          }}\n\
+         (function(module, exports, require, __filename, __dirname) {{\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
+         {bind_bare_globals}\
          \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ if (k === 'default' || k === '__esModule') continue; try {{ if (typeof globalThis[k] === 'undefined') globalThis[k] = typeof module.exports[k] === 'function' ? globalThis.__thaw_bind_preserving_statics(module.exports[k], module.exports) : module.exports[k]; }} catch (e) {{}} }} }}\n\
          {bind_nested_namespaces}\
          {bind_default_exports}\
          }};\n\
          if (globalThis.__thaw_module_ready && typeof globalThis.__thaw_module_ready.then === 'function') {{ globalThis.__thaw_module_ready.then(__thaw_bind_module_exports); }}\n\
-         else {{ __thaw_bind_module_exports(); }}"
+         else {{ __thaw_bind_module_exports(); }}\n\
+         }}).call(globalThis, globalThis.module, globalThis.exports, globalThis.require, globalThis.module.filename, globalThis.module.filename.slice(0, globalThis.module.filename.lastIndexOf('/')));"
     )
 }
 
@@ -803,6 +822,7 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             bundle.fallback_names,
             bundle.class_names,
             bundle.nested_namespace_aliases,
+            bundle.package_name,
         );
         let wrapped = if bundle.js_source.len() >= 1024 {
             encode_embedded_script(&wrapped)

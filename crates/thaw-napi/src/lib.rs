@@ -810,6 +810,7 @@ pub struct CallbackInfo {
 struct Host {
     functions: HashMap<String, Function>,
     exports: HashMap<String, (usize, NapiValue)>,
+    qualified_packages: HashSet<String>,
     compiled_callbacks: HashMap<(usize, usize, usize), NapiValue>,
     libraries: Vec<*mut c_void>,
     embedded_files: Vec<std::fs::File>,
@@ -830,6 +831,7 @@ impl Host {
         Self {
             functions: HashMap::new(),
             exports: HashMap::new(),
+            qualified_packages: HashSet::new(),
             compiled_callbacks: HashMap::new(),
             libraries: Vec::new(),
             embedded_files: Vec::new(),

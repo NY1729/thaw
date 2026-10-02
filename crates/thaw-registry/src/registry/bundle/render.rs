@@ -21,7 +21,7 @@
 /// wrong package's module map. The IIFE's closures keep each package's
 /// module system private to itself regardless of what loads after it.
 fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
-    let mut out = String::from("module.exports = (function() {\n");
+    let mut out = String::from("module.exports = (function(require) {\n");
 
     out.push_str("var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\n");
     out.push_str("var __thaw_bundle_cache = {};\n");
@@ -71,11 +71,11 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20if (String(factoryKey || key).endsWith('.node') && require.addon) return require.addon();\n\
          \x20\x20if (!(key in __thaw_bundle_cache)) {\n\
          \x20\x20\x20\x20factoryKey = factoryKey || key;\n\
-         \x20\x20\x20\x20var mod = { exports: {} };\n\
+         \x20\x20\x20\x20var mod = { exports: {}, filename: '/thaw_modules/' + (factoryKey || key) };\n\
          \x20\x20\x20\x20__thaw_bundle_cache[key] = mod;\n\
          \x20\x20\x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
          \x20\x20\x20\x20var localRequire = function(spec) {\n\
-         \x20\x20\x20\x20\x20\x20if ((spec === 'bindings' || spec === 'node-gyp-build') && globalThis.require && typeof globalThis.require.addon === 'function') return globalThis.require.addon;\n\
+         \x20\x20\x20\x20\x20\x20if ((spec === 'bindings' || spec === 'node-gyp-build') && typeof require.addon === 'function') return require.addon;\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
          \x20\x20\x20\x20\x20\x20if (target) return __thaw_bundle_require(target.key, target.factory);\n\
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
@@ -99,7 +99,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20var keys = Object.keys(__thaw_bundle_require_maps);\n\
          \x20\x20var factoryKey = keys.indexOf(text) >= 0 ? text : keys.find(function(key) { return text.endsWith('/' + key) || text.endsWith(key); });\n\
          \x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
-         \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && globalThis.require && typeof globalThis.require.addon === 'function') return globalThis.require.addon; spec = String(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return __thaw_bundle_exports[spec]; var target = __thaw_bundle_target(map, spec); if (!target && !factoryKey) { for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec); } if (target) return __thaw_bundle_require(target.key, target.factory); return require(spec); };\n\
+         \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && typeof require.addon === 'function') return require.addon; spec = String(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return __thaw_bundle_exports[spec]; var target = __thaw_bundle_target(map, spec); if (!target && !factoryKey) { for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec); } if (target) return __thaw_bundle_require(target.key, target.factory); return require(spec); };\n\
          \x20\x20created.addon = require.addon;\n\
          \x20\x20created.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
@@ -218,7 +218,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          return __thaw_bundle_entry;\n",
         js_string_literal(main_key)
     ));
-    out.push_str("})();\n");
+    out.push_str("})(globalThis.require);\n");
 
     out
 }
