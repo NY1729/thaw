@@ -57,6 +57,10 @@ fn net_shutdown_write(handle: u32) -> String {
 }
 
 fn net_poll_read(handle: u32) -> String {
+    net_poll_read_impl(handle, false)
+}
+
+fn net_poll_read_impl(handle: u32, retain_on_eof: bool) -> String {
     NET_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let mut value = vec![0u8; 16 * 1024];
@@ -81,7 +85,9 @@ fn net_poll_read(handle: u32) -> String {
         };
         match outcome {
             Ok(Some(0)) => {
-                streams.1.remove(&handle);
+                if !retain_on_eof {
+                    streams.1.remove(&handle);
+                }
                 "eof".to_string()
             }
             Ok(Some(length)) => {

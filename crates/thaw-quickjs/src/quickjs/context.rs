@@ -990,7 +990,9 @@ fn ensure_context() {
                 let tcp_shutdown =
                     Function::new(ctx.clone(), |handle: u32| net_shutdown_write(handle))
                         .expect("failed to create JavaScript TCP shutdown function");
-                let tcp_poll_read = Function::new(ctx.clone(), |handle: u32| net_poll_read(handle))
+                let tcp_poll_read = Function::new(ctx.clone(), |handle: u32, retain_on_eof: rquickjs::function::Opt<bool>| {
+                    if retain_on_eof.0.unwrap_or(false) { net_poll_read_impl(handle, true) } else { net_poll_read(handle) }
+                })
                     .expect("failed to create JavaScript TCP polling reader");
                 let tcp_destroy = Function::new(ctx.clone(), |handle: u32| net_destroy(handle))
                     .expect("failed to create JavaScript TCP closer");
