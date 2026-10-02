@@ -197,6 +197,18 @@ impl<'ctx> HirCompiler<'ctx> {
             let setter = format!("__thaw_setter_{name}");
             let getter = fields.iter().position(|(field, _)| field == &getter);
             if getter.is_none() && fields.iter().any(|(field, _)| field == &setter) {
+                // A setter-only own field reads as undefined. Keep its key
+                // when this conversion preserves JavaScript property values,
+                // without reading the field's unreachable backing slot.
+                if preserve_undefined {
+                    let key = self.builder
+                        .build_global_string_ptr(name, "dynamic_setter_only_key")
+                        .map_err(|error| error.to_string())?;
+                    let undefined = self.compile_napi_undefined_json()?;
+                    self.compile_json_object_set_native_with_undefined(
+                        json, key.as_pointer_value(), undefined, &HirType::Json, true, true,
+                    )?;
+                }
                 continue;
             }
             let (value, value_type) = if let Some(getter) = getter {
@@ -359,10 +371,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     preserve_undefined,
                 );
             }
-            HirType::Undefined => return Ok(()),
+            HirType::Undefined => {
+                if !preserve_undefined {
+                    return Ok(());
+                }
+                value = self.compile_napi_undefined_json()?;
+            }
             HirType::Null => value = self.compile_json_null()?,
             _ => {}
         }
+        let owned = owned || (preserve_undefined && matches!(field_type, HirType::Undefined));
         let mut setter = match field_type {
                 HirType::F64 => "thaw_json_object_set_number",
                 HirType::Str => "thaw_json_object_set_string",
@@ -417,7 +435,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     )?;
                     "thaw_json_object_set_json"
                 }
-                HirType::Null => "thaw_json_object_set_json",
+                HirType::Null | HirType::Undefined => "thaw_json_object_set_json",
                 HirType::JsValue => {
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
@@ -1047,6 +1065,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     preserve_undefined,
                 );
             }
+            HirType::Undefined if preserve_undefined => {
+                let undefined = self.compile_napi_undefined_json()?;
+                return self.compile_json_array_push_owned(json, undefined);
+            }
             HirType::Null | HirType::Undefined | HirType::Void => {
                 value = self.compile_json_null()?;
             }
@@ -1101,7 +1123,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 "thaw_json_array_push_json"
             }
             HirType::Object(_) => {
-                value = self.compile_native_object_to_json(value.into_pointer_value(), element_type)?;
+                value = self.compile_native_object_to_json_with_undefined(
+                    value.into_pointer_value(), element_type, preserve_undefined,
+                )?;
                 "thaw_json_array_push_json"
             }
             HirType::Null | HirType::Undefined | HirType::Void => {
