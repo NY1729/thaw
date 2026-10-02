@@ -2786,3 +2786,128 @@ fn promise_any_errors_handle_is_rooted_with_live_promise() {
     thaw_arena::thaw_arena_reset();
     assert!(thaw_arena::was_reclaimed(errors as usize));
 }
+
+
+#[test]
+fn promise_any_stages_arena_backed_opaque_reason_across_reset() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let opaque = thaw_arena::thaw_arena_alloc(8, 8);
+    assert!(!opaque.is_null());
+    unsafe { opaque.cast::<u64>().write(0x51a7_e2d3_f4b5_c6d7) };
+    let first = thaw_promise_new();
+    let last = thaw_promise_new();
+    let any = unsafe { thaw_promise_any([first, last, first].as_ptr(), 3) };
+    assert_eq!(thaw_promise_reject(first, opaque), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(any) }, 0);
+
+    // The first child has been destroyed; only the join's staging root can
+    // retain this otherwise opaque arena allocation until the final array.
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(opaque as usize));
+    assert_eq!(unsafe { thaw_promise_reject_typed(
+        last, std::ptr::null(), 6, 0.0, 0, false, std::ptr::null(),
+    ) }, 1);
+    thaw_runtime_run_until_idle();
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(any) };
+    assert!(!errors.is_null());
+    assert_eq!(unsafe { promise_any_reason_at(errors, 0) }, (8, opaque as u64));
+    assert_eq!(unsafe { promise_any_reason_at(errors, 2) }, (8, opaque as u64));
+    assert_eq!(unsafe { opaque.cast::<u64>().read() }, 0x51a7_e2d3_f4b5_c6d7);
+    unsafe { thaw_promise_destroy(any) };
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(opaque as usize));
+}
+
+#[test]
+fn finally_adopt_roots_original_result_object_and_aggregate_until_output_owns_them() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let leaf = thaw_promise_new();
+    let aggregate = unsafe { thaw_promise_any([leaf].as_ptr(), 1) };
+    assert_eq!(unsafe { thaw_promise_reject_typed(
+        leaf, std::ptr::null(), 6, 0.0, 0, false, std::ptr::null(),
+    ) }, 1);
+    thaw_runtime_run_until_idle();
+    let errors = unsafe { thaw_promise_exception_aggregate_errors(aggregate) };
+    assert!(!errors.is_null());
+
+    let original = thaw_arena::thaw_arena_alloc(8, 8);
+    let object = thaw_arena::thaw_arena_alloc(8, 8);
+    unsafe {
+        original.cast::<u64>().write(0x1234_5678);
+        object.cast::<u64>().write(0x8765_4321);
+    }
+    let source = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_reject_typed_with_aggregate(
+        source, original, 0, 0.0, 0, false, object,
+        std::ptr::null(), errors,
+    ) }, 1);
+    let returned = thaw_promise_new();
+    let output = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
+        output, returned, original, 1, 0, 0.0, 0, false, object, source,
+    ) }, 1);
+    unsafe { thaw_promise_destroy(source); thaw_promise_destroy(aggregate) };
+    thaw_arena::thaw_arena_reset();
+    for pointer in [original, object, errors.cast_mut()] {
+        assert!(!thaw_arena::was_reclaimed(pointer as usize));
+    }
+
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(output) }, 2);
+    assert_eq!(unsafe { thaw_promise_exception_object(output) }, object);
+    assert_eq!(unsafe { thaw_promise_exception_aggregate_errors(output) }, errors);
+    let output_root = thaw_arena::ArenaRoot::new(output as usize);
+    thaw_arena::thaw_arena_reset();
+    for pointer in [original, object, errors.cast_mut()] {
+        assert!(!thaw_arena::was_reclaimed(pointer as usize));
+    }
+    assert_eq!(unsafe { original.cast::<u64>().read() }, 0x1234_5678);
+    assert_eq!(unsafe { object.cast::<u64>().read() }, 0x8765_4321);
+    assert_eq!(unsafe { promise_any_reason_at(errors, 0) }, (5, 0));
+    unsafe { thaw_promise_destroy(output) };
+    drop(output_root);
+    thaw_arena::thaw_arena_reset();
+    for pointer in [original, object, errors.cast_mut()] {
+        assert!(thaw_arena::was_reclaimed(pointer as usize));
+    }
+}
+
+#[test]
+fn purged_aggregate_callbacks_ignore_late_child_results_and_release_roots() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let first = thaw_promise_new();
+    let last = thaw_promise_new();
+    let any = unsafe { thaw_promise_any([first, last].as_ptr(), 2) };
+    let reason = thaw_arena::thaw_arena_alloc(8, 8);
+    assert_eq!(thaw_promise_reject(first, reason), 1);
+    thaw_runtime_run_until_idle();
+    purge_pending_async_state();
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(reason as usize));
+    assert_eq!(thaw_promise_reject(last, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(any) }, 0);
+    assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
+    unsafe { thaw_promise_destroy(any) };
+
+    let source = thaw_promise_new();
+    let original = thaw_arena::thaw_arena_alloc(8, 8);
+    assert_eq!(thaw_promise_reject(source, original), 1);
+    let returned = thaw_promise_new();
+    let output = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
+        output, returned, original, 1, 0, 0.0, 0, false,
+        std::ptr::null(), source,
+    ) }, 1);
+    unsafe { thaw_promise_destroy(source) };
+    purge_pending_async_state();
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(original as usize));
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_state(output) }, 0);
+    unsafe { thaw_promise_destroy(output) };
+    thaw_arena::thaw_arena_reset();
+}

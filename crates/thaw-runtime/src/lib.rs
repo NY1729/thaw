@@ -201,6 +201,9 @@ fn reject_for_invocation_deadline(promise: *mut ThawPromise) {
 /// subscriptions (such as N-API filesystem watchers) that outlive one
 /// invocation by design.
 fn purge_pending_async_state() {
+    // Abandoned aggregate callback Boxes may outlive cleared queues. Release
+    // their temporary pins and make any later callback ignore arena payloads.
+    cancel_pending_aggregate_states();
     READY_CONTINUATIONS.with(|queue| queue.borrow_mut().clear());
     TIMERS.with(|timers| timers.borrow_mut().clear());
     FD_WAITS.with(|waits| waits.borrow_mut().clear());
