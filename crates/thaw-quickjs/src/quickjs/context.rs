@@ -1,3 +1,85 @@
+fn url_snapshot(url: &url::Url) -> String {
+    serde_json::json!({
+        "href": url.as_str(),
+        "protocol": format!("{}:", url.scheme()),
+        "username": url.username(),
+        "password": url.password().unwrap_or(""),
+        "hostname": url.host_str().unwrap_or(""),
+        "port": url.port().map_or(String::new(), |port| port.to_string()),
+        "pathname": url.path(),
+        "search": url.query().filter(|query| !query.is_empty()).map_or(String::new(), |query| format!("?{query}")),
+        "hash": url.fragment().filter(|fragment| !fragment.is_empty()).map_or(String::new(), |fragment| format!("#{fragment}")),
+        "origin": url.origin().ascii_serialization(),
+        "opaque": url.cannot_be_a_base(),
+    }).to_string()
+}
+
+fn host_url_parse(input: String, base: String, has_base: bool) -> String {
+    let result = if has_base {
+        url::Url::parse(&base).and_then(|base| base.join(&input))
+    } else {
+        url::Url::parse(&input)
+    };
+    result.map_or_else(|_| "null".to_owned(), |url| url_snapshot(&url))
+}
+
+fn host_url_set(href: String, property: String, value: String) -> String {
+    let Ok(mut url) = url::Url::parse(&href) else { return "null".to_owned() };
+    let accepted = match property.as_str() {
+        "protocol" => url.set_scheme(value.strip_suffix(':').unwrap_or(&value)).is_ok(),
+        "username" => url.set_username(&value).is_ok(),
+        "password" => url.set_password(Some(&value)).is_ok(),
+        "hostname" => {
+            if value.contains(':') && !(value.starts_with('[') && value.ends_with(']')) { false }
+            else { url.set_host(Some(&value)).is_ok() }
+        },
+        "host" => {
+            if value.bytes().any(|byte| matches!(byte, b'/' | b'\\' | b'?' | b'#' | b'@')) {
+                false
+            } else {
+                let authority = format!("{}://{value}/", url.scheme());
+                if let Ok(parsed) = url::Url::parse(&authority) {
+                    if let Some(host) = parsed.host_str() {
+                        let mut next = url.clone();
+                        let has_port = if value.starts_with('[') {
+                            value.find(']').is_some_and(|end| value.as_bytes().get(end + 1) == Some(&b':'))
+                        } else {
+                            value.contains(':')
+                        };
+                        if next.set_host(Some(host)).is_ok()
+                            && (!has_port || next.set_port(parsed.port()).is_ok()) {
+                            url = next;
+                            true
+                        } else { false }
+                    } else { false }
+                } else { false }
+            }
+        }
+        "port" => {
+            if value.is_empty() { url.set_port(None).is_ok() }
+            else if value.bytes().all(|byte| byte.is_ascii_digit()) {
+                value.parse::<u16>().is_ok_and(|port| url.set_port(Some(port)).is_ok())
+            } else { false }
+        }
+        "pathname" => {
+            if url.cannot_be_a_base() { false }
+            else { url.set_path(&value); true }
+        }
+        "search" => {
+            if value.is_empty() { url.set_query(None); }
+            else { url.set_query(Some(value.strip_prefix('?').unwrap_or(&value))); }
+            true
+        }
+        "hash" => {
+            if value.is_empty() { url.set_fragment(None); }
+            else { url.set_fragment(Some(value.strip_prefix('#').unwrap_or(&value))); }
+            true
+        }
+        _ => false,
+    };
+    if accepted { url_snapshot(&url) } else { "null".to_owned() }
+}
+
 fn cli_eval(arguments: &[String]) -> Option<(usize, Option<&str>)> {
     let index = arguments
         .iter()
@@ -157,6 +239,10 @@ fn ensure_context() {
                     )
                     .expect("failed to install host exec arguments");
                 install_napi_bridge(&ctx).expect("failed to install N-API bridge");
+                ctx.globals().set("__thaw_url_parse", Function::new(ctx.clone(), host_url_parse)
+                    .expect("failed to create URL parser")).expect("failed to install URL parser");
+                ctx.globals().set("__thaw_url_set", Function::new(ctx.clone(), host_url_set)
+                    .expect("failed to create URL setter")).expect("failed to install URL setter");
                 let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
                 install_shared_environment_functions(&ctx, shared_env)
                     .expect("failed to install shared Worker environment accessors");

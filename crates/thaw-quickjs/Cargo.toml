@@ -78,6 +78,7 @@ pkcs1 = { version = "0.7", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rquickjs = "0.12.2"
+url = "=2.5.8"
 rsa = { version = "0.9", features = ["sha2", "pem", "getrandom"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 sec1 = { version = "0.7", features = ["pem"] }
