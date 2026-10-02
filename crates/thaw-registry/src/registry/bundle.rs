@@ -12,6 +12,8 @@
 struct BundledModule {
     key: String,
     source: String,
+    export_graph: Option<serde_json::Value>,
+    origin_parameter: Option<String>,
     requires: Vec<(String, String)>,
     static_esm_specs: Vec<String>,
     has_esm: bool,

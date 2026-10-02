@@ -561,6 +561,8 @@ fn esm_synthetic_offset(source: &str) -> Option<usize> {
     let unused = |name: &str| !identifiers.0.contains(name) && !source.contains(name);
     (0..).find(|offset| {
         unused(&format!("__thaw_esm_key_{offset}"))
+            && unused(&format!("__thaw_esm_origin_{offset}"))
+            && unused(&format!("__thaw_esm_resolution_{offset}"))
             && (0..count).all(|index| {
                 let index = offset + index;
                 ["import", "reexport", "reexport_all"].iter().all(|kind| {
@@ -637,6 +639,7 @@ fn rewrite_live_import_references(source: &str, synthetic_offset: usize) -> Opti
         ModuleExportName::Str(value) => value.value.to_string_lossy().into_owned(),
     };
     let mut bindings = BTreeMap::<String, String>::new();
+    let origin_name = format!("__thaw_esm_origin_{synthetic_offset}");
     let mut synthetic_count = synthetic_offset;
     for item in &module.body {
         match item {
@@ -661,7 +664,8 @@ fn rewrite_live_import_references(source: &str, synthetic_offset: usize) -> Opti
                             bindings.insert(
                                 default.local.sym.to_string(),
                                 format!(
-                                    "(({module_name} && {module_name}.__esModule) ? {module_name}.default : {module_name})"
+                                    "((typeof {origin_name} !== 'undefined') ? {origin_name}.defaultImport({}, {module_name}) : (({module_name} && {module_name}.__esModule) ? {module_name}.default : {module_name}))",
+                                    js_string_literal(&import.src.value.to_string_lossy())
                                 ),
                             );
                         }
@@ -1054,6 +1058,14 @@ fn strip_reserved_wrapper_redeclarations(source: &str) -> String {
 /// `exports`, rather than aborting the whole rewrite.
 #[cfg(test)]
 fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
+    // This test-only convenience has no dependency graph. A star needs the
+    // bundle's binding-origin graph to distinguish a diamond from ambiguity.
+    if esm_export_graph(source)
+        .and_then(|graph| graph.get("stars").and_then(|stars| stars.as_array()).cloned())
+        .is_some_and(|stars| !stars.is_empty())
+    {
+        return None;
+    }
     rewrite_esm_to_commonjs_mode(source, false)
 }
 
@@ -1107,44 +1119,12 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
         }
     };
 
-    // Explicit exports take precedence over every star, regardless of source
-    // order. Gather them before emitting the sequential re-export loops.
-    let mut explicit_exports = BTreeSet::new();
-    for item in &module.body {
-        match item {
-            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
-                explicit_exports.extend(names_declared_by(&export.decl));
-            }
-            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if !export.type_only => {
-                for spec in &export.specifiers {
-                    match spec {
-                        ExportSpecifier::Named(named) if !named.is_type_only => {
-                            let name = named.exported.as_ref().unwrap_or(&named.orig);
-                            explicit_exports.insert(export_name(name));
-                        }
-                        ExportSpecifier::Namespace(namespace) => {
-                            explicit_exports.insert(export_name(&namespace.name));
-                        }
-                        ExportSpecifier::Default(default) => {
-                            explicit_exports.insert(default.exported.sym.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(_)
-                | ModuleDecl::ExportDefaultExpr(_)) => {
-                explicit_exports.insert("default".to_string());
-            }
-            _ => {}
-        }
-    }
-
     let mut prologue = String::new();
     let mut local_export_prologue = String::new();
     let mut rest = String::new();
     let mut synthetic_count = synthetic_offset;
     let mut imported_bindings = BTreeMap::<String, String>::new();
+    let origin_name = format!("__thaw_esm_origin_{synthetic_offset}");
     let mut binding_counter = synthetic_offset;
     for item in &module.body {
         match item {
@@ -1169,7 +1149,8 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                             imported_bindings.insert(
                                 default.local.sym.to_string(),
                                 format!(
-                                    "(({module_name} && {module_name}.__esModule) ? {module_name}.default : {module_name})"
+                                    "((typeof {origin_name} !== 'undefined') ? {origin_name}.defaultImport({}, {module_name}) : (({module_name} && {module_name}.__esModule) ? {module_name}.default : {module_name}))",
+                                    js_string_literal(&import.src.value.to_string_lossy())
                                 ),
                             );
                         }
@@ -1185,7 +1166,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
         }
     }
 
-    let key_name = format!("__thaw_esm_key_{synthetic_offset}");
+    let resolution_name = format!("__thaw_esm_resolution_{synthetic_offset}");
     for item in &module.body {
         match item {
             ModuleItem::Stmt(stmt) => {
@@ -1207,6 +1188,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                     "var {var_name} = {loader}({});\n",
                     js_string_literal(&spec)
                 ));
+                prologue.push_str(&format!("if (typeof {origin_name} !== 'undefined') {origin_name}.edge({}, {var_name});\n", js_string_literal(&spec)));
                 for specifier in &import.specifiers {
                     match specifier {
                         ImportSpecifier::Default(d) => {
@@ -1269,6 +1251,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                         "var {var_name} = {loader}({});\n",
                         js_string_literal(&spec)
                     ));
+                prologue.push_str(&format!("if (typeof {origin_name} !== 'undefined') {origin_name}.edge({}, {var_name});\n", js_string_literal(&spec)));
                     for spec in &named.specifiers {
                         if let ExportSpecifier::Named(n) = spec {
                             let orig = export_name(&n.orig);
@@ -1277,14 +1260,18 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                                 .as_ref()
                                 .map(&export_name)
                                 .unwrap_or_else(|| orig.clone());
-                            rest.push_str(&format!(
-                                "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ return {var_name}[{}]; }} }});\n",
+                            local_export_prologue.push_str(&format!(
+                                "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ if (typeof {var_name} === 'undefined') throw new ReferenceError('Export is not initialized'); return {var_name}[{}]; }} }});\n",
                                 js_string_literal(&exported),
                                 js_string_literal(&orig)
                             ));
+                        } else if let ExportSpecifier::Namespace(namespace) = spec {
+                            local_export_prologue.push_str(&format!(
+                                "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ if (typeof {var_name} === 'undefined') throw new ReferenceError('Export is not initialized'); return {var_name}; }} }});\n",
+                                js_string_literal(&export_name(&namespace.name))
+                            ));
                         }
-                        // `export * as ns from './y'`/`export v from './y'`:
-                        // rare re-export forms, best-effort skipped.
+                        // `export v from './y'` remains unsupported.
                     }
                 }
                 None => {
@@ -1321,13 +1308,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                     "var {var_name} = {loader}({});\n",
                     js_string_literal(&spec)
                 ));
-                let excluded = explicit_exports.iter().map(|name| {
-                    format!("{key_name} === {}", js_string_literal(name))
-                }).collect::<Vec<_>>().join(" || ");
-                let excluded = if excluded.is_empty() { "false" } else { &excluded };
-                rest.push_str(&format!(
-                    "for (let {key_name} in {var_name}) {{ if ({key_name} !== 'default' && {key_name} !== '__esModule' && !({excluded})) Object.defineProperty(exports, {key_name}, {{ enumerable: true, get: function() {{ return {var_name}[{key_name}]; }} }}); }}\n"
-                ));
+                prologue.push_str(&format!("if (typeof {origin_name} !== 'undefined') {origin_name}.edge({}, {var_name});\n", js_string_literal(&spec)));
             }
             // `import foo = require(...)`/`export = foo`/`export as
             // namespace`: TS-only forms that shouldn't appear in real
@@ -1337,7 +1318,115 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
         }
     }
 
+    // Publish statically known ESM star names before a cyclic dependency can
+    // observe this partially initialized namespace. Opaque CJS/native names
+    // remain deferred until their loader records an edge.
+    let star_setup = if module.body.iter().any(|item| matches!(item, ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) if !export.type_only)) {
+        format!("if (typeof {origin_name} === 'undefined') throw new TypeError('export * requires bundle origin graph');\n{origin_name}.track(exports);\n")
+    } else {
+        String::new()
+    };
     Some(strip_reserved_wrapper_redeclarations(&rewrite_import_meta_urls(
-        &format!("module.exports.__esModule = true;\n{local_export_prologue}{prologue}{rest}"),
+        &format!("module.exports.__esModule = true;\n{local_export_prologue}{star_setup}{prologue}{rest}"),
     )))
+}
+
+/// The original ESM export edges, kept separately from the generated CJS
+/// source so star resolution can follow bindings through diamond/cyclic
+/// reexports before either module has finished evaluating.
+fn esm_export_graph(source: &str) -> Option<serde_json::Value> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use thaw_parser::ast::{Decl, DefaultDecl, ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+
+    let module = thaw_parser::parse_javascript(source).ok()?;
+    let name = |value: &ModuleExportName| match value {
+        ModuleExportName::Ident(id) => id.sym.to_string(),
+        ModuleExportName::Str(text) => text.value.to_string_lossy().into_owned(),
+    };
+    let mut imported = BTreeMap::<String, (String, Option<String>, bool)>::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(decl)) = item else { continue };
+        let source = decl.src.value.to_string_lossy().into_owned();
+        for specifier in &decl.specifiers {
+            match specifier {
+                ImportSpecifier::Named(named) => {
+                    let local = named.local.sym.to_string();
+                    let remote = named.imported.as_ref().map(&name).unwrap_or_else(|| local.clone());
+                    imported.insert(local, (source.clone(), Some(remote), false));
+                }
+                ImportSpecifier::Default(default) => {
+                    imported.insert(default.local.sym.to_string(), (source.clone(), Some("default".to_string()), true));
+                }
+                ImportSpecifier::Namespace(namespace) => {
+                    imported.insert(namespace.local.sym.to_string(), (source.clone(), None, false));
+                }
+            }
+        }
+    }
+    let mut local = serde_json::Map::new();
+    let mut indirect = serde_json::Map::new();
+    let mut stars = Vec::new();
+    let mut has_esm = false;
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(decl) = item else { continue };
+        has_esm = true;
+        match decl {
+            ModuleDecl::ExportDecl(export) => {
+                let mut names = BTreeSet::new();
+                match &export.decl {
+                    Decl::Fn(function) => { names.insert(function.ident.sym.to_string()); }
+                    Decl::Class(class) => { names.insert(class.ident.sym.to_string()); }
+                    Decl::Var(vars) => for variable in &vars.decls { pattern_names(&variable.name, &mut names); },
+                    _ => {}
+                }
+                for binding in names { local.insert(binding.clone(), binding.into()); }
+            }
+            ModuleDecl::ExportDefaultDecl(default) => {
+                let binding = match &default.decl {
+                    DefaultDecl::Fn(function) => function.ident.as_ref().map(|id| id.sym.to_string()),
+                    DefaultDecl::Class(class) => class.ident.as_ref().map(|id| id.sym.to_string()),
+                    DefaultDecl::TsInterfaceDecl(_) => None,
+                }.unwrap_or_else(|| "*default*".to_string());
+                local.insert("default".to_string(), binding.into());
+            }
+            ModuleDecl::ExportDefaultExpr(_) => {
+                local.insert("default".to_string(), "*default*".into());
+            }
+            ModuleDecl::ExportNamed(export) if !export.type_only => {
+                for specifier in &export.specifiers {
+                    match specifier {
+                        ExportSpecifier::Named(named) if !named.is_type_only => {
+                            let original = name(&named.orig);
+                            let exported = named.exported.as_ref().map(&name).unwrap_or_else(|| original.clone());
+                            let target = export.src.as_ref().map(|source| (source.value.to_string_lossy().into_owned(), Some(original.clone()), false))
+                                .or_else(|| imported.get(&original).cloned());
+                            if let Some((source, remote, default_interop)) = target {
+                                indirect.insert(exported, serde_json::json!([source, remote, default_interop]));
+                            } else {
+                                local.insert(exported, original.into());
+                            }
+                        }
+                        ExportSpecifier::Namespace(namespace) => {
+                            if let Some(source) = &export.src {
+                                indirect.insert(name(&namespace.name), serde_json::json!([source.value.to_string_lossy(), null, false]));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ModuleDecl::ExportAll(export) if !export.type_only => {
+                stars.push(serde_json::Value::String(export.src.value.to_string_lossy().into_owned()));
+            }
+            _ => {}
+        }
+    }
+    has_esm.then(|| serde_json::json!({ "local": local, "indirect": indirect, "stars": stars }))
+}
+
+fn esm_origin_parameter(source: &str) -> Option<String> {
+    esm_export_graph(source)?;
+    let dynamic_source = rewrite_dynamic_imports(source);
+    let source = dynamic_source.as_deref().unwrap_or(source);
+    Some(format!("__thaw_esm_origin_{}", esm_synthetic_offset(source)?))
 }

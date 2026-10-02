@@ -1,3 +1,191 @@
+const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey) {
+  var own = Object.prototype.hasOwnProperty;
+  var ambiguous = {};
+  function factoryOf(key) {
+    if (own.call(__thaw_bundle_export_graphs, key)) return key;
+    var query = key.indexOf('?'), fragment = key.indexOf('#', 1);
+    var at = query < 0 ? fragment : (fragment < 0 ? query : Math.min(query, fragment));
+    return at < 0 ? key : key.slice(0, at);
+  }
+  function graphOf(key) { return __thaw_bundle_export_graphs[factoryOf(key)]; }
+  function targetOf(key, spec) {
+    return __thaw_bundle_target(__thaw_bundle_require_maps[factoryOf(key)] || {}, spec);
+  }
+  var enumerable = Object.prototype.propertyIsEnumerable;
+  function valueOf(target, sourceKey, spec) {
+    var edges = __thaw_bundle_edges[sourceKey];
+    if (edges && own.call(edges, spec)) return edges[spec];
+    // A cycle may reach this edge before its owner executes the loader.
+    // Export discovery must never evaluate a dependency ahead of that owner.
+    return undefined;
+  }
+  function namesOf(key, visited, sourceKey, spec) {
+    if (visited.indexOf(key) >= 0) return [];
+    var graph = graphOf(key);
+    if (!graph) {
+      var value = valueOf({ key: key, factory: factoryOf(key) }, sourceKey, spec);
+      return value == null ? [] : Object.keys(value).filter(function(name) { return name !== '__esModule'; });
+    }
+    var next = visited.concat(key);
+    var names = Object.keys(graph.local).concat(Object.keys(graph.indirect));
+    for (var index = 0; index < graph.stars.length; index++) {
+      var target = targetOf(key, graph.stars[index]);
+      if (!target) continue;
+      var more = namesOf(target.key, next, key, graph.stars[index]);
+      for (var j = 0; j < more.length; j++) {
+        if (more[j] !== 'default' && names.indexOf(more[j]) < 0) names.push(more[j]);
+      }
+    }
+    return names;
+  }
+  function resolve(key, name, visited, allowMissing, sourceKey, spec) {
+    var visit = key + '\u0000' + name;
+    if (visited.indexOf(visit) >= 0) return null;
+    var graph = graphOf(key);
+    if (!graph) {
+      // Star exports skip the CommonJS interop marker; explicit named
+      // reexports still resolve it through allowMissing.
+      if (name === '__esModule' && !allowMissing) return null;
+      var value = valueOf({ key: key, factory: factoryOf(key) }, sourceKey, spec);
+      return (allowMissing || (value != null && enumerable.call(value, name))) ? { kind: 'cjs', key: key, sourceKey: sourceKey, spec: spec, name: name } : null;
+    }
+    var next = visited.concat(visit);
+    if (own.call(graph.local, name)) {
+      return { kind: 'esm', key: key, binding: graph.local[name], name: name };
+    }
+    if (own.call(graph.indirect, name)) {
+      var indirect = graph.indirect[name];
+      var source = targetOf(key, indirect[0]);
+      if (!source) return null;
+      if (indirect[1] === null) {
+        return { kind: 'namespace', key: source.key, binding: '*namespace*' };
+      }
+      if (indirect[2] && !graphOf(source.key)) {
+        return { kind: 'cjs-default', key: source.key, sourceKey: key, spec: indirect[0] };
+      }
+      return resolve(source.key, indirect[1], next, true, key, indirect[0]);
+    }
+    if (name === 'default') return null;
+    var found = null;
+    for (var index = 0; index < graph.stars.length; index++) {
+      var star = targetOf(key, graph.stars[index]);
+      if (!star) continue;
+      var candidate = resolve(star.key, name, next, false, key, graph.stars[index]);
+      if (candidate === ambiguous) return ambiguous;
+      if (!candidate) continue;
+      if (found && !sameBinding(found, candidate)) return ambiguous;
+      found = candidate;
+    }
+    return found;
+  }
+  function sameBinding(left, right) {
+    if (left.kind !== right.kind) return false;
+    if (left.kind === 'cjs') return left.key === right.key && left.name === right.name;
+    if (left.kind === 'cjs-default') return left.key === right.key;
+    return left.key === right.key && left.binding === right.binding;
+  }
+  function read(resolution) {
+    if (resolution.kind === 'cjs' || resolution.kind === 'cjs-default') {
+      var edges = __thaw_bundle_edges[resolution.sourceKey];
+      if (!edges || !own.call(edges, resolution.spec)) throw new ReferenceError("Cannot access '" + (resolution.name || 'default') + "' before initialization");
+      var value = valueOf(null, resolution.sourceKey, resolution.spec);
+      return resolution.kind === 'cjs' ? value[resolution.name] : value && value.__esModule ? value.default : value;
+    }
+    var source = __thaw_bundle_require(resolution.key, factoryOf(resolution.key));
+    return resolution.kind === 'namespace' ? source : source[resolution.name];
+  }
+  function linksReady(key, visited) {
+    if (visited.indexOf(key) >= 0) return true;
+    var graph = graphOf(key);
+    if (!graph) return true;
+    var next = visited.concat(key), edges = __thaw_bundle_edges[key];
+    // Explicit named reexports cannot introduce a competing star binding.
+    // Their names are static even if their opaque target has not run yet.
+    var specs = graph.stars;
+    for (var index = 0; index < specs.length; index++) {
+      var spec = specs[index], target = targetOf(key, spec);
+      if (!target) continue;
+      // ESM names and terminal bindings are known from the source graph
+      // before evaluation. Only opaque CJS/native targets need a loaded edge
+      // to discover their exported names.
+      if ((!graphOf(target.key) && (!edges || !own.call(edges, spec))) || !linksReady(target.key, next)) return false;
+    }
+    var indirectNames = Object.keys(graph.indirect);
+    for (var n = 0; n < indirectNames.length; n++) {
+      var indirect = graph.indirect[indirectNames[n]], target = targetOf(key, indirect[0]);
+      // A direct opaque named reexport has a statically fixed name/binding.
+      // An ESM target can itself resolve through unknown opaque stars.
+      if (target && graphOf(target.key) && !linksReady(target.key, next)) return false;
+    }
+    return true;
+  }
+  return {
+    edge: function(spec, value) {
+      var edges = __thaw_bundle_edges[ownerKey];
+      if (!edges) edges = __thaw_bundle_edges[ownerKey] = Object.create(null);
+      if (own.call(edges, spec) && edges[spec] === value) return;
+      edges[spec] = value;
+      __thaw_bundle_edge_version++;
+      // A cycle can reach an ESM module before its later CJS/native loader.
+      // Only link when its full transitive export graph is available.
+      for (var key in __thaw_bundle_star_linkers) __thaw_bundle_star_linkers[key]();
+    },
+    track: function(exports) {
+      var linked = false, linking = false;
+      var link = function() {
+        if (linked || linking || !linksReady(ownerKey, [])) return;
+        linking = true;
+        try {
+          // A CJS Proxy ownKeys trap can record another edge while names are
+          // discovered. Recompute before publication if the graph changed.
+          var bindings, before;
+          do {
+            before = __thaw_bundle_edge_version;
+            bindings = [];
+            var graph = graphOf(ownerKey), names = [];
+            for (var index = 0; index < graph.stars.length; index++) {
+              var spec = graph.stars[index], target = targetOf(ownerKey, spec);
+              if (!target) continue;
+              var more = namesOf(target.key, [], ownerKey, spec);
+              for (var j = 0; j < more.length; j++) {
+                var name = more[j];
+                if (name !== 'default' && names.indexOf(name) < 0) names.push(name);
+              }
+            }
+            for (var n = 0; n < names.length; n++) {
+              var name = names[n];
+              if (own.call(graph.local, name) || own.call(graph.indirect, name) || (name !== '__esModule' && own.call(exports, name))) continue;
+              var resolution = resolve(ownerKey, name, [], false, null, null);
+              if (resolution && resolution !== ambiguous) bindings.push([name, resolution]);
+            }
+          } while (before !== __thaw_bundle_edge_version && linksReady(ownerKey, []));
+          if (!linksReady(ownerKey, [])) return;
+          for (var b = 0; b < bindings.length; b++) {
+            var binding = bindings[b];
+            if (binding[0] !== '__esModule' && own.call(exports, binding[0])) continue;
+            Object.defineProperty(exports, binding[0], { enumerable: true, get: function(r) { return function() { return read(r); }; }(binding[1]) });
+          }
+          linked = true;
+          delete __thaw_bundle_star_linkers[ownerKey];
+        } finally { linking = false; }
+      };
+      __thaw_bundle_star_linkers[ownerKey] = link;
+      link();
+    },
+    defaultImport: function(spec, value) {
+      var target = targetOf(ownerKey, spec);
+      return target && graphOf(target.key) ? value.default : value && value.__esModule ? value.default : value;
+    },
+    names: function(spec, value) {
+      var target = targetOf(ownerKey, spec);
+      return target && graphOf(target.key) ? namesOf(target.key, [], ownerKey, spec) : (value == null ? [] : Object.keys(value).filter(function(name) { return name !== '__esModule'; }));
+    },
+    resolve: function(name) { var found = resolve(ownerKey, name, [], false, null, null); return found === ambiguous ? null : found; },
+    read: read
+  };
+}
+"#;
+
 /// Renders `modules` into one JS string: a small embedded CommonJS
 /// module-system emulation (a factory + a per-module require-spec-to-key
 /// map, both precomputed statically -- no runtime path resolution needed
@@ -25,6 +213,9 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
 
     out.push_str("var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\n");
     out.push_str("var __thaw_bundle_cache = {};\n");
+    out.push_str("var __thaw_bundle_edges = Object.create(null);\n");
+    out.push_str("var __thaw_bundle_star_linkers = Object.create(null);\n");
+    out.push_str("var __thaw_bundle_edge_version = 0;\n");
     out.push_str("var __thaw_bundle_factories = {\n");
     for module in modules {
         let asynchronous = if module.async_module { "async " } else { "" };
@@ -33,11 +224,19 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
         } else {
             "require"
         };
-        out.push_str(&format!(
-            "{}: {asynchronous}function(module, exports, {require}, requireAsync, __filename, __dirname) {{\n{}\n}},\n",
-            js_string_literal(&module.key),
-            module.source
-        ));
+        if let Some(origin) = &module.origin_parameter {
+            out.push_str(&format!(
+                "{}: function({origin}) {{ return {asynchronous}function(module, exports, {require}, requireAsync, __filename, __dirname) {{\n{}\n}}; }},\n",
+                js_string_literal(&module.key),
+                module.source,
+            ));
+        } else {
+            out.push_str(&format!(
+                "{}: {asynchronous}function(module, exports, {require}, requireAsync, __filename, __dirname) {{\n{}\n}},\n",
+                js_string_literal(&module.key),
+                module.source,
+            ));
+        }
     }
     out.push_str("};\n");
 
@@ -54,6 +253,13 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
         out.push_str("},\n");
     }
     out.push_str("};\n");
+
+    let export_graphs = modules.iter().filter_map(|module| {
+        module.export_graph.as_ref().map(|graph| (module.key.clone(), graph.clone()))
+    }).collect::<serde_json::Map<String, serde_json::Value>>();
+    let export_graph_json = serde_json::Value::Object(export_graphs).to_string();
+    out.push_str(&format!("var __thaw_bundle_export_graphs = JSON.parse({});\n", js_string_literal(&export_graph_json)));
+    out.push_str(STAR_ORIGIN_RUNTIME);
 
     out.push_str(
         "function __thaw_bundle_target(map, spec) {\n\
@@ -89,8 +295,8 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20var filename = '/thaw_modules/' + factoryKey, slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash);\n\
          \x20\x20\x20\x20var initialized;\n\
-         \x20\x20\x20\x20try { initialized = __thaw_bundle_factories[factoryKey](mod, mod.exports, localRequire, localRequireAsync, filename, dirname); } catch (error) { delete __thaw_bundle_cache[key]; throw error; }\n\
-         \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; }, function(error) { delete __thaw_bundle_cache[key]; throw error; });\n\
+         \x20\x20\x20\x20try { var factory = __thaw_bundle_factories[factoryKey]; if (Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, factoryKey)) factory = factory(__thaw_bundle_origin_for(key)); initialized = factory(mod, mod.exports, localRequire, localRequireAsync, filename, dirname); } catch (error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; }\n\
+         \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; }, function(error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; });\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
          }\n\
@@ -104,13 +310,22 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20created.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
          }\n\
+         function __thaw_bundle_register_worker_main(key, mod) {\n\
+         \x20\x20if (Object.prototype.hasOwnProperty.call(__thaw_bundle_cache, key)) throw new Error('Worker entry already initialized');\n\
+         \x20\x20mod.filename = '/thaw_modules/' + key;\n\
+         \x20\x20var resolveReady, rejectReady;\n\
+         \x20\x20mod.ready = new Promise(function(resolve, reject) { resolveReady = resolve; rejectReady = reject; });\n\
+         \x20\x20__thaw_bundle_cache[key] = mod;\n\
+         \x20\x20return function(succeeded, error) { if (succeeded) resolveReady(mod.exports); else rejectReady(error); };\n\
+         }\n\
          globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\n\
          var __thaw_worker_bundle_source =\n\
-         \x20\x20'var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_factories = {' +\n\
+         \x20\x20'(function() {\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
          \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
          \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
-         \x20\x20__thaw_bundle_target.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' +\n\
-         \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\n';\n\
+         \x20\x20'var __thaw_bundle_export_graphs = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_export_graphs)) + ');\\n' +\n\
+         \x20\x20__thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
+         \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\nglobalThis.__thaw_bundle_worker_origin = __thaw_bundle_origin_for;\\nglobalThis.__thaw_bundle_register_worker_main = __thaw_bundle_register_worker_main;\\n})();\\n';\n\
          globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source;\n",
     );
 
