@@ -1231,28 +1231,45 @@ fn http_incoming_message_pipe_forwards_the_buffered_body_and_ends() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-/// `IncomingMessage` also never had `.unpipe()` -- the exact same gap as
-/// `.pipe()` above, one real caller further in: multer's own
-/// `make-middleware.js` calls `req.unpipe(busboy)` once it's done reading
-/// a request (right after busboy's `close` event), unconditionally,
-/// regardless of whether an error occurred. With `.unpipe` undefined,
-/// this threw deep inside a callback dispatched from the request's own
-/// socket-read loop -- with nothing at that layer reporting the
-/// exception, the request simply never got a response (a real, harder-to
-/// diagnose failure mode than an ordinary crash: no error message
-/// anywhere, confirmed only by adding temporary tracing between every
-/// statement of multer's own `done()` function). Fixed with a safe no-op
-/// (emitting `'unpipe'` on the destination if it can) -- correct given
-/// `.pipe()`'s own buffer-then-replay design has no ongoing pipe state
-/// left to actually tear down by the time real code calls `unpipe()`.
+/// IncomingMessage unpipe must remove the exact pipe listeners while preserving
+/// other destinations, including when called from a data listener snapshot.
 #[test]
-fn http_incoming_message_unpipe_does_not_throw_and_emits_unpipe() {
+fn http_incoming_message_unpipe_detaches_destination_listeners() {
     use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http_incoming_message_unpipe");
     fs::write(
         dir.join("index.js"),
-        "var http = require('node:http'); module.exports = function () { var req = new http.IncomingMessage(null); req._pendingBody = Buffer.from('x'); var events = []; var destination = { write: function() { return true; }, end: function() {}, emit: function(name) { events.push(name); } }; req.pipe(destination); var returned = req.unpipe(destination); return [returned === req, events]; };",
+        r#"var http = require('node:http'); module.exports = function() {
+  function destination(name) { return { writes: [], events: [], ends: 0,
+    write: function(chunk) { this.writes.push(chunk.toString()); return true; },
+    end: function() { this.ends++; },
+    emit: function(event) { this.events.push(event); }
+  }; }
+  var before = new http.IncomingMessage(null), first = destination('first'), second = destination('second');
+  before.pipe(first); before.pipe(second, { end: false });
+  before._queueBody(Buffer.from('A'));
+  var returned = before.unpipe(first) === before;
+  before._queueBody(Buffer.from('B')); before._finishBody();
+
+  var during = new http.IncomingMessage(null), left = destination('left'), right = destination('right');
+  left.write = function(chunk) { this.writes.push(chunk.toString()); during.unpipe(right); return true; };
+  during.pipe(left); during.pipe(right);
+  during._queueBody(Buffer.from('C')); during._queueBody(Buffer.from('D')); during._finishBody();
+
+  var all = new http.IncomingMessage(null), x = destination('x'), y = destination('y'), removal = new Error('remove marker'), caught = false, nested = false;
+  x.emit = function(event) { this.events.push(event); if (event === 'unpipe') { try { all.unpipe(); } catch (error) { nested = error === removal; } throw new Error('notify marker'); } };
+  all.pipe(x); all.pipe(y);
+  all.on('removeListener', function(event) { if (event === 'data') throw removal; });
+  try { all.unpipe(); } catch (error) { caught = error === removal; }
+  all._queueBody(Buffer.from('E')); all._finishBody();
+
+  return Promise.resolve().then(function() { return [
+    returned, [first.writes, first.ends, first.events], [second.writes, second.ends, second.events],
+    [left.writes, left.ends, left.events], [right.writes, right.ends, right.events],
+    [caught, nested, all._pipeRecords.length, all.listenerCount('data'), all.listenerCount('end'), x.writes, x.ends, x.events, y.writes, y.ends, y.events]
+  ]; });
+};"#,
     )
     .unwrap();
     let empty_node_modules = temp_registry("builtin_http_incoming_message_unpipe_node_modules");
@@ -1267,7 +1284,7 @@ fn http_incoming_message_unpipe_does_not_throw_and_emits_unpipe() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[true,["pipe","unpipe"]]"#);
+    assert_eq!(result, r#"[true,[[],0,["pipe","unpipe"]],[["A","B"],0,["pipe"]],[["C","D"],1,["pipe"]],[[],0,["pipe","unpipe"]],[true,true,0,0,0,[],0,["pipe","unpipe"],[],0,["pipe","unpipe"]]]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
