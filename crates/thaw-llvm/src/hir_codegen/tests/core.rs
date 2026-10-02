@@ -2643,6 +2643,54 @@ fn dynamic_json_calls_release_bridge_temporaries() {
 }
 
 #[test]
+fn dynamic_json_setter_destroys_owned_result_before_exception_branch() {
+    // Both paths use setDynamicPropertyJson: one ordinary assignment and one
+    // assignment whose JavaScript setter can throw into a Thaw catch block.
+    for (name, source, caught) in [
+        (
+            "dynamic_set_success_cleanup",
+            r#"function main(): void {
+                const box: JsValue = getDynamicValue("box");
+                box.value = JSON.parse("1");
+            }"#,
+            false,
+        ),
+        (
+            "dynamic_set_throw_cleanup",
+            r#"function main(): void {
+                loadScript("globalThis.box = {}; Object.defineProperty(box, 'value', { set() { throw new Error('setter'); } });");
+                const box: JsValue = getDynamicValue("box");
+                try {
+                    box.value = JSON.parse("1");
+                } catch (error) {
+                    console.log(error);
+                }
+            }"#,
+            true,
+        ),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, name);
+        compiler.compile_program(&program).unwrap();
+        let ir = compiler.print_to_string();
+        let setter = ir.lines().position(|line| {
+            line.contains("call ") && line.contains("@thaw_js_set_property_json_result(")
+        }).expect(&ir);
+        let suffix = ir.lines().skip(setter).collect::<Vec<_>>().join("\n");
+        let extracted = suffix.find("dynamic_property_json_set_value = extractvalue").expect(&ir);
+        let destroyed = suffix.find("call void @thaw_cstring_destroy").expect(&ir);
+        let branch = suffix.find("br i1 %has_pending_exception").expect(&ir);
+        assert!(extracted < destroyed && destroyed < branch, "{ir}");
+        assert!(suffix[destroyed..].lines().next().unwrap()
+            .contains("%dynamic_property_json_set_value"), "{ir}");
+        let branch_line = suffix[branch..].lines().next().unwrap();
+        assert!(branch_line.contains(if caught { "label %catch" } else { "label %propagate_exception" }), "{ir}");
+    }
+}
+
+#[test]
 fn initializes_top_level_bindings_in_source_order_and_shares_mutation() {
     let source = r#"
         const base = 40;
