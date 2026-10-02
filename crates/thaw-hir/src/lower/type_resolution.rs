@@ -1329,6 +1329,51 @@ fn resolve_ts_type_with_substitution(
                     in_progress,
                 );
             }
+            if !interfaces.contains_key(ref_name) && matches!(ref_name, "Map" | "WeakMap") {
+                let name = ref_name;
+                let [key, value] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err(format!("{name}<K, V> requires exactly two type arguments"));
+                };
+                let key = resolve_ts_type_with_substitution(key, substitution, interfaces, generic_interfaces, in_progress)?;
+                if name == "WeakMap" {
+                    weak_key_intrinsic_suffix(&key)?;
+                } else {
+                    map_key_intrinsic_suffix(&key)?;
+                }
+                let value = resolve_ts_type_with_substitution(value, substitution, interfaces, generic_interfaces, in_progress)?;
+                return Ok(if name == "WeakMap" {
+                    HirType::WeakMap(Box::new(key), Box::new(value))
+                } else {
+                    HirType::Map(Box::new(key), Box::new(value))
+                });
+            }
+            if !interfaces.contains_key(ref_name) && matches!(ref_name, "Set" | "WeakSet") {
+                let name = ref_name;
+                let [element] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err(format!("{name}<T> requires exactly one type argument"));
+                };
+                let element = resolve_ts_type_with_substitution(element, substitution, interfaces, generic_interfaces, in_progress)?;
+                if name == "WeakSet" {
+                    weak_key_intrinsic_suffix(&element)?;
+                } else {
+                    map_key_intrinsic_suffix(&element)?;
+                }
+                return Ok(if name == "WeakSet" {
+                    HirType::WeakSet(Box::new(element))
+                } else {
+                    HirType::Set(Box::new(element))
+                });
+            }
             // TypeScript's built-in legacy-decorator aliases (`lib.es5.d.ts`)
             // have no ambient `.d.ts` of their own in thaw, so a package
             // like class-validator/TypeORM declaring
