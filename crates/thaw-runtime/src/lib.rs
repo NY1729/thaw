@@ -693,6 +693,7 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
 #[repr(C)]
 pub struct ThawPromise {
     result: Option<*const u8>,
+    fulfilled_provenance: *const ExceptionProvenance,
     rejection_text: Option<Vec<u8>>,
     rejected: bool,
     exception_tag: u64,

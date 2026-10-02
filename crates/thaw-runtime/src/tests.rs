@@ -2911,3 +2911,123 @@ fn purged_aggregate_callbacks_ignore_late_child_results_and_release_roots() {
     unsafe { thaw_promise_destroy(output) };
     thaw_arena::thaw_arena_reset();
 }
+
+#[test]
+fn private_exception_provenance_has_stable_eight_word_layout() {
+    assert_eq!(std::mem::size_of::<ExceptionProvenance>(), 64);
+    assert_eq!(std::mem::align_of::<ExceptionProvenance>(), 8);
+    let original = thaw_arena::thaw_arena_alloc(8, 8);
+    let text = thaw_arena::thaw_arena_alloc(8, 8);
+    let errors = thaw_arena::thaw_arena_alloc(8, 8);
+    let object = thaw_arena::thaw_arena_alloc(8, 8);
+    let record = thaw_exception_provenance_new(
+        original, text, errors, 7, 1.25, 19, 1, object,
+    );
+    assert!(!record.is_null());
+    let record = unsafe { &*record };
+    assert_eq!(record.original, original.cast_const());
+    assert_eq!(record.native_text, text.cast_const());
+    assert_eq!(record.aggregate_errors, errors.cast_const());
+    assert_eq!(record.tag, 7);
+    assert_eq!(record.f64_value, 1.25);
+    assert_eq!(record.i64_value, 19);
+    assert_eq!(record.bool_value, 1);
+    assert_eq!(record.object, object.cast_const());
+}
+
+#[test]
+fn fulfilled_provenance_follows_exact_result_and_first_settlement() {
+    let value = thaw_arena::thaw_arena_alloc(8, 8);
+    let unrelated = thaw_arena::thaw_arena_alloc(8, 8);
+    let record = thaw_exception_provenance_new(value, std::ptr::null(),
+        std::ptr::null(), 5, 0.0, 0, 0, std::ptr::null());
+    let other_record = thaw_exception_provenance_new(unrelated, std::ptr::null(),
+        std::ptr::null(), 5, 0.0, 0, 0, std::ptr::null());
+    let child = thaw_promise_new();
+    assert!(unsafe { thaw_promise_fulfilled_provenance(child) }.is_null());
+    extern "C" fn unused_callback(_: *mut u8, _: *mut ThawPromise, _: *mut ThawPromise, _: *const u8) {}
+    let chained = unsafe { thaw_promise_chain(child, unused_callback, std::ptr::null_mut(), 1) };
+    assert_eq!(unsafe { thaw_promise_resolve_with_provenance(child, value, record) }, 1);
+    assert_eq!(unsafe { thaw_promise_resolve_with_provenance(child, unrelated, other_record) }, 0);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_fulfilled_provenance(chained) }, record);
+    unsafe { thaw_promise_destroy(chained) };
+
+    let rejected = thaw_promise_new();
+    assert_eq!(thaw_promise_reject(rejected, value), 1);
+    assert!(unsafe { thaw_promise_fulfilled_provenance(rejected) }.is_null());
+    unsafe { thaw_promise_destroy(rejected) };
+}
+
+#[test]
+fn rooted_fulfilled_record_retains_its_arena_children_until_destroy() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let result = thaw_arena::thaw_arena_alloc(8, 8);
+    let nested = thaw_arena::thaw_arena_alloc(8, 8);
+    let record = thaw_exception_provenance_new(result, std::ptr::null(),
+        nested, 7, 0.0, 0, 0, std::ptr::null());
+    let promise = thaw_promise_new();
+    let root = thaw_arena::ArenaRoot::new(promise as usize);
+    assert_eq!(unsafe { thaw_promise_resolve_with_provenance(promise, result, record) }, 1);
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(record as usize));
+    assert!(!thaw_arena::was_reclaimed(nested as usize));
+    assert_eq!(unsafe { thaw_promise_fulfilled_provenance(promise) }, record);
+    unsafe { thaw_promise_destroy(promise) };
+    drop(root);
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(record as usize));
+    assert!(thaw_arena::was_reclaimed(nested as usize));
+}
+
+#[test]
+fn finally_adopt_retains_fulfilled_provenance_after_source_destroy() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let value = thaw_arena::thaw_arena_alloc(8, 8);
+    let errors = thaw_arena::thaw_arena_alloc(8, 8);
+    let record = thaw_exception_provenance_new(value, std::ptr::null(),
+        errors, 7, 0.0, 0, 0, std::ptr::null());
+    let source = thaw_promise_new();
+    let returned = thaw_promise_new();
+    let output = thaw_promise_new();
+    let output_root = thaw_arena::ArenaRoot::new(output as usize);
+    assert_eq!(unsafe { thaw_promise_resolve_with_provenance(source, value, record) }, 1);
+    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
+        output, returned, value, 0, 0, 0.0, 0, false, std::ptr::null(), source,
+    ) }, 1);
+    unsafe { thaw_promise_destroy(source) };
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(record as usize));
+    assert!(!thaw_arena::was_reclaimed(errors as usize));
+    assert_eq!(thaw_promise_resolve(returned, std::ptr::null()), 1);
+    thaw_runtime_run_until_idle();
+    assert_eq!(unsafe { thaw_promise_fulfilled_provenance(output) }, record);
+    unsafe { thaw_promise_destroy(output) };
+    drop(output_root);
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(record as usize));
+}
+
+#[test]
+fn native_adopt_race_and_any_forward_fulfilled_record_without_reinterpreting_result() {
+    for kind in 0..3 {
+        let value = thaw_arena::thaw_arena_alloc(8, 8);
+        let record = thaw_exception_provenance_new(value, std::ptr::null(),
+            std::ptr::null(), 5, 0.0, 0, 0, std::ptr::null());
+        let input = thaw_promise_new();
+        let output = match kind {
+            0 => {
+                let output = thaw_promise_new();
+                assert_eq!(unsafe { thaw_promise_adopt(output, input) }, 1);
+                output
+            }
+            1 => unsafe { thaw_promise_race([input].as_ptr(), 1) },
+            _ => unsafe { thaw_promise_any([input].as_ptr(), 1) },
+        };
+        assert_eq!(unsafe { thaw_promise_resolve_with_provenance(input, value, record) }, 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(unsafe { thaw_promise_state(output) }, 1);
+        assert_eq!(unsafe { thaw_promise_fulfilled_provenance(output) }, record);
+        unsafe { thaw_promise_destroy(output) };
+    }
+}
