@@ -332,7 +332,8 @@ impl<'a> FnLowerer<'a> {
                 if let Expr::Ident(class) = member.obj.as_ref() {
                     let class_name = class.sym.as_ref();
                     let symbol = class_static_method_symbol(class_name, &property);
-                    if self.signatures.contains_key(&symbol) {
+                    if self.is_unshadowed_class_identifier(class_name)
+                        && self.signatures.contains_key(&symbol) {
                         if call.type_args.is_some() {
                             return Err(format!(
                                 "native static method `{class_name}.{property}` is not generic"
