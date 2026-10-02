@@ -1781,3 +1781,95 @@ fn rejects_uninitialized_non_optional_native_static_fields() {
         "{error}"
     );
 }
+
+#[test]
+fn generic_class_method_type_parameter_shadows_class_parameter() {
+    let program = lower(
+        r#"
+        class Box<T> {
+            constructor(public value: T) {}
+            get(): T { return this.value; }
+            identity<T>(value: T): T { return value; }
+        }
+        function main(): void {
+            const box = new Box<string>("ready");
+            const text: string = box.get();
+            const number: number = box.identity<number>(42);
+            console.log(text, number);
+        }
+        "#,
+    );
+    let string_box = specialized_generic_name("Box", &[HirType::Str]);
+    let getter = program.functions.iter().find(|function|
+        function.name == class_method_symbol(&string_box, "get")).unwrap();
+    assert_eq!(getter.ret, HirType::Str);
+    let identity = program.functions.iter().find(|function|
+        function.name.starts_with(&class_method_symbol(&string_box, "identity__thaw_f64")))
+        .expect("method-local T specializes independently of class T");
+    assert_eq!(identity.ret, HirType::F64);
+}
+
+#[test]
+fn generic_type_substitution_respects_nested_type_binders_and_conditional_arms() {
+    #[derive(Default)]
+    struct References(Vec<String>);
+    impl Visit for References {
+        fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
+            if reference.type_params.is_none() {
+                if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
+                    self.0.push(name.sym.to_string());
+                }
+            }
+            reference.visit_children_with(self);
+        }
+    }
+    let mut module = thaw_parser::parse_typescript(
+        r#"
+        type FunctionShape = [T, <T>(value: T) => T, T];
+        type MappedShape = { [T in keyof T]: T };
+        type InferShape = T extends infer T ? T : T;
+        type NestedInfer = T extends (string extends infer T ? T : never) ? T : T;
+        type AliasShape<T> = T;
+        type SignatureShape = { <T>(value: T): T; new <T>(value: T): T; method<T>(value: T): T };
+        interface InterfaceShape<T> { value: T; }
+        "#,
+    ).unwrap();
+    let replacement = TsType::TsKeywordType(swc_ecma_ast::TsKeywordType {
+        span: swc_common::DUMMY_SP,
+        kind: TsKeywordTypeKind::TsStringKeyword,
+    });
+    let substitutions = HashMap::from([("T".to_string(), Box::new(replacement))]);
+    for item in &mut module.body {
+        item.visit_mut_with(&mut GenericClassTypeSubstituter::new(&substitutions));
+    }
+    let mut references = HashMap::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => {
+                let mut names = References::default();
+                alias.visit_with(&mut names);
+                references.insert(alias.id.sym.to_string(), names.0);
+                if alias.id.sym == "NestedInfer" {
+                    let TsType::TsConditionalType(outer) = alias.type_ann.as_ref() else {
+                        panic!("outer conditional");
+                    };
+                    assert!(matches!(outer.true_type.as_ref(), TsType::TsKeywordType(_)),
+                        "nested infer must not shadow the outer true arm");
+                }
+            }
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(interface))) => {
+                let mut names = References::default();
+                interface.visit_with(&mut names);
+                references.insert(interface.id.sym.to_string(), names.0);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(references["FunctionShape"], ["T", "T"]);
+    assert_eq!(references["MappedShape"], ["T"]);
+    assert_eq!(references["InferShape"], ["T"]);
+    assert_eq!(references["NestedInfer"], ["T"]);
+    assert_eq!(references["AliasShape"], ["T"]);
+    assert_eq!(references["SignatureShape"], ["T", "T", "T", "T", "T", "T"]);
+    assert_eq!(references["InterfaceShape"], ["T"]);
+}
