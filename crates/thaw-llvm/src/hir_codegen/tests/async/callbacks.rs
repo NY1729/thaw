@@ -497,6 +497,45 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         String::from_utf8_lossy(&output.stdout),
         "42\nnative addon failed\nasync 42 status 0\n42\n42\n"
     );
+    // The scheduled addon invokes the generated callback after main has
+    // already thrown. Its successful callback must not consume or reframe
+    // main's earlier exception, including on the second invocation.
+    let pending_source = format!(r#"
+        function main(): void {{
+            loadNativeAddon("{}");
+            callNativeAddonWithCallback(
+                "schedule", JSON.parse("[]"),
+                (error: Json, result: Json): Json => {{
+                    console.log("callback ran");
+                    return result;
+                }}
+            );
+            throw "outer main failure";
+        }}
+    "#, addon.display());
+    let pending_module = thaw_parser::parse_typescript(&pending_source).unwrap();
+    let pending_program = thaw_hir::lower_module(&pending_module).unwrap();
+    let pending_context = Context::create();
+    let mut pending_compiler = HirCompiler::new(&pending_context, "napi_prior_pending");
+    pending_compiler.compile_program(&pending_program).unwrap();
+    let pending_obj = dir.join("pending.o");
+    let pending_exe = dir.join("pending");
+    pending_compiler.write_object_file(&pending_obj).unwrap();
+    assert!(cc_command()
+        .arg(&pending_obj)
+        .arg(&arena)
+        .arg(&std)
+        .arg(&runtime)
+        .arg(&napi)
+        .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"])
+        .arg(&pending_exe)
+        .status().unwrap().success());
+    let pending_output = Command::new(&pending_exe).output().unwrap();
+    let pending_stdout = String::from_utf8_lossy(&pending_output.stdout);
+    let pending_stderr = String::from_utf8_lossy(&pending_output.stderr);
+    assert!(pending_stdout.contains("async 42 status 0"), "{pending_stdout}");
+    assert_eq!(pending_stdout.matches("callback ran").count(), 2, "{pending_stdout}");
+    assert!(pending_stderr.contains("outer main failure"), "{pending_stderr}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
