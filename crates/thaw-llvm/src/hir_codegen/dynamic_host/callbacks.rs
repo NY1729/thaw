@@ -1722,6 +1722,40 @@ impl<'ctx> HirCompiler<'ctx> {
     /// a raw JSON value at this point, so there is no compile-time
     /// evidence to prefer one candidate member over another beyond what
     /// the value itself reports.
+    /// A Union decoder borrows its JSON input even when the selected member
+    /// is a resolved Promise<scalar>. The ordinary typed-result scalar path
+    /// consumes JSON, so build this Promise from the borrowed scalar instead.
+    fn compile_borrowed_json_promise_scalar(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        resolved: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let promise = self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_new").unwrap(),
+                &[],
+                "dynamic_union_promise",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_promise_new returned no value")?
+            .into_pointer_value();
+        let value = self.compile_json_value_to_native(json, resolved)?;
+        let slot = self.allocate_arena_cell(self.basic_type(resolved)?, "dynamic_union_promise_result")?;
+        self.builder
+            .build_store(slot, value)
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_resolve").unwrap(),
+                &[promise.into(), slot.into()],
+                "resolve_dynamic_union_promise",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(promise.into())
+    }
+
     fn compile_json_to_union_result(
         &mut self,
         json: BasicValueEnum<'ctx>,
@@ -1904,8 +1938,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_conditional_branch(matches, matched_block, next_block)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(matched_block);
-            let native = if matches!(element, HirType::Promise(_)) {
-                self.compile_typed_dynamic_result(json, element)?
+            let native = if let HirType::Promise(resolved) = element {
+                if matches!(resolved.as_ref(), HirType::F64 | HirType::Str | HirType::Bool) {
+                    self.compile_borrowed_json_promise_scalar(json, resolved)?
+                } else {
+                    self.compile_typed_dynamic_result(json, element)?
+                }
             } else {
                 self.compile_json_value_to_native(json, element)?
             };
@@ -1929,8 +1967,12 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(block) = remaining {
             self.builder.position_at_end(block);
             let index = elements.len() - 1;
-            let native = if matches!(elements[index], HirType::Promise(_)) {
-                self.compile_typed_dynamic_result(json, &elements[index])?
+            let native = if let HirType::Promise(resolved) = &elements[index] {
+                if matches!(resolved.as_ref(), HirType::F64 | HirType::Str | HirType::Bool) {
+                    self.compile_borrowed_json_promise_scalar(json, resolved)?
+                } else {
+                    self.compile_typed_dynamic_result(json, &elements[index])?
+                }
             } else {
                 self.compile_json_value_to_native(json, &elements[index])?
             };
@@ -2037,7 +2079,11 @@ impl<'ctx> HirCompiler<'ctx> {
             // (not just a call to it -- every declared Fallback function
             // gets compiled unconditionally, whether the user's own code
             // ever calls it or not).
-            HirType::Union(elements) => self.compile_json_to_union_result(json, elements),
+            HirType::Union(elements) => {
+                let value = self.compile_json_to_union_result(json, elements)?;
+                self.compile_destroy_decoded_owned_json(json, ty)?;
+                Ok(value)
+            },
             HirType::Optional(payload) => {
                 let (object, key) = self.compile_napi_optional_result_container(json)?;
                 self.compile_json_to_optional_field(object, key, json, payload, false)
