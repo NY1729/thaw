@@ -1,3 +1,75 @@
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromiseResolveKind {
+    Value,
+    Adopt,
+    Mixed,
+}
+
+fn promise_resolved_argument(parameter: &HirType) -> (HirType, PromiseResolveKind) {
+    if let HirType::Optional(inner) = parameter {
+        if matches!(inner.as_ref(), HirType::Promise(value)
+            if matches!(value.as_ref(), HirType::Void | HirType::Undefined)) {
+            let HirType::Promise(value) = inner.as_ref() else { unreachable!() };
+            return (value.as_ref().clone(), PromiseResolveKind::Mixed);
+        }
+    }
+    if let HirType::Nullable(inner) = parameter {
+        if matches!(inner.as_ref(), HirType::Promise(value)
+            if value.as_ref() == &HirType::Null) {
+            return (HirType::Null, PromiseResolveKind::Mixed);
+        }
+    }
+    if let HirType::Union(parts) = parameter {
+        if let [value, HirType::Promise(promised)] = parts.as_slice() {
+            if value == promised.as_ref() {
+                return (value.clone(), PromiseResolveKind::Mixed);
+            }
+        }
+    }
+    if let HirType::Promise(value) = parameter {
+        return (value.as_ref().clone(), PromiseResolveKind::Adopt);
+    }
+    (parameter.clone(), PromiseResolveKind::Value)
+}
+
+fn promise_resolver_parameter(callback: &HirType) -> Result<(HirType, PromiseResolveKind), String> {
+    let (params, ret) = match callback {
+        HirType::Function(params, ret) => (params, ret),
+        HirType::CallableFunction(params, _, None, ret) => (params, ret),
+        _ => return Err("Promise resolve callback is not a function".into()),
+    };
+    if ret.as_ref() != &HirType::Void {
+        return Err("Promise resolve callback must return void".into());
+    }
+    match params.as_slice() {
+        [] => Ok((HirType::Void, PromiseResolveKind::Value)),
+        [parameter] => Ok(promise_resolved_argument(parameter)),
+        _ => Err("Promise resolve callback must take at most one value".into()),
+    }
+}
+
+fn promise_mixed_resolver_type(resolved: &HirType, omittable: bool) -> HirType {
+    let parameter = if matches!(resolved, HirType::Void | HirType::Undefined) {
+        HirType::Optional(Box::new(HirType::Promise(Box::new(resolved.clone()))))
+    } else if resolved == &HirType::Null {
+        HirType::Nullable(Box::new(HirType::Promise(Box::new(HirType::Null))))
+    } else {
+        HirType::Union(vec![
+            resolved.clone(), HirType::Promise(Box::new(resolved.clone())),
+        ])
+    };
+    if omittable {
+        HirType::CallableFunction(
+            vec![parameter],
+            HirOptionalMask::from_bools(&[true]),
+            None,
+            Box::new(HirType::Void),
+        )
+    } else {
+        HirType::Function(vec![parameter], Box::new(HirType::Void))
+    }
+}
+
 impl<'a> FnLowerer<'a> {
     fn promise_rejection_snapshot_name(binding: &str, field: &str) -> String {
         format!("@@thaw_promise_rejection:{binding}:{field}")
@@ -241,6 +313,57 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn declared_promise_resolver(
+        &mut self,
+        executor: &Expr,
+    ) -> Result<Option<HirType>, String> {
+        let annotation = match executor {
+            Expr::Arrow(arrow) => arrow.params.first().and_then(|parameter| match parameter {
+                Pat::Ident(binding) => binding.type_ann.as_ref(),
+                Pat::Assign(assignment) => match assignment.left.as_ref() {
+                    Pat::Ident(binding) => binding.type_ann.as_ref(),
+                    _ => None,
+                },
+                _ => None,
+            }),
+            Expr::Fn(function) => function.function.params.first().and_then(|parameter| {
+                match &parameter.pat {
+                    Pat::Ident(binding) => binding.type_ann.as_ref(),
+                    _ => None,
+                }
+            }),
+            _ => None,
+        };
+        if let Some(annotation) = annotation {
+            if matches!(annotation.type_ann.as_ref(),
+                TsType::TsKeywordType(keyword)
+                    if keyword.kind == TsKeywordTypeKind::TsAnyKeyword)
+            {
+                return Ok(None);
+            }
+            return lower_ts_type(
+                &annotation.type_ann,
+                self.interfaces,
+                self.generic_interfaces,
+            ).map(Some);
+        }
+        if let Expr::Ident(ident) = executor {
+            let name = self.resolve_binding(ident.sym.as_ref());
+            if let Some(ty) = self.scope.get(&name) {
+                return Ok(match ty {
+                    HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _) => {
+                        params.first().filter(|param| *param != &HirType::Dynamic).cloned()
+                    }
+                    _ => None,
+                });
+            }
+            return Ok(self.signatures.get(&name).and_then(|signature| {
+                signature.params.first().filter(|param| *param != &HirType::Dynamic).cloned()
+            }));
+        }
+        Ok(None)
+    }
+
     /// `new Function(...args)` -- the args are the parameter names followed
     /// by the body. An AOT compiler can't compile a runtime source string,
     /// so this is lowered to the JS realm's own `Function` constructor via
@@ -292,35 +415,87 @@ impl<'a> FnLowerer<'a> {
         } else {
             (None, Vec::new())
         };
-        let inferred_resolve = if let Some(executor) = &spread_executor {
-            self.infer_promise_constructor_value_type(executor)
-        } else {
-            self.infer_promise_constructor_type(&executor.expr)
-        };
-        let (resolved, assimilates) = if let Some(type_args) = &new_expr.type_args {
+        let explicit = if let Some(type_args) = &new_expr.type_args {
             let [resolved] = type_args.params.as_slice() else {
                 return Err("`new Promise` requires exactly one type argument".into());
             };
-            let resolved = lower_ts_type(resolved, self.interfaces, self.generic_interfaces)?;
-            let assimilates = matches!(
-                inferred_resolve.as_ref().ok(),
-                Some(HirType::Promise(inner)) if inner.as_ref() == &resolved
-            );
-            (resolved, assimilates)
+            Some(lower_ts_type(resolved, self.interfaces, self.generic_interfaces)?)
         } else {
-            match inferred_resolve? {
-                HirType::Promise(inner) => (*inner, true),
-                resolved => (resolved, false),
+            None
+        };
+        let declared_resolver = if let Some(executor) = &spread_executor {
+            match self.infer_expr_type(executor)? {
+                HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _) => {
+                    params.first().filter(|param| *param != &HirType::Dynamic).cloned()
+                }
+                _ => return Err("Promise executor is not a function value".into()),
             }
-        };
-        let resolve_value = if assimilates {
-            vec![HirType::Promise(Box::new(resolved.clone()))]
-        } else if resolved == HirType::Void {
-            Vec::new()
         } else {
-            vec![resolved.clone()]
+            self.declared_promise_resolver(&executor.expr)?
         };
-        let resolve = HirType::Function(resolve_value, Box::new(HirType::Void));
+        let inferred_resolve = if let Some(executor) = &spread_executor {
+            self.infer_promise_constructor_value_type(executor, explicit.as_ref())
+                .map(|value| (value, true))
+        } else {
+            self.infer_promise_constructor_type(&executor.expr, explicit.as_ref())
+        };
+        if let Err(error) = &inferred_resolve {
+            if explicit.is_none()
+                || !error.starts_with(
+                    "cannot infer Promise type because the executor has no resolvable",
+                )
+            {
+                return Err(error.clone());
+            }
+        }
+        let inferred = inferred_resolve.as_ref().ok()
+            .map(|(result, observed)| (result.clone(), *observed));
+        let legacy_unobserved_void = explicit.is_none()
+            && matches!(inferred.as_ref(), Some((HirType::Void, false)));
+        let resolved = if let Some(explicit) = explicit {
+            if let Some((result, observed)) = inferred {
+                let compatible = if declared_resolver.is_some() {
+                    result == explicit
+                } else {
+                    promise_resolve_value_fits(&result, &explicit)
+                };
+                if observed && !compatible {
+                    return Err(format!(
+                        "Promise resolve value has type {result:?}, expected {explicit:?}"
+                    ));
+                }
+            }
+            explicit
+        } else {
+            inferred_resolve.map(|(result, _)| result)?
+        };
+        let kind = if let Some(declared) = &declared_resolver {
+            let (declared_result, kind) = promise_resolver_parameter(declared)?;
+            if declared_result != resolved {
+                return Err(format!(
+                    "Promise resolve callback has result {declared_result:?}, expected {resolved:?}"
+                ));
+            }
+            kind
+        } else if legacy_unobserved_void {
+            PromiseResolveKind::Value
+        } else {
+            PromiseResolveKind::Mixed
+        };
+        let resolve = if kind == PromiseResolveKind::Mixed {
+            declared_resolver.unwrap_or_else(|| {
+                promise_mixed_resolver_type(&resolved, resolved == HirType::Void)
+            })
+        } else {
+            let resolve_value = if kind == PromiseResolveKind::Adopt {
+                vec![HirType::Promise(Box::new(resolved.clone()))]
+            } else if resolved == HirType::Void {
+                Vec::new()
+            } else {
+                vec![resolved.clone()]
+            };
+            HirType::Function(resolve_value, Box::new(HirType::Void))
+        };
         let reject = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
         let arity = if let Some(executor) = &spread_executor {
             match self.infer_expr_type(executor)? {
@@ -352,34 +527,43 @@ impl<'a> FnLowerer<'a> {
                 Some(&HirType::Void),
             )?
         };
-        let result = HirExpr::PromiseNew(
-            Box::new(executor),
-            resolved,
-            assimilates,
-            false,
-        );
+        let result = if kind == PromiseResolveKind::Mixed {
+            HirExpr::PromiseNewMixed(Box::new(executor), resolved, available[0].clone())
+        } else {
+            HirExpr::PromiseNew(
+                Box::new(executor), resolved,
+                kind == PromiseResolveKind::Adopt, false,
+            )
+        };
         self.wrap_call_argument_bindings(result, &spread_bindings)
     }
 
     fn infer_promise_constructor_value_type(
         &mut self,
         executor: &HirExpr,
+        explicit: Option<&HirType>,
     ) -> Result<HirType, String> {
         let (params, _) = match self.infer_expr_type(executor)? {
             HirType::Function(params, ret) => (params, ret),
             HirType::CallableFunction(params, _, _, ret) => (params, ret),
             _ => return Err("cannot infer Promise type from executor function".into()),
         };
-        let Some(HirType::Function(resolve_params, _)) = params.first() else {
+        let Some(resolve) = params.first() else {
             return Err("cannot infer Promise type from executor resolve parameter".into());
         };
-        let [resolved] = resolve_params.as_slice() else {
-            return Err("Promise resolve callback must take exactly one value".into());
-        };
-        Ok(resolved.clone())
+        if resolve == &HirType::Dynamic {
+            return explicit.cloned().ok_or(
+                "cannot infer Promise type from a generic executor without a type argument".into(),
+            );
+        }
+        Ok(promise_resolver_parameter(resolve)?.0)
     }
 
-    fn infer_promise_constructor_type(&mut self, executor: &Expr) -> Result<HirType, String> {
+    fn infer_promise_constructor_type(
+        &mut self,
+        executor: &Expr,
+        explicit: Option<&HirType>,
+    ) -> Result<(HirType, bool), String> {
         use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
         if let Expr::Ident(ident) = executor {
@@ -396,27 +580,52 @@ impl<'a> FnLowerer<'a> {
                     )
                 })
             });
-            let Some(HirType::Function(params, _)) = callback_type else {
+            let Some(HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _)) = callback_type else {
                 return Err("cannot infer Promise type from executor function".into());
             };
-            let Some(HirType::Function(resolve_params, _)) = params.first() else {
+            let Some(resolve) = params.first() else {
                 return Err("cannot infer Promise type from executor resolve parameter".into());
             };
-            let [resolved] = resolve_params.as_slice() else {
-                return Err("Promise resolve callback must take exactly one value".into());
-            };
-            return Ok(resolved.clone());
+            if resolve == &HirType::Dynamic {
+                return explicit.cloned().map(|resolved| (resolved, false))
+                    .ok_or("cannot infer Promise type from a generic executor without a type argument".into());
+            }
+            return Ok((promise_resolver_parameter(resolve)?.0, true));
         }
 
-        let Expr::Arrow(arrow) = executor else {
-            return Err("cannot infer Promise type from this executor".into());
+        let resolve_binding = match executor {
+            Expr::Arrow(arrow) => arrow.params.first(),
+            Expr::Fn(function) => function.function.params.first().map(|param| &param.pat),
+            _ => return Err("cannot infer Promise type from this executor".into()),
         };
-        let Some(Pat::Ident(resolve_binding)) = arrow.params.first() else {
+        let Some(resolve_binding) = resolve_binding else {
             return Err("cannot infer Promise type without a resolve parameter".into());
         };
+        let resolve_binding = match resolve_binding {
+            Pat::Ident(binding) => binding,
+            Pat::Assign(assignment) => match assignment.left.as_ref() {
+                Pat::Ident(binding) => binding,
+                _ => return Err("cannot infer Promise type without a resolve parameter".into()),
+            },
+            _ => return Err("cannot infer Promise type without a resolve parameter".into()),
+        };
+        if let Some(annotation) = &resolve_binding.type_ann {
+            if !matches!(annotation.type_ann.as_ref(),
+                TsType::TsKeywordType(keyword)
+                    if keyword.kind == TsKeywordTypeKind::TsAnyKeyword)
+            {
+                let declared = lower_ts_type(
+                    &annotation.type_ann,
+                    self.interfaces,
+                    self.generic_interfaces,
+                )?;
+                return Ok((promise_resolver_parameter(&declared)?.0, true));
+            }
+        }
         struct ResolveCalls {
             name: Symbol,
-            values: Vec<Expr>,
+            values: Vec<(Expr, bool)>,
+            zero_arg_calls: usize,
             locals: HashMap<Symbol, Expr>,
             // Whether `resolve` is referenced anywhere at all, in any
             // position -- including handed off *by reference* rather
@@ -427,7 +636,51 @@ impl<'a> FnLowerer<'a> {
             // all in that shape.
             referenced: bool,
         }
+        impl ResolveCalls {
+            fn shadows_resolve(&self, pattern: &Pat) -> bool {
+                match pattern {
+                    Pat::Ident(binding) => binding.id.sym == self.name,
+                    Pat::Assign(assignment) => self.shadows_resolve(&assignment.left),
+                    _ => false,
+                }
+            }
+        }
         impl Visit for ResolveCalls {
+            fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+                if !arrow.params.iter().any(|pattern| self.shadows_resolve(pattern)) {
+                    arrow.visit_children_with(self);
+                }
+            }
+
+            fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+                if !function.params.iter().any(|param| self.shadows_resolve(&param.pat)) {
+                    function.visit_children_with(self);
+                }
+            }
+
+            fn visit_call_expr(&mut self, call: &CallExpr) {
+                if let Callee::Expr(callee) = &call.callee {
+                    if let Expr::Ident(ident) = callee.as_ref() {
+                        let mut current = ident.sym.to_string();
+                        let mut seen = BTreeSet::new();
+                        while current != self.name && seen.insert(current.clone()) {
+                            let Some(Expr::Ident(next)) = self.locals.get(&current) else {
+                                break;
+                            };
+                            current = next.sym.to_string();
+                        }
+                        if current == self.name {
+                            if let [arg] = call.args.as_slice() {
+                                self.values.push((arg.expr.as_ref().clone(), arg.spread.is_some()));
+                            } else if call.args.is_empty() {
+                                self.zero_arg_calls += 1;
+                            }
+                        }
+                    }
+                }
+                call.visit_children_with(self);
+            }
+
             fn visit_expr(&mut self, expr: &Expr) {
                 if let Expr::Ident(ident) = expr {
                     if ident.sym == self.name {
@@ -447,26 +700,23 @@ impl<'a> FnLowerer<'a> {
                 declarator.visit_children_with(self);
             }
 
-            fn visit_call_expr(&mut self, call: &CallExpr) {
-                if let Callee::Expr(callee) = &call.callee {
-                    if matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym == self.name) {
-                        if let [arg] = call.args.as_slice() {
-                            if arg.spread.is_none() {
-                                self.values.push(arg.expr.as_ref().clone());
-                            }
-                        }
-                    }
-                }
-                call.visit_children_with(self);
-            }
         }
         let mut calls = ResolveCalls {
             name: resolve_binding.id.sym.to_string(),
             values: Vec::new(),
+            zero_arg_calls: 0,
             locals: HashMap::new(),
             referenced: false,
         };
-        arrow.body.visit_with(&mut calls);
+        match executor {
+            Expr::Arrow(arrow) => arrow.body.visit_with(&mut calls),
+            Expr::Fn(function) => {
+                if let Some(body) = &function.function.body {
+                    body.visit_with(&mut calls);
+                }
+            }
+            _ => unreachable!(),
+        }
 
         struct ExpandExecutorLocals<'a> {
             locals: &'a HashMap<Symbol, Expr>,
@@ -490,7 +740,22 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let mut inferred = None;
-        for mut value in calls.values {
+        for (mut value, mut spread) in calls.values {
+            if spread {
+                let single = match &value {
+                    Expr::Array(array) => match array.elems.as_slice() {
+                        [Some(element)] if element.spread.is_none() => {
+                            Some(element.expr.as_ref().clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(single) = single {
+                    value = single;
+                    spread = false;
+                }
+            }
             value.visit_mut_with(&mut ExpandExecutorLocals {
                 locals: &calls.locals,
                 expanding: BTreeSet::new(),
@@ -499,6 +764,26 @@ impl<'a> FnLowerer<'a> {
                 format!("cannot infer Promise type from resolve argument: {error}")
             })?;
             let actual = self.infer_expr_type(&value)?;
+            let actual = if spread {
+                match actual {
+                    HirType::Tuple(mut values) if values.len() == 1 => values.remove(0),
+                    other => return Err(format!(
+                        "Promise resolve spread must supply one static value, got {other:?}"
+                    )),
+                }
+            } else {
+                actual
+            };
+            let (actual, _) = promise_resolved_argument(&actual);
+            if let Some(expected) = explicit {
+                if !promise_resolve_value_fits(&actual, expected) {
+                    return Err(format!(
+                        "Promise resolve value has type {actual:?}, expected {expected:?}"
+                    ));
+                }
+                inferred = Some(expected.clone());
+                continue;
+            }
             if let Some(expected) = &inferred {
                 if expected != &actual {
                     return Err(format!(
@@ -509,8 +794,16 @@ impl<'a> FnLowerer<'a> {
                 inferred = Some(actual);
             }
         }
+        if calls.zero_arg_calls > 0 {
+            if explicit.is_some_and(|expected| *expected != HirType::Void)
+                || inferred.as_ref().is_some_and(|inferred| *inferred != HirType::Void)
+            {
+                return Err("Promise resolve() without a value requires Promise<void>".into());
+            }
+            return Ok((HirType::Void, true));
+        }
         if let Some(inferred) = inferred {
-            return Ok(inferred);
+            return Ok((inferred, true));
         }
         if calls.referenced {
             // `resolve` is handed off by reference (no direct
@@ -521,7 +814,7 @@ impl<'a> FnLowerer<'a> {
             // explicit `new Promise<T>(...)` type argument still
             // overrides this when the callback truly resolves with a
             // value some other way this static scan can't see.
-            return Ok(HirType::Void);
+            return Ok((HirType::Void, false));
         }
         Err("cannot infer Promise type because the executor has no resolvable `resolve(value)` call"
             .into())

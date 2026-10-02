@@ -225,6 +225,7 @@ fn erase_expr(expr: &mut HirExpr) {
         | HirExpr::PostfixUpdate(_, _) => {}
 
         HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
         | HirExpr::Index(left, right)
         | HirExpr::JsonKey(left, right)
         | HirExpr::JsonIndex(left, right)
@@ -324,6 +325,11 @@ fn erase_expr(expr: &mut HirExpr) {
         HirExpr::PromiseNew(value, ty, _, _) => {
             erase_expr(value);
             erase_ty(ty);
+        }
+        HirExpr::PromiseNewMixed(value, ty, resolver) => {
+            erase_expr(value);
+            erase_ty(ty);
+            erase_ty(resolver);
         }
         HirExpr::PromiseThen(source, callback, a, b, _, _) => {
             erase_expr(source);

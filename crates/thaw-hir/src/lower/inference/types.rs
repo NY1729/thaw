@@ -454,6 +454,7 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
+            HirExpr::EvalThen(_, second) => self.infer_expr_type(second),
             HirExpr::Call(callee, args) => {
                 let HirExpr::Var(name) = callee.as_ref() else {
                     let (params, ret) = match self.infer_expr_type(callee)? {
@@ -2324,7 +2325,7 @@ impl<'a> FnLowerer<'a> {
             | HirExpr::PromiseAllSettledArray(_, element) => Ok(HirType::Promise(Box::new(
                 HirType::Array(Box::new(promise_settled_result_type(element.clone()))),
             ))),
-            HirExpr::PromiseNew(_, resolved, _, _) => {
+            HirExpr::PromiseNew(_, resolved, _, _) | HirExpr::PromiseNewMixed(_, resolved, _) => {
                 Ok(HirType::Promise(Box::new(resolved.clone())))
             }
             HirExpr::PromiseThen(_, _, _, output, _, _) => {

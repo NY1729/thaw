@@ -33,6 +33,9 @@ pub enum HirExpr {
     /// Strict equality between two values with the same tagged union type.
     UnionIsEqual(Box<HirExpr>, Box<HirExpr>, Vec<HirType>),
     Call(Box<HirExpr>, Vec<HirExpr>),
+    /// Evaluates the first operand exactly once for its effects, then returns
+    /// the second operand. Used when absence coercion replaces a value.
+    EvalThen(Box<HirExpr>, Box<HirExpr>),
     // Invokes a closure through its second entry with an explicit JavaScript `thisArg`.
     FunctionCallWithThis(
         Box<HirExpr>,
@@ -70,6 +73,8 @@ pub enum HirExpr {
     PromiseAllSettledArray(Box<HirExpr>, HirType),
     /// `new Promise<T>((resolve, reject) => ...)`.
     PromiseNew(Box<HirExpr>, HirType, bool, bool),
+    /// A constructor resolve callback that accepts either `T` or `Promise<T>`.
+    PromiseNewMixed(Box<HirExpr>, HirType, HirType),
     /// A typed `.then`/`.catch` continuation. `on_rejected` distinguishes
     /// catch from then while retaining the input and output native layouts.
     PromiseThen(Box<HirExpr>, Box<HirExpr>, HirType, HirType, bool, bool),

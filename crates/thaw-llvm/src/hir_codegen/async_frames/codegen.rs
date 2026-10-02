@@ -439,12 +439,18 @@ impl<'ctx> HirCompiler<'ctx> {
         resume_result: Option<PointerValue<'ctx>>,
     ) -> Result<(), String> {
         if let Some((name, ty)) = &segment.resume_target {
-            let result_ptr = resume_result.ok_or("async resume result is unavailable")?;
             let llvm_ty = self.basic_type(ty)?;
-            let value = self
-                .builder
-                .build_load(llvm_ty, result_ptr, &format!("awaited_{name}"))
-                .map_err(|e| e.to_string())?;
+            // Promise<void> settles with a null payload. The resumed HIR
+            // binding still needs its normal frame slot, but no payload may
+            // be loaded from the null pointer.
+            let value = if *ty == HirType::Void {
+                llvm_ty.const_zero()
+            } else {
+                let result_ptr = resume_result.ok_or("async resume result is unavailable")?;
+                self.builder
+                    .build_load(llvm_ty, result_ptr, &format!("awaited_{name}"))
+                    .map_err(|e| e.to_string())?
+            };
             let (slot, _) = self
                 .variables
                 .get(name)
