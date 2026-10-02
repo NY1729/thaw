@@ -468,11 +468,6 @@ fn build_with_native_mode(
             || shim_source.contains("embedExecutable("),
     });
     let marker = format!("{ARTIFACT_MARKER}{manifest}");
-    let marker_literal = serde_json::to_string(&marker)
-        .map_err(|error| format!("failed to encode artifact metadata: {error}"))?;
-    shim_source.push_str(&format!(
-        "function __thaw_artifact_metadata(): string {{ return {marker_literal}; }}\n"
-    ));
     let constructor_package_qualifiers =
         package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
     let transform = |source: &str, module_path: &Path, is_override: bool| {
@@ -596,6 +591,7 @@ fn build_with_native_mode(
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
     compiler.compile_program(&program)?;
+    compiler.embed_artifact_metadata(marker.as_bytes())?;
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
 
@@ -693,6 +689,7 @@ fn build_with_native_mode(
         // especially important for the optional QuickJS/N-API hosts, whose
         // unrelated feature implementations otherwise survive the link.
         .arg("-Wl,--gc-sections")
+        .arg("-Wl,--undefined=__thaw_artifact_metadata")
         .args(&registry_native_libs)
         .args(extra_links);
     if !static_link {
@@ -725,7 +722,15 @@ fn build_with_native_mode(
         return Err(format!("linking failed:\n{stderr}{hint}"));
     }
 
-    if static_link && elf_has_program_interpreter(&scratch.path.join("program"))? {
+    let linked = scratch.path.join("program");
+    let linked_bytes = std::fs::read(&linked)
+        .map_err(|error| format!("failed to inspect linked artifact `{}`: {error}", linked.display()))?;
+    let linked_manifest = artifact_manifest_from_bytes(&linked_bytes)?;
+    if linked_manifest != manifest {
+        return Err("linked artifact metadata differs from the build manifest".into());
+    }
+
+    if static_link && elf_has_program_interpreter(&linked)? {
         return Err(format!(
             "static link produced `{}` with a dynamic ELF interpreter",
             output.display()
@@ -1230,30 +1235,27 @@ fn ensure_static_system_libraries() -> Result<(), String> {
 fn elf_has_program_interpreter(path: &Path) -> Result<bool, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to inspect `{}`: {error}", path.display()))?;
-    if bytes.len() < 64 || &bytes[..4] != b"\x7fELF" {
-        return Err(format!("`{}` is not an ELF executable", path.display()));
+    let endian = elf_endian(&bytes)
+        .map_err(|error| format!("`{}`: {error}", path.display()))?;
+    let header = &bytes[..64];
+    let offset = endian.u64(&header[32..])?;
+    let entry_size = u64::from(endian.u16(&header[54..])?);
+    let count = u64::from(endian.u16(&header[56..])?);
+    if count == 0 {
+        return Ok(false);
     }
-    if bytes[4] != 2 || bytes[5] != 1 {
-        return Err("static output verification currently requires little-endian ELF64".into());
+    if entry_size < 56 {
+        return Err(format!("`{}` has an invalid ELF program table", path.display()));
     }
-    let program_offset = usize::try_from(u64::from_le_bytes(bytes[32..40].try_into().unwrap()))
-        .map_err(|_| format!("`{}` has an invalid ELF program table offset", path.display()))?;
-    let entry_size = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
-    let entry_count = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
-    if entry_count != 0 && (entry_size < 56
-        || entry_count.checked_mul(entry_size)
-            .and_then(|size| program_offset.checked_add(size))
-            .is_none_or(|end| end > bytes.len()))
-    {
-        return Err(format!("`{}` has a truncated ELF program table", path.display()));
-    }
-    for index in 0..entry_count {
-        let offset = index.checked_mul(entry_size)
-            .and_then(|step| program_offset.checked_add(step));
-        let kind = offset.and_then(|offset| bytes.get(offset..offset.checked_add(4)?))
-            .ok_or_else(|| format!("`{}` has a truncated ELF program table", path.display()))?;
-        let kind = u32::from_le_bytes(kind.try_into().unwrap());
-        if kind == 3 {
+    let table_size = count.checked_mul(entry_size).ok_or("ELF program table overflows")?;
+    elf_range(&bytes, offset, table_size)
+        .map_err(|error| format!("`{}` has an invalid ELF program table: {error}", path.display()))?;
+    for index in 0..count {
+        let entry_offset = index.checked_mul(entry_size)
+            .and_then(|step| offset.checked_add(step))
+            .ok_or("ELF program header offset overflows")?;
+        let entry = elf_range(&bytes, entry_offset, 4)?;
+        if endian.u32(entry)? == 3 {
             return Ok(true);
         }
     }

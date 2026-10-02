@@ -414,6 +414,100 @@ fn npm_run_command(script: &str, directory: &Path, arguments: &[String]) -> Comm
 include!("dev.rs");
 
 const ARTIFACT_MARKER: &str = "THAW_ARTIFACT_V1:";
+const ARTIFACT_SECTION: &[u8] = b".thaw.artifact";
+
+#[derive(Clone, Copy)]
+enum ElfEndian {
+    Little,
+    Big,
+}
+
+fn elf_endian(bytes: &[u8]) -> Result<ElfEndian, String> {
+    if bytes.len() < 64 || &bytes[..4] != b"\x7fELF" || bytes[4] != 2 {
+        return Err("not an ELF64 executable".into());
+    }
+    match bytes[5] {
+        1 => Ok(ElfEndian::Little),
+        2 => Ok(ElfEndian::Big),
+        _ => Err("ELF executable has unsupported byte order".into()),
+    }
+}
+
+fn elf_range(bytes: &[u8], offset: u64, length: u64) -> Result<&[u8], String> {
+    let start = usize::try_from(offset).map_err(|_| "ELF offset exceeds addressable memory")?;
+    let length = usize::try_from(length).map_err(|_| "ELF length exceeds addressable memory")?;
+    let end = start.checked_add(length).ok_or("ELF range overflows")?;
+    bytes.get(start..end).ok_or_else(|| "ELF range extends beyond file".into())
+}
+
+impl ElfEndian {
+    fn u16(self, bytes: &[u8]) -> Result<u16, String> {
+        let raw: [u8; 2] = bytes.get(..2).ok_or("truncated ELF integer")?
+            .try_into().map_err(|_| "truncated ELF integer")?;
+        Ok(match self { Self::Little => u16::from_le_bytes(raw), Self::Big => u16::from_be_bytes(raw) })
+    }
+
+    fn u32(self, bytes: &[u8]) -> Result<u32, String> {
+        let raw: [u8; 4] = bytes.get(..4).ok_or("truncated ELF integer")?
+            .try_into().map_err(|_| "truncated ELF integer")?;
+        Ok(match self { Self::Little => u32::from_le_bytes(raw), Self::Big => u32::from_be_bytes(raw) })
+    }
+
+    fn u64(self, bytes: &[u8]) -> Result<u64, String> {
+        let raw: [u8; 8] = bytes.get(..8).ok_or("truncated ELF integer")?
+            .try_into().map_err(|_| "truncated ELF integer")?;
+        Ok(match self { Self::Little => u64::from_le_bytes(raw), Self::Big => u64::from_be_bytes(raw) })
+    }
+}
+
+fn elf_section<'a>(bytes: &'a [u8], name: &[u8]) -> Result<&'a [u8], String> {
+    let endian = elf_endian(bytes)?;
+    let header = &bytes[..64];
+    let table_offset = endian.u64(&header[40..])?;
+    let entry_size = u64::from(endian.u16(&header[58..])?);
+    let count = u64::from(endian.u16(&header[60..])?);
+    let names_index = u64::from(endian.u16(&header[62..])?);
+    if count == 0 || names_index == 0xffff {
+        return Err("ELF extended section numbering is unsupported".into());
+    }
+    if entry_size < 64 || names_index == 0 || names_index >= count {
+        return Err("ELF section table is invalid".into());
+    }
+    let table_size = count.checked_mul(entry_size).ok_or("ELF section table overflows")?;
+    elf_range(bytes, table_offset, table_size)?;
+    let entry = |index: u64| -> Result<&[u8], String> {
+        let offset = index.checked_mul(entry_size)
+            .and_then(|step| table_offset.checked_add(step))
+            .ok_or("ELF section offset overflows")?;
+        elf_range(bytes, offset, 64)
+    };
+    let names_header = entry(names_index)?;
+    if endian.u32(&names_header[4..])? != 3 {
+        return Err("ELF section names table has an invalid type".into());
+    }
+    let names = elf_range(bytes, endian.u64(&names_header[24..])?, endian.u64(&names_header[32..])?)?;
+    let mut found = None;
+    for index in 1..count {
+        let section = entry(index)?;
+        let name_offset = usize::try_from(endian.u32(section)?)
+            .map_err(|_| "ELF section name offset overflows")?;
+        let suffix = names.get(name_offset..).ok_or("ELF section name is out of range")?;
+        let end = suffix.iter().position(|byte| *byte == 0)
+            .ok_or("ELF section name is not null terminated")?;
+        if &suffix[..end] != name {
+            continue;
+        }
+        if found.is_some() {
+            return Err("executable contains duplicate Thaw artifact sections".into());
+        }
+        if endian.u32(&section[4..])? != 1 {
+            return Err("Thaw artifact section is not PROGBITS".into());
+        }
+        found = Some(elf_range(bytes, endian.u64(&section[24..])?, endian.u64(&section[32..])?)?);
+    }
+    found.ok_or_else(|| "executable does not contain a Thaw artifact section".into())
+}
+
 
 fn run_inspect(args: &[String]) -> Result<(), String> {
     if args.len() != 1 {
@@ -422,10 +516,9 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
     let path = Path::new(&args[0]);
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
-    if bytes.len() < 20 || &bytes[..4] != b"\x7fELF" {
-        return Err(format!("`{}` is not an ELF executable", path.display()));
-    }
-    let architecture = match u16::from_le_bytes([bytes[18], bytes[19]]) {
+    let endian = elf_endian(&bytes)
+        .map_err(|error| format!("`{}`: {error}", path.display()))?;
+    let architecture = match endian.u16(&bytes[18..])? {
         0x3e => "x86_64",
         0xb7 => "aarch64",
         _ => "unknown",
@@ -489,18 +582,15 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
 }
 
 fn artifact_manifest_from_bytes(bytes: &[u8]) -> Result<serde_json::Value, String> {
-    let marker = ARTIFACT_MARKER.as_bytes();
-    let offset = bytes
-        .windows(marker.len())
-        .position(|window| window == marker)
-        .ok_or("executable does not contain Thaw artifact metadata")?
-        + marker.len();
-    let end = bytes[offset..]
-        .iter()
-        .position(|byte| *byte == 0)
-        .map(|length| offset + length)
+    let section = elf_section(bytes, ARTIFACT_SECTION)?;
+    let payload = section.strip_prefix(ARTIFACT_MARKER.as_bytes())
+        .ok_or("Thaw artifact metadata has an unsupported version")?;
+    let json = payload.strip_suffix(&[0])
         .ok_or("Thaw artifact metadata is not null terminated")?;
-    serde_json::from_slice(&bytes[offset..end])
+    if json.is_empty() || json.contains(&0) {
+        return Err("Thaw artifact metadata has invalid contents".into());
+    }
+    serde_json::from_slice(json)
         .map_err(|error| format!("invalid Thaw artifact metadata: {error}"))
 }
 
