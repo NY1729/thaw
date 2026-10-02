@@ -524,8 +524,8 @@ fn rewrite_dynamic_imports_named(source: &str, source_name: &thaw_parser::common
                 .pos
                 .0 as usize
         };
-        edits.push((offset(lo), offset(argument_lo), "requireAsync(String("));
-        edits.push((offset(argument_hi), offset(hi), "))"));
+        edits.push((offset(lo), offset(argument_lo), "requireAsync("));
+        edits.push((offset(argument_hi), offset(hi), ")"));
     }
     edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
     let mut output = source.to_string();

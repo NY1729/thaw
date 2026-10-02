@@ -853,6 +853,54 @@ fn bundler_embeds_static_file_url_worker_sources() {
 }
 
 #[test]
+fn bundled_worker_dynamic_import_converts_once_and_keeps_worker_module() {
+    use std::ffi::{CStr, CString};
+
+    // Unrun regression: the Worker entry's dynamic import helper must use
+    // the same ToString boundary while preserving its local worker_threads.
+    let dir = temp_registry("worker_dynamic_import_specifier");
+    let modules = temp_registry("worker_dynamic_import_specifier_modules");
+    fs::write(dir.join("dep.js"), "exports.value = 42;").unwrap();
+    fs::write(
+        dir.join("worker.js"),
+        "var wt = require('node:worker_threads'); var calls = 0, hint; \
+         var spec = { [Symbol.toPrimitive]: function(value) { calls++; hint = value; return 'node:worker_threads'; } }; \
+         wt.parentPort.on('message', function() { Promise.all([import(spec), import('./dep.js')]).then(function(values) { \
+           wt.parentPort.postMessage([values[0].parentPort === wt.parentPort, calls, hint, values[1].value]); \
+           wt.parentPort.close(); \
+         }); });",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("index.js"),
+        "var Worker = require('node:worker_threads').Worker; \
+         module.exports = function() { return new Promise(function(resolve, reject) { \
+           var worker = new Worker(new URL('./worker.js', import.meta.url)), result; \
+           worker.on('message', function(value) { result = value; }); \
+           worker.on('error', reject); worker.on('exit', function(code) { resolve([result, code]); }); \
+           worker.postMessage('go'); \
+         }); };",
+    )
+    .unwrap();
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 3);
+    fs::remove_dir_all(&dir).unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.runWorkerDynamicSpecifier = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"runWorkerDynamicSpecifier".as_ptr(), c"[]".as_ptr());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[true,1,\"string\",42],0]"
+    );
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
 fn worker_url_rewrite_ignores_unrelated_worker_bindings() {
     let dir = temp_registry("unrelated_worker_url");
     let source = "class Worker {}\nnew Worker(new URL('./missing.js', import.meta.url));";

@@ -907,8 +907,58 @@ fn validates_json_import_attributes_and_rejects_unsupported_types() {
     let rewritten =
         rewrite_dynamic_imports("const data = import('./data.json', { with: { type: 'json' } });")
             .unwrap();
-    assert!(rewritten.contains("requireAsync(String('./data.json'))"));
+    assert!(rewritten.contains("requireAsync('./data.json')"));
     assert!(!rewritten.contains("type: 'json'"));
+}
+
+#[test]
+fn dynamic_import_coerces_specifier_once_outside_local_string_scope() {
+    use std::ffi::{CStr, CString};
+
+    // Unrun regression: dynamic import uses ToString before returning its
+    // Promise, but a conversion failure rejects that Promise.
+    let dir = temp_registry("dynamic_import_specifier");
+    let modules = temp_registry("dynamic_import_specifier_modules");
+    fs::write(
+        dir.join("index.js"),
+        "module.exports = async function() { \
+         var conversions = 0, hint, evaluations = 0; \
+         var spec = { [Symbol.toPrimitive]: function(value) { conversions++; hint = value; return './dep.js'; } }; \
+         function next() { evaluations++; return spec; } \
+         var pending = import(next()); \
+         spec[Symbol.toPrimitive] = function() { throw new Error('late conversion'); }; \
+         var first = await pending; \
+         var helperCalls = 0; \
+         var helperSpec = { [Symbol.toPrimitive]: function(value) { helperCalls++; return './dep.js'; } }; \
+         var second = await globalThis.__thaw_bundle_create_import_async('pkg/index.js')(helperSpec); \
+         async function shadow(String) { return (await import('./dep.js')).value; } \
+         var local = await shadow(null), symbolSynchronous = false, symbolPromise; \
+         try { symbolPromise = import(Symbol('dep')); } catch (_) { symbolSynchronous = true; symbolPromise = Promise.resolve(null); } \
+         var symbolRejected = await symbolPromise.then(function() { return false; }, function(error) { return error instanceof TypeError; }); \
+         var failureSynchronous = false, failurePromise; \
+         try { failurePromise = import({ [Symbol.toPrimitive]: function() { throw new Error('conversion failed'); } }); } \
+         catch (_) { failureSynchronous = true; failurePromise = Promise.resolve(null); } \
+         var failure = await failurePromise.then(function() { return 'resolved'; }, function(error) { return error.message; }); \
+         return [first.value, second.value, local, conversions, hint, evaluations, helperCalls, symbolSynchronous, symbolRejected, failureSynchronous, failure]; };",
+    )
+    .unwrap();
+    fs::write(dir.join("dep.js"), "exports.value = 42;").unwrap();
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.runDynamicSpecifier = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"runDynamicSpecifier".as_ptr(), c"[]".as_ptr());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[42,42,42,1,\"string\",1,1,false,true,false,\"conversion failed\"]"
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
 }
 
 #[test]
