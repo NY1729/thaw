@@ -406,6 +406,185 @@ fn http_client_requests_and_parses_a_real_chunked_response() {
 }
 
 #[test]
+fn http_client_rejects_truncated_bodies_but_accepts_unframed_eof() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        for _ in 0..5 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let packet: &[u8] = if request.starts_with("GET /length ") {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nabc"
+            } else if request.starts_with("GET /chunk ") {
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n"
+            } else if request.starts_with("GET /trailers ") {
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n0\r\n"
+            } else if request.starts_with("GET /unframed ") {
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabc"
+            } else {
+                assert!(request.starts_with("GET /normal "));
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n0\r\n\r\n"
+            };
+            stream.write_all(packet).unwrap();
+        }
+    });
+
+    let dir = temp_registry("builtin_http_truncated_eof");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http = require('node:http'); module.exports = async function(port) {
+          function probe(path) { return new Promise(function(resolve) {
+            var events = [], request = http.get({ hostname: '127.0.0.1', port: port, path: path }, function(response) {
+              events.push('headers:' + response.complete);
+              response.on('data', function(value) { events.push('data:' + value.toString()); });
+              response.on('end', function() { events.push('end:' + response.complete); });
+              response.on('aborted', function() { events.push('aborted:' + response.complete); });
+              response.on('error', function(error) { events.push('response-error:' + error.code); });
+              response.on('close', function() { events.push('response-close'); });
+            });
+            request.on('error', function(error) { events.push('request-error:' + error.code); });
+            request.on('close', function() { events.push('request-close'); resolve(events); });
+          }); }
+          return [await probe('/length'), await probe('/chunk'), await probe('/trailers'), await probe('/unframed'), await probe('/normal')];
+        };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_truncated_eof_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpTruncatedEof = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpTruncatedEof").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let cases: Vec<Vec<String>> = serde_json::from_str(&result).unwrap();
+    assert_eq!(cases.len(), 5);
+    let failure_tail = [
+        "aborted:false",
+        "response-error:ECONNRESET",
+        "response-close",
+        "request-error:ECONNRESET",
+        "request-close",
+    ];
+    for events in &cases[..3] {
+        assert_eq!(events.first().map(String::as_str), Some("headers:false"));
+        let aborted = events.iter().position(|event| event == "aborted:false").unwrap();
+        let prefix = events[1..aborted]
+            .iter()
+            .map(|event| event.strip_prefix("data:").unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!("abc".starts_with(&prefix));
+        assert_eq!(events[aborted..].iter().map(String::as_str).collect::<Vec<_>>(), failure_tail);
+    }
+    for events in &cases[3..] {
+        assert_eq!(events.first().map(String::as_str), Some("headers:false"));
+        let ended = events.iter().position(|event| event == "end:true").unwrap();
+        let body = events[1..ended]
+            .iter()
+            .map(|event| event.strip_prefix("data:").unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(body, "abc");
+        assert_eq!(events[ended..].iter().map(String::as_str).collect::<Vec<_>>(), ["end:true", "request-close"]);
+    }
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_client_truncated_eof_keeps_cleanup_after_listener_reentry() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_truncated_reentry");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http = require('node:http'), EventEmitter = require('node:events'); module.exports = function() {
+          var socket = new EventEmitter(), events = [], marker = new Error('listener marker'), caught = false;
+          socket.write = function() { return true; }; socket.end = function() { return this; };
+          socket.destroy = function() { this.emit('close'); return this; };
+          var request = http.request({ hostname: 'example.test', port: 80, agent: false, _transport: { createConnection: function() { return socket; } } }, function(response) {
+            events.push('headers:' + response.complete);
+            response.on('data', function() { events.push('data'); });
+            response.on('end', function() { events.push('end'); });
+            response.on('aborted', function() { events.push('aborted:' + arguments.length); request.destroy(); throw marker; });
+            response.on('error', function(error) { events.push('response-error:' + error.code); });
+            response.on('close', function() { events.push('response-close:' + arguments.length); });
+          });
+          request.on('error', function(error) { events.push('request-error:' + error.code); });
+          request.on('close', function() { events.push('request-close'); });
+          request.end(); socket.emit('connect');
+          socket.emit('data', Buffer.from('HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabc'));
+          try { socket.emit('end'); } catch (error) { caught = error === marker; }
+          return Promise.resolve().then(function() { return [caught, events]; });
+        };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_truncated_reentry_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpTruncatedReentry = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpTruncatedReentry").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[true,["headers:false","aborted:0","response-error:ECONNRESET","response-close:0","request-error:ECONNRESET","request-close"]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_client_parse_failure_keeps_first_notification_exception_when_destroy_throws() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_parse_failure_cleanup");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http = require('node:http'), EventEmitter = require('node:events'); module.exports = function() {
+          var socket = new EventEmitter(), events = [], notification = new Error('notification marker'), destruction = new Error('destroy marker'), caught = false;
+          socket.write = function() { return true; }; socket.end = function() { return this; };
+          socket.on('close', function() { events.push('socket-close'); throw destruction; });
+          socket.destroy = function() { events.push('destroy'); this.emit('close'); return this; };
+          var request = http.request({ hostname: 'example.test', port: 80, agent: false, _transport: { createConnection: function() { return socket; } } });
+          request.on('error', function() { events.push('request-error'); throw notification; });
+          request.on('close', function() { events.push('request-close:' + arguments.length); });
+          request.end(); socket.emit('connect');
+          try { socket.emit('data', Buffer.from('invalid response\r\n\r\n')); } catch (error) { caught = error === notification; }
+          return Promise.resolve().then(function() { return [caught, events]; });
+        };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_parse_failure_cleanup_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpParseFailureCleanup = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpParseFailureCleanup").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[true,["request-error","destroy","socket-close","request-close:0"]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn http_response_complete_waits_for_chunked_body_end() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
