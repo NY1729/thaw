@@ -1966,9 +1966,20 @@ fn rewrite_external_class_methods_with_static_qualified(
                 body.visit_with(&mut hoisted);
                 names.extend(hoisted.0);
             }
+            // Decorators run while the function is defined. Parameters (including
+            // defaults) and the body run only when it is called.
+            function.decorators.visit_with(self);
+            for parameter in &function.params {
+                parameter.decorators.visit_with(self);
+            }
+            let outer_flow = self.flow_state();
             let saved = self.enter_shadow_scope(names);
-            function.visit_children_with(self);
+            for parameter in &function.params {
+                parameter.pat.visit_with(self);
+            }
+            function.body.visit_with(self);
             self.exit_shadow_scope(saved);
+            self.restore_flow_state(outer_flow);
         }
 
         fn visit_fn_expr(&mut self, expression: &FnExpr) {
@@ -1987,12 +1998,14 @@ fn rewrite_external_class_methods_with_static_qualified(
             let mut hoisted = ConstructorHoistedVars::default();
             arrow.body.visit_with(&mut hoisted);
             names.extend(hoisted.0);
+            let outer_flow = self.flow_state();
             let saved = self.enter_shadow_scope(names);
             if let Some(seeds) = self.callback_instance_seeds.remove(&arrow.span.lo.0) {
                 for (name, class) in seeds { self.variables.insert(name, class); }
             }
             arrow.visit_children_with(self);
             self.exit_shadow_scope(saved);
+            self.restore_flow_state(outer_flow);
         }
 
         fn visit_catch_clause(&mut self, clause: &CatchClause) {
@@ -2027,9 +2040,26 @@ fn rewrite_external_class_methods_with_static_qualified(
                 body.visit_with(&mut hoisted);
                 names.extend(hoisted.0);
             }
+            // A computed constructor key is evaluated at class definition;
+            // parameter defaults and the constructor body are deferred.
+            constructor.key.visit_with(self);
+            for parameter in &constructor.params {
+                match parameter {
+                    ParamOrTsParamProp::Param(param) => param.decorators.visit_with(self),
+                    ParamOrTsParamProp::TsParamProp(property) => property.decorators.visit_with(self),
+                }
+            }
+            let outer_flow = self.flow_state();
             let saved = self.enter_shadow_scope(names);
-            constructor.visit_children_with(self);
+            for parameter in &constructor.params {
+                match parameter {
+                    ParamOrTsParamProp::Param(param) => param.pat.visit_with(self),
+                    ParamOrTsParamProp::TsParamProp(property) => property.param.visit_with(self),
+                }
+            }
+            constructor.body.visit_with(self);
             self.exit_shadow_scope(saved);
+            self.restore_flow_state(outer_flow);
         }
 
         fn visit_new_expr(&mut self, expression: &NewExpr) {
