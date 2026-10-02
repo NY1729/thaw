@@ -1339,6 +1339,90 @@ pub extern "C" fn thaw_i64_to_radix_string(value: i64, radix: f64) -> *const c_c
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
+// A binary64 is an integer multiple of 2^-1074. Even u64::MAX copies of
+// Number.MAX_VALUE fit in 2162 bits, so 34 limbs hold either signed part.
+const PRECISE_SUM_LIMBS: usize = 34;
+
+struct PreciseSum([u64; PRECISE_SUM_LIMBS]);
+
+impl Default for PreciseSum {
+    fn default() -> Self {
+        Self([0; PRECISE_SUM_LIMBS])
+    }
+}
+
+impl PreciseSum {
+    fn add(&mut self, value: f64) {
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as usize;
+        let mantissa = (bits & ((1u64 << 52) - 1)) | if exponent == 0 { 0 } else { 1u64 << 52 };
+        let shift = exponent.saturating_sub(1);
+        let mut index = shift / 64;
+        let mut carry = (mantissa as u128) << (shift % 64);
+        while carry != 0 {
+            debug_assert!(index < PRECISE_SUM_LIMBS);
+            let total = self.0[index] as u128 + (carry & u64::MAX as u128);
+            self.0[index] = total as u64;
+            carry = (carry >> 64) + (total >> 64);
+            index += 1;
+        }
+    }
+
+    fn bit(&self, index: usize) -> bool {
+        (self.0[index / 64] >> (index % 64)) & 1 != 0
+    }
+
+    fn any_below(&self, bit: usize) -> bool {
+        self.0[..bit / 64].iter().any(|limb| *limb != 0)
+            || (bit % 64 != 0 && self.0[bit / 64] & ((1u64 << (bit % 64)) - 1) != 0)
+    }
+
+    fn magnitude_difference(positive: &Self, negative: &Self) -> (Self, bool) {
+        let is_negative = positive.0.iter().rev().cmp(negative.0.iter().rev()).is_lt();
+        let (larger, smaller) = if is_negative { (negative, positive) } else { (positive, negative) };
+        let mut result = Self::default();
+        let mut borrow = false;
+        for index in 0..PRECISE_SUM_LIMBS {
+            let (difference, first_borrow) = larger.0[index].overflowing_sub(smaller.0[index]);
+            let (difference, second_borrow) = difference.overflowing_sub(borrow as u64);
+            result.0[index] = difference;
+            borrow = first_borrow || second_borrow;
+        }
+        debug_assert!(!borrow);
+        (result, is_negative)
+    }
+
+    fn rounded_binary64(&self, negative: bool) -> f64 {
+        let Some(highest) = self.0.iter().rposition(|limb| *limb != 0)
+            .map(|index| index * 64 + 63 - self.0[index].leading_zeros() as usize)
+        else {
+            return 0.0;
+        };
+        let sign = (negative as u64) << 63;
+        if highest < 52 {
+            return f64::from_bits(sign | self.0[0]);
+        }
+        if highest > 2097 {
+            return f64::from_bits(sign | (0x7ffu64 << 52));
+        }
+        let shift = highest - 52;
+        let mut mantissa = 0u64;
+        for bit in (shift..=highest).rev() {
+            mantissa = (mantissa << 1) | self.bit(bit) as u64;
+        }
+        if shift != 0 && self.bit(shift - 1)
+            && (self.any_below(shift - 1) || mantissa & 1 != 0)
+        {
+            mantissa += 1;
+        }
+        let exponent = highest - 51 + usize::from(mantissa == 1u64 << 53);
+        if exponent >= 0x7ff {
+            return f64::from_bits(sign | (0x7ffu64 << 52));
+        }
+        f64::from_bits(sign | ((exponent as u64) << 52) | (mantissa & ((1u64 << 52) - 1)))
+    }
+}
+
 #[no_mangle]
 /// `Math.sumPrecise(numbers)` for the native `number[]` buffer and its
 /// presence sidecar. Returns 1 after writing `out`, or 0 for a hole or an
@@ -1363,8 +1447,8 @@ pub unsafe extern "C" fn thaw_math_sum_precise(
     #[derive(Clone, Copy)]
     enum State { MinusZero, Finite, PlusInfinity, MinusInfinity, NaN }
     let mut state = State::MinusZero;
-    let mut sum = 0.0f64;
-    let mut compensation = 0.0f64;
+    let mut positive = PreciseSum::default();
+    let mut negative = PreciseSum::default();
     for index in 0..length {
         if !unsafe { array_index_present(presence, index) } {
             return 0;
@@ -1386,25 +1470,66 @@ pub unsafe extern "C" fn thaw_math_sum_precise(
             && !(value == 0.0 && value.is_sign_negative())
         {
             state = State::Finite;
-            let total = sum + value;
-            if sum.abs() >= value.abs() {
-                compensation += (sum - total) + value;
+            if value.is_sign_negative() {
+                negative.add(value);
             } else {
-                compensation += (value - total) + sum;
+                positive.add(value);
             }
-            sum = total;
         }
     }
     unsafe {
         out.write(match state {
             State::MinusZero => -0.0,
-            State::Finite => sum + compensation,
+            State::Finite => {
+                let (magnitude, negative) = PreciseSum::magnitude_difference(&positive, &negative);
+                magnitude.rounded_binary64(negative)
+            }
             State::PlusInfinity => f64::INFINITY,
             State::MinusInfinity => f64::NEG_INFINITY,
             State::NaN => f64::NAN,
         });
     }
     1
+}
+
+#[cfg(test)]
+mod precise_sum_tests {
+    use super::*;
+
+    fn native_sum(values: &[f64]) -> f64 {
+        let mut array = Vec::with_capacity(8 + values.len() * 8);
+        array.extend_from_slice(&(values.len() as u64).to_ne_bytes());
+        for value in values {
+            array.extend_from_slice(&value.to_ne_bytes());
+        }
+        let mut result = f64::NAN;
+        assert_eq!(unsafe { thaw_math_sum_precise(array.as_ptr(), std::ptr::null(), &mut result) }, 1);
+        result
+    }
+
+    #[test]
+    fn finite_partial_overflow_cancels_before_final_rounding() {
+        let max = f64::MAX;
+        assert_eq!(native_sum(&[max, max, -max]).to_bits(), max.to_bits());
+        assert_eq!(native_sum(&[-max, -max, max]).to_bits(), (-max).to_bits());
+        assert_eq!(native_sum(&[max, max, -max, -max]).to_bits(), 0.0f64.to_bits());
+        assert_eq!(native_sum(&[max, max]), f64::INFINITY);
+        assert_eq!(native_sum(&[1e16, 1.0, -1e16]), 1.0);
+    }
+
+    #[test]
+    fn exact_sum_rounds_once_and_preserves_zero_rules() {
+        let half_ulp = f64::EPSILON / 2.0;
+        assert_eq!(native_sum(&[1.0, half_ulp]).to_bits(), 1.0f64.to_bits());
+        assert_eq!(native_sum(&[1.0, half_ulp, half_ulp]).to_bits(), (1.0 + f64::EPSILON).to_bits());
+        assert_eq!(native_sum(&[f64::MIN_POSITIVE, -f64::MIN_POSITIVE, f64::from_bits(1)]).to_bits(), 1);
+        assert_eq!(native_sum(&[]).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(native_sum(&[-0.0, -0.0]).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(native_sum(&[-0.0, 0.0]).to_bits(), 0.0f64.to_bits());
+        assert_eq!(native_sum(&[1.0, -1.0]).to_bits(), 0.0f64.to_bits());
+        assert_eq!(native_sum(&[f64::INFINITY]), f64::INFINITY);
+        assert!(native_sum(&[f64::INFINITY, f64::NEG_INFINITY]).is_nan());
+    }
 }
 
 #[cfg(test)]
