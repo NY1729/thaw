@@ -769,6 +769,51 @@ module.exports = function () {
 }
 
 #[test]
+fn http2_local_initial_window_settings_adjust_existing_receive_windows() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_local_window");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function () {
+  var session = new http2.ClientHttp2Session(1, 'tcp'), frames = [], received = '';
+  session.authority = 'example.test';
+  session._send = function(value) { frames.push(Buffer.from(value)); return true; };
+  var first = session.request({ ':path': '/first' });
+  first.on('data', function(value) { received += value.toString(); });
+  var original = first._receiveWindow;
+  session.settings({ initialWindowSize: 0 });
+  var reduced = first._receiveWindow;
+  var second = session.request({ ':path': '/second' });
+  var newWindow = second._receiveWindow, rejected = false;
+  try { session._frame(0, 0, first.id, Buffer.from('a')); }
+  catch (error) { rejected = error.message === 'HTTP/2 flow-control window exceeded'; }
+  session.settings({ initialWindowSize: 2 });
+  var raised = [first._receiveWindow, second._receiveWindow];
+  session._frame(0, 0, first.id, Buffer.from('ab'));
+  var updates = frames.filter(function(value) { return value[3] === 8; }).length;
+  return [original, reduced, newWindow, rejected, raised[0], raised[1], received, first._receiveWindow, updates];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_local_window_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2LocalWindow = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2LocalWindow").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[65535,0,0,true,2,2,"ab",2,2]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn http2_flow_control_resumes_large_bidirectional_bodies() {
     use std::ffi::{CStr, CString};
 
