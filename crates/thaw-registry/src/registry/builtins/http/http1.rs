@@ -3,7 +3,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
         "http" => Some(
             r#"var net = require('node:net'), EventEmitter = require('node:events'), StringDecoder = require('node:string_decoder').StringDecoder;
              function IncomingMessage(socket) { EventEmitter.call(this); this.socket = this.connection = socket; this.statusCode = null; this.statusMessage = null; this.headers = {}; this.headersDistinct = {}; this.rawHeaders = []; this.trailers = {}; this.rawTrailers = []; this.complete = false; this.aborted = false; this.readable = true; this.method = null; this.url = ''; this.httpVersion = '1.1'; this.httpVersionMajor = 1; this.httpVersionMinor = 1; this._bodyQueue = []; this._bodyComplete = false; this._flowing = false; this._paused = false; this._drainQueued = false; this._draining = false; this._decoder = null; this._decoderEnded = false; this._decoderTail = ''; this._pipeRecords = []; }
-             IncomingMessage.prototype = Object.create(EventEmitter.prototype); IncomingMessage.prototype.constructor = IncomingMessage; IncomingMessage.prototype.setEncoding = function(encoding) { var next = new StringDecoder(encoding); if (this._decoder && !this._decoderEnded) this._decoderTail += this._decoder.end(); this._decoder = next; this._decoderEnded = false; this._encoding = encoding; if (this._decoderTail) this._scheduleBodyDrain(); return this; }; IncomingMessage.prototype.destroy = function(error) { this.aborted = true; this.readable = false; this._bodyQueue.length = 0; this._decoderTail = ''; if (this.socket) this.socket.destroy(error); return this; };
+             IncomingMessage.prototype = Object.create(EventEmitter.prototype); IncomingMessage.prototype.constructor = IncomingMessage; IncomingMessage.prototype.setEncoding = function(encoding) { var next = new StringDecoder(encoding); if (this._decoder && !this._decoderEnded) this._decoderTail += this._decoder.end(); this._decoder = next; this._decoderEnded = false; this._encoding = encoding; if (this._decoderTail) this._scheduleBodyDrain(); return this; }; IncomingMessage.prototype._abortBody = function() { this.aborted = true; this.readable = false; this._bodyQueue.length = 0; this._decoderTail = ''; }; IncomingMessage.prototype.destroy = function(error) { this._abortBody(); if (this.socket) this.socket.destroy(error); return this; };
              IncomingMessage.prototype._scheduleBodyDrain = function() { if (this._drainQueued || this.readableEnded || this.aborted) return; this._drainQueued = true; var message = this; queueMicrotask(function() { message._drainQueued = false; message._drainBody(); }); };
              IncomingMessage.prototype._drainBody = function() { if (this._draining || this.aborted) return; this._draining = true; try { while (this._flowing && !this._paused && (this._decoderTail || this._bodyQueue.length)) { if (this._decoderTail) { var oldTail = this._decoderTail; this._decoderTail = ''; this.emit('data', oldTail); continue; } var body = this._bodyQueue.shift(), value = this._decoder ? this._decoder.write(body) : body; if (!this._decoder || value.length) this.emit('data', value); } if (this._bodyComplete && !this.aborted && !this._bodyQueue.length && !this._decoderTail && !this._paused && !this.readableEnded && (this._flowing || this.listenerCount('end'))) { if (this._decoder && !this._decoderEnded) { var decoder = this._decoder, finalText = decoder.end(); this._decoderEnded = true; if (finalText) this.emit('data', finalText); if (this._decoder !== decoder) { this._scheduleBodyDrain(); return; } } if (this.aborted || this._paused || this._bodyQueue.length || this._decoderTail) return; this.readable = false; this.readableEnded = true; this.emit('end'); } } finally { this._draining = false; } };
              IncomingMessage.prototype._queueBody = function(body) { if (body.length && !this.aborted) { this._bodyQueue.push(Buffer.from(body)); this._scheduleBodyDrain(); } };
@@ -27,10 +27,22 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length));
                if (!this.hasHeader('connection')) this.setHeader('Connection', 'close');
                var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n';
-               var pending = Buffer.alloc(0), response = null, remaining = null, chunkSize = null, ended = false, upgraded = false;
-               function finishResponse() { if (!response || ended) return; ended = true; response.complete = true; response._finishBody(); }
+               var pending = Buffer.alloc(0), response = null, remaining = null, chunkSize = null, ended = false, upgraded = false, failed = false, closeQueued = false;
+               function closeRequest() { if (closeQueued) return; closeQueued = true; request.destroyed = true; queueMicrotask(function() { request.emit('close'); }); }
+               function failResponse(error) {
+                 if (failed || upgraded) return;
+                 failed = true;
+                 if (response && !ended) response._abortBody();
+                 var thrown, hasThrown = false;
+                 function notify(target, event, value) { try { if (event === 'error') target.emit(event, value); else target.emit(event); } catch (caught) { if (!hasThrown) { thrown = caught; hasThrown = true; } } }
+                 if (response && !ended) { notify(response, 'aborted'); notify(response, 'error', error); notify(response, 'close'); }
+                 notify(request, 'error', error);
+                 closeRequest();
+                 if (hasThrown) throw thrown;
+               }
+               function finishResponse() { if (!response || ended || failed || response.aborted || request.destroyed) return; ended = true; response.complete = true; response._finishBody(); }
                function emitBody(value) {
-                 if (!value.length || ended) return;
+                 if (!value.length || ended || failed || response.aborted || request.destroyed) return;
                  if (remaining !== null) {
                    var count = Math.min(remaining, value.length);
                    if (count) response._queueBody(value.subarray(0, count));
@@ -64,6 +76,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                    response = candidate; response.trailersDistinct = {};
                    var length = response.headers['content-length']; remaining = length === undefined ? null : Math.max(0, Number(length));
                    request.emit('response', response);
+                   if (failed || response.aborted || request.destroyed) return;
                    if (request.method === 'HEAD' || [101, 204, 205, 304].indexOf(response.statusCode) >= 0 || remaining === 0) { finishResponse(); pending = Buffer.alloc(0); return; }
                  }
                  if (String(response.headers['transfer-encoding'] || '').toLowerCase().indexOf('chunked') >= 0) {
@@ -87,10 +100,11 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                var transport = this._options._transport || net, connectOptions = Object.assign({}, this._options, { host: this._options.hostname, port: this._options.port });
                var socket = this.socket = this.connection = transport.createConnection ? transport.createConnection(connectOptions) : transport.connect(connectOptions);
                this.emit('socket', socket);
-               socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); });
+               socket.on('error', function(error) { if (upgraded) { request.destroyed = true; request.emit('error', error); return; } failResponse(error); });
                socket.on('connect', function() { var packet = Buffer.concat([Buffer.from(head), body]); if (socket.encrypted) socket.end(packet); else socket.write(packet); request.emit('finish'); if (typeof callback === 'function') callback(); });
-               socket.on('data', function(data) { if (upgraded) return; try { pending = Buffer.concat([pending, Buffer.from(data)]); consume(); } catch (error) { request.emit('error', error); socket.destroy(); } });
-               socket.on('end', function() { if (upgraded) return; try { consume(); if (!response) throw new Error('Parse Error: Invalid HTTP response'); finishResponse(); request.destroyed = true; queueMicrotask(function() { request.emit('close'); }); } catch (error) { request.emit('error', error); } });
+               socket.on('data', function(data) { if (upgraded || failed || request.destroyed) return; try { pending = Buffer.concat([pending, Buffer.from(data)]); consume(); } catch (error) { var thrown, hasThrown = false; try { failResponse(error); } catch (reason) { thrown = reason; hasThrown = true; } try { socket.destroy(); } catch (reason) { if (!hasThrown) { thrown = reason; hasThrown = true; } } if (hasThrown) throw thrown; } });
+               socket.on('end', function() { if (upgraded || failed) return; try { consume(); if (upgraded) return; if (!response) throw new Error('Parse Error: Invalid HTTP response'); if (request.destroyed && !ended) { var stopped = new Error('aborted'); stopped.code = 'ECONNRESET'; failResponse(stopped); return; } if (!ended && (String(response.headers['transfer-encoding'] || '').toLowerCase().indexOf('chunked') >= 0 || remaining > 0)) { var error = new Error('aborted'); error.code = 'ECONNRESET'; failResponse(error); return; } if (!ended) finishResponse(); closeRequest(); } catch (error) { if (failed) throw error; failResponse(error); } });
+               socket.on('close', function() { if (upgraded) return; if (!failed && !ended) { if (!response && request.destroyed) { closeRequest(); return; } var error = new Error('aborted'); error.code = 'ECONNRESET'; failResponse(error); } else closeRequest(); });
                return this;
              };
              var endWithoutAgent = ClientRequest.prototype.end; ClientRequest.prototype.end = function() { if (this.agent && typeof this.agent.createConnection === 'function') { var agent = this.agent; this._options._transport = { createConnection: function(options) { return agent.createConnection(options); } }; } return endWithoutAgent.apply(this, arguments); };
