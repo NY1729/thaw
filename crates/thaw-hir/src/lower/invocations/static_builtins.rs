@@ -2822,7 +2822,7 @@ impl<'a> FnLowerer<'a> {
                             self.lower_array_from_callback(&call.args[1].expr, &item_type)?
                         };
                         let result =
-                            self.lower_group_by(items, item_type, key_fn, object_result)?;
+                            self.lower_group_by(items, item_type, key_fn, object_result, true)?;
                         return self.wrap_call_argument_bindings(result, &spread_bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"fromAsync" {

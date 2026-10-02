@@ -1431,6 +1431,62 @@ fn compiles_object_group_by_a_native_array() {
 }
 
 #[test]
+fn static_group_by_follows_live_array_length_while_legacy_group_snapshots_it() {
+    let source = r#"
+        let sourceCalls = 0;
+        function provide(items: number[]): number[] { sourceCalls++; return items; }
+        function main(): void {
+            const mapGrow: number[] = [1, 2];
+            const mapGrown: Map<string, number[]> = Map.groupBy(provide(mapGrow), (value, index) => {
+                if (index === 0) mapGrow.push(3);
+                return "all";
+            });
+            console.log(mapGrown.get("all")!.join(","));
+            console.log(sourceCalls);
+
+            const mapShrink: number[] = [1, 2, 3];
+            const mapShrunk: Map<string, number[]> = Map.groupBy(mapShrink, (value, index) => {
+                if (index === 0) { mapShrink.pop(); mapShrink.pop(); }
+                return "all";
+            });
+            console.log(mapShrunk.get("all")!.join(","));
+
+            const objectGrow: number[] = [1, 2];
+            const objectGrown: Record<string, number[]> = Object.groupBy(objectGrow, (value, index) => {
+                if (index === 0) objectGrow.push(3);
+                return "all";
+            });
+            console.log(objectGrown.all.join(","));
+
+            const objectShrink: number[] = [1, 2, 3];
+            const objectShrunk: Record<string, number[]> = Object.groupBy(objectShrink, (value, index) => {
+                if (index === 0) { objectShrink.pop(); objectShrink.pop(); }
+                return "all";
+            });
+            console.log(objectShrunk.all.join(","));
+
+            const legacyObject: number[] = [1, 2];
+            const oldObject = legacyObject.group((value, index) => {
+                if (index === 0) legacyObject.push(3);
+                return "all";
+            });
+            console.log(oldObject.all.join(","));
+
+            const legacyMap: number[] = [1, 2];
+            const oldMap = legacyMap.groupToMap((value, index) => {
+                if (index === 0) legacyMap.push(3);
+                return "all";
+            });
+            console.log(oldMap.get("all")!.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "group_by_live_length"),
+        "1,2,3\n1\n1\n1,2,3\n1\n1,2\n1,2\n"
+    );
+}
+
+#[test]
 fn composes_union_array_constructors_concat_and_grouping() {
     let source = r#"
         let calls = 0;
