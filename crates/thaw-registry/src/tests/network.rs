@@ -2386,7 +2386,7 @@ fn http_response_framing_keeps_pipelined_messages_aligned() {
         };
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut requests = Vec::new();
-        for (method, path) in [("GET", "/explicit"), ("GET", "/empty"), ("HEAD", "/head"), ("GET", "/204"), ("GET", "/304"), ("GET", "/last")] {
+        for (method, path) in [("GET", "/explicit"), ("GET", "/empty"), ("HEAD", "/head"), ("GET", "/204"), ("GET", "/204-framed"), ("GET", "/304"), ("GET", "/205-buffered"), ("GET", "/205-streamed"), ("GET", "/205-explicit"), ("GET", "/last")] {
             requests.extend_from_slice(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes());
         }
         stream.write_all(&requests).unwrap();
@@ -2414,8 +2414,19 @@ fn http_response_framing_keeps_pipelined_messages_aligned() {
         assert!(head.contains("Content-Length: 4\r\n"), "{head}");
         let no_content = read_head(&mut stream);
         assert!(no_content.starts_with("HTTP/1.1 204 No Content\r\n"), "{no_content}");
+        let invalid_no_content = read_head(&mut stream);
+        assert!(invalid_no_content.starts_with("HTTP/1.1 204 No Content\r\n"), "{invalid_no_content}");
+        assert!(!invalid_no_content.contains("Content-Length:"), "{invalid_no_content}");
+        assert!(!invalid_no_content.contains("Transfer-Encoding:"), "{invalid_no_content}");
         let not_modified = read_head(&mut stream);
         assert!(not_modified.starts_with("HTTP/1.1 304 Not Modified\r\n"), "{not_modified}");
+        assert!(not_modified.contains("Transfer-Encoding: chunked\r\n"), "{not_modified}");
+        for _ in 0..3 {
+            let reset = read_head(&mut stream);
+            assert!(reset.starts_with("HTTP/1.1 205 Reset Content\r\n"), "{reset}");
+            assert_eq!(reset.matches("Content-Length: 0\r\n").count(), 1, "{reset}");
+            assert!(!reset.contains("Transfer-Encoding:"), "{reset}");
+        }
         let last = read_head(&mut stream);
         assert!(last.starts_with("HTTP/1.1 200 OK\r\n"), "{last}");
         assert!(last.contains("Content-Length: 2\r\n"), "{last}");
@@ -2431,7 +2442,11 @@ fn http_response_framing_keeps_pipelined_messages_aligned() {
         else if (request.url === '/empty') { response.write('', function() { callbacks.push('empty-head'); }); response.write('', function() { callbacks.push('empty-no-packet'); }); response.write('y', function() { callbacks.push('data'); }); response.end(function() { callbacks.push('end'); }); }
         else if (request.url === '/head') { response.setHeader('Content-Length', '4'); response.writeHead(200); for (var change of [function() { response.setHeader('X-Late', 'x'); }, function() { response.removeHeader('Content-Length'); }, function() { response.writeHead(201); }]) { try { change(); guards.push(false); } catch (error) { guards.push(error.code === 'ERR_HTTP_HEADERS_SENT'); } } response.write('drop'); response.end(); }
         else if (request.url === '/204') { response.statusCode = 204; response.write('bad'); response.end(); }
+        else if (request.url === '/204-framed') { response.writeHead(204, { 'Content-Length': '9', 'Transfer-Encoding': 'chunked' }); response.end('bad'); }
         else if (request.url === '/304') { response.statusCode = 304; response.setHeader('Transfer-Encoding', 'chunked'); response.write('bad'); response.end(); }
+        else if (request.url === '/205-buffered') { response.statusCode = 205; response.end('bad'); }
+        else if (request.url === '/205-streamed') { response.statusCode = 205; response.write('bad'); response.end('more'); }
+        else if (request.url === '/205-explicit') { response.writeHead(205, { 'Content-Length': '9', 'Transfer-Encoding': 'chunked' }); response.flushHeaders(); response.end('bad'); }
         else response.end('ok', function() { server.close(); });
       });
       await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); });
@@ -2448,6 +2463,48 @@ fn http_response_framing_keeps_pipelined_messages_aligned() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(result, r#"[["data","empty-head","empty-no-packet","end"],[true,true,true]]"#);
     client.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_client_205_waits_for_declared_framing_or_eof() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_client_205_framing");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'), EventEmitter = require('node:events');
+module.exports = async function() {
+  async function receive(mode) {
+    var socket = new EventEmitter(), response, data = 0, ends = 0, errors = 0;
+    socket.write = function() { return true; };
+    socket.destroy = function() { this.emit('close'); };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } }, function(value) {
+      response = value;
+      response.on('data', function() { data++; });
+      response.on('end', function() { ends++; });
+    });
+    request.on('error', function() { errors++; });
+    request.end(); socket.emit('connect');
+    var head = 'HTTP/1.1 205 Reset Content\r\n' + (mode === 'length' ? 'Content-Length: 0\r\n' : mode === 'chunked' ? 'Transfer-Encoding: chunked\r\n' : '') + '\r\n';
+    socket.emit('data', Buffer.from(head));
+    var before = response.complete;
+    if (mode === 'chunked') socket.emit('data', Buffer.from('0\r\nX-End: yes\r\n\r\n'));
+    socket.emit('end');
+    await Promise.resolve();
+    return [response.statusCode, before, response.complete, data, ends, response.trailers['x-end'] || '', errors];
+  }
+  return [await receive('length'), await receive('chunked'), await receive('eof')];
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_client_205_framing_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {bundle} globalThis.exerciseHttpClient205Framing = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpClient205Framing").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[205,true,true,0,1,"",0],[205,false,true,0,1,"yes",0],[205,false,true,0,1,"",0]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
