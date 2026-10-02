@@ -9655,3 +9655,41 @@ fn math_extremes_of_sparse_runtime_array_propagate_nan() {
         "true true\ntrue true\ntrue true\n"
     );
 }
+
+#[test]
+fn spread_primitive_conversions_match_direct_nullish_and_bigint_conversions() {
+    let source = r#"
+        let calls = 0;
+        function absent(): null { calls++; return null; }
+        function main(): void {
+            console.log(String(...[absent()]), calls);
+            console.log(String(...[undefined]));
+            console.log(Number(...[null]));
+            console.log(Number.isNaN(Number(...[undefined])));
+            console.log(Boolean(...[null]), Boolean(...[undefined]));
+            console.log(BigInt(...[7]) === BigInt(7));
+            console.log(BigInt(...[true]) === BigInt(true));
+            console.log(BigInt(...["9007199254740993"]).toString());
+            try { BigInt(...[1.5]); } catch (error) { console.log("fraction"); }
+            try { BigInt(...["bad"]); } catch (error) { console.log("invalid"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "spread_primitive_conversion_parity"),
+        "null 1\nundefined\n0\ntrue\nfalse false\ntrue\ntrue\n9007199254740993\nfraction\ninvalid\n");
+}
+
+#[test]
+fn spread_primitive_conversion_evaluates_tuple_and_throwing_operands_once() {
+    let source = r#"
+        let calls = 0;
+        function tuple(): [null] { calls++; return [null]; }
+        function fail(): null { calls++; throw "stop"; }
+        function main(): void {
+            console.log(String(...tuple()), calls);
+            try { String(...[fail()]); } catch (error) { console.log("spread", calls); }
+            try { String(fail()); } catch (error) { console.log("direct", calls); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "spread_primitive_operand_once"),
+        "null 1\nspread 2\ndirect 3\n");
+}
