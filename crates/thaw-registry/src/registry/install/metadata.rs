@@ -49,49 +49,83 @@ fn package_export_target<'a>(
     select_export_condition(target, conditions)
 }
 
+enum ExportCondition<'a> {
+    Target(&'a str),
+    Blocked,
+    Unmatched,
+}
+
 fn select_export_condition<'a>(
     value: &'a serde_json::Value,
     conditions: &[&str],
 ) -> Option<&'a str> {
+    match select_export_condition_inner(value, conditions) {
+        ExportCondition::Target(path) => Some(path),
+        ExportCondition::Blocked | ExportCondition::Unmatched => None,
+    }
+}
+
+fn select_export_condition_inner<'a>(
+    value: &'a serde_json::Value,
+    conditions: &[&str],
+) -> ExportCondition<'a> {
+    if value.is_null() {
+        return ExportCondition::Blocked;
+    }
     if let Some(path) = value.as_str() {
         if conditions == ["types"]
             && ![".d.ts", ".d.cts", ".d.mts"]
                 .iter()
                 .any(|extension| path.ends_with(extension))
         {
-            return None;
+            return ExportCondition::Unmatched;
         }
-        return Some(path);
+        return ExportCondition::Target(path);
     }
     if let Some(candidates) = value.as_array() {
-        return candidates
-            .iter()
-            .find_map(|candidate| select_export_condition(candidate, conditions));
+        // Array entries may fall through, but a terminal null (or an empty
+        // array) still blocks later conditional keys.
+        let mut blocked = candidates.is_empty();
+        for candidate in candidates {
+            match select_export_condition_inner(candidate, conditions) {
+                ExportCondition::Target(path) => return ExportCondition::Target(path),
+                ExportCondition::Blocked => blocked = true,
+                ExportCondition::Unmatched => {}
+            }
+        }
+        return if blocked { ExportCondition::Blocked } else { ExportCondition::Unmatched };
     }
-    let object = value.as_object()?;
+    let Some(object) = value.as_object() else {
+        return ExportCondition::Unmatched;
+    };
     for (condition, value) in object {
         if conditions.contains(&condition.as_str()) {
-            if let Some(path) = select_export_condition(value, conditions) {
-                return Some(path);
+            match select_export_condition_inner(value, conditions) {
+                ExportCondition::Target(path) => return ExportCondition::Target(path),
+                ExportCondition::Blocked => return ExportCondition::Blocked,
+                ExportCondition::Unmatched => {}
             }
         }
     }
     if conditions == ["types"] {
         for condition in ["require", "node", "default", "import"] {
-            if let Some(path) = object
-                .get(condition)
-                .and_then(|value| select_export_condition(value, conditions))
-            {
-                return Some(path);
+            if let Some(value) = object.get(condition) {
+                match select_export_condition_inner(value, conditions) {
+                    ExportCondition::Target(path) => return ExportCondition::Target(path),
+                    ExportCondition::Blocked => return ExportCondition::Blocked,
+                    ExportCondition::Unmatched => {}
+                }
             }
         }
         for child in object.values() {
-            if let Some(path) = select_export_condition(child, conditions) {
-                return Some(path);
+            match select_export_condition_inner(child, conditions) {
+                ExportCondition::Target(path) => return ExportCondition::Target(path),
+                ExportCondition::Blocked => return ExportCondition::Blocked,
+                ExportCondition::Unmatched => {}
             }
         }
     }
-    None
+    ExportCondition::Unmatched
 }
 
 fn validate_export_subpath(subpath: &str) -> Result<(), String> {
@@ -146,6 +180,25 @@ fn wildcard_capture<'a>(pattern: &str, path: &'a str) -> Option<&'a str> {
     Some(&path[prefix.len()..path.len() - suffix.len()])
 }
 
+fn matched_package_subpath_export<'a, 'b>(
+    exports: &'a serde_json::Map<String, serde_json::Value>,
+    subpath: &'b str,
+) -> Option<(&'a serde_json::Value, Option<&'b str>)> {
+    if let Some(exact) = exports.get(&format!("./{subpath}")) {
+        return Some((exact, None));
+    }
+    let mut matches = exports.iter().filter_map(|(key, value)| {
+        let pattern = key.strip_prefix("./")?;
+        let capture = wildcard_capture(pattern, subpath)?;
+        let (prefix, suffix) = pattern.split_once('*')?;
+        Some((prefix.len(), suffix.len(), value, capture))
+    }).collect::<Vec<_>>();
+    matches.sort_by_key(|(prefix, suffix, _, _)| {
+        (std::cmp::Reverse(*prefix), std::cmp::Reverse(*suffix))
+    });
+    matches.first().map(|(_, _, value, capture)| (*value, Some(*capture)))
+}
+
 fn package_subpath_exports(
     manifest: &serde_json::Value,
     package_dir: &Path,
@@ -182,24 +235,25 @@ fn package_subpath_exports(
                 };
                 let expanded = subpath.replacen('*', capture, 1);
                 validate_export_subpath(&expanded)?;
-                subpaths.push(PackageSubpathExport {
-                    subpath: expanded,
-                    runtime_entry: runtime.replace('*', capture),
-                    types_entry: types.replace('*', capture),
-                });
+                subpaths.push(expanded);
             }
             continue;
         }
         validate_export_subpath(subpath)?;
-        subpaths.push(PackageSubpathExport {
-            subpath: subpath.to_string(),
-            runtime_entry: runtime.to_string(),
-            types_entry: types.to_string(),
-        });
+        subpaths.push(subpath.to_string());
     }
-    subpaths.sort_by(|left, right| left.subpath.cmp(&right.subpath));
-    subpaths.dedup_by(|left, right| left.subpath == right.subpath);
-    Ok(subpaths)
+    subpaths.sort();
+    subpaths.dedup();
+    Ok(subpaths.into_iter().filter_map(|subpath| {
+        // The most specific key wins, including an exact or pattern `null`
+        // that excludes a file enumerated by a broader wildcard.
+        let (target, capture) = matched_package_subpath_export(exports, &subpath)?;
+        let runtime = select_export_condition(target, &["require", "node", "default"])?;
+        let types = select_export_condition(target, &["types"])?;
+        let runtime_entry = capture.map_or_else(|| runtime.to_string(), |value| runtime.replace('*', value));
+        let types_entry = capture.map_or_else(|| types.to_string(), |value| types.replace('*', value));
+        Some(PackageSubpathExport { subpath, runtime_entry, types_entry })
+    }).collect())
 }
 
 /// `package` has no bundled type declarations of its own -- fetch the
