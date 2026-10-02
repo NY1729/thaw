@@ -302,6 +302,14 @@ fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(Str
 /// Doesn't attempt the rest of Node's real algorithm (`package.json`
 /// `exports` maps, `.json`/`.node` candidates, etc.) -- just these two
 /// common shapes.
+fn is_directory_module_request(path: &str) -> bool {
+    path.ends_with('/')
+        || path == "."
+        || path == ".."
+        || path.ends_with("/.")
+        || path.ends_with("/..")
+}
+
 fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBuf), String> {
     let mut active_directories = std::collections::HashSet::new();
     let mut cyclic_entry = false;
@@ -323,6 +331,31 @@ fn resolve_module_path_inner(
     identity_error: &mut Option<String>,
 ) -> Result<(String, PathBuf), String> {
     let trimmed = path.trim_end_matches('/');
+    let candidates = [
+        path.to_string(),
+        format!("{trimmed}.js"),
+        format!("{trimmed}.cjs"),
+        // Real ESM packages commonly use an explicit `.mjs` extension
+        // (sometimes alongside a separate `.cjs` build) rather than
+        // relying on `package.json`'s `"type": "module"`.
+        format!("{trimmed}.mjs"),
+        format!("{trimmed}.json"),
+        format!("{trimmed}/index.js"),
+        format!("{trimmed}/index.cjs"),
+        format!("{trimmed}/index.mjs"),
+        format!("{trimmed}/index.json"),
+    ];
+    // Explicit directory requests skip file extension probes (as in Node's
+    // CommonJS loader). Otherwise a sibling file beats a directory entry.
+    let directory_only = is_directory_module_request(path);
+    if !directory_only {
+        for candidate in &candidates[..5] {
+            let resolved = package_dir.join(candidate);
+            if resolved.is_file() {
+                return Ok((candidate.clone(), resolved));
+            }
+        }
+    }
     let directory = package_dir.join(trimmed);
     if directory.is_dir() {
         // Canonical identity detects both lexical `.`/`..` cycles and symlink aliases.
@@ -362,21 +395,7 @@ fn resolve_module_path_inner(
             },
         }
     }
-    let candidates = [
-        path.to_string(),
-        format!("{trimmed}.js"),
-        format!("{trimmed}.cjs"),
-        // Real ESM packages commonly use an explicit `.mjs` extension
-        // (sometimes alongside a separate `.cjs` build) rather than
-        // relying on `package.json`'s `"type": "module"`.
-        format!("{trimmed}.mjs"),
-        format!("{trimmed}.json"),
-        format!("{trimmed}/index.js"),
-        format!("{trimmed}/index.cjs"),
-        format!("{trimmed}/index.mjs"),
-        format!("{trimmed}/index.json"),
-    ];
-    for candidate in &candidates {
+    for candidate in &candidates[5..] {
         let resolved = package_dir.join(candidate);
         if resolved.is_file() {
             return Ok((candidate.clone(), resolved));
