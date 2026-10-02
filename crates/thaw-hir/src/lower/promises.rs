@@ -1,4 +1,30 @@
 impl<'a> FnLowerer<'a> {
+    fn promise_rejection_snapshot_name(binding: &str, field: &str) -> String {
+        format!("@@thaw_promise_rejection:{binding}:{field}")
+    }
+
+    fn snapshot_promise_rejection(&mut self, binding: &str) -> Vec<HirStmt> {
+        let fields = [
+            ("original", HirType::Str, None),
+            ("native_text", HirType::Str, Some("__thaw_pending_exception_native_text")),
+            ("aggregate", HirType::Object(Vec::new()), Some("__thaw_pending_exception_aggregate")),
+            ("tag", HirType::I64, Some("__thaw_pending_exception_tag")),
+            ("f64", HirType::F64, Some("__thaw_pending_exception_f64")),
+            ("i64", HirType::I64, Some("__thaw_pending_exception_i64")),
+            ("bool", HirType::Bool, Some("__thaw_pending_exception_bool")),
+            ("object", HirType::Object(Vec::new()), Some("__thaw_pending_exception_object")),
+        ];
+        fields.into_iter().map(|(field, ty, getter)| {
+            let name = Self::promise_rejection_snapshot_name(binding, field);
+            self.scope.insert(name.clone(), ty.clone());
+            let value = if let Some(getter) = getter {
+                HirExpr::Call(Box::new(HirExpr::Var(getter.to_string())), Vec::new())
+            } else {
+                HirExpr::Var(binding.to_string())
+            };
+            HirStmt::Let(name, ty, value)
+        }).collect()
+    }
     fn lower_promise_rejection_callback(
         &mut self,
         expr: &Expr,

@@ -285,6 +285,12 @@ impl<'a> FnLowerer<'a> {
                 params.push(HirParam { name, ty });
             }
             let mut prefix = Vec::new();
+            if let Some(binding) = params.iter()
+                .find(|param| self.promise_catch_bindings.contains(&param.name))
+                .map(|param| param.name.clone())
+            {
+                prefix.extend(self.snapshot_promise_rejection(&binding));
+            }
             for (pattern, name, ty) in destructuring {
                 self.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
             }

@@ -267,6 +267,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(native_slot, native_text).map_err(|e| e.to_string())?;
             for (suffix, getter) in [
                 ("object", "thaw_promise_exception_object"),
+                ("aggregate", "thaw_promise_exception_aggregate_errors"),
                 ("tag", "thaw_promise_exception_tag"),
                 ("f64", "thaw_promise_exception_f64"),
                 ("i64", "thaw_promise_exception_i64"),
@@ -1035,9 +1036,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(|(binding, _)| *binding)
             .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
         self.builder.build_store(binding_slot, pending).map_err(|e| e.to_string())?;
-        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 6] = [
+        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 7] = [
             ("native_text", PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, ptr_ty.into()),
             ("object", PENDING_EXCEPTION_OBJECT_SYMBOL, ptr_ty.into()),
+            ("aggregate", PENDING_EXCEPTION_AGGREGATE_SYMBOL, ptr_ty.into()),
             ("tag", PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
             ("f64", PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
             ("i64", PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),

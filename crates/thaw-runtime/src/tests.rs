@@ -2749,3 +2749,20 @@ fn promise_any_reason_slots_keep_object_pointer_null_and_opaque_separate() {
     assert_eq!(unsafe { promise_any_reason_at(errors, 2) }, (8, 1));
     unsafe { thaw_promise_destroy(any) };
 }
+
+#[test]
+fn explicit_null_exception_tag_reports_null_without_reading_an_opaque_pointer() {
+    let opaque = 1usize as *const u8;
+    let terminal = unsafe { thaw_runtime_exception_report_text(
+        opaque.cast(), std::ptr::null(), 6, 0.0, 0, false,
+    ) };
+    assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(terminal) }.to_bytes(), b"null");
+    unsafe { thaw_arena::destroy_string(terminal) };
+
+    let promise = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_reject_typed(
+        promise, opaque, 6, 0.0, 0, false, std::ptr::null(),
+    ) }, 1);
+    assert_eq!(promise_report_bytes(unsafe { &*promise }).as_slice(), b"null");
+    unsafe { thaw_promise_destroy(promise) };
+}

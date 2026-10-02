@@ -289,6 +289,7 @@ fn promise_report_bytes(source: &ThawPromise) -> Vec<u8> {
         2 => source.exception_i64.to_string().into_bytes(),
         3 => source.exception_bool.to_string().into_bytes(),
         5 => b"undefined".to_vec(),
+        6 => b"null".to_vec(),
         4 => b"Unhandled opaque string Promise rejection".to_vec(),
         _ => b"Unhandled opaque Promise rejection".to_vec(),
     })

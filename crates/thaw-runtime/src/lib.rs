@@ -119,6 +119,7 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
             2 => i64_value.to_string().into_bytes(),
             3 => bool_value.to_string().into_bytes(),
             5 => b"undefined".to_vec(),
+            6 => b"null".to_vec(),
             4 => b"Uncaught opaque string exception".to_vec(),
             _ => b"Uncaught opaque exception".to_vec(),
         }

@@ -86,7 +86,56 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             None
         };
-        let val = self.compile_expr(trusted_text.unwrap_or(expr))?.into_pointer_value();
+        let pending_rethrow = if let HirExpr::Call(callee, args) = expr {
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "@@thaw_rethrow_pending_exception")
+                && args.len() == 9 { Some(args.as_slice()) } else { None }
+        } else { None };
+        let val = self.compile_expr(pending_rethrow.map(|args| &args[0]).or(trusted_text).unwrap_or(expr))?.into_pointer_value();
+        if let Some(args) = pending_rethrow {
+            // Snapshot fields belong to this callback parameter, so a handled
+            // inner exception cannot replace the original rejection metadata.
+            let ptr = self.context.ptr_type(AddressSpace::default());
+            let original = self.compile_expr(&args[1])?.into_pointer_value();
+            let value_word = self.builder.build_ptr_to_int(val, self.context.i64_type(),
+                "rethrow_value_word").map_err(|error| error.to_string())?;
+            let original_word = self.builder.build_ptr_to_int(original, self.context.i64_type(),
+                "rethrow_original_word").map_err(|error| error.to_string())?;
+            let same = self.builder.build_int_compare(inkwell::IntPredicate::EQ,
+                value_word, original_word, "same_rejection_binding")
+                .map_err(|error| error.to_string())?;
+            let native = self.compile_expr(&args[2])?.into_pointer_value();
+            let aggregate = self.compile_expr(&args[3])?.into_pointer_value();
+            let tag = self.compile_expr(&args[4])?.into_int_value();
+            let f64_value = self.compile_expr(&args[5])?.into_float_value();
+            let i64_value = self.compile_expr(&args[6])?.into_int_value();
+            let bool_value = self.compile_expr(&args[7])?.into_int_value();
+            let object = self.compile_expr(&args[8])?.into_pointer_value();
+            self.clear_pending_native_text()?;
+            for (slot, value) in [
+                (self.pending_exception_native_text().as_pointer_value(),
+                    self.builder.build_select(same, native, ptr.const_null(), "rethrow_native_text")
+                        .map_err(|error| error.to_string())?),
+                (self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.builder.build_select(same, aggregate, ptr.const_null(), "rethrow_aggregate")
+                        .map_err(|error| error.to_string())?),
+                (self.pending_exception_object().as_pointer_value(),
+                    self.builder.build_select(same, object, ptr.const_null(), "rethrow_object")
+                        .map_err(|error| error.to_string())?),
+            ] {
+                self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
+            }
+            let tag = self.builder.build_select(same, tag, self.context.i64_type().const_int(4, false),
+                "rethrow_tag").map_err(|error| error.to_string())?;
+            self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(), tag)
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(), f64_value)
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(), i64_value)
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(), bool_value)
+                .map_err(|error| error.to_string())?;
+            return Ok(val);
+        }
         self.clear_pending_native_text()?;
         if trusted_text.is_some() || matches!(expr, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))) {
             self.mark_pending_native_text(val)?;
@@ -98,6 +147,14 @@ impl<'ctx> HirCompiler<'ctx> {
                         "rethrown_native_text_provenance",
                     ).map_err(|error| error.to_string())?;
                     self.mark_pending_native_text(provenance)?;
+                    if let Some((aggregate_slot, _)) = self.variables.get(&format!("{name}__thaw_exception_aggregate")) {
+                        let aggregate = self.builder.build_load(
+                            self.context.ptr_type(AddressSpace::default()), *aggregate_slot,
+                            "rethrown_aggregate_errors",
+                        ).map_err(|error| error.to_string())?;
+                        self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(), aggregate)
+                            .map_err(|error| error.to_string())?;
+                    }
                 }
             }
         }
@@ -476,6 +533,10 @@ impl<'ctx> HirCompiler<'ctx> {
         ).map_err(|e| e.to_string())?;
         self.builder.build_store(native_text_slot, native_text)
             .map_err(|e| e.to_string())?;
+        let aggregate = self.builder.build_load(
+            ptr_ty, self.pending_exception_aggregate_errors().as_pointer_value(),
+            "caught_aggregate_errors",
+        ).map_err(|e| e.to_string())?;
         let previous_native_text = self.catch_native_text.insert(
             catch_name.to_string(), (catch_slot, native_text_slot),
         );
@@ -522,6 +583,10 @@ impl<'ctx> HirCompiler<'ctx> {
             format!("{catch_name}__thaw_exception_object"),
             (object_slot, str_ty),
         );
+        let aggregate_slot = self.builder.build_alloca(str_ty, "catch_aggregate_slot")
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(aggregate_slot, aggregate).map_err(|e| e.to_string())?;
+        self.variables.insert(format!("{catch_name}__thaw_exception_aggregate"), (aggregate_slot, str_ty));
         for (suffix, symbol, ty) in [
             (
                 "tag",
