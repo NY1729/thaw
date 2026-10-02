@@ -24,6 +24,7 @@ struct AsyncHttpGet {
     path: String,
     redirects: usize,
     resolution: Option<SharedDnsResolution>,
+    remaining_addresses: Vec<SocketAddr>,
 }
 
 type SharedDnsResolution = Arc<Mutex<Option<Result<Vec<SocketAddr>, String>>>>;
@@ -230,6 +231,31 @@ fn start_dns_resolution(host: String, port: u16) -> Result<(RawFd, DnsResult), S
         return Err(format!("starting DNS resolver: {error}"));
     }
     Ok((read_fd, result))
+}
+
+fn schedule_next_http_connection(
+    task: *mut AsyncHttpGet,
+    mut last_error: Option<String>,
+) -> Result<(), String> {
+    loop {
+        if http_deadline_expired(task) {
+            return Err(HTTP_DEADLINE_ERROR.to_string());
+        }
+        let Some(address) = (unsafe { (*task).remaining_addresses.pop() }) else {
+            return Err(last_error.unwrap_or_else(|| "DNS returned no usable address".to_string()));
+        };
+        match open_nonblocking_socket(address) {
+            Ok(fd) => {
+                unsafe {
+                    (*task).fd = fd;
+                    (*task).state = AsyncHttpState::Connecting;
+                }
+                schedule_async_http(task, THAW_FD_WRITABLE);
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
 }
 
 struct NonblockingSocket(RawFd);
@@ -478,6 +504,7 @@ fn restart_async_http(task: *mut AsyncHttpGet, location: &str) -> Result<(), Str
     task_ref.path = path;
     task_ref.redirects += 1;
     task_ref.resolution = Some(resolution);
+    task_ref.remaining_addresses.clear();
     schedule_async_http(task, THAW_FD_READABLE);
     Ok(())
 }
@@ -743,32 +770,12 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                         return;
                     }
                 };
-                let mut last_error = None;
-                let mut socket = None;
-                for address in addresses {
-                    if expire_async_http(task) {
-                        return;
-                    }
-                    match open_nonblocking_socket(address) {
-                        Ok(fd) => {
-                            socket = Some(fd);
-                            break;
-                        }
-                        Err(error) => last_error = Some(error),
-                    }
-                }
-                let Some(fd) = socket else {
-                    async_http_error(
-                        task,
-                        last_error.unwrap_or_else(|| "DNS returned no usable address".to_string()),
-                    );
-                    return;
-                };
                 unsafe {
-                    (*task).fd = fd;
-                    (*task).state = AsyncHttpState::Connecting;
+                    (*task).remaining_addresses = addresses.into_iter().rev().collect();
                 }
-                schedule_async_http(task, THAW_FD_WRITABLE);
+                if let Err(error) = schedule_next_http_connection(task, None) {
+                    async_http_error(task, error);
+                }
                 return;
             }
             AsyncHttpState::Connecting => {
@@ -789,10 +796,20 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     } else {
                         std::io::Error::last_os_error()
                     };
-                    async_http_error(task, format!("connecting HTTP socket: {error}"));
+                    unsafe {
+                        libc::close((*task).fd);
+                        (*task).fd = -1;
+                    }
+                    if let Err(error) = schedule_next_http_connection(
+                        task,
+                        Some(format!("connecting HTTP socket: {error}")),
+                    ) {
+                        async_http_error(task, error);
+                    }
                     return;
                 }
                 unsafe {
+                    (*task).remaining_addresses.clear();
                     (*task).state = if (*task).tls.is_some() {
                         AsyncHttpState::TlsHandshaking
                     } else {
@@ -1049,6 +1066,7 @@ fn thaw_http_get_async_with_config(
             path,
             redirects: 0,
             resolution: Some(resolution),
+            remaining_addresses: Vec::new(),
         })))
     })();
     match start {

@@ -1526,6 +1526,7 @@ fn async_http_ready_response_cannot_complete_after_absolute_deadline() {
         path: "/".to_string(),
         redirects: 0,
         resolution: None,
+        remaining_addresses: Vec::new(),
     }));
     resume_async_http(task.cast(), std::ptr::null());
     assert_eq!(thaw_promise_state(completion), 2);
@@ -1533,6 +1534,54 @@ fn async_http_ready_response_cannot_complete_after_absolute_deadline() {
         libc::close(fds[1]);
         thaw_promise_destroy(completion);
     }
+}
+
+#[test]
+fn async_http_retries_remaining_address_after_connect_so_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let good_address = listener.local_addr().unwrap();
+    let refused_address = std::net::SocketAddr::from(([127, 0, 0, 2], good_address.port()));
+    let first_fd = open_nonblocking_socket(refused_address)
+        .expect("loopback connection refusal should complete asynchronously");
+    let server = std::thread::spawn(move || {
+        let (mut connection, _) = listener.accept().unwrap();
+        let mut request = [0u8; 1024];
+        let read = connection.read(&mut request).unwrap();
+        assert!(request[..read].starts_with(b"GET /retry HTTP/1.1\r\n"));
+        connection
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .unwrap();
+    });
+    let completion = thaw_promise_new();
+    let task = Box::into_raw(Box::new(AsyncHttpGet {
+        fd: first_fd,
+        request: format!(
+            "GET /retry HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: */*\r\n\r\n",
+            good_address
+        )
+        .into_bytes(),
+        written: 0,
+        response: Vec::new(),
+        state: AsyncHttpState::Connecting,
+        completion,
+        readiness: std::ptr::null_mut(),
+        deadline: Instant::now() + Duration::from_secs(5),
+        tls: None,
+        tls_config: tls_client_config(),
+        use_tls: false,
+        host: "127.0.0.1".to_string(),
+        port: good_address.port(),
+        path: "/retry".to_string(),
+        redirects: 0,
+        resolution: None,
+        remaining_addresses: vec![good_address],
+    }));
+    schedule_async_http(task, THAW_FD_WRITABLE);
+    let result_slot = thaw_runtime_run_until_resolved(completion) as *const *const c_char;
+    assert_eq!(thaw_promise_state(completion), 1);
+    assert_eq!(unsafe { CStr::from_ptr(*result_slot) }.to_bytes(), b"ok");
+    server.join().unwrap();
+    unsafe { thaw_promise_destroy(completion) };
 }
 
 #[test]
