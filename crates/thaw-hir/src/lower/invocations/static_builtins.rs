@@ -83,9 +83,24 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var(intrinsic.to_string())),
                             vec![
                                 var(&acc_name),
-                                HirExpr::TypedIndex(
-                                    Box::new(var(&source_name)),
-                                    Box::new(var(&index_name)),
+                                // Spread reads holes and explicit undefined as
+                                // undefined; number conversion contributes NaN.
+                                // State 1 alone carries a numeric payload.
+                                HirExpr::Conditional(
+                                    Box::new(HirExpr::BinOp(
+                                        BinOp::EqEqEq,
+                                        Box::new(HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                                            vec![var(&source_name), var(&index_name)],
+                                        )),
+                                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                                    )),
+                                    Box::new(HirExpr::TypedIndex(
+                                        Box::new(var(&source_name)),
+                                        Box::new(var(&index_name)),
+                                        HirType::F64,
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))),
                                     HirType::F64,
                                 ),
                             ],
