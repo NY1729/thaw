@@ -325,21 +325,58 @@ fn flush_tls(task: *mut AsyncHttpGet) -> Result<bool, String> {
     Ok(true)
 }
 
-fn read_tls_records(task: *mut AsyncHttpGet) -> Result<bool, String> {
+#[derive(Clone, Copy)]
+enum TlsReadOutcome {
+    Pending,
+    Eof,
+    Completed,
+}
+
+fn read_tls_records(
+    task: *mut AsyncHttpGet,
+    complete_response: bool,
+) -> Result<TlsReadOutcome, String> {
     let fd = unsafe { (*task).fd };
     let mut socket = NonblockingSocket(fd);
+    let mut plaintext = [0u8; 8192];
     loop {
         if http_deadline_expired(task) {
             return Err(HTTP_DEADLINE_ERROR.to_string());
         }
+        // rustls bounds its incoming plaintext buffer. Empty the reader before
+        // reading another TLS record, including data received with the handshake.
+        loop {
+            if http_deadline_expired(task) {
+                return Err(HTTP_DEADLINE_ERROR.to_string());
+            }
+            let read = unsafe { (*task).tls.as_mut().unwrap().reader().read(&mut plaintext) };
+            match read {
+                Ok(0) => return Ok(TlsReadOutcome::Eof),
+                Ok(read) => {
+                    unsafe { &mut (*task).response }.extend_from_slice(&plaintext[..read]);
+                    if complete_response && complete_async_http_if_ready(task, false) {
+                        return Ok(TlsReadOutcome::Completed);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(TlsReadOutcome::Eof);
+                }
+                Err(error) => {
+                    return Err(format!("reading decrypted HTTP response: {error}"));
+                }
+            }
+        }
         let read = unsafe { (*task).tls.as_mut().expect("TLS state is present").read_tls(&mut socket) };
         match read {
-            Ok(0) => return Ok(true),
+            Ok(0) => return Ok(TlsReadOutcome::Eof),
             Ok(_) => {
                 unsafe { (*task).tls.as_mut().unwrap().process_new_packets() }
                     .map_err(|error| format!("processing TLS records: {error}"))?;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(TlsReadOutcome::Pending);
+            }
             Err(error) => return Err(format!("reading TLS records: {error}")),
         }
     }
@@ -822,14 +859,14 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                     async_http_error(task, error);
                     return;
                 }
-                let eof = match read_tls_records(task) {
-                    Ok(eof) => eof,
+                let outcome = match read_tls_records(task, false) {
+                    Ok(outcome) => outcome,
                     Err(error) => {
                         async_http_error(task, error);
                         return;
                     }
                 };
-                if eof {
+                if matches!(outcome, TlsReadOutcome::Eof) {
                     async_http_error(task, "TLS peer closed during handshake".to_string());
                     return;
                 }
@@ -910,50 +947,17 @@ extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
                         async_http_error(task, error);
                         return;
                     }
-                    let eof = match read_tls_records(task) {
-                        Ok(eof) => eof,
+                    let outcome = match read_tls_records(task, true) {
+                        Ok(outcome) => outcome,
                         Err(error) => {
                             async_http_error(task, error);
                             return;
                         }
                     };
-                    let mut plaintext = [0u8; 8192];
-                    loop {
-                        if expire_async_http(task) {
-                            return;
-                        }
-                        let read =
-                            unsafe { (*task).tls.as_mut().unwrap().reader().read(&mut plaintext) };
-                        match read {
-                            Ok(0) => break,
-                            Ok(read) => {
-                                unsafe { &mut (*task).response }
-                                    .extend_from_slice(&plaintext[..read]);
-                                if complete_async_http_if_ready(task, false) {
-                                    return;
-                                }
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                                if complete_async_http_if_ready(task, true) {
-                                    return;
-                                }
-                                async_http_error(
-                                    task,
-                                    "TLS peer closed before the HTTP response completed"
-                                        .to_string(),
-                                );
-                                return;
-                            }
-                            Err(error) => {
-                                async_http_error(
-                                    task,
-                                    format!("reading decrypted HTTP response: {error}"),
-                                );
-                                return;
-                            }
-                        }
+                    if matches!(outcome, TlsReadOutcome::Completed) {
+                        return;
                     }
+                    let eof = matches!(outcome, TlsReadOutcome::Eof);
                     if complete_async_http_if_ready(task, eof) {
                         return;
                     }
