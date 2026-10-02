@@ -723,6 +723,72 @@ fn http2_h2c_sessions_exchange_real_frames_over_tcp() {
 }
 
 #[test]
+fn http2_stream_terminal_paths_drain_queue_and_suppress_late_frames() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_stream_terminal");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2'); module.exports = function() {
+          var session = new http2.ClientHttp2Session(1, 'tcp'), frames = [], events = [];
+          session.authority = 'example.test'; session.remoteSettings.initialWindowSize = 0;
+          session._send = function(value) { frames.push(Buffer.from(value)); return true; };
+          var local = session.request({ ':path': '/local' });
+          local.on('close', function() { events.push('local-close'); });
+          local.write('held', function(error) { events.push(error ? 'local-failed' : 'local-success'); });
+          local.close(); session._frame(8, 0, local.id, Buffer.from([0, 0, 0, 4])); session._deliverHeaders(local.id, 1, Buffer.alloc(0));
+          var localData = frames.filter(function(value) { return value[3] === 0 && value[8] === local.id; }).length;
+          var peer = session.request({ ':path': '/peer' });
+          peer.on('aborted', function() { events.push('peer-aborted'); });
+          peer.on('close', function() { events.push('peer-close'); });
+          peer.write('held', function(error) { events.push(error ? 'peer-failed' : 'peer-success'); });
+          session._frame(3, 0, peer.id, Buffer.from([0, 0, 0, 8]));
+          var incoming = session.request({ ':path': '/incoming' }), ended = 0;
+          incoming.on('data', function() { incoming.close(); });
+          incoming.on('end', function() { ended++; });
+          session._frame(0, 1, incoming.id, Buffer.from('x'));
+          var updates = frames.filter(function(value) { return value[3] === 8; }).map(function(value) { return value[8]; });
+          var normal = session.request({ ':path': '/normal' });
+          normal.readableEnded = normal.writableEnded = true; normal._maybeClose();
+          var paused = session.request({ ':path': '/paused' }, { endStream: true }), pausedEvents = [];
+          paused.pause(); paused.on('data', function(value) { pausedEvents.push('data:' + value.toString()); });
+          paused.on('end', function() { pausedEvents.push('end'); });
+          paused.on('close', function() { pausedEvents.push('close'); });
+          session._frame(0, 1, paused.id, Buffer.from('body'));
+          var beforeResume = [session._streams.has(paused.id), paused.closed, !!paused.readableEnded, paused._queuedData.length, pausedEvents.length];
+          paused.resume();
+          var closeOnData = 0, callbackResults = [], finishes = 0;
+          session._send = function(value) { frames.push(Buffer.from(value)); if (value[3] === 0 && value[8] === closeOnData) { var active = session._streams.get(closeOnData); if (active) active.close(); } return true; };
+          var positive = session.request({ ':path': '/positive' }); positive._sendWindow = 1;
+          positive.on('finish', function() { finishes++; });
+          var beforePositiveWindow = session._sendWindow;
+          closeOnData = positive.id;
+          positive.write('x', function(error) { callbackResults.push(error ? 'positive-failed' : 'positive-success'); });
+          var afterPositiveWindow = session._sendWindow;
+          var empty = session.request({ ':path': '/empty' });
+          empty.on('finish', function() { finishes++; });
+          closeOnData = empty.id;
+          empty.end(function(error) { callbackResults.push(error ? 'empty-failed' : 'empty-success'); });
+          return Promise.resolve().then(function() { return [events, localData, session._streams.has(local.id), session._streams.has(peer.id), session._streams.has(normal.id), ended, updates, beforeResume, pausedEvents, session._streams.has(paused.id), callbackResults, finishes, beforePositiveWindow === afterPositiveWindow, !!positive.writableEnded, !!empty.writableEnded]; });
+        };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_stream_terminal_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2StreamTerminal = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2StreamTerminal").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["local-close","peer-aborted","peer-close","local-failed","peer-failed"],0,false,false,false,0,[0],[true,false,false,1,0],["data:body","end","close"],false,["positive-failed","empty-failed"],0,true,false,false]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn http2_zero_initial_window_blocks_data_until_window_update() {
     use std::ffi::{CStr, CString};
 
@@ -1666,6 +1732,77 @@ module.exports = function() {
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(result, r#"[[true,0,0,0,true],[2,0,0,0,0],["error","close","caught-removal","settings-failed","ping-failed"]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_finish_listener_throw_still_retires_stream_and_settles_sent_callback() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_finish_throw");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  function queued(empty) {
+    var session = new http2.Http2Session(empty ? 999991 : 999992, false, 'tcp'), stream = new http2.Http2Stream(session, 1), marker = new Error('finish marker'), events = [], caught = false;
+    session._send = function() { return true; };
+    session._streams.set(1, stream);
+    stream.readableEnded = true;
+    stream.on('finish', function() { events.push('finish'); throw marker; });
+    stream.on('close', function() { events.push('close'); if (empty) throw new Error('close marker'); });
+    try { if (empty) stream.end(function(error) { events.push(error ? 'callback:failure' : 'callback:ok'); });
+          else stream.end('body', function(error) { events.push(error ? 'callback:failure' : 'callback:ok'); }); }
+    catch (error) { caught = error === marker; }
+    var state = [caught, stream.closed, session._streams.has(1), stream._writeQueue.length];
+    return Promise.resolve().then(function() { return [state, events]; });
+  }
+  function headers(server) {
+    var session = new http2.Http2Session(server ? 999993 : 999994, server, 'tcp'), marker = new Error('finish marker'), events = [], caught = false, stream;
+    session.authority = 'example.test';
+    session._send = function() {
+      if (!server && !stream) {
+        stream = session._streams.get(1);
+        stream.readableEnded = true;
+        stream.on('finish', function() { events.push('finish'); throw marker; });
+        stream.on('close', function() { events.push('close'); });
+      }
+      return true;
+    };
+    if (server) {
+      stream = new http2.ServerHttp2Stream(session, 2);
+      session._streams.set(2, stream);
+      stream.readableEnded = true;
+      stream.on('finish', function() { events.push('finish'); throw marker; });
+      stream.on('close', function() { events.push('close'); throw new Error('close marker'); });
+    }
+    try { if (server) stream.respond({ ':status': 200 }, { endStream: true });
+          else session.request({ ':path': '/' }, { endStream: true }); }
+    catch (error) { caught = error === marker; }
+    return [caught, stream.closed, session._streams.has(stream.id), events];
+  }
+  return Promise.all([queued(false), queued(true)]).then(function(writes) { return writes.concat([headers(true), headers(false)]); });
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_finish_throw_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2FinishThrow = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2FinishThrow").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[[true,true,false,0],["finish","close","callback:ok"]],[[true,true,false,0],["finish","close","callback:ok"]],[true,true,false,["finish","close"]],[true,true,false,["finish","close"]]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
