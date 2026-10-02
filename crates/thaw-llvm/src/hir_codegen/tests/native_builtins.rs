@@ -8905,8 +8905,7 @@ fn compiles_set_and_map_any_key() {
 fn math_sum_precise_sparse_and_special_values() {
     let source = r#"
         function main(): void {
-            const deleted: number[] = [1, 2];
-            delete deleted[0];
+            const deleted: number[] = [, 2];
             try { Math.sumPrecise(deleted); console.log("deleted accepted"); }
             catch (error) { console.log(error instanceof TypeError); }
             const grown: number[] = [1];
@@ -8922,8 +8921,7 @@ fn math_sum_precise_sparse_and_special_values() {
             console.log(Number.isNaN(Math.sumPrecise([Infinity, -Infinity])));
             console.log(Number.isNaN(Math.sumPrecise([NaN])));
             console.log(Math.sumPrecise([1e16, 1, -1e16]));
-            const late: number[] = [Infinity, 1];
-            delete late[1];
+            const late: number[] = [Infinity, , 1];
             try { Math.sumPrecise(late); console.log("late accepted"); }
             catch (error) { console.log(error instanceof TypeError); }
         }
