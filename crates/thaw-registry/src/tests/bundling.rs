@@ -716,3 +716,59 @@ fn bundles_transitive_bare_esm_imports() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn package_imports_use_import_conditions_for_static_and_dynamic_calls() {
+    let root = temp_registry("imports-conditions");
+    let modules = root.join("node_modules");
+    let package = modules.join("condition-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), r##"{"name":"condition-kit","imports":{"#exact":{"import":"./esm.js","require":"./cjs.js"},"#feature/*":{"import":"./esm/*.js","require":"./cjs/*.js"}}}"##).unwrap();
+    fs::create_dir_all(package.join("esm")).unwrap();
+    fs::create_dir_all(package.join("cjs")).unwrap();
+    fs::write(package.join("entry.js"), "import value from '#exact'; export default import('#feature/child');").unwrap();
+    fs::write(package.join("esm.js"), "export default 1;").unwrap();
+    fs::write(package.join("cjs.js"), "module.exports = 2;").unwrap();
+    fs::write(package.join("esm/child.js"), "export default 3;").unwrap();
+    fs::write(package.join("cjs/child.js"), "module.exports = 4;").unwrap();
+    let (bundle, _, file_count, _) = bundle_commonjs_package(&modules, "condition-kit", &package, "entry.js").unwrap();
+    assert_eq!(file_count, 3, "entry plus import-condition exact and wildcard files");
+    assert!(bundle.contains("condition-kit/esm.js"));
+    assert!(bundle.contains("condition-kit/esm/child.js"));
+    assert!(!bundle.contains("condition-kit/cjs.js"));
+    assert!(!bundle.contains("condition-kit/cjs/child.js"));
+    fs::write(package.join("entry.js"), "module.exports = [require('#exact'), require('#feature/child')];").unwrap();
+    let (bundle, _, file_count, _) = bundle_commonjs_package(&modules, "condition-kit", &package, "entry.js").unwrap();
+    assert_eq!(file_count, 3);
+    assert!(bundle.contains("condition-kit/cjs.js"));
+    assert!(bundle.contains("condition-kit/cjs/child.js"));
+    assert!(!bundle.contains("condition-kit/esm.js"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn package_imports_external_targets_use_nested_dependency_and_selected_pattern() {
+    let root = temp_registry("imports-external");
+    let modules = root.join("node_modules");
+    let package = modules.join("owner");
+    let nested = package.join("node_modules/dependency");
+    let shadow = package.join("lib/node_modules/dependency");
+    fs::create_dir_all(&nested).unwrap();
+    fs::create_dir_all(&shadow).unwrap();
+    fs::write(package.join("package.json"), r##"{"name":"owner","imports":{"#dep/*":"dependency/*","#dep/private/*":null,"#dep/public/*":"dependency/public/*","#builtin":"fs"}}"##).unwrap();
+    fs::write(package.join("lib/entry.js"), "module.exports = require('#dep/public/feature');").unwrap();
+    fs::write(nested.join("package.json"), r#"{"name":"dependency","version":"2.0.0"}"#).unwrap();
+    fs::create_dir_all(nested.join("public")).unwrap();
+    fs::write(nested.join("public/feature.js"), "module.exports = 7;").unwrap();
+    fs::write(shadow.join("package.json"), r#"{"name":"dependency","version":"9.0.0"}"#).unwrap();
+    fs::create_dir_all(shadow.join("public")).unwrap();
+    fs::write(shadow.join("public/feature.js"), "module.exports = 9;").unwrap();
+    let (bundle, _, file_count, versions) = bundle_commonjs_package(&modules, "owner", &package, "lib/entry.js").unwrap();
+    assert_eq!(file_count, 2);
+    assert!(bundle.contains("dependency/public/feature.js"));
+    assert_eq!(versions.get("dependency").map(String::as_str), Some("2.0.0"));
+    assert!(!bundle.contains("module.exports = 9"), "nested source-directory dependency must not shadow the imports manifest scope");
+    assert!(matches!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#dep/private/hidden", &["require", "node", "default"]), None));
+    assert!(matches!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#builtin", &["require", "node", "default"]), Some(PackageImportResolution::Builtin(name)) if name == "fs"));
+    let _ = fs::remove_dir_all(root);
+}
