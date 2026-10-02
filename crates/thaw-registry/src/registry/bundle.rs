@@ -1,10 +1,7 @@
 /// One file pulled into a `bundle_commonjs_package` bundle. `key` is
-/// `"<owning package name>/<path resolved by resolve_module_path,
-/// relative to that package's own root>"` -- package-qualified so two
-/// different packages' identically-named files (`index.js` is extremely
-/// common) can't collide in the same bundle. Used both as the emitted
-/// module map's key and, by stripping the package-name prefix and
-/// resolving against that package's own directory, to read the file.
+/// `"<package instance locator>/<path resolved by resolve_module_path>"`.
+/// A nested dependency includes its owning `node_modules` path in the
+/// locator, so two installations with the same name cannot share a factory.
 /// `requires` and `imports` keep the source request condition for each
 /// resolved specifier, since one spelling can select distinct package
 /// exports for CommonJS and ESM.

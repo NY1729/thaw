@@ -17,7 +17,7 @@ fn split_bare_spec(spec: &str) -> (&str, Option<&str>) {
     }
 }
 /// Finds the real directory a bare dependency name resolves to, given
-/// the directory of the package doing the requiring -- Node's actual
+/// the directory of the file doing the requiring -- Node's actual
 /// `node_modules` resolution walks up from the requiring module's own
 /// directory, checking `<ancestor>/node_modules/<dep_name>` at every
 /// level, not just the flat top-level `node_modules_dir`. npm only
@@ -27,20 +27,20 @@ fn split_bare_spec(spec: &str) -> (&str, Option<&str>) {
 /// `entities@^7`, but something else in the tree pins `entities@4`,
 /// which wins the top-level slot) leaves the conflicting version nested
 /// under the dependent's own `node_modules` instead, exactly like a real
-/// `npm install` would. Checking `requiring_pkg_dir`'s own ancestors
+/// `npm install` would. Checking `caller_dir`'s own ancestors
 /// first (before falling back to `node_modules_dir`) reproduces that
-/// real algorithm; `node_modules_dir` itself is `requiring_pkg_dir`'s
+/// real algorithm; `node_modules_dir` itself is `caller_dir`'s
 /// own eventual ancestor when nothing more specific shadows it (a plain
 /// top-level dependency, the overwhelmingly common case), so this is a
 /// pure generalization, not a behavior change for anything that already
 /// worked.
 fn resolve_dependency_dir(
     node_modules_dir: &Path,
-    requiring_pkg_dir: &Path,
+    caller_dir: &Path,
     dep_name: &str,
 ) -> PathBuf {
     let project_root = node_modules_dir.parent().unwrap_or(node_modules_dir);
-    for ancestor in requiring_pkg_dir.ancestors() {
+    for ancestor in caller_dir.ancestors() {
         let candidate = ancestor.join("node_modules").join(dep_name);
         if read_manifest(&candidate).is_ok() {
             return candidate;
@@ -53,7 +53,7 @@ fn resolve_dependency_dir(
 }
 
 /// Resolves a bare require spec to the file it actually points to,
-/// searching `requiring_pkg_dir`'s own nested `node_modules` before
+/// searching the calling file's nested `node_modules` before
 /// falling back to the flat `node_modules_dir` (see
 /// `resolve_dependency_dir`). With no subpath, that's the target
 /// package's own `main` field (or the `index.js` default); with a "deep
@@ -68,12 +68,12 @@ fn resolve_dependency_dir(
 /// report, same as any other unresolvable require.
 fn resolve_bare_require(
     node_modules_dir: &Path,
-    requiring_pkg_dir: &Path,
+    caller_dir: &Path,
     spec: &str,
 ) -> Option<(String, String, PathBuf, PathBuf)> {
     resolve_bare_specifier(
         node_modules_dir,
-        requiring_pkg_dir,
+        caller_dir,
         spec,
         &["require", "node", "default"],
     )
@@ -81,12 +81,12 @@ fn resolve_bare_require(
 
 fn resolve_bare_import(
     node_modules_dir: &Path,
-    requiring_pkg_dir: &Path,
+    caller_dir: &Path,
     spec: &str,
 ) -> Option<(String, String, PathBuf, PathBuf)> {
     resolve_bare_specifier(
         node_modules_dir,
-        requiring_pkg_dir,
+        caller_dir,
         spec,
         &["import", "node", "default"],
     )
@@ -94,12 +94,12 @@ fn resolve_bare_import(
 
 fn resolve_bare_specifier(
     node_modules_dir: &Path,
-    requiring_pkg_dir: &Path,
+    caller_dir: &Path,
     spec: &str,
     conditions: &[&str],
 ) -> Option<(String, String, PathBuf, PathBuf)> {
     let (dep_name, subpath) = split_bare_spec(spec);
-    let dep_dir = resolve_dependency_dir(node_modules_dir, requiring_pkg_dir, dep_name);
+    let dep_dir = resolve_dependency_dir(node_modules_dir, caller_dir, dep_name);
     let target = match subpath {
         Some(sub) => {
             let manifest = read_manifest(&dep_dir).ok()?;
