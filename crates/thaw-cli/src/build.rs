@@ -413,6 +413,7 @@ fn build_with_native_mode(
         &static_packages,
         &dynamic_packages,
         &user_source,
+        &thaw_parser::common::FileName::Real(input.to_path_buf()),
         embed_native_addons,
         output,
         external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
@@ -474,18 +475,29 @@ fn build_with_native_mode(
     ));
     let constructor_package_qualifiers =
         package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
-    let transform = |source: &str| {
+    let transform = |source: &str, module_path: &Path, is_override: bool| {
+        let input_name = if is_override && source != user_source.as_str() {
+            thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()).into())
+        } else {
+            thaw_parser::common::FileName::Real(module_path.to_path_buf())
+        };
         let imported_overload_aliases = fallback_function_overload_rewrites
             .iter()
             .map(|rewrite| rewrite.0.clone())
             .collect();
-        let source = rewrite_qualified_calls(
+        let qualified = rewrite_qualified_calls_named(
             source,
             &qualified_call_rewrites,
             &imported_overload_aliases,
+            &input_name,
         )?;
-        let source = rewrite_external_class_methods_with_static_qualified(
-            &source,
+        let qualified_name = if qualified != source {
+            thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)").into())
+        } else {
+            input_name
+        };
+        let methods = rewrite_external_class_methods_with_static_qualified_named(
+            &qualified,
             &class_constructor_rewrites,
             &class_method_rewrites,
             &callback_instance_rewrites,
@@ -497,14 +509,21 @@ fn build_with_native_mode(
             &factory_class_rewrites,
             &fallback_function_overload_rewrites,
             &constructor_package_qualifiers,
+            &qualified_name,
         )?;
-        rewrite_external_class_constructors(
-            &source,
+        let methods_name = if methods != qualified {
+            thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)").into())
+        } else {
+            qualified_name
+        };
+        rewrite_external_class_constructors_named(
+            &methods,
             &class_constructor_rewrites,
             &constructor_package_qualifiers,
+            &methods_name,
         )
     };
-    let mut module = module_graph::bundle_with_source_transform(
+    let mut module = module_graph::bundle_with_named_source_transform(
         input,
         &user_source,
         &external_exports,

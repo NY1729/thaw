@@ -1169,3 +1169,56 @@ fn block_and_catch_bindings_do_not_shadow_outer_module_references() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n7\n0\n7\n5\n7\ncaught\n7\n3\n9\n4\n9\n");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn registry_transform_receives_each_module_path_for_source_maps() {
+    use thaw_parser::common::{FileName, Spanned};
+
+    let dir = std::env::temp_dir().join(format!("thaw-registry-transform-source-name-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let dependency = dir.join("dependency.ts");
+    let entry_source = "import { value } from './dependency'; console.log(value);";
+    let dependency_source = "export const value: number = 1;";
+    std::fs::write(&entry, entry_source).unwrap();
+    std::fs::write(&dependency, dependency_source).unwrap();
+    let observed = std::cell::RefCell::new(Vec::new());
+    let transform = |source: &str, path: &Path, is_override: bool| {
+        let name = if is_override && source != entry_source {
+            FileName::Custom(format!("{} (in-memory entry override)", path.display()).into())
+        } else {
+            FileName::Real(path.to_path_buf())
+        };
+        let (module, map) = thaw_parser::parse_typescript_with_source_map_named(source, name.clone())?;
+        assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &name);
+        observed.borrow_mut().push((path.to_path_buf(), is_override, name));
+        Ok(if is_override { source.to_string() } else { source.replace("= 1", "= 2") })
+    };
+    module_graph::bundle_with_named_source_transform(
+        &entry, entry_source, &Default::default(), &Default::default(),
+        &Default::default(), &Default::default(), &Default::default(),
+        &Default::default(), &transform,
+    ).unwrap();
+    let seen = observed.borrow();
+    assert!(seen.contains(&(entry.clone(), true, FileName::Real(entry.clone()))));
+    assert!(seen.contains(&(dependency.clone(), false, FileName::Real(dependency.clone()))));
+    drop(seen);
+    let override_source = "import { value } from './dependency'; console.log(value + 1);";
+    let overrides = std::cell::RefCell::new(Vec::new());
+    let override_transform = |source: &str, path: &Path, is_override: bool| {
+        if is_override {
+            let name = FileName::Custom(format!("{} (in-memory entry override)", path.display()).into());
+            let (module, map) = thaw_parser::parse_typescript_with_source_map_named(source, name.clone())?;
+            assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &name);
+            overrides.borrow_mut().push(name);
+        }
+        Ok(source.to_string())
+    };
+    module_graph::bundle_with_named_source_transform(
+        &entry, override_source, &Default::default(), &Default::default(),
+        &Default::default(), &Default::default(), &Default::default(),
+        &Default::default(), &override_transform,
+    ).unwrap();
+    assert_eq!(overrides.borrow().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
