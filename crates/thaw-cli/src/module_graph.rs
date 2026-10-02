@@ -7,7 +7,7 @@ use thaw_parser::ast::{
     ModuleItem, Pat, TsEntityName, TsInterfaceDecl, TsTypeRef, VarDeclarator,
 };
 
-type SourceTransform<'a> = dyn Fn(&str) -> Result<String, String> + 'a;
+type SourceTransform<'a> = dyn Fn(&str, &Path, bool) -> Result<String, String> + 'a;
 pub(crate) const EXTERNAL_MODULE_OFFSET: usize = 1_000_000;
 
 #[derive(Debug)]
@@ -357,7 +357,7 @@ fn load_module(
             .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?,
     };
     let source = match transform {
-        Some(transform) => transform(&source)
+        Some(transform) => transform(&source, &path, source_override.is_some())
             .map_err(|error| format!("failed to transform `{}`: {error}", path.display()))?,
         None => source,
     };
@@ -1305,6 +1305,26 @@ pub fn bundle_with_source_transform(
     external_export_assignments: &HashMap<String, String>,
     external_module_indices: &HashMap<String, usize>,
     transform: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<Module, String> {
+    let adapter = |source: &str, _path: &Path, _is_override: bool| transform(source);
+    bundle_with_named_source_transform(
+        entry, entry_source, external_exports, external_namespace_aliases,
+        external_nested_namespaces, external_resolutions, external_export_assignments,
+        external_module_indices, &adapter,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bundle_with_named_source_transform(
+    entry: &Path,
+    entry_source: &str,
+    external_exports: &HashMap<String, HashMap<String, String>>,
+    external_namespace_aliases: &HashMap<String, HashSet<String>>,
+    external_nested_namespaces: &HashMap<String, HashMap<String, HashMap<String, String>>>,
+    external_resolutions: &HashMap<String, String>,
+    external_export_assignments: &HashMap<String, String>,
+    external_module_indices: &HashMap<String, usize>,
+    transform: &dyn Fn(&str, &Path, bool) -> Result<String, String>,
 ) -> Result<Module, String> {
     let entry = entry
         .canonicalize()
