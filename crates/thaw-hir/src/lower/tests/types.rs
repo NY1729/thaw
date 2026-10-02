@@ -1976,3 +1976,20 @@ fn throwing_byte_receiver_is_bound_before_side_effecting_spread_arguments() {
     let argument_at = body.find("__thaw_native_arg_").unwrap();
     assert!(receiver_at < argument_at, "a throwing receiver must prevent argument evaluation: {body}");
 }
+
+#[test]
+fn optional_call_preserves_nullable_and_nullish_result_tags() {
+    lower(r#"
+        type Maybe = (() => number | null) | undefined;
+        type Both = (() => number | null | undefined) | undefined;
+        function main(): void {
+            let f: Maybe = undefined;
+            let g: Both = undefined;
+            const a: number | null | undefined = f?.();
+            const b: number | null | undefined = g?.();
+            let o: { method: () => number | null } | undefined = undefined;
+            const c: number | null | undefined = o?.method();
+            console.log(a, b, c);
+        }
+    "#);
+}
