@@ -68,7 +68,11 @@
         let valid = true, consumed = 0;
         for (let offset = 0; offset < length && index + offset < bytes.length; offset++) {
           const continuation = bytes[index + offset];
-          if ((continuation & 0xc0) !== 0x80) { valid = false; break; }
+          const lower = offset === 0 && first === 0xe0 ? 0xa0
+            : offset === 0 && first === 0xf0 ? 0x90 : 0x80;
+          const upper = offset === 0 && first === 0xed ? 0x9f
+            : offset === 0 && first === 0xf4 ? 0x8f : 0xbf;
+          if (continuation < lower || continuation > upper) { valid = false; break; }
           code = code << 6 | continuation & 0x3f;
           consumed++;
         }
