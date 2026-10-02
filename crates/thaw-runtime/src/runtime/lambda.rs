@@ -53,6 +53,17 @@ fn handle_one_invocation(
         .ok_or("response from .../invocation/next is missing the request id header")?
         .to_string();
 
+    // The Lambda Runtime API supplies the X-Ray parent and sampling decision
+    // per invocation. A warm environment must not retain the previous trace
+    // when the next response has no trace header.
+    match next.header("lambda-runtime-trace-id") {
+        Some(trace_id) if trace_id.contains('\0') => {
+            return Err("response from .../invocation/next has an invalid trace id header".into());
+        }
+        Some(trace_id) => std::env::set_var("_X_AMZN_TRACE_ID", trace_id),
+        None => std::env::remove_var("_X_AMZN_TRACE_ID"),
+    }
+
     // `Lambda-Runtime-Deadline-Ms` is an absolute epoch timestamp; convert it
     // to a countdown so the event-loop drivers in lib.rs only need a
     // monotonic clock. A missing/unparsable header (e.g. a local test

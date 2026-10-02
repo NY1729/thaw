@@ -878,6 +878,37 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
     })
 }
 
+/// Synchronizes the one Lambda-owned trace variable with the already-live
+/// JavaScript `process.env` snapshot before a compiled handler runs.
+#[no_mangle]
+pub extern "C" fn thaw_js_sync_lambda_trace_from_env() -> u8 {
+    let trace = match std::env::var("_X_AMZN_TRACE_ID") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return 0,
+    };
+    with_active_or_context(|ctx| {
+        let result = ctx
+            .globals()
+            .get::<_, Object>("process")
+            .and_then(|process| process.get::<_, Object>("env"))
+            .and_then(|env| match trace.as_deref() {
+                Some(value) => env.set("_X_AMZN_TRACE_ID", value),
+                None => env.remove("_X_AMZN_TRACE_ID"),
+            });
+        match result {
+            Ok(()) => 1,
+            Err(rquickjs::Error::Exception) => {
+                // The setter may throw. Consume QuickJS's pending exception
+                // before the next warm invocation enters the same context.
+                let _ = ctx.catch();
+                0
+            }
+            Err(_) => 0,
+        }
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_js_set_process_env(name: *const c_char, value: *const c_char) -> u8 {
     let name = to_str(name);

@@ -418,6 +418,55 @@ impl<'ctx> HirCompiler<'ctx> {
         };
 
         let i8_ptr = self.context.ptr_type(AddressSpace::default());
+        // Only a QuickJS-backed Lambda needs to refresh the JavaScript
+        // process.env snapshot. This direct call also retains the helper in
+        // the linked archive without adding a runtime-to-QuickJS dependency.
+        let handler_fn = if self.uses_quickjs || self.uses_quickjs_handles {
+            let sync = self.module.add_function(
+                "thaw_js_sync_lambda_trace_from_env",
+                self.context.i8_type().fn_type(&[], false),
+                Some(Linkage::External),
+            );
+            let wrapper = self.module.add_function(
+                "__thaw_lambda_trace_handler",
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::Internal),
+            );
+            let entry = self.context.append_basic_block(wrapper, "entry");
+            let failed = self.context.append_basic_block(wrapper, "trace_sync_failed");
+            let ready = self.context.append_basic_block(wrapper, "trace_sync_ready");
+            self.builder.position_at_end(entry);
+            let synced = self.builder.build_call(sync, &[], "sync_lambda_trace")
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value().basic()
+                .ok_or("Lambda trace sync returned no value")?
+                .into_int_value();
+            let ok = self.builder.build_int_compare(
+                IntPredicate::NE, synced, self.context.i8_type().const_zero(), "lambda_trace_synced",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_conditional_branch(ok, ready, failed)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(failed);
+            let message = self.builder.build_global_string_ptr(
+                "\u{1}ThawError\u{1}failed to synchronize Lambda trace environment",
+                "lambda_trace_sync_error",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_store(self.pending_exception().as_pointer_value(), message.as_pointer_value())
+                .map_err(|error| error.to_string())?;
+            self.builder.build_return(Some(&i8_ptr.const_null()))
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(ready);
+            let event = wrapper.get_first_param().unwrap();
+            let result = self.builder.build_call(handler_fn, &[event.into()], "call_lambda_handler")
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value().basic()
+                .ok_or("Lambda handler returned no value")?;
+            self.builder.build_return(Some(&result))
+                .map_err(|error| error.to_string())?;
+            wrapper
+        } else {
+            handler_fn
+        };
         let run_type = self
             .context
             .void_type()

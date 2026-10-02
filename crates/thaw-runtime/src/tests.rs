@@ -7,6 +7,29 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
+// Lambda invocations update a process-wide variable. Keep every direct
+// invocation fixture serial and restore the parent test process's value.
+static LAMBDA_TRACE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct LambdaTraceEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for LambdaTraceEnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("_X_AMZN_TRACE_ID", value),
+            None => std::env::remove_var("_X_AMZN_TRACE_ID"),
+        }
+    }
+}
+
+fn guard_lambda_trace_env() -> LambdaTraceEnvGuard {
+    let lock = LAMBDA_TRACE_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    LambdaTraceEnvGuard { previous: std::env::var_os("_X_AMZN_TRACE_ID"), _lock: lock }
+}
+
 #[test]
 fn bytes_encoding_preserves_native_units_and_stops_at_invalid_hex() {
     let face = thaw_arena::arena_string("😀".as_bytes());
@@ -1925,6 +1948,7 @@ fn invocation_guard_resets_request_arena() {
 
 #[test]
 fn polls_an_invocation_and_posts_the_handler_result() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
 
@@ -1964,6 +1988,7 @@ fn polls_an_invocation_and_posts_the_handler_result() {
 
 #[test]
 fn lambda_decodes_chunked_utf8_event_before_handler_and_post_response() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let (tx, rx) = mpsc::channel();
@@ -2032,6 +2057,7 @@ extern "C" fn tagged_lambda_error_handler(_: *const c_char) -> *const c_char {
 
 #[test]
 fn lambda_error_type_uses_public_name_instead_of_internal_ancestry() {
+    let _trace_guard = guard_lambda_trace_env();
     for (raw, expected) in [
         (b"\x01\x1eSub\x1fMyError\x1fError\x01boom\0".as_slice(), "Sub"),
         (b"\x01\x1eSub\x1fMyError\x1fError\x01boom\x04Visible\0".as_slice(), "Visible"),
@@ -2067,6 +2093,7 @@ fn lambda_error_type_uses_public_name_instead_of_internal_ancestry() {
 
 #[test]
 fn posts_uncaught_handler_exception_to_the_lambda_error_endpoint() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let (tx, rx) = mpsc::channel();
@@ -2119,6 +2146,7 @@ extern "C" fn slow_async_handler(_: *const c_char) -> *const c_char {
 
 #[test]
 fn posts_a_timeout_error_when_the_deadline_header_elapses_before_the_handler_settles() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let (tx, rx) = mpsc::channel();
@@ -2158,6 +2186,7 @@ fn posts_a_timeout_error_when_the_deadline_header_elapses_before_the_handler_set
 
 #[test]
 fn surfaces_http_error_status_as_an_error() {
+    let _trace_guard = guard_lambda_trace_env();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
 
@@ -2535,4 +2564,59 @@ fn terminal_and_detached_f64_reports_use_javascript_number_spelling() {
         assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(pending.cast()) }.to_bytes(), expected.as_bytes());
         unsafe { thaw_arena::destroy_string(pending.cast_mut().cast()) };
     }
+}
+
+extern "C" fn lambda_trace_env_handler(_: *const c_char) -> *const c_char {
+    let trace = std::env::var("_X_AMZN_TRACE_ID").unwrap_or_else(|_| "<absent>".into());
+    CString::new(trace).unwrap().into_raw()
+}
+
+#[test]
+fn lambda_sets_and_clears_the_trace_environment_per_invocation() {
+    let _trace_guard = guard_lambda_trace_env();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for (index, trace) in [Some("Root=first"), Some("Root=second"), None].into_iter().enumerate() {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            assert!(request.starts_with(b"GET /2018-06-01/runtime/invocation/next"));
+            let trace_header = trace.map(|value| format!("Lambda-Runtime-Trace-Id: {value}\r\n")).unwrap_or_default();
+            conn.write_all(format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: trace-{index}\r\n{trace_header}Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+                "{}",
+            ).as_bytes()).unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            tx.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
+            conn.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        }
+    });
+    for expected in ["Root=first", "Root=second", "<absent>"] {
+        handle_one_invocation(&addr, lambda_trace_env_handler, std::ptr::null_mut()).unwrap();
+        assert!(rx.recv().unwrap().ends_with(expected));
+    }
+    server.join().unwrap();
+    assert!(std::env::var_os("_X_AMZN_TRACE_ID").is_none());
+}
+
+#[test]
+fn lambda_rejects_nul_trace_header_before_handler() {
+    let _trace_guard = guard_lambda_trace_env();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        conn.read_to_end(&mut request).unwrap();
+        conn.write_all(b"HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: invalid-trace\r\nLambda-Runtime-Trace-Id: Root=bad\0value\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+    });
+    let error = handle_one_invocation(&addr, lambda_trace_env_handler, std::ptr::null_mut()).unwrap_err();
+    assert!(error.contains("invalid trace id header"), "{error}");
+    server.join().unwrap();
 }
