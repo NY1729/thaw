@@ -111,6 +111,22 @@ fn push_error_family_ambient_declarations(classes: &[thaw_bridge::DtsClass], shi
     }
 }
 
+/// A reversible, single filesystem component for a package's external
+/// native addon. Keep common npm-name bytes readable; escape `%`, scope
+/// separators, and any other byte so distinct names never share a sidecar.
+/// The prefix makes `.` and `..` ordinary component contents.
+fn native_addon_path_component(name: &str) -> String {
+    let mut component = String::from("p-");
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            component.push(byte as char);
+        } else {
+            component.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    component
+}
+
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -1392,14 +1408,11 @@ fn generate_registry_shims(
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or("output path has no valid file name")?;
-                let package_dir = format!(
-                    "{}.native/{}",
-                    executable_name,
-                    sanitize_identifier(&pkg.name)
-                );
+                let component = native_addon_path_component(&pkg.name);
+                let package_dir = format!("{executable_name}.native/{component}");
                 let destination = external_native_staging
                     .ok_or("external native staging directory is missing")?
-                    .join(sanitize_identifier(&pkg.name));
+                    .join(&component);
                 std::fs::create_dir_all(&destination).map_err(|error| {
                     format!("failed to create `{}`: {error}", destination.display())
                 })?;
