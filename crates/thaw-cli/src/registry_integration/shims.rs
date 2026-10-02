@@ -191,8 +191,27 @@ include!("jit/loop_bodies.rs");
 include!("jit/loop_aliases.rs");
 include!("jit/callables.rs");
 
+fn registry_bundle_js_source_name(package: &str, has_bundle: bool) -> thaw_parser::common::FileName {
+    let kind = if has_bundle { "bundle" } else { "missing bundle" };
+    thaw_parser::common::FileName::Custom(format!("{package} {kind} JavaScript").into())
+}
+
 fn jit_export(
     source: &str,
+    export_name: &str,
+    allow_default: bool,
+    function: &thaw_bridge::DtsFunction,
+) -> Option<JitExport> {
+    jit_export_named(
+        source,
+        &thaw_parser::common::FileName::Custom("input.js".into()),
+        export_name, allow_default, function,
+    )
+}
+
+fn jit_export_named(
+    source: &str,
+    source_name: &thaw_parser::common::FileName,
     export_name: &str,
     allow_default: bool,
     function: &thaw_bridge::DtsFunction,
@@ -282,7 +301,7 @@ fn jit_export(
         return None;
     }
 
-    let module = thaw_parser::parse_javascript(source).ok()?;
+    let module = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?.0;
     let mut module_functions = std::collections::HashMap::new();
     for item in &module.body {
         if let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))) = item {
