@@ -4,6 +4,8 @@
 pub struct ResolvedPackage {
     pub name: String,
     pub dts_source: String,
+    /// Exact installed declaration file read into `dts_source`; generated builtins have none.
+    pub dts_path: Option<PathBuf>,
     pub native_lib: Option<PathBuf>,
     /// A synchronous Node-API addon loaded through thaw-napi. Kept separate
     /// from `native_lib` because `.node` uses N-API handles, not the Fast-path
@@ -122,6 +124,7 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
     Ok(ResolvedPackage {
         name: name.to_string(),
         dts_source,
+        dts_path: Some(dts_path),
         native_lib,
         native_addon,
         native_dependencies,
@@ -371,6 +374,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
                 _ => "",
             }
         ),
+        dts_path: None,
         native_lib: None,
         native_addon: None,
         native_dependencies: Vec::new(),
