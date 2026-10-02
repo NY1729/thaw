@@ -1841,9 +1841,10 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let server_config = config.clone();
     let server = std::thread::spawn(move || {
         let (socket, _) = listener.accept().unwrap();
-        let connection = ServerConnection::new(config).unwrap();
+        let connection = ServerConnection::new(server_config).unwrap();
         let mut stream = StreamOwned::new(connection, socket);
         let mut request = Vec::new();
         let mut chunk = [0_u8; 1024];
@@ -1886,6 +1887,43 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
         r#"[200,"yes","secret","https:",true,true,"https:"]"#
     );
     server.join().unwrap();
+
+    // A direct TLS client must receive data while its write half is still open.
+    let greeting_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let greeting_port = greeting_listener.local_addr().unwrap().port();
+    let greeting_server = std::thread::spawn(move || {
+        let (socket, _) = greeting_listener.accept().unwrap();
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        let mut stream = StreamOwned::new(ServerConnection::new(config).unwrap(), socket);
+        stream.write_all(b"greeting").unwrap();
+        stream.flush().unwrap();
+        let mut received = [0_u8; 1];
+        assert_eq!(stream.read(&mut received).unwrap(), 0);
+        stream.conn.send_close_notify();
+        stream.flush().unwrap();
+    });
+    let direct_dir = temp_registry("builtin_tls_read_before_end");
+    fs::write(
+        direct_dir.join("index.js"),
+        "var tls = require('node:tls'); module.exports = function(port, ca) { return new Promise(function(resolve, reject) { var chunks = [], pausedSnapshot, writableOnData = false, endCallbacks = 0, ends = 0, closes = 0; var socket = tls.connect({ host: '127.0.0.1', port: port, ca: ca }); socket.on('error', reject); socket.on('secureConnect', function() { socket.pause(); setTimeout(function() { pausedSnapshot = chunks.length; socket.resume(); }, 20); }); socket.on('data', function(chunk) { writableOnData = socket.writable; chunks.push(chunk.toString()); if (chunks.join('') === 'greeting') socket.end(function() { endCallbacks++; }); }); socket.on('end', function() { ends++; }); socket.on('close', function() { closes++; resolve([pausedSnapshot, chunks.join(''), writableOnData, endCallbacks, ends, closes]); }); }); };",
+    )
+    .unwrap();
+    let direct_node_modules = temp_registry("builtin_tls_read_before_end_node_modules");
+    let (direct_bundle, _, direct_file_count, _) =
+        bundle_commonjs_package(&direct_node_modules, "tls-pkg", &direct_dir, "index.js")
+            .unwrap();
+    assert_eq!(direct_file_count, 7);
+    let direct_script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {direct_bundle} globalThis.exerciseTlsReadBeforeEnd = module.exports;");
+    let direct_source = CString::new(direct_script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(direct_source.as_ptr()), 1);
+    let direct_function = CString::new("exerciseTlsReadBeforeEnd").unwrap();
+    let direct_arguments = CString::new(serde_json::to_string(&(greeting_port, &ca)).unwrap()).unwrap();
+    let direct_result = thaw_quickjs::thaw_js_call(direct_function.as_ptr(), direct_arguments.as_ptr());
+    let direct_result = unsafe { CStr::from_ptr(direct_result) }.to_string_lossy();
+    assert_eq!(direct_result, r#"[0,"greeting",true,1,1,1]"#);
+    greeting_server.join().unwrap();
+    let _ = fs::remove_dir_all(&direct_dir);
+    let _ = fs::remove_dir_all(&direct_node_modules);
 
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
     let server_port = reservation.local_addr().unwrap().port();
