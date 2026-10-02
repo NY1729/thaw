@@ -1353,35 +1353,19 @@ impl<'a> FnLowerer<'a> {
                         );
                         values_type = HirType::Array(Box::new(HirType::Str));
                     }
-                    // `for...of` a `Map` yields `[key, value]` pairs and a
-                    // `Set` yields its elements, matching their default
-                    // iterators -- snapshot to an array up front (like
-                    // `.entries()`/`.values()` do) and let the rest of
-                    // this lowering treat it as an ordinary array loop.
-                    if let HirType::Map(key_type, value_type) = &values_type {
-                        let pair_type = HirType::Tuple(vec![
-                            key_type.as_ref().clone(),
-                            value_type.as_ref().clone(),
-                        ]);
-                        let array_type = HirType::Array(Box::new(pair_type));
-                        values = HirExpr::TypedClosure(
-                            array_type.clone(),
-                            Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_map_snapshot_entries".into())),
-                                vec![values],
-                            )),
-                        );
-                        values_type = array_type;
-                    } else if let HirType::Set(element_type) = &values_type {
-                        let array_type = HirType::Array(element_type.clone());
-                        values = HirExpr::TypedClosure(
-                            array_type.clone(),
-                            Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_map_snapshot_keys".into())),
-                                vec![values],
-                            )),
-                        );
-                        values_type = array_type;
+                    // Reuse the live cursor used by Map/Set `.entries()` and
+                    // `.values()`: each resume checks current entries, so
+                    // additions and deletions during the body are visible.
+                    let collection_item = match &values_type {
+                        HirType::Map(key, value) => Some((HirType::Tuple(vec![
+                            key.as_ref().clone(), value.as_ref().clone(),
+                        ]), 2.0)),
+                        HirType::Set(element) => Some((element.as_ref().clone(), 0.0)),
+                        _ => None,
+                    };
+                    if let Some((item_type, mode)) = collection_item {
+                        values = self.lower_map_iterator(values, values_type.clone(), item_type, mode)?;
+                        values_type = self.infer_expr_type(&values)?;
                     }
                     if matches!(values_type, HirType::Object(_))
                         && matches!(for_of.right.as_ref(), Expr::Ident(_))
@@ -1476,33 +1460,6 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_json_map_or_set_entries".to_string())),
                             vec![values],
                         );
-                    }
-                    // A native `Map`/`Set` iterates its `[key, value]` entries
-                    // / values -- materialize the snapshot array (the same
-                    // conversion `[...map]`/`Array.from(set)` use) and fall
-                    // into the array case below.
-                    if let HirType::Map(key_type, value_type) = &values_type {
-                        let pair_type = HirType::Tuple(vec![
-                            key_type.as_ref().clone(),
-                            value_type.as_ref().clone(),
-                        ]);
-                        values = HirExpr::TypedClosure(
-                            HirType::Array(Box::new(pair_type)),
-                            Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_map_snapshot_entries".to_string())),
-                                vec![values],
-                            )),
-                        );
-                        values_type = self.infer_expr_type(&values)?;
-                    } else if let HirType::Set(set_element) = &values_type {
-                        values = HirExpr::TypedClosure(
-                            HirType::Array(set_element.clone()),
-                            Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_map_snapshot_keys".to_string())),
-                                vec![values],
-                            )),
-                        );
-                        values_type = self.infer_expr_type(&values)?;
                     }
                     let (element, json_array) = match &values_type {
                         HirType::Array(element) => (element.as_ref().clone(), false),
