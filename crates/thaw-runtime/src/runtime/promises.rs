@@ -140,6 +140,11 @@ pub unsafe extern "C" fn thaw_promise_reject_typed(
     promise.exception_f64 = f64_value;
     promise.exception_i64 = i64_value;
     promise.exception_bool = bool_value;
+    thaw_arena::replace_reference(
+        promise as *mut ThawPromise as usize,
+        promise.exception_object as usize,
+        object as usize,
+    );
     promise.exception_object = object;
     1
 }
@@ -507,6 +512,42 @@ pub unsafe extern "C" fn thaw_promise_finally(
     output
 }
 
+// These Box-held callbacks are not arena allocations. Purge releases only
+// their temporary arena pins and marks them inert; a late Promise callback
+// may still own the Box frame and must not read request-arena payloads.
+thread_local! {
+    static PROMISE_FINALLY_ADOPT_STATES: RefCell<Vec<*mut PromiseFinallyAdoptState>> =
+        const { RefCell::new(Vec::new()) };
+    static PROMISE_ANY_STATES: RefCell<Vec<*mut PromiseAnyState>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn pin_promise_pointer_once(roots: &mut Vec<(usize, thaw_arena::ArenaRoot)>, pointer: usize) {
+    if pointer != 0 && !roots.iter().any(|(current, _)| *current == pointer) {
+        roots.push((pointer, thaw_arena::ArenaRoot::new(pointer)));
+    }
+}
+
+fn cancel_pending_aggregate_states() {
+    let finally_states = PROMISE_FINALLY_ADOPT_STATES.with(|states| {
+        std::mem::take(&mut *states.borrow_mut())
+    });
+    for pointer in finally_states {
+        let state = unsafe { &mut *pointer };
+        state.cancelled = true;
+        state.original_roots.clear();
+    }
+    let any_states = PROMISE_ANY_STATES.with(|states| {
+        std::mem::take(&mut *states.borrow_mut())
+    });
+    for pointer in any_states {
+        let state = unsafe { &mut *pointer };
+        state.cancelled = true;
+        state.reason_roots.clear();
+        state.output_root = None;
+    }
+}
+
 struct PromiseFinallyAdoptState {
     output: *mut ThawPromise,
     input: *mut ThawPromise,
@@ -519,10 +560,19 @@ struct PromiseFinallyAdoptState {
     original_object: *const u8,
     original_aggregate_errors: *const u8,
     original_text: Option<Vec<u8>>,
+    original_roots: Vec<(usize, thaw_arena::ArenaRoot)>,
+    cancelled: bool,
 }
 
 extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
+    PROMISE_FINALLY_ADOPT_STATES.with(|states| {
+        states.borrow_mut().retain(|pointer| *pointer != frame.cast());
+    });
     let state = unsafe { Box::from_raw(frame.cast::<PromiseFinallyAdoptState>()) };
+    if state.cancelled {
+        unsafe { thaw_promise_destroy(state.input) };
+        return;
+    }
     if unsafe { thaw_promise_state(state.input) } == 2 {
         forward_promise_rejection(state.output, state.input, result);
     } else if state.original_rejected {
@@ -602,6 +652,12 @@ fn finally_adopt_with_source(
     if output.is_null() || input.is_null() || output == input {
         return 0;
     }
+    let aggregate_errors = unsafe { source.as_ref() }
+        .map_or(std::ptr::null(), |source| source.aggregate_errors);
+    let mut original_roots = Vec::new();
+    for pointer in [original, original_object, aggregate_errors] {
+        pin_promise_pointer_once(&mut original_roots, pointer as usize);
+    }
     let state = Box::into_raw(Box::new(PromiseFinallyAdoptState {
         output,
         input,
@@ -612,10 +668,12 @@ fn finally_adopt_with_source(
         original_i64,
         original_bool,
         original_object,
-        original_aggregate_errors: unsafe { source.as_ref() }
-            .map_or(std::ptr::null(), |source| source.aggregate_errors),
+        original_aggregate_errors: aggregate_errors,
         original_text: unsafe { source.as_ref() }.and_then(|source| source.rejection_text.clone()),
+        original_roots,
+        cancelled: false,
     }));
+    PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow_mut().push(state));
     thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast());
     1
 }
@@ -984,6 +1042,9 @@ struct PromiseAnyState {
     remaining: usize,
     fulfilled: bool,
     reasons: Vec<Option<PromiseAnyReason>>,
+    reason_roots: Vec<(usize, thaw_arena::ArenaRoot)>,
+    output_root: Option<thaw_arena::ArenaRoot>,
+    cancelled: bool,
 }
 
 struct PromiseAnyChild {
@@ -995,24 +1056,44 @@ struct PromiseAnyChild {
 extern "C" fn resume_promise_any_child(frame: *mut u8, result: *const u8) {
     let child = unsafe { Box::from_raw(frame.cast::<PromiseAnyChild>()) };
     let state = unsafe { &mut *child.state };
+    if state.cancelled {
+        // Purge released request-arena pins and reset the join count. A
+        // still-live child can settle later, but its result is now opaque.
+        unsafe { thaw_promise_destroy(child.promise) };
+        state.remaining -= 1;
+        if state.remaining == 0 {
+            unsafe { drop(Box::from_raw(child.state)) };
+        }
+        return;
+    }
     if !state.fulfilled {
         if unsafe { thaw_promise_state(child.promise) } == 1 {
             state.fulfilled = true;
+            state.reason_roots.clear();
             thaw_promise_resolve(state.output, result);
         } else {
             let reason = promise_any_reason(unsafe { &*child.promise }, result);
+            if let Some(reason) = reason {
+                if matches!(reason.tag, 3 | 6 | 7 | 8 | 9) {
+                    pin_promise_pointer_once(&mut state.reason_roots, reason.payload as usize);
+                }
+            }
             for index in &child.indices { state.reasons[*index] = reason; }
         }
     }
     unsafe { thaw_promise_destroy(child.promise) };
     state.remaining -= 1;
     if state.remaining == 0 {
+        PROMISE_ANY_STATES.with(|states| {
+            states.borrow_mut().retain(|pointer| *pointer != child.state);
+        });
         if !state.fulfilled {
             let errors = promise_any_errors(&state.reasons);
             if reject_native_text(state.output, PROMISE_ANY_REJECTED_ERROR.as_ptr()) != 0 {
                 set_promise_aggregate_errors(state.output, errors);
             }
         }
+        state.reason_roots.clear();
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
         unsafe { drop(Box::from_raw(child.state)) };
     }
@@ -1062,7 +1143,11 @@ pub unsafe extern "C" fn thaw_promise_any(
         remaining: grouped.len(),
         fulfilled: false,
         reasons: vec![None; len],
+        reason_roots: Vec::new(),
+        output_root: Some(thaw_arena::ArenaRoot::new(output as usize)),
+        cancelled: false,
     }));
+    PROMISE_ANY_STATES.with(|states| states.borrow_mut().push(state));
     ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
     for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAnyChild { state, promise, indices }));
