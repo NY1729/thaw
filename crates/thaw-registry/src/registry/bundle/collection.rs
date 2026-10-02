@@ -72,6 +72,8 @@ fn add_builtin_module(
     modules.push(BundledModule {
         key,
         source: source.to_string(),
+        export_graph: None,
+        origin_parameter: None,
         requires,
         static_esm_specs: Vec::new(),
         has_esm: false,
@@ -392,6 +394,8 @@ fn bundle_commonjs_package_cached(
 
         modules.push(BundledModule {
             key,
+            export_graph: esm_export_graph(&source),
+            origin_parameter: esm_origin_parameter(&source),
             source,
             requires,
             static_esm_specs: analysis.static_esm_specs,

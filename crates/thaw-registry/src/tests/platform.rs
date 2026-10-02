@@ -879,3 +879,66 @@ fn worker_threads_broadcast_channel_clones_between_matching_names() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn worker_esm_star_diamond_uses_the_same_terminal_origin() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("worker-star-origin");
+    let modules = temp_registry("worker-star-origin-modules");
+    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
+    fs::write(package.join("worker.js"), "import { parentPort } from 'node:worker_threads'; export * from './a.js'; export * from './b.js'; parentPort.postMessage(module.exports.value); parentPort.close();").unwrap();
+    fs::write(package.join("a.js"), "export * from './leaf.js';").unwrap();
+    fs::write(package.join("b.js"), "export * from './leaf.js';").unwrap();
+    fs::write(package.join("leaf.js"), "export const value = 7;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-origin-pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerStarResult = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerStarResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "7");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn worker_esm_cycle_uses_one_cached_main_module_identity() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("worker-main-cycle-origin");
+    let modules = temp_registry("worker-main-cycle-origin-modules");
+    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Promise(function(resolve, reject) { var worker = new Worker(new URL('./worker.js', import.meta.url)); worker.on('message', resolve); worker.on('error', reject); }); };").unwrap();
+    fs::write(package.join("worker.js"), "import { parentPort } from 'node:worker_threads'; import { readMain } from './dep.js'; var __thaw_finish_worker_main_0 = 'user-finish'; var __thaw_worker_main_error_0 = 'user-error'; globalThis.workerMainRuns = (globalThis.workerMainRuns || 0) + 1; export const identity = {}; parentPort.postMessage([workerMainRuns, readMain() === module.exports.identity, module.filename, __thaw_finish_worker_main_0, __thaw_worker_main_error_0]); parentPort.close();").unwrap();
+    fs::write(package.join("dep.js"), "import * as main from './worker.js'; export function readMain() { return main.identity; }").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-origin-pkg", &package, "index.js").unwrap();
+    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.workerCycleResult = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerCycleResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true,\"/thaw_modules/worker-origin-pkg/worker.js\",\"user-finish\",\"user-error\"]");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn worker_main_ready_rejects_every_falsy_thrown_value() {
+    use std::ffi::{CStr, CString};
+    let package = temp_registry("worker-falsy-main-ready");
+    let modules = temp_registry("worker-falsy-main-ready-modules");
+    fs::write(package.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function() { return new Worker(new URL('./worker.js', import.meta.url)); };").unwrap();
+    fs::write(package.join("worker.js"), "throw 0;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "worker-falsy-pkg", &package, "index.js").unwrap();
+    let script = format!(r#"globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle}
+        (0, eval)(globalThis.__thaw_worker_bundle_source);
+        globalThis.workerFalsyReadyProbe = async function() {{
+          var reasons = [0, false, '', null, undefined], results = [];
+          for (var i = 0; i < reasons.length; i++) {{
+            var mod = {{ exports: {{}} }}, finish = globalThis.__thaw_bundle_register_worker_main('probe/' + i, mod);
+            finish(false, reasons[i]);
+            try {{ await mod.ready; results.push(false); }}
+            catch (error) {{ results.push(Object.is(error, reasons[i])); }}
+          }}
+          return results;
+        }};"#);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerFalsyReadyProbe".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true,true,true]");
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
