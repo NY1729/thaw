@@ -251,6 +251,37 @@ fn expands_wildcard_package_exports_from_type_files() {
 }
 
 #[test]
+fn null_export_exclusion_blocks_wildcard_enumeration_and_lazy_registration() {
+    let modules = temp_registry("null-export-modules");
+    let registry = temp_registry("null-export-registry");
+    let package = modules.join("pkg");
+    fs::create_dir_all(package.join("dist/features/private")).unwrap();
+    for name in ["public", "private/secret", "private/open", "default-first", "conditional", "array-blocked", "array-fallback"] {
+        fs::write(package.join(format!("dist/features/{name}.d.ts")), "export declare const value: number;").unwrap();
+        fs::write(package.join(format!("dist/features/{name}.cjs")), "exports.value = 1;").unwrap();
+    }
+    let source = r#"{"exports":{"./features/*":{"types":"./dist/features/*.d.ts","require":"./dist/features/*.cjs"},"./features/private/*":null,"./features/private/open":{"types":"./dist/features/private/open.d.ts","require":"./dist/features/private/open.cjs"},"./features/conditional":{"require":null,"default":"./dist/features/conditional.cjs","types":"./dist/features/conditional.d.ts"},"./features/default-first":{"default":"./dist/features/default-first.cjs","require":null,"types":"./dist/features/default-first.d.ts"},"./features/array-blocked":{"require":[null],"default":"./dist/features/array-blocked.cjs","types":"./dist/features/array-blocked.d.ts"},"./features/array-fallback":{"require":[null,{"require":"./dist/features/array-fallback.cjs"}],"types":"./dist/features/array-fallback.d.ts"}}}"#;
+    fs::write(package.join("package.json"), source).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(source).unwrap();
+    let names = package_subpath_exports(&manifest, &package).unwrap()
+        .into_iter().map(|export| export.subpath).collect::<Vec<_>>();
+    assert_eq!(names, vec!["features/array-fallback".to_string(), "features/default-first".to_string(), "features/private/open".to_string(), "features/public".to_string()]);
+    assert_eq!(
+        runtime_export_specifiers("pkg", &package).unwrap(),
+        vec!["pkg/features/array-fallback".to_string(), "pkg/features/default-first".to_string(), "pkg/features/private/open".to_string(), "pkg/features/public".to_string()],
+    );
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/private/secret", &["require", "node", "default"]), None);
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/conditional", &["require", "node", "default"]), None);
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/array-blocked", &["require", "node", "default"]), None);
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/array-fallback", &["require", "node", "default"]), Some("./dist/features/array-fallback.cjs".to_string()));
+    assert_eq!(package_subpath_runtime_target(&manifest, "features/default-first", &["require", "node", "default"]), Some("./dist/features/default-first.cjs".to_string()));
+    assert!(add_installed_subpath(&registry, &modules, "pkg/features/private/secret")
+        .unwrap_err().contains("no export named"));
+    let _ = fs::remove_dir_all(modules);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_npm_layout_registers_wildcard_subpath_artifacts() {
     let scratch = temp_registry("installed-wildcard-scratch");
     let registry = temp_registry("installed-wildcard-registry");
