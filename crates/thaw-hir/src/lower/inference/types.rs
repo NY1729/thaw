@@ -2363,7 +2363,8 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_lookup_native_projector" =>
                         return Ok(HirType::Optional(Box::new(HirType::Function(
                             Vec::new(), Box::new(HirType::JsValue))))),
-                    "__thaw_register_native_object_projector" => return Ok(HirType::Bool),
+                    "__thaw_register_native_object_projector"
+                    | "__thaw_register_native_object_layout" => return Ok(HirType::Bool),
                     "__thaw_release_native_projection_callbacks" => return Ok(HirType::Void),
                     "__thaw_require_native_owner" => return Ok(HirType::Void),
                     "callDynamicValueMixedHandle" | "__thaw_build_native_object_wrapper"

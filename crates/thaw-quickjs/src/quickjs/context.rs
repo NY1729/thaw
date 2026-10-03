@@ -874,6 +874,7 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
         const map = new WeakMap();
         const apply = Reflect.apply;
         const objectConstructor = Object;
+        const objectCreate = Object.create;
         const defineProperty = Object.defineProperty;
         const set = WeakMap.prototype.set;
         const get = WeakMap.prototype.get;
@@ -888,7 +889,47 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
         const weakDeref = WeakRef.prototype.deref;
         const Finalizer = FinalizationRegistry;
         const finalizerRegister = FinalizationRegistry.prototype.register;
-        const stringStartsWith = String.prototype.startsWith;
+        const stringIndexOf = String.prototype.indexOf;
+        const stringSlice = String.prototype.slice;
+        const arrayPush = Array.prototype.push;
+        const number = Number;
+        const isSafeInteger = Number.isSafeInteger;
+        const layoutSegments = layout => {
+            const fields = [];
+            let cursor = 0;
+            while (cursor < layout.length) {
+                const start = cursor;
+                for (let part = 0; part < 2; part++) {
+                    const colon = apply(stringIndexOf, layout, [':', cursor]);
+                    if (colon < 0) return null;
+                    const bytes = number(apply(stringSlice, layout, [cursor, colon]));
+                    if (!isSafeInteger(bytes) || bytes < 0) return null;
+                    cursor = colon + 1 + bytes * 2;
+                    if (cursor > layout.length) return null;
+                }
+                apply(arrayPush, fields, [apply(stringSlice, layout, [start, cursor])]);
+            }
+            return fields;
+        };
+        const layoutContains = (actual, expected) => {
+            if (actual === expected) return true;
+            const have = layoutSegments(actual);
+            const want = layoutSegments(expected);
+            if (!have || !want) return false;
+            const used = objectCreate(null);
+            for (let desired = 0; desired < want.length; desired++) {
+                let found = false;
+                for (let index = 0; index < have.length; index++) {
+                    if (!used[index] && have[index] === want[desired]) {
+                        used[index] = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
+        };
         const finalized = new Finalizer(({pointer, weak}) => {
             if (apply(mapGet, objectCache, [pointer]) === weak)
                 apply(mapDelete, objectCache, [pointer]);
@@ -918,14 +959,14 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
             },
             (wrapper, expected) => {
                 const owner = apply(get, objectOwners, [wrapper]);
-                return owner && apply(stringStartsWith, owner.layout, [expected])
+                return owner && layoutContains(owner.layout, expected)
                     ? owner.pointer : '';
             },
             (pointer, expected) => {
                 const weak = apply(mapGet, objectCache, [pointer]);
                 const existing = weak && apply(weakDeref, weak, []);
                 const owner = existing && apply(get, objectOwners, [existing]);
-                return owner && apply(stringStartsWith, owner.layout, [expected])
+                return owner && layoutContains(owner.layout, expected)
                     ? existing : undefined;
             },
             token => {

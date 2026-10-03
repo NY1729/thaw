@@ -3886,11 +3886,12 @@ impl<'a> FnLowerer<'a> {
                 vec![HirExpr::Lit(HirLit::Str(
                     "__thaw_object_with_native_getters".into(),
                 ))])));
-        // A borrowed foreign FFI object has no arena owner to retain. Fail
-        // before registering the first callback that could capture its pointer.
+        // Keep the physical layout authoritative for callback receiver
+        // recovery, including a later structural view in different order.
+        // Registration checks arena ownership before any callback is acquired.
         body.push(HirStmt::Expr(HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_require_native_owner".into())),
-            vec![HirExpr::Var(source_name.clone())],
+            Box::new(HirExpr::Var("__thaw_register_native_object_layout".into())),
+            vec![HirExpr::Var(source_name.clone()), HirExpr::Lit(HirLit::Bool(true))],
         )));
         // Resolve the builder and encode plain metadata before acquiring any
         // temporary native callback handles. From this point to the builder

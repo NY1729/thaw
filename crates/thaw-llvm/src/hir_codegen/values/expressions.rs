@@ -800,19 +800,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
 
             self.builder.position_at_end(matched);
-            let field_pointer = unsafe {
-                self.builder
-                    .build_in_bounds_gep(
-                        self.context.i8_type(),
-                        object,
-                        &[self
-                            .context
-                            .i64_type()
-                            .const_int(object_field_offset(fields, index)?, false)],
-                        "dynamic_property_field",
-                    )
-                    .map_err(|error| error.to_string())?
-            };
+            let field_pointer = self.compile_field_ptr_from_pointer(object, fields, index)?;
             let value = self
                 .builder
                 .build_load(
