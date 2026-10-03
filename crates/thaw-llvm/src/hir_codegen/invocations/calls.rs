@@ -330,7 +330,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let i64_type = self.context.i64_type();
                 let slot = self.builder.build_call(
                     self.module.get_function("thaw_array_ensure_index").unwrap(),
-                    &[target.into(), i64_type.const_int(array_element_storage_bytes(&element), false).into(), index.into()],
+                    &[target.into(), i64_type.const_int(array_element_storage_bytes(&element)?, false).into(), index.into()],
                     "undefined_write_slot",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("array undefined write returned no slot")?.into_pointer_value();
@@ -398,7 +398,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.module.get_function("thaw_array_resize").unwrap(),
                     &[
                         handle.into(),
-                        self.context.i64_type().const_int(array_element_storage_bytes(&element), false).into(),
+                        self.context.i64_type().const_int(array_element_storage_bytes(&element)?, false).into(),
                         length.into(),
                     ],
                     "array_resize",
@@ -549,7 +549,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         &[
                             buffer.into(),
                             presence.into(),
-                            self.context.i64_type().const_int(array_element_storage_bytes(&element), false).into(),
+                            self.context.i64_type().const_int(array_element_storage_bytes(&element)?, false).into(),
                         ],
                         "array_sort_present_length",
                     )

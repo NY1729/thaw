@@ -401,18 +401,27 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut element_bytes = elems
             .iter()
             .filter_map(|element| self.expr_hir_type(element))
-            .map(|element| array_element_storage_bytes(&element))
-            .max()
-            .unwrap_or(ARRAY_ELEM_BYTES);
+            .try_fold(ARRAY_ELEM_BYTES, |width, element| {
+                Ok::<_, String>(width.max(array_element_storage_bytes(&element)?))
+            })?;
         let elem_vals = elems
             .iter()
             .map(|e| self.compile_expr(e))
             .collect::<Result<Vec<_>, _>>()?;
-        if elem_vals.iter().any(|value| value.is_struct_value()) {
-            element_bytes = element_bytes.max(ASYNC_SLOT_BYTES);
+        for (expr, value) in elems.iter().zip(&elem_vals) {
+            let bytes = compiled_value_layout(value.get_type())?.0;
+            let actual = align_storage(bytes, 8)?
+                .max(if value.is_struct_value() { ASYNC_SLOT_BYTES } else { ARRAY_ELEM_BYTES });
+            if let Some(declared) = self.expr_hir_type(expr) {
+                if actual > array_element_storage_bytes(&declared)? {
+                    return Err("array element exceeds its declared storage".into());
+                }
+            }
+            element_bytes = element_bytes.max(actual);
         }
 
-        let size = ARRAY_HEADER_BYTES + element_bytes * elem_vals.len() as u64;
+        let size = checked_storage_add(ARRAY_HEADER_BYTES,
+            checked_storage_mul(element_bytes, elem_vals.len() as u64)?)?;
         let i64_type = self.context.i64_type();
         let size_val = i64_type.const_int(size, false);
         let align_val = i64_type.const_int(element_bytes.min(8), false);
@@ -433,7 +442,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         for (i, val) in elem_vals.into_iter().enumerate() {
-            let offset = i64_type.const_int(ARRAY_HEADER_BYTES + element_bytes * i as u64, false);
+            let offset = i64_type.const_int(checked_array_offset(element_bytes, i)?, false);
             let elem_ptr = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), base_ptr, &[offset], "elem_ptr")
@@ -492,6 +501,59 @@ impl<'ctx> HirCompiler<'ctx> {
             .into())
     }
 
+    fn checked_array_allocation_size(
+        &mut self,
+        length: IntValue<'ctx>,
+        stride: u64,
+        name: &str,
+    ) -> Result<IntValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let max_length = ((isize::MAX as u64) - ARRAY_HEADER_BYTES) / stride;
+        let too_long = self.builder.build_int_compare(
+            IntPredicate::UGT, length, i64_type.const_int(max_length, false),
+            &format!("{name}_too_long"),
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let valid = self.context.append_basic_block(function, &format!("{name}_valid"));
+        let invalid = self.context.append_basic_block(function, &format!("{name}_invalid"));
+        self.builder.build_conditional_branch(too_long, invalid, valid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.compile_throw_type_error("Array allocation exceeds addressable storage")?;
+        self.builder.position_at_end(valid);
+        let payload = self.builder.build_int_mul(length, i64_type.const_int(stride, false),
+            &format!("{name}_payload")).map_err(|error| error.to_string())?;
+        self.builder.build_int_add(payload, i64_type.const_int(ARRAY_HEADER_BYTES, false),
+            &format!("{name}_size")).map_err(|error| error.to_string())
+    }
+
+    fn checked_array_length_add(
+        &mut self,
+        left: IntValue<'ctx>,
+        right: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let max = i64_type.const_int(isize::MAX as u64, false);
+        let right_invalid = self.builder.build_int_compare(IntPredicate::UGT, right, max,
+            "array_part_length_invalid").map_err(|error| error.to_string())?;
+        let remaining = self.builder.build_int_sub(max, right, "array_length_remaining")
+            .map_err(|error| error.to_string())?;
+        let sum_invalid = self.builder.build_int_compare(IntPredicate::UGT, left, remaining,
+            "array_total_length_invalid").map_err(|error| error.to_string())?;
+        let invalid = self.builder.build_or(right_invalid, sum_invalid, "array_length_invalid")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let valid_block = self.context.append_basic_block(function, "array_length_valid");
+        let invalid_block = self.context.append_basic_block(function, "array_length_overflow");
+        self.builder.build_conditional_branch(invalid, invalid_block, valid_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid_block);
+        self.compile_throw_type_error("Array length exceeds addressable storage")?;
+        self.builder.position_at_end(valid_block);
+        self.builder.build_int_add(left, right, "spread_total")
+            .map_err(|error| error.to_string())
+    }
+
     fn compile_array_alloc(
         &mut self,
         length: &HirExpr,
@@ -503,22 +565,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_float_to_signed_int(length, i64_type, "array_alloc_length")
             .map_err(|error| error.to_string())?;
-        let payload_size = self
-            .builder
-            .build_int_mul(
-                length,
-                i64_type.const_int(array_element_storage_bytes(element), false),
-                "array_alloc_payload_size",
-            )
-            .map_err(|error| error.to_string())?;
-        let allocation_size = self
-            .builder
-            .build_int_add(
-                payload_size,
-                i64_type.const_int(ARRAY_HEADER_BYTES, false),
-                "array_alloc_size",
-            )
-            .map_err(|error| error.to_string())?;
+        let allocation_size = self.checked_array_allocation_size(
+            length, array_element_storage_bytes(element)?, "array_alloc")?;
         let result = self
             .builder
             .build_call(
@@ -526,7 +574,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[
                     allocation_size.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element).min(8), false)
+                        .const_int((array_element_storage_bytes(element)?).min(8), false)
                         .into(),
                 ],
                 "array_alloc",
@@ -543,7 +591,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// Evaluates each array part once from left to right and copies their
-    /// uniform eight-byte element slots into one arena-owned result array.
+    /// uniform type-sized element slots into one arena-owned result array.
     fn compile_array_concat(
         &mut self,
         parts: &[HirExpr],
@@ -560,27 +608,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_load(i64_type, array, "spread_length")
                 .map_err(|error| error.to_string())?
                 .into_int_value();
-            total = self
-                .builder
-                .build_int_add(total, length, "spread_total")
-                .map_err(|error| error.to_string())?;
+            total = self.checked_array_length_add(total, length)?;
             arrays.push((handle, array, length));
         }
 
-        let element_width = array_element_storage_bytes(element);
-        let element_bytes = i64_type.const_int(element_width, false);
-        let payload_size = self
-            .builder
-            .build_int_mul(total, element_bytes, "spread_payload_size")
-            .map_err(|error| error.to_string())?;
-        let allocation_size = self
-            .builder
-            .build_int_add(
-                payload_size,
-                i64_type.const_int(ARRAY_HEADER_BYTES, false),
-                "spread_allocation_size",
-            )
-            .map_err(|error| error.to_string())?;
+        let element_width = array_element_storage_bytes(element)?;
+        let allocation_size = self.checked_array_allocation_size(
+            total, element_width, "spread_allocation")?;
         let result = self
             .builder
             .build_call(
@@ -728,12 +762,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_float_to_signed_int(idx_val, i64_type, "idx")
             .map_err(|e| e.to_string())?;
         let element_bytes = match self.expr_hir_type(array) {
-            Some(HirType::Array(element)) => array_element_storage_bytes(&element),
-            Some(HirType::Tuple(elements)) => elements
-                .iter()
-                .map(array_element_storage_bytes)
-                .max()
-                .unwrap_or(ARRAY_ELEM_BYTES),
+            Some(HirType::Array(element)) => array_element_storage_bytes(&element)?,
+            Some(HirType::Tuple(elements)) => tuple_element_storage_bytes(&elements)?,
             _ => ARRAY_ELEM_BYTES,
         };
         // Bounds/negative/non-integer-checked in `thaw_array_read_ptr`
@@ -776,17 +806,25 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(|(_, expr)| self.compile_expr(expr))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let field_sizes = field_vals
-            .iter()
-            .map(|value| {
-                if value.is_struct_value() {
-                    ASYNC_SLOT_BYTES
+        let field_sizes = field_vals.iter().enumerate()
+            .map(|(index, value)| {
+                let declared = self.expr_hir_type(&fields[index].1)
+                    .map(|ty| object_field_storage_bytes(&ty))
+                    .transpose()?;
+                let actual = compiled_value_layout(value.get_type())?.0;
+                let actual = align_storage(actual, 8)?
+                    .max(if value.is_struct_value() { ASYNC_SLOT_BYTES } else { OBJECT_FIELD_BYTES });
+                if let Some(declared) = declared {
+                    if actual > declared {
+                        return Err(format!("object field `{}` exceeds its declared storage", fields[index].0));
+                    }
+                    Ok::<_, String>(declared)
                 } else {
-                    OBJECT_FIELD_BYTES
+                    Ok(actual)
                 }
             })
-            .collect::<Vec<_>>();
-        let size = field_sizes.iter().sum::<u64>();
+            .collect::<Result<Vec<_>, _>>()?;
+        let size = field_sizes.iter().try_fold(0, |total, width| checked_storage_add(total, *width))?;
         let i64_type = self.context.i64_type();
         let size_val = i64_type.const_int(size.max(1), false);
         let align_val = i64_type.const_int(OBJECT_FIELD_BYTES, false);
@@ -838,7 +876,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
             }
-            byte_offset += field_sizes[i];
+            byte_offset = checked_storage_add(byte_offset, field_sizes[i])?;
         }
 
         Ok(base_ptr.into())
@@ -854,11 +892,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "object allocation requires an object type, got {object_type:?}"
             ));
         };
-        let size = fields
-            .iter()
-            .map(|(_, field_type)| object_field_storage_bytes(field_type))
-            .sum::<u64>()
-            .max(1);
+        let size = object_storage_bytes(fields)?.max(1);
         let i64_type = self.context.i64_type();
         let allocation = self
             .builder
@@ -891,7 +925,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(field_pointer, zero)
                 .map_err(|error| error.to_string())?;
-            byte_offset += object_field_storage_bytes(field_type);
+            byte_offset = checked_storage_add(byte_offset, object_field_storage_bytes(field_type)?)?;
         }
         // Only a constructor's ClassAlloc may register nominal identity.
         // Ordinary ObjectAlloc can originate from typed fallback values,
@@ -925,7 +959,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let offset = self
             .context
             .i64_type()
-            .const_int(object_field_offset(fields, index), false);
+            .const_int(object_field_offset(fields, index)?, false);
 
         unsafe {
             self.builder

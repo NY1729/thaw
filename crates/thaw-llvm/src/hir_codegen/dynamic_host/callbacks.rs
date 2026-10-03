@@ -323,17 +323,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 self.compile_jit_argument_slots(field_value, field_type, &field_path, output)?;
-                offset += object_field_storage_bytes(field_type);
+                offset = checked_storage_add(offset, object_field_storage_bytes(field_type)?)?;
             }
             return Ok(());
         }
         if let HirType::Tuple(elements) = ty {
             let tuple = self.compile_array_data(value.into_pointer_value())?;
-            let stride = elements
-                .iter()
-                .map(array_element_storage_bytes)
-                .max()
-                .unwrap_or(ARRAY_ELEM_BYTES);
+            let stride = tuple_element_storage_bytes(elements)?;
             for (index, element_type) in elements.iter().enumerate() {
                 let element_path = format!("{path}_{index}");
                 let pointer = unsafe {
@@ -342,7 +338,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             self.context.i8_type(),
                             tuple,
                             &[self.context.i64_type().const_int(
-                                ARRAY_HEADER_BYTES + stride * index as u64,
+                                checked_array_offset(stride, index)?,
                                 false,
                             )],
                             &element_path,

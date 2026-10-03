@@ -300,7 +300,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let offset = self
             .context
             .i64_type()
-            .const_int(object_field_offset(fields, getter_index), false);
+            .const_int(object_field_offset(fields, getter_index)?, false);
         let pointer = unsafe {
             self.builder
                 .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "getter_field")
@@ -890,7 +890,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_int_mul(
                 index.as_basic_value().into_int_value(),
-                i64_type.const_int(array_element_storage_bytes(element_type), false),
+                i64_type.const_int(array_element_storage_bytes(element_type)?, false),
                 "console_array_element_offset",
             )
             .map_err(|error| error.to_string())?;
@@ -1030,16 +1030,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_array_new returned no value")?;
-        let stride = element_types
-            .iter()
-            .map(array_element_storage_bytes)
-            .max()
-            .unwrap_or(ARRAY_ELEM_BYTES);
+        let stride = tuple_element_storage_bytes(element_types)?;
         for (index, element_type) in element_types.iter().enumerate() {
             let offset = self
                 .context
                 .i64_type()
-                .const_int(ARRAY_HEADER_BYTES + stride * index as u64, false);
+                .const_int(checked_array_offset(stride, index)?, false);
             let pointer = unsafe {
                 self.builder
                     .build_in_bounds_gep(

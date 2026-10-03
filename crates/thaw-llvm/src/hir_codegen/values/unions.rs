@@ -416,7 +416,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.module.get_function("thaw_arena_alloc").unwrap(),
                         &[
                             i64_type
-                                .const_int(object_storage_bytes(fields).max(1), false)
+                                .const_int((object_storage_bytes(fields)?).max(1), false)
                                 .into(),
                             i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
                         ],
@@ -434,7 +434,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             .build_in_bounds_gep(
                                 self.context.i8_type(),
                                 allocation,
-                                &[i64_type.const_int(object_field_offset(fields, index), false)],
+                                &[i64_type.const_int(object_field_offset(fields, index)?, false)],
                                 "zero_object_field",
                             )
                             .map_err(|error| error.to_string())?

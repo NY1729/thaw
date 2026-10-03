@@ -1918,3 +1918,39 @@ fn setter_only_source_copies_undefined_own_value_in_object_assign() {
         "true true true\n{}\n"
     );
 }
+// Unrun regression: the first field/element/local has a 24-byte LLVM value,
+// followed by a sentinel that the former fixed 16-byte slot overwrote.
+#[test]
+fn nested_tagged_values_preserve_adjacent_arena_slots() {
+    let source = r#"
+        interface Holder { value: (string | number) | undefined; tail: number; }
+        function choose(kind: number): (string | number) | undefined {
+            if (kind === 1) return "first";
+            if (kind === 2) return 82;
+            return "tuple";
+        }
+        async function carry(input: (string | number) | undefined): Promise<(string | number) | undefined> {
+            let saved: (string | number) | undefined = input;
+            let tail: number = 93;
+            await sleep(1);
+            console.log(tail);
+            return saved;
+        }
+        async function main(): Promise<void> {
+            const holder: Holder = { value: choose(1), tail: 71 };
+            console.log(holder.value);
+            console.log(holder.tail);
+            const values: ((string | number) | undefined)[] = [choose(1), choose(2)];
+            console.log(values[0]);
+            console.log(values[1]);
+            const pair: [(string | number) | undefined, number] = [choose(3), 83];
+            console.log(pair[0]);
+            console.log(pair[1]);
+            console.log(await carry(84));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_tagged_arena_slots"),
+        "first\n71\nfirst\n82\ntuple\n83\n93\n84\n"
+    );
+}

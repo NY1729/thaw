@@ -885,7 +885,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     i64_type.const_int(args.len() as u64, false).into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element), false)
+                        .const_int(array_element_storage_bytes(element)?, false)
                         .into(),
                 ],
                 "promise_all",
@@ -926,7 +926,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     len.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element), false)
+                        .const_int(array_element_storage_bytes(element)?, false)
                         .into(),
                 ],
                 "promise_all_array",
@@ -986,7 +986,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(
                     size_slot,
-                    i64_type.const_int(array_element_storage_bytes(element), false),
+                    i64_type.const_int(array_element_storage_bytes(element)?, false),
                 )
                 .map_err(|error| error.to_string())?;
         }
@@ -1101,7 +1101,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     len.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element), false)
+                        .const_int(array_element_storage_bytes(element)?, false)
                         .into(),
                 ],
                 name,
