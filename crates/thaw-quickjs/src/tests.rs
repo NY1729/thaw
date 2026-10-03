@@ -2980,6 +2980,32 @@ fn shared_json_reviver_reconstructs_well_known_symbol_values() {
 }
 
 #[test]
+fn property_key_bridge_distinguishes_registered_symbols() {
+    assert_eq!(
+        load(r#"function registeredSymbolPropertyKeys() {
+          const key = 'part:\u0000\ud800';
+          const registered = __thaw_property_key('\u0003R41:' + key);
+          const repeated = __thaw_property_key('\u0003R41:' + key);
+          const anotherWire = __thaw_property_key('\u0003R42:' + key);
+          const unique = __thaw_property_key('\u000341:' + key);
+          const empty = __thaw_property_key('\u0003R43:');
+          const object = { [registered]: 9 };
+          const revived = JSON.parse(JSON.stringify([
+            '\u0003R44:' + key, '\u0003R45:' + key, '\u000346:' + key, '\u0003R47:'
+          ]), __thaw_json_date_reviver);
+          return [registered === Symbol.for(key), repeated === registered,
+            anotherWire === registered, unique !== registered,
+            object[Symbol.for(key)] === 9, empty === Symbol.for(''),
+            revived[0] === registered, revived[1] === registered,
+            revived[2] !== registered, revived[3] === empty,
+            __thaw_property_key('\u001f@@iterator') === Symbol.iterator];
+        }"#),
+        1
+    );
+    assert_eq!(call("registeredSymbolPropertyKeys", "[]"), "[true,true,true,true,true,true,true,true,true,true,true]");
+}
+
+#[test]
 fn property_key_bridge_preserves_symbol_identity() {
     assert_eq!(
         load(
