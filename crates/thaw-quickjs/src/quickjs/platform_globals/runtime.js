@@ -1,4 +1,11 @@
   globalThis.global = globalThis;
+  const thawDateConstructor = Date;
+  const thawDateGetTime = Date.prototype.getTime;
+  const thawDateApply = Reflect.apply;
+  Object.defineProperty(globalThis, '__thaw_date_from_live_value', {
+    value: value => thawDateApply(thawDateGetTime, new thawDateConstructor(value), []),
+    configurable: false, writable: false,
+  });
   // Used by thaw-bridge's generated module-bootstrap glue
   // (`crates/thaw-bridge/src/bridge/generation.rs`) wherever a package
   // export gets `.bind()`-captured onto a bare/qualified global -- a
