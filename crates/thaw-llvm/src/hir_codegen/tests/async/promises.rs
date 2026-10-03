@@ -1323,3 +1323,37 @@ fn promise_input_allocation_failure_reaches_catch_and_empty_input_skips_allocato
     }
     assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+#[test]
+fn reject_resolvers_record_their_native_string_before_settlement() {
+    // Source-level computed, empty, and embedded-NUL values all enter the
+    // same Str-typed reject ABI. The runtime copies bytes only when that
+    // exact pointer was marked as trusted native text.
+    let source = r#"
+        function main(): void {
+            const computed: string = "a" + "\0b";
+            Promise.reject(computed);
+            new Promise<number>((resolve, reject) => reject(computed));
+            Promise.reject("");
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "reject_native_text_provenance");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let reject_bodies = ir.split("define internal void @__thaw_promise_reject_")
+        .skip(1)
+        .map(|section| section.split("\n}").next().unwrap())
+        .collect::<Vec<_>>();
+    assert!(reject_bodies.len() >= 3, "{ir}");
+    for body in reject_bodies {
+        let lines = body.lines().collect::<Vec<_>>();
+        let marked = lines.iter().position(|line| line.contains("store ptr %")
+            && line.contains("@__thaw_pending_exception_native_text")).expect(&ir);
+        let settled = lines.iter().position(|line|
+            line.contains("@thaw_promise_reject_typed_with_aggregate")).expect(&ir);
+        assert!(marked < settled, "{ir}");
+    }
+}
