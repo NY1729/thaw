@@ -1069,6 +1069,37 @@ fn compiles_full_year_setters_on_invalid_dates() {
 }
 
 #[test]
+fn date_constructor_parses_string_values_across_any_boundary_once() {
+    let source = r#"
+        let calls = 0;
+        function dateText(): any {
+            calls++;
+            return "2020-01-01T00:00:00.000Z";
+        }
+        function main(): void {
+            const text: any = "2020-01-01T00:00:00.000Z";
+            console.log(new Date(text).getTime());
+            console.log(new Date(dateText()).getTime(), calls);
+            const emptyText: any = "";
+            console.log(Number.isNaN(new Date(emptyText).getTime()));
+            const milliseconds: any = 1704067200500;
+            const nil: any = null;
+            const absent: any = undefined;
+            const flag: any = true;
+            console.log(new Date(milliseconds).getTime(), new Date(nil).getTime());
+            console.log(Number.isNaN(new Date(absent).getTime()), new Date(flag).getTime());
+            console.log(new Date("2020-01-01T00:00:00.000Z").getTime());
+            const local = new Date(2024, 0, 1);
+            console.log(local.getFullYear(), local.getMonth(), local.getDate());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_any_string_constructor"),
+        "1577836800000\n1577836800000 1\ntrue\n1704067200500 0\ntrue 1\n1577836800000\n2024 0 1\n"
+    );
+}
+
+#[test]
 fn compiles_date_utc_and_parse() {
     let source = r#"
         function isoText(): string {

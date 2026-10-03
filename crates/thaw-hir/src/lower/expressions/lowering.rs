@@ -3400,11 +3400,42 @@ impl<'a> FnLowerer<'a> {
                             )
                         } else if let Some(argument) = args.first() {
                             let value = self.lower_expr(&argument.expr)?;
-                            if self.infer_expr_type(&value)? == HirType::Str {
+                            let value_type = self.infer_expr_type(&value)?;
+                            if value_type == HirType::Str {
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_date_parse".to_string())),
                                     vec![value],
                                 )
+                            } else if value_type == HirType::Json {
+                                let name = format!("__thaw_date_json_arg_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(name.clone(), HirType::Json);
+                                let bound = HirExpr::Var(name.clone());
+                                let is_string = HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_typeof".to_string())),
+                                        vec![bound.clone()],
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::Str("string".to_string()))),
+                                );
+                                let parsed = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_date_parse".to_string())),
+                                    vec![HirExpr::JsonAsString(Box::new(bound.clone()))],
+                                );
+                                let clipped = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_date_time_clip".to_string())),
+                                    vec![HirExpr::JsonAsNumber(Box::new(bound))],
+                                );
+                                self.wrap_call_argument_bindings(
+                                    HirExpr::Conditional(
+                                        Box::new(is_string),
+                                        Box::new(parsed),
+                                        Box::new(clipped),
+                                        HirType::F64,
+                                    ),
+                                    &[(name, HirType::Json, value)],
+                                )?
                             } else {
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_date_time_clip".to_string())),
