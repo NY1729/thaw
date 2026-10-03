@@ -668,17 +668,87 @@ impl<'a> FnLowerer<'a> {
                 (receiver, receiver_type) = self.lower_union_array_sequence(receiver, members)?;
             }
         }
-        let result = if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "propertyIsEnumerable")
-            && matches!(receiver_type, HirType::Array(_))
-        {
+        // Bind the receiver before spread argument bindings, as a member call
+        // evaluates its base before any argument. The predicates below only
+        // inspect descriptors; they never get the property value.
+        let receiver_name = format!("__thaw_own_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+        let source = HirExpr::Var(receiver_name.clone());
+        let enumerable = matches!(&member.prop, MemberProp::Ident(property)
+            if property.sym == "propertyIsEnumerable");
+        let result = if enumerable && matches!(&receiver_type, HirType::Array(_)) {
             HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_array_property_is_enumerable".into())),
-                vec![receiver, self.coerce_primitive_to_string(key_value.clone())?],
+                vec![source, self.coerce_primitive_to_string(key_value.clone())?],
             )
+        } else if enumerable {
+            self.lower_property_is_enumerable_value(source, key_value.clone())?
         } else {
-            self.lower_has_own_value(receiver, key_value.clone())?
+            self.lower_has_own_value(source, key_value.clone())?
         };
-        self.wrap_call_argument_bindings(result, &bindings)
+        let result = self.wrap_call_argument_bindings(result, &bindings)?;
+        self.wrap_call_argument_bindings(
+            result,
+            &[(receiver_name, receiver_type, receiver)],
+        )
+    }
+
+    /// Test membership first (including the physical full-layout alias),
+    /// then consult the original owner's enumerable descriptor bit.
+    fn lower_property_is_enumerable_value(
+        &mut self,
+        receiver: HirExpr,
+        key_value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver_type = self.infer_expr_type(&receiver)?;
+        let key_value = self.coerce_primitive_to_string(key_value)?;
+        if matches!(&receiver_type, HirType::Json | HirType::Dictionary(_)) {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_property_is_enumerable".into())),
+                vec![receiver, key_value],
+            ));
+        }
+        if !matches!(&receiver_type, HirType::Object(_)) {
+            return Err(format!(
+                "`propertyIsEnumerable` currently requires a fixed object or dictionary, got {receiver_type:?}"
+            ));
+        }
+        let object_name = format!("__thaw_enumerable_object_{}", self.next_binding);
+        self.next_binding += 1;
+        let key_name = format!("__thaw_enumerable_key_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(object_name.clone(), receiver_type.clone());
+        self.scope.insert(key_name.clone(), HirType::Str);
+        let object = HirExpr::Var(object_name.clone());
+        let key = HirExpr::Var(key_name.clone());
+        let present = self.lower_has_own_value(object.clone(), key.clone())?;
+        let flags = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_property_flags".into())),
+            vec![object, key],
+        );
+        let enumerable = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::BinOp(
+                BinOp::BitAnd,
+                Box::new(flags),
+                Box::new(HirExpr::Lit(HirLit::F64(2.0))),
+            )),
+            Box::new(HirExpr::Lit(HirLit::F64(2.0))),
+        );
+        let result = HirExpr::Conditional(
+            Box::new(present),
+            Box::new(enumerable),
+            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            HirType::Bool,
+        );
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (object_name, receiver_type, receiver),
+                (key_name, HirType::Str, key_value),
+            ],
+        )
     }
 
     /// Whether `receiver` has `key` as an own property. A fixed native

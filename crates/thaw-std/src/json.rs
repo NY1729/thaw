@@ -4797,6 +4797,25 @@ pub unsafe extern "C" fn thaw_json_has_own(value: *const Value, key: *const c_ch
     }
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`; `key` must point to
+/// a valid NUL-terminated string.
+pub unsafe extern "C" fn thaw_json_property_is_enumerable(value: *const Value, key: *const c_char) -> u8 {
+    let key = to_key(key);
+    match unsafe { value.as_ref() } {
+        Some(Value::Host(lease)) => u8::from(host_property_predicate(lease, &key, 3)),
+        Some(Value::Array(_)) if key == b"length" => 0,
+        Some(Value::String(text)) => u8::from(array_index_key(&key)
+            .is_some_and(|index| (index as usize) < text.encode_utf16().count())),
+        Some(Value::Wtf8(bytes)) => u8::from(array_index_key(&key)
+            .is_some_and(|index| (index as usize) < wtf8_decode_utf16(bytes).len())),
+        Some(value) => json_has_own_value(value, &key).into(),
+        None => 0,
+    }
+}
+
 fn json_number_is(left: f64, right: f64) -> bool {
     (left.is_nan() && right.is_nan()) || (left == right && left.to_bits() == right.to_bits())
 }
