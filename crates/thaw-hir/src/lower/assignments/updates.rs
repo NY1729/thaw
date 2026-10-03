@@ -358,8 +358,10 @@ impl<'a> FnLowerer<'a> {
                     &[(array_name, array_type, array), (index_name, HirType::F64, *index)],
                 );
             }
-            let value = HirExpr::BinOp(op, Box::new(current), Box::new(one));
-            return Ok(build_assign(target, value));
+            if let Target::Var(name) = target {
+                let value = HirExpr::BinOp(op, Box::new(current), Box::new(one));
+                return Ok(build_assign(Target::Var(name), value));
+            }
         }
         if let Target::Var(name) = target {
             return Ok(HirExpr::PostfixUpdate(name, op));
@@ -436,10 +438,21 @@ impl<'a> FnLowerer<'a> {
         bindings.push((old_name.clone(), HirType::F64, self.coerce_primitive_to_number(current)?));
         let old = HirExpr::Var(old_name);
         let updated = HirExpr::BinOp(op, Box::new(old.clone()), Box::new(one));
-        let result = HirExpr::Block(vec![
-            HirStmt::Expr(build_assign(target, updated)),
-            HirStmt::Return(Some(old)),
-        ]);
+        let result = if update.prefix {
+            let updated_name = format!("__thaw_update_new_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(updated_name.clone(), HirType::F64);
+            bindings.push((updated_name.clone(), HirType::F64, updated));
+            HirExpr::Block(vec![
+                HirStmt::Expr(build_assign(target, HirExpr::Var(updated_name.clone()))),
+                HirStmt::Return(Some(HirExpr::Var(updated_name))),
+            ])
+        } else {
+            HirExpr::Block(vec![
+                HirStmt::Expr(build_assign(target, updated)),
+                HirStmt::Return(Some(old)),
+            ])
+        };
         self.wrap_call_argument_bindings(result, &bindings)
     }
 }
