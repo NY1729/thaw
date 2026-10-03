@@ -619,8 +619,10 @@
       // whose separator differs per locale) can use the skeleton native;
       // a bare minute is not zero-padded even for `'2-digit'` (Node:
       // `{minute:'2-digit'}` -> `"5"`), which `_formatTimeOnlyParts` handles.
-      const skeletonTimeOnly =
-        !hasDateFields && !this._hour && this._minute !== undefined && this._second !== undefined;
+      const skeletonTimeOnly = !hasDateFields && !this._hour && (
+        (this._minute !== undefined && this._second !== undefined) ||
+        (this._dayPeriod !== undefined && (this._minute !== undefined || this._second !== undefined))
+      );
       const options = {
         weekday: this._weekday,
         era: this._era,

@@ -446,6 +446,60 @@ fn group_by_type(fields: &[Field]) -> (Vec<Field>, Vec<Field>) {
     (date, time)
 }
 
+// CLDR has Bhm/Bhms, but no Bm/Bms. Match the locale's B+hour pattern,
+// then remove only the hour (and, for second-only, its minute) plus the
+// separators following those synthetic fields. This keeps B on its locale-
+// specific side of the requested numeric fields.
+fn flexible_period_without_hour_pattern(
+    skeletons: &[(Vec<Field>, Pattern<'static>)],
+    fields: &[Field],
+) -> Option<Pattern<'static>> {
+    use icu_datetime::provider::fields::{DayPeriod, Hour};
+
+    let synthetic_minute = !fields.iter().any(|field| matches!(field.symbol, FieldSymbol::Minute));
+    let mut match_fields = fields.to_vec();
+    match_fields.push(Field { symbol: FieldSymbol::Hour(Hour::H12), length: FieldLength::One });
+    if synthetic_minute {
+        match_fields.push(Field { symbol: FieldSymbol::Minute, length: FieldLength::One });
+    }
+    match_fields.sort_by(field_cmp);
+    let pattern = match get_best_available_format_pattern(skeletons, &match_fields) {
+        BestSkeleton::AllFieldsMatch(pattern) | BestSkeleton::MissingOrExtraFields(pattern) => pattern,
+        BestSkeleton::NoMatch => return None,
+    };
+    if !fields.iter().all(|requested| pattern.items.iter().any(|item| {
+        matches!(item, PatternItem::Field(found) if found.symbol == requested.symbol)
+    })) || !pattern.items.iter().any(|item| matches!(item, PatternItem::Field(field)
+        if matches!(field.symbol, FieldSymbol::Hour(_)))) {
+        return None;
+    }
+    let mut filtered = Vec::new();
+    let mut after_synthetic = false;
+    for item in pattern.items.iter() {
+        match item {
+            PatternItem::Field(field) if matches!(field.symbol, FieldSymbol::Hour(_))
+                || (synthetic_minute && matches!(field.symbol, FieldSymbol::Minute)) => {
+                after_synthetic = true;
+            }
+            PatternItem::Literal(_) if after_synthetic => {}
+            other => {
+                after_synthetic = false;
+                filtered.push(other);
+            }
+        }
+    }
+    if !fields.iter().all(|requested| filtered.iter().any(|item| matches!(item,
+        PatternItem::Field(found) if found.symbol == requested.symbol)))
+        || filtered.iter().any(|item| matches!(item, PatternItem::Field(field)
+            if !fields.iter().any(|requested| requested.symbol == field.symbol)))
+        || !filtered.iter().any(|item| matches!(item, PatternItem::Field(field)
+            if matches!(field.symbol, FieldSymbol::DayPeriod(DayPeriod::Flexible))))
+    {
+        return None;
+    }
+    Some(pattern_from_items(filtered))
+}
+
 /// Matches a full requested field set (date and/or time) against the
 /// locale's `availableFormats` table and returns the final pattern,
 /// combining date and time with `glue` (`[full, long, medium, short]`)
@@ -468,6 +522,14 @@ pub fn create_best_pattern_for_fields(
     };
     let time_pattern = if time_fields.is_empty() {
         None
+    } else if time_fields.iter().any(|field| matches!(field.symbol,
+        FieldSymbol::DayPeriod(icu_datetime::provider::fields::DayPeriod::Flexible)))
+        && !time_fields.iter().any(|field| matches!(field.symbol, FieldSymbol::Hour(_)))
+        && time_fields.iter().any(|field| matches!(field.symbol,
+            FieldSymbol::Minute | FieldSymbol::Second(_)))
+    {
+        // A failed B+minute/second match must not silently return date only.
+        Some(flexible_period_without_hour_pattern(skeletons, &time_fields)?)
     } else {
         match get_best_available_format_pattern(skeletons, &time_fields) {
             BestSkeleton::AllFieldsMatch(p) | BestSkeleton::MissingOrExtraFields(p) => Some(p),
