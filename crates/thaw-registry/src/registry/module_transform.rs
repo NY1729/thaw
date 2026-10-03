@@ -623,7 +623,10 @@ fn esm_synthetic_offset_named(source: &str, source_name: &thaw_parser::common::F
     })
 }
 
-fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, source_name: &thaw_parser::common::FileName) -> Option<String> {
+fn rewrite_live_import_references_named(
+    source: &str, synthetic_offset: usize, source_name: &thaw_parser::common::FileName,
+    opaque_specs: Option<&std::collections::BTreeSet<String>>,
+) -> Option<String> {
     use std::collections::{BTreeMap, BTreeSet};
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
@@ -699,6 +702,9 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
             ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
                 let module_name = format!("__thaw_esm_import_{synthetic_count}");
                 synthetic_count += 1;
+                let source_spec = import.src.value.to_string_lossy().into_owned();
+                let opaque = opaque_specs.is_some_and(|specs| specs.contains(&source_spec));
+                if opaque_specs.is_some() && !opaque { continue; }
                 for specifier in &import.specifiers {
                     match specifier {
                         ImportSpecifier::Named(named) => {
@@ -709,19 +715,27 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
                                 .as_ref()
                                 .map(&export_name)
                                 .unwrap_or_else(|| local.clone());
-                            bindings.insert(
-                                local,
-                                format!("{module_name}[{}]", js_string_literal(&imported)),
-                            );
+                            bindings.insert(local, if opaque {
+                                format!("{origin_name}.readImport({}, {})",
+                                    js_string_literal(&source_spec), js_string_literal(&imported))
+                            } else {
+                                format!("{module_name}[{}]", js_string_literal(&imported))
+                            });
                         }
                         ImportSpecifier::Default(default) => {
                             bindings.insert(
                                 default.local.sym.to_string(),
-                                format!(
+                                if opaque {
+                                    format!("{origin_name}.readDefault({})", js_string_literal(&source_spec))
+                                } else { format!(
                                     "((typeof {origin_name} !== 'undefined') ? {origin_name}.defaultImport({}, {module_name}) : (({module_name} && {module_name}.__esModule) ? {module_name}.default : {module_name}))",
-                                    js_string_literal(&import.src.value.to_string_lossy())
-                                ),
+                                    js_string_literal(&source_spec)
+                                ) },
                             );
+                        }
+                        ImportSpecifier::Namespace(namespace) if opaque => {
+                            bindings.insert(namespace.local.sym.to_string(),
+                                format!("{origin_name}.namespaceImport({})", js_string_literal(&source_spec)));
                         }
                         ImportSpecifier::Namespace(_) => {}
                     }
@@ -984,6 +998,164 @@ fn rewrite_live_import_references_named(source: &str, synthetic_offset: usize, s
     Some(output)
 }
 
+// Native QuickJS cannot link a named export against an opaque CJS shell. Keep
+// the shell as a side-effect import at that declaration's position, and let
+// the already-collected origin graph publish its live name on the facade.
+fn native_opaque_link_checks_named(
+    source: &str, rewritten_specs: &std::collections::BTreeSet<String>,
+    source_name: &thaw_parser::common::FileName,
+) -> Option<Vec<(String, String)>> {
+    use thaw_parser::ast::{ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+    let (module, _) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?;
+    let export_name = |name: &ModuleExportName| match name {
+        ModuleExportName::Ident(id) => id.sym.to_string(),
+        ModuleExportName::Str(text) => text.value.to_string_lossy().into_owned(),
+    };
+    let mut checks = Vec::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import))
+                if !import.type_only && rewritten_specs.contains(import.src.value.to_string_lossy().as_ref()) => {
+                let spec = import.src.value.to_string_lossy().into_owned();
+                for binding in &import.specifiers {
+                    match binding {
+                        ImportSpecifier::Named(named) if !named.is_type_only => {
+                            checks.push((spec.clone(), named.imported.as_ref()
+                                .map(&export_name).unwrap_or_else(|| named.local.sym.to_string())));
+                        }
+                        ImportSpecifier::Default(_) => checks.push((spec.clone(), "default".to_owned())),
+                        _ => {}
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export))
+                if !export.type_only && export.src.as_ref().is_some_and(|src|
+                    rewritten_specs.contains(src.value.to_string_lossy().as_ref())) => {
+                let spec = export.src.as_ref()?.value.to_string_lossy().into_owned();
+                for binding in &export.specifiers {
+                    if let ExportSpecifier::Named(named) = binding {
+                        if !named.is_type_only { checks.push((spec.clone(), export_name(&named.orig))); }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(checks)
+}
+
+fn rewrite_native_opaque_edges_named(
+    source: &str, opaque_specs: &std::collections::BTreeSet<String>, helper_spec: &str,
+    source_name: &thaw_parser::common::FileName,
+) -> Option<String> {
+    use thaw_parser::ast::{ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleItem};
+    use thaw_parser::common::{SourceMapper, Spanned};
+    let offset = esm_synthetic_offset_named(source, source_name)?;
+    let origin_name = format!("__thaw_esm_origin_{offset}");
+    let referenced = rewrite_live_import_references_named(source, offset, source_name, Some(opaque_specs))
+        .unwrap_or_else(|| source.to_owned());
+    let referenced = rewrite_mixed_dynamic_imports_named(&referenced, &origin_name,
+        &rewritten_js_source_name(source_name, "native opaque reference rewrite"))?;
+    let rewritten_name = rewritten_js_source_name(source_name, "native opaque reference rewrite");
+    let (module, map) = thaw_parser::parse_javascript_with_source_map_named(&referenced, rewritten_name).ok()?;
+    let mut opaque_locals = std::collections::BTreeSet::new();
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+            if opaque_specs.contains(import.src.value.to_string_lossy().as_ref()) {
+                for specifier in &import.specifiers {
+                    match specifier {
+                        ImportSpecifier::Named(named) => { opaque_locals.insert(named.local.sym.to_string()); }
+                        ImportSpecifier::Default(default) => { opaque_locals.insert(default.local.sym.to_string()); }
+                        ImportSpecifier::Namespace(namespace) => { opaque_locals.insert(namespace.local.sym.to_string()); }
+                    }
+                }
+            }
+        }
+    }
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    for item in &module.body {
+        let replacement = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import))
+                if opaque_specs.contains(import.src.value.to_string_lossy().as_ref()) =>
+                Some(format!("import {};", js_string_literal(&import.src.value.to_string_lossy()))),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export))
+                if export.src.as_ref().is_some_and(|src| opaque_specs.contains(src.value.to_string_lossy().as_ref())) =>
+                Some(format!("import {};", js_string_literal(&export.src.as_ref()?.value.to_string_lossy()))),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export))
+                if opaque_specs.contains(export.src.value.to_string_lossy().as_ref()) =>
+                Some(format!("import {};", js_string_literal(&export.src.value.to_string_lossy()))),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if export.src.is_none() => {
+                let mut kept = Vec::new();
+                let mut changed = false;
+                for specifier in &export.specifiers {
+                    let imported_opaque = match specifier {
+                        ExportSpecifier::Named(named) => match &named.orig {
+                            thaw_parser::ast::ModuleExportName::Ident(id) => opaque_locals.contains(id.sym.as_ref()),
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if imported_opaque { changed = true; continue; }
+                    kept.push(map.span_to_snippet(specifier.span()).ok()?);
+                }
+                changed.then(|| if kept.is_empty() { "export {};".to_owned() }
+                    else { format!("export {{ {} }};", kept.join(", ")) })
+            }
+            _ => None,
+        };
+        if let Some(text) = replacement {
+            let span = item.span();
+            let start = map.lookup_byte_offset(span.lo).pos.0 as usize;
+            let end = map.lookup_byte_offset(span.hi).pos.0 as usize;
+            edits.push((start, end, text));
+        }
+    }
+    let mut output = referenced;
+    for (start, end, text) in edits.into_iter().rev() { output.replace_range(start..end, &text); }
+    // This helper has no user side effects; importing it before the original
+    // dependencies provides a lexical, per-registration origin capability.
+    let bom = if output.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let at = if output[bom..].starts_with("#!") {
+        output[bom..].find('\n').map(|index| bom + index + 1).unwrap_or(output.len())
+    } else { bom };
+    output.insert_str(at, &format!("import {{ origin as {origin_name} }} from {};\n", js_string_literal(helper_spec)));
+    Some(output)
+}
+
+fn rewrite_mixed_dynamic_imports_named(
+    source: &str, origin_name: &str, source_name: &thaw_parser::common::FileName,
+) -> Option<String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{CallExpr, Callee};
+    use thaw_parser::common::Spanned;
+    struct Calls(Vec<(u32, u32, u32, u32)>);
+    impl Visit for Calls {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if matches!(call.callee, Callee::Import(_)) {
+                if call.args.len() != 1 || call.args[0].spread.is_some() { return; }
+                let span = call.span();
+                let value = call.args[0].expr.span();
+                self.0.push((span.lo.0, span.hi.0, value.lo.0, value.hi.0));
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let (module, map) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()).ok()?;
+    let mut calls = Calls(Vec::new());
+    module.visit_with(&mut calls);
+    let binding = format!("{origin_name}_dynamic_spec");
+    let mut edits = Vec::new();
+    for (lo, hi, arg_lo, arg_hi) in calls.0 {
+        let offset = |at| map.lookup_byte_offset(thaw_parser::common::BytePos(at)).pos.0 as usize;
+        edits.push((offset(lo), offset(arg_lo), format!("(function({binding}) {{ try {{ var spec = `${{{binding}}}`; {origin_name}.validateDynamic(spec); return {origin_name}.completeDynamic(spec, import(spec)); }} catch (error) {{ return {origin_name}.rejectDynamic(error); }} }})(")));
+        edits.push((offset(arg_hi), offset(hi), ")".to_owned()));
+    }
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut output = source.to_owned();
+    for (start, end, text) in edits { output.replace_range(start..end, &text); }
+    Some(output)
+}
+
 fn rewrite_import_meta_urls_named(source: &str, source_name: &thaw_parser::common::FileName) -> String {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{Expr, Ident, MetaPropKind};
@@ -1189,7 +1361,7 @@ fn rewrite_esm_to_commonjs_mode_named(source: &str, await_imports: bool, source_
     let source = dynamic_source.as_deref().unwrap_or(source);
     let source_name = dynamic_name.as_ref().unwrap_or(source_name);
     let synthetic_offset = esm_synthetic_offset_named(source, source_name)?;
-    let live_source = rewrite_live_import_references_named(source, synthetic_offset, source_name);
+    let live_source = rewrite_live_import_references_named(source, synthetic_offset, source_name, None);
     let live_name = live_source.as_ref().filter(|rewritten| rewritten.as_str() != source)
         .map(|_| rewritten_js_source_name(source_name, "live import rewrite"));
     let source = live_source.as_deref().unwrap_or(source);
@@ -1521,7 +1693,7 @@ fn esm_export_graph_named(source: &str, source_name: &thaw_parser::common::FileN
                         ExportSpecifier::Named(named) if !named.is_type_only => {
                             let original = name(&named.orig);
                             let exported = named.exported.as_ref().map(&name).unwrap_or_else(|| original.clone());
-                            let target = export.src.as_ref().map(|source| (source.value.to_string_lossy().into_owned(), Some(original.clone()), false))
+                            let target = export.src.as_ref().map(|source| (source.value.to_string_lossy().into_owned(), Some(original.clone()), original == "default"))
                                 .or_else(|| imported.get(&original).cloned());
                             if let Some((source, remote, default_interop)) = target {
                                 indirect.insert(exported, serde_json::json!([source, remote, default_interop]));

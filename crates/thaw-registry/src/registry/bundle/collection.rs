@@ -183,6 +183,150 @@ fn bundle_builtin_module(name: &str) -> Result<String, String> {
     Ok(render_bundle(&main_key, &modules))
 }
 
+// Staged native/CJS candidate assembly. The production selector below stays
+// unchanged until the full imported-binding/facade path has been reviewed.
+fn prepare_mixed_native_render(main_key: &str, modules: &[BundledModule]) -> Option<MixedBundleRender> {
+    use std::collections::{BTreeSet, HashMap};
+    // Native link validation can use a known ESM graph or the established
+    // synthetic CommonJS default. Other opaque names depend on running a
+    // factory, so keep those graphs on the existing renderer.
+    fn statically_checkable(
+        key: &str, name: &str, modules: &[BundledModule], native: &BTreeSet<String>,
+        seen: &mut BTreeSet<(String, String)>,
+    ) -> bool {
+        if !native.contains(key) { return name == "default"; }
+        if !seen.insert((key.to_owned(), name.to_owned())) { return true; }
+        let Some(module) = modules.iter().find(|module| module.key == key) else { return false };
+        let Some(graph) = module.export_graph.as_ref() else { return true };
+        if graph["local"].get(name).is_some() { return true; }
+        if let Some(indirect) = graph["indirect"].get(name) {
+            let Some(spec) = indirect[0].as_str() else { return false };
+            let Some(target) = module.imports.iter().find(|(request, _)| request == spec).map(|(_, target)| target) else { return false };
+            if indirect[1].is_null() { return true; }
+            let Some(remote) = indirect[1].as_str() else { return false };
+            return statically_checkable(target, remote, modules, native, seen);
+        }
+        if name == "default" { return true; }
+        let Some(stars) = graph["stars"].as_array() else { return false };
+        stars.iter().all(|star| star.as_str().and_then(|spec|
+            module.imports.iter().find(|(request, _)| request == spec).map(|(_, target)| target))
+            .is_some_and(|target| statically_checkable(target, name, modules, native, seen)))
+    }
+    let native = modules.iter().filter(|module| module.native_esm_context
+        && !module.commonjs_context && !module.uses_legacy_bundle_globals
+        && !module.has_nonliteral_module_load && !module.uses_import_meta)
+        .map(|module| module.key.clone()).collect::<BTreeSet<_>>();
+    if !native.contains(main_key) || native.len() == modules.len() { return None; }
+    // CJS-first require of ESM, Worker entry rewriting and nonliteral loads
+    // are separate gates. A mixed candidate cannot silently use those paths.
+    if modules.iter().any(|module| module.requires.iter().any(|(_, target)| native.contains(target))
+        || module.has_nonliteral_module_load || module.uses_legacy_bundle_globals && native.contains(&module.key)) {
+        return None;
+    }
+    let module_keys = modules.iter().map(|module| module.key.as_str()).collect::<BTreeSet<_>>();
+    let opaque = modules.iter().filter(|module| !native.contains(&module.key))
+        .map(|module| module.key.clone()).collect::<BTreeSet<_>>();
+    let asynchronous_opaque = modules.iter().filter(|module| opaque.contains(&module.key)
+        && module.async_module).map(|module| module.key.as_str()).collect::<BTreeSet<_>>();
+    // An async opaque dependency that can import back into any native source
+    // may await that source's still-pending evaluation. Keep that graph on
+    // the legacy bridge until a cycle-aware async boundary is available.
+    let mut reaches_native = native.clone();
+    loop {
+        let mut changed = false;
+        for module in modules {
+            if module.imports.iter().any(|(_, target)| reaches_native.contains(target)) {
+                changed |= reaches_native.insert(module.key.clone());
+            }
+        }
+        if !changed { break; }
+    }
+    if asynchronous_opaque.iter().any(|key| reaches_native.contains(*key)) { return None; }
+    // Dynamic imports from opaque factories use the registration-bound
+    // evaluator; synchronous require-to-native remains gated above.
+    let mut mixed = opaque.clone();
+    loop {
+        let mut changed = false;
+        for module in modules.iter().filter(|module| native.contains(&module.key)) {
+            if module.imports.iter().any(|(_, target)| mixed.contains(target)) {
+                changed |= mixed.insert(module.key.clone());
+            }
+        }
+        if !changed { break; }
+    }
+    let mut records = Vec::new();
+    let mut opaque_edges = Vec::new();
+    let mut origins = Vec::new();
+    let mut removed_link_checks = Vec::new();
+    for module in modules.iter().filter(|module| native.contains(&module.key)) {
+        if module.static_esm_specs.iter().any(|spec| !module.imports.iter().any(|(request, target)|
+            request == spec && module_keys.contains(target.as_str()))) { return None; }
+        let rewrite_specs = module.imports.iter().filter(|(_, target)| mixed.contains(target))
+            .map(|(spec, _)| spec.clone()).collect::<BTreeSet<_>>();
+        for (spec, name) in native_opaque_link_checks_named(&module.source, &rewrite_specs,
+            &module.source_name)? {
+            let target = module.imports.iter().find(|(request, _)| request == &spec)?.1.as_str();
+            if !statically_checkable(target, &name, modules, &native, &mut BTreeSet::new()) {
+                return None;
+            }
+            removed_link_checks.push((module.key.clone(), spec, name));
+        }
+        let helper_spec = format!("__thaw_private_origin_spec/{}", module.key);
+        let helper_key = format!("__thaw_private_origin_key/{}", module.key);
+        if module_keys.contains(helper_key.as_str()) || module.imports.iter().any(|(spec, _)| spec == &helper_spec) {
+            return None;
+        }
+        let source = rewrite_native_opaque_edges_named(&module.source, &rewrite_specs,
+            &helper_spec, &module.source_name)?;
+        let mut imports = module.imports.iter().cloned().collect::<HashMap<_, _>>();
+        for (index, (spec, target)) in module.imports.iter().filter(|(_, target)| opaque.contains(target)).enumerate() {
+            let shell = format!("__thaw_private_opaque_edge/{}/{}", module.key, index);
+            if module_keys.contains(shell.as_str()) { return None; }
+            imports.insert(spec.clone(), shell.clone());
+            opaque_edges.push(serde_json::json!({ "key": shell, "importer": module.key,
+                "specifier": spec, "target": target, "factory": target,
+                "asynchronous": asynchronous_opaque.contains(target.as_str()) }));
+        }
+        // The source rewrite always introduces this lexical capability. It
+        // also serves dynamic import selection when there are no static
+        // opaque imports, so every native record must map it.
+        imports.insert(helper_spec, helper_key.clone());
+        origins.push(serde_json::json!({ "key": helper_key, "owner": module.key }));
+        records.push(serde_json::json!({ "key": module.key, "source": source, "imports": imports }));
+    }
+    // Preserve laziness: every native entry validates only its own static
+    // dependency closure immediately before that entry is evaluated.
+    fn visit_static_closure(
+        key: &str, modules: &[BundledModule], native: &BTreeSet<String>,
+        seen: &mut BTreeSet<String>, ordered: &mut Vec<String>,
+    ) {
+        if !native.contains(key) || !seen.insert(key.to_owned()) { return; }
+        if let Some(module) = modules.iter().find(|module| module.key == key) {
+            for spec in &module.static_esm_specs {
+                if let Some(target) = module.imports.iter().find(|(request, _)| request == spec).map(|(_, target)| target) {
+                    visit_static_closure(target, modules, native, seen, ordered);
+                }
+            }
+        }
+        ordered.push(key.to_owned());
+    }
+    let mut static_link_checks = std::collections::BTreeMap::new();
+    for entry in modules.iter().filter(|module| native.contains(&module.key)) {
+        let mut closure = Vec::new();
+        visit_static_closure(&entry.key, modules, &native, &mut BTreeSet::new(), &mut closure);
+        let checks = closure.iter().flat_map(|owner| removed_link_checks.iter()
+            .filter(move |(source, _, _)| source == owner).cloned()).collect::<Vec<_>>();
+        static_link_checks.insert(entry.key.clone(), checks);
+    }
+    Some(MixedBundleRender {
+        native_keys: native,
+        mixed_keys: mixed,
+        static_link_checks,
+        registration: serde_json::json!({ "main": main_key, "modules": records,
+            "opaqueKeys": opaque, "opaqueEdges": opaque_edges, "origins": origins }),
+    })
+}
+
 /// Shared across every subpath bundle of one `registry add`: parsed module
 /// sources (`modules`) and their ESM->CommonJS rewrites (`rewritten`), keyed
 /// by file and package instance because Worker bootstrap text embeds the
@@ -617,8 +761,20 @@ fn bundle_commonjs_package_cached(
                         && modules.iter().any(|candidate| candidate.key == *target))
                 })
         });
+    // Classify async dependencies while the original ESM sources are still
+    // available. Only opaque factories are rewritten; registered native
+    // modules must retain the source that QuickJS links.
+    let mixed = if native_esm {
+        None
+    } else {
+        mark_async_modules(&mut modules)?;
+        prepare_mixed_native_render(&main_key, &modules)
+    };
     if !native_esm {
-        prepare_async_modules(&mut modules, source_cache)?;
+        let preserve_native = mixed.as_ref()
+            .map(|route| route.native_keys.clone())
+            .unwrap_or_default();
+        rewrite_async_modules(&mut modules, source_cache, &preserve_native);
     }
 
     let file_count = modules.len();
@@ -627,7 +783,7 @@ fn bundle_commonjs_package_cached(
     source_cache.package_versions.extend(package_versions);
     Ok((
         if native_esm { render_native_esm_bundle(&main_key, &modules) }
-        else { render_bundle(&main_key, &modules) },
+        else { render_bundle_mode(&main_key, &modules, mixed.as_ref()) },
         main_key,
         file_count,
         dependency_versions,

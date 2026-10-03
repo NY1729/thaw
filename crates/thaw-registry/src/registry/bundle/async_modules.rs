@@ -2,6 +2,12 @@ fn prepare_async_modules(
     modules: &mut [BundledModule],
     source_cache: &mut SourceCache,
 ) -> Result<(), String> {
+    mark_async_modules(modules)?;
+    rewrite_async_modules(modules, source_cache, &std::collections::BTreeSet::new());
+    Ok(())
+}
+
+fn mark_async_modules(modules: &mut [BundledModule]) -> Result<(), String> {
     use std::collections::BTreeSet;
 
     for module in modules.iter_mut() {
@@ -72,7 +78,14 @@ fn prepare_async_modules(
         visit(&module.key, modules, &mut Vec::new(), &mut visited)?;
     }
 
-    for module in modules.iter_mut() {
+    Ok(())
+}
+
+fn rewrite_async_modules(
+    modules: &mut [BundledModule], source_cache: &mut SourceCache,
+    preserve_native: &std::collections::BTreeSet<String>,
+) {
+    for module in modules.iter_mut().filter(|module| !preserve_native.contains(&module.key)) {
         // Reuse the rewrite of a file already rewritten in an earlier
         // subpath bundle (same file, same async-ness); only a module with
         // no real file behind it (a Node builtin polyfill) is rewritten
@@ -97,5 +110,4 @@ fn prepare_async_modules(
             module.source = source;
         }
     }
-    Ok(())
 }
