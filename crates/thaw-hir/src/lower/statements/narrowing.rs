@@ -132,18 +132,29 @@ impl<'a> FnLowerer<'a> {
 
         let mut out = Vec::new();
         let mut using_disposals: Vec<HirStmt> = Vec::new();
+        let mut using_flags = Vec::new();
         for stmt in stmts {
-            out.extend(self.lower_stmt_seq(stmt)?);
             if let Stmt::Decl(Decl::Using(using_decl)) = stmt {
+                // Register each successful acquisition before the next initializer.
                 for declarator in &using_decl.decls {
+                    let mut single = using_decl.clone();
+                    single.decls = vec![declarator.clone()];
+                    out.extend(self.lower_using_decl(&single)?);
                     if let Pat::Ident(binding) = &declarator.name {
+                        let flag = self.bind_local("__thaw_using_acquired", HirType::Bool);
+                        using_flags.push(HirStmt::Let(flag.clone(), HirType::Bool,
+                            HirExpr::Lit(HirLit::Bool(false))));
+                        out.push(HirStmt::Expr(HirExpr::Assign(flag.clone(),
+                            Box::new(HirExpr::Lit(HirLit::Bool(true))))));
                         let disposal = self.lower_using_disposal(
                             binding.id.sym.as_ref(),
                             using_decl.is_await,
                         )?;
-                        using_disposals.push(disposal);
+                        using_disposals.push(Self::guard_using_disposal(flag, disposal));
                     }
                 }
+            } else {
+                out.extend(self.lower_stmt_seq(stmt)?);
             }
             if let Stmt::Expr(expression) = stmt {
                 if let Some(targets) = self.assertion_union_narrowing(&expression.expr) {
@@ -203,13 +214,14 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
-        self.lower_using_scope(out, using_disposals)
+        self.lower_using_scope(out, using_disposals, using_flags)
     }
 
     fn lower_using_scope(
         &mut self,
         out: Vec<HirStmt>,
         mut using_disposals: Vec<HirStmt>,
+        mut using_flags: Vec<HirStmt>,
     ) -> Result<Vec<HirStmt>, String> {
         if using_disposals.is_empty() {
             return Ok(out);
@@ -232,14 +244,25 @@ impl<'a> FnLowerer<'a> {
         self.generator_finalizers
             .insert(catch_name.clone(), normal_disposal.clone());
         let body = inject_finally_before_exits(out, &normal_disposal, false);
-        let mut lowered = vec![HirStmt::Try(
+        // Every flag is initialized before any fallible acquisition in the Try.
+        using_flags.push(HirStmt::Try(
             body,
             catch_name.clone(),
             exceptional_disposal,
             Some(catch_name),
-        )];
-        lowered.extend(normal_disposal);
-        Ok(lowered)
+        ));
+        using_flags.extend(normal_disposal);
+        Ok(using_flags)
+    }
+
+    fn guard_using_disposal(flag: Symbol, disposal: HirStmt) -> HirStmt {
+        HirStmt::If(HirExpr::Var(flag.clone()), vec![
+            // Consume before calling user code: a throwing disposer must not
+            // be attempted again by the enclosing exceptional cleanup.
+            HirStmt::Expr(HirExpr::Assign(flag,
+                Box::new(HirExpr::Lit(HirLit::Bool(false))))),
+            disposal,
+        ], Vec::new())
     }
 
     fn hoist_using_return_values(
