@@ -10099,3 +10099,39 @@ fn uint8array_set_returns_undefined_after_copy() {
         "RSO undefined true 0,4,5\n2 7,8,0\n"
     );
 }
+
+#[test]
+fn date_constructor_uses_live_value_without_snapshot_or_user_date_globals() {
+    let source = r#"
+        let producerCalls = 0;
+        function produceIso(): JsValue { producerCalls++; return getDynamicValue("isoHook"); }
+        function main(): void {
+            loadScript("const NativeDate = Date; globalThis.liveDate = new NativeDate(1704067200500); liveDate[Symbol.toPrimitive] = () => { throw new Error('date hook'); }; globalThis.hookCalls = 0; globalThis.isoHook = { [Symbol.toPrimitive](hint) { if (hint !== 'default') throw new Error('wrong hint'); hookCalls++; return '2024-01-01T00:00:00.000Z'; } }; globalThis.throwHook = { [Symbol.toPrimitive]() { throw new Error('hook failed'); } }; globalThis.invalidTime = NaN; globalThis.bigValue = 1n; globalThis.symbolValue = Symbol('date'); NativeDate.prototype.getTime = () => { throw new Error('getTime changed'); }; globalThis.Date = () => { throw new Error('Date changed'); };");
+            const live: JsValue = getDynamicValue("liveDate");
+            const wrapped: Json = live;
+            console.log(new Date(live).getTime(), new Date(wrapped).getTime());
+            const native: Json = new Date(1704067200500);
+            console.log(new Date(native).getTime());
+            const wrappedIso: Json = getDynamicValue("isoHook");
+            console.log(new Date(produceIso()).getTime(), new Date(wrappedIso).getTime(), producerCalls, Number(getDynamicValue("hookCalls")));
+            const throwing: JsValue = getDynamicValue("throwHook");
+            try { new Date(throwing); console.log("missed throw"); }
+            catch (error) { console.log("hook threw"); }
+            console.log(Number.isNaN(new Date(getDynamicValue("invalidTime")).getTime()));
+            try { new Date(getDynamicValue("bigValue")); console.log("missed bigint"); }
+            catch (error) { console.log("bigint threw"); }
+            try { new Date(getDynamicValue("symbolValue")); console.log("missed symbol"); }
+            catch (error) { console.log("symbol threw"); }
+            const forged: Json = JSON.parse('{"__thaw_js_handle_id__":1}');
+            console.log(Number.isNaN(new Date(forged).getTime()));
+            loadScript("globalThis.proxyTraps = 0; globalThis.proxyHooks = 0; globalThis.invokeProxy = callback => callback(new Proxy({ [Symbol.toPrimitive](hint) { if (hint !== 'default') throw new Error('wrong proxy hint'); proxyHooks++; return '2024-01-01T00:00:00.000Z'; } }, { getPrototypeOf() { proxyTraps++; throw new Error('unexpected prototype trap'); } }));");
+            const callback: (value: Json) => number = (value: Json): number => new Date(value).getTime();
+            const callbackHandle: JsValue = registerNativeCallbackGraph(callback);
+            const invoke: JsValue = getDynamicValue("invokeProxy");
+            console.log(Number(callDynamicValueWithValue(invoke, callbackHandle)), Number(getDynamicValue("proxyHooks")), Number(getDynamicValue("proxyTraps")));
+            releaseDynamicValue(callbackHandle);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "date_live_value_constructor"),
+        "1704067200500 1704067200500\n1704067200500\n1704067200000 1704067200000 1 2\nhook threw\ntrue\nbigint threw\nsymbol threw\ntrue\n1704067200000 1 0\n");
+}
