@@ -514,31 +514,31 @@ fn framed_error_actual_throw_and_rejection_keep_empty_name_getter_order_and_orig
     "#), 1);
     let empty = thaw_js_call_result(c"throwEmptyName".as_ptr(), c"[]".as_ptr());
     assert!(empty.value.is_null());
-    let empty_error = unsafe { CString::from_raw(empty.error.cast_mut()) };
-    let wire = empty_error.as_bytes();
+    let wire = unsafe { CStr::from_ptr(empty.error) }.to_bytes();
     let frame = thaw_arena::error_wire::parse_tagged(wire).unwrap();
     assert_eq!(frame.chain, b"");
     assert_eq!(frame.display, b"`throwEmptyName` threw: a\x02b");
     assert_eq!(frame.suffix, b"");
+    unsafe { thaw_arena::destroy_string(empty.error.cast_mut()) };
 
     let rejected = thaw_js_call_result(c"rejectFramedError".as_ptr(), c"[]".as_ptr());
     assert!(rejected.value.is_null());
-    let rejected_error = unsafe { CString::from_raw(rejected.error.cast_mut()) };
-    let wire = rejected_error.as_bytes();
+    let wire = unsafe { CStr::from_ptr(rejected.error) }.to_bytes();
     let frame = thaw_arena::error_wire::parse_tagged(wire).unwrap();
     assert_eq!(frame.chain, b"Error");
     assert_eq!(frame.display, b"`rejectFramedError`'s promise rejected: raw\x03x");
     assert_eq!(frame.original, Some(&b"raw\x03x"[..]));
     assert_eq!(frame.suffix, b"\x05{\"status\":418}");
+    unsafe { thaw_arena::destroy_string(rejected.error.cast_mut()) };
 
     let ordered = thaw_js_call_result(c"throwGetterOrder".as_ptr(), c"[]".as_ptr());
     assert!(ordered.value.is_null());
-    let ordered_error = unsafe { CString::from_raw(ordered.error.cast_mut()) };
-    let wire = ordered_error.as_bytes();
+    let wire = unsafe { CStr::from_ptr(ordered.error) }.to_bytes();
     let frame = thaw_arena::error_wire::parse_tagged(wire).unwrap();
     assert_eq!(frame.chain, b"TypeError");
     assert_eq!(frame.display, b"`throwGetterOrder` threw: body\x04x");
     assert_eq!(frame.suffix, b"\x03CODE");
+    unsafe { thaw_arena::destroy_string(ordered.error.cast_mut()) };
     assert_eq!(call("readErrorGetterOrder", "[]"), "\"MCN\"");
 }
 
@@ -6689,4 +6689,46 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
         assert!(!descriptor.get::<_, bool>("configurable").unwrap());
         ctx.globals().set("__thaw_saved_callback_holder", Value::new_undefined(ctx)).unwrap();
     });
+}
+
+#[test]
+fn result_error_abi_keeps_embedded_nul_in_throw_rejection_and_getter() {
+    assert_eq!(load(r#"
+        function throwNulResult() {
+            const error = new TypeError('left\u0000right');
+            error.code = 'ERR_NUL';
+            error.status = 418;
+            throw error;
+        }
+        function rejectNulResult() {
+            return Promise.reject(new Error('reject\u0000body'));
+        }
+        globalThis.nulGetterResult = {
+            get value() { throw new TypeError('getter\u0000body'); }
+        };
+    "#), 1);
+    let thrown = thaw_js_call_result(c"throwNulResult".as_ptr(), c"[]".as_ptr());
+    assert!(thrown.value.is_null());
+    let bytes = unsafe { CStr::from_ptr(thrown.error) }.to_bytes();
+    let frame = thaw_arena::error_wire::parse_tagged(bytes).unwrap();
+    assert_eq!(frame.chain, b"TypeError");
+    assert!(frame.display.windows(b"left\0right".len()).any(|part| part == b"left\0right"));
+    assert_eq!(frame.original, None);
+    assert!(frame.suffix.windows(b"ERR_NUL".len()).any(|part| part == b"ERR_NUL"));
+    assert!(frame.suffix.windows(b"418".len()).any(|part| part == b"418"));
+    unsafe { thaw_arena::destroy_string(thrown.error.cast_mut()) };
+
+    let rejected = thaw_js_call_result(c"rejectNulResult".as_ptr(), c"[]".as_ptr());
+    assert!(rejected.value.is_null());
+    let bytes = unsafe { CStr::from_ptr(rejected.error) }.to_bytes();
+    assert!(bytes.windows(b"reject\0body".len()).any(|part| part == b"reject\0body"));
+    unsafe { thaw_arena::destroy_string(rejected.error.cast_mut()) };
+
+    let handle = thaw_js_get_global(c"nulGetterResult".as_ptr());
+    let getter = thaw_js_get_property_result(handle, c"value".as_ptr());
+    assert_eq!(getter.value, 0);
+    let bytes = unsafe { CStr::from_ptr(getter.error) }.to_bytes();
+    assert!(bytes.windows(b"getter\0body".len()).any(|part| part == b"getter\0body"));
+    unsafe { thaw_arena::destroy_string(getter.error.cast_mut()) };
+    assert_eq!(thaw_js_release_handle(handle), 1);
 }

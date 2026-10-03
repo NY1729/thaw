@@ -1477,14 +1477,18 @@ include!("quickjs/api.rs");
 mod tests;
 
 /// Common C ABI result for external operations that can either return a
-/// pointer-shaped value or throw. Both pointers are owned by the callee for
-/// the current request; exactly one is non-null.
+/// pointer-shaped value or throw. Exactly one pointer is non-null. Read an
+/// owned result string through `thaw_arena::NativeStr` to retain embedded
+/// NUL bytes, then release it with `thaw_arena::destroy_string` (or the ABI
+/// companion `thaw_cstring_destroy`).
 #[repr(C)]
 pub struct ThawResult {
     pub value: *const c_char,
     pub error: *const c_char,
 }
 
+/// Handle-valued companion to `ThawResult`; its non-null error pointer has
+/// the same `NativeStr` reader and `destroy_string` ownership contract.
 #[repr(C)]
 pub struct ThawHandleResult {
     pub value: u64,
