@@ -113,10 +113,12 @@ impl<'a> FnLowerer<'a> {
             if rest.is_some() {
                 arguments.push(HirExpr::Var("__thaw_callable_rest".into()));
             }
-            return Ok(vec![HirStmt::Return(Some(HirExpr::Call(
-                Box::new(HirExpr::Var(target)),
-                arguments,
-            )))]);
+            let call = HirExpr::Call(Box::new(HirExpr::Var(target)), arguments);
+            return Ok(if signature.ret == HirType::Void {
+                vec![HirStmt::Expr(call), HirStmt::Return(None)]
+            } else {
+                vec![HirStmt::Return(Some(call))]
+            });
         };
 
         let parameter = &parameters[next];
