@@ -312,7 +312,10 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 if value.error.is_null() {
                     Ok(serde_json::json!({ "kind": "handle", "value": value.value.to_string() }))
                 } else {
-                    Err(CStr::from_ptr(value.error).to_string_lossy().into_owned())
+                    let error = thaw_arena::NativeStr::from_ptr(value.error)
+                        .to_string_lossy().into_owned();
+                    thaw_arena::destroy_string(value.error);
+                    Err(error)
                 }
             }
             "symbol" => {
@@ -456,7 +459,10 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 if result.error.is_null() {
                     Ok(serde_json::json!({ "kind": "value", "value": true }))
                 } else {
-                    Err(CStr::from_ptr(result.error).to_string_lossy().into_owned())
+                    let error = thaw_arena::NativeStr::from_ptr(result.error)
+                        .to_string_lossy().into_owned();
+                    thaw_arena::destroy_string(result.error);
+                    Err(error)
                 }
             }
             _ => Err(format!("unknown native addon handle operation `{operation}`")),
@@ -1766,7 +1772,7 @@ fn text_result(result: Result<String, String>) -> ThawResult {
         },
         Err(error) => ThawResult {
             value: ptr::null_mut(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1849,7 +1855,7 @@ unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
 fn handle_error(error: impl Into<String>) -> ThawNapiHandleResult {
     ThawNapiHandleResult {
         value: 0,
-        error: CString::new(error.into()).unwrap_or_default().into_raw(),
+        error: thaw_arena::owned_string(error.into()),
     }
 }
 
@@ -2590,7 +2596,7 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
         },
         Err(error) => ThawResult {
             value: ptr::null_mut(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -2691,10 +2697,12 @@ pub unsafe extern "C" fn thaw_napi_call(name: *const c_char, args: *const c_char
     if result.error.is_null() {
         result.value
     } else {
-        let error = CStr::from_ptr(result.error).to_string_lossy();
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
         CString::new(format!(
             "{{\"__thaw_error__\":{}}}",
-            serde_json::to_string(error.as_ref()).unwrap()
+            serde_json::to_string(&error).unwrap()
         ))
         .unwrap()
         .into_raw()
