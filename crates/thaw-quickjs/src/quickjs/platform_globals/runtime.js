@@ -180,6 +180,15 @@
   const thawGraphObjectIs = Object.is;
   const thawGraphOwn = (object, key) => thawGraphApply(thawGraphOwnProperty, object, [key]);
   const thawGraphGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  // PropertyIsEnumerable uses the original descriptor and parser intrinsics.
+  // The user-visible Reflect and JSON objects can be replaced after bootstrap.
+  thawGraphDefineProperty(globalThis, '__thaw_host_property_is_enumerable', {
+    value: (object, keyJson) => {
+      const descriptor = thawGraphReflectGetOwnPropertyDescriptor(object, thawGraphParse(keyJson));
+      return descriptor !== undefined && descriptor.enumerable;
+    },
+    writable: false, configurable: false,
+  });
   const thawGraphDateTime = thawGraphDateConstructor.prototype.getTime;
   const thawGraphArrayBufferLength = thawGraphGetOwnPropertyDescriptor(thawGraphArrayBufferConstructor.prototype, 'byteLength').get;
   const thawGraphIsView = thawGraphArrayBufferConstructor.isView;

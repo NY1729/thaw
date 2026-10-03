@@ -2521,6 +2521,16 @@ pub extern "C" fn thaw_js_property_predicate_json_key_result(
     let key_json = to_str(key_json);
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
+        if operation == 3 {
+            let predicate: Function = ctx.globals().get("__thaw_host_property_is_enumerable")
+                .map_err(|error| error.to_string())?;
+            let result: bool = predicate.call((object, key_json.as_str()))
+                .map_err(|error| match error {
+                    rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+                    error => error.to_string(),
+                })?;
+            return Ok(u64::from(result));
+        }
         let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
         let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
         let key: Value = parse.call((key_json.as_str(),)).map_err(|error| error.to_string())?;
