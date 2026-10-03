@@ -1313,6 +1313,15 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        let absent = self.builder.build_is_null(closure, "native_callback_is_undefined")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let present_block = self.context.append_basic_block(function, "native_callback_present_pointer");
+        let absent_block = self.context.append_basic_block(function, "native_callback_absent_pointer");
+        let done = self.context.append_basic_block(function, "native_callback_pointer_done");
+        self.builder.build_conditional_branch(absent, absent_block, present_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(present_block);
         let jsvalue_param_mask: u64 = params
             .iter()
             .enumerate()
@@ -1374,7 +1383,25 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        Ok(value)
+        let present_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(absent_block);
+        let undefined_name = self.builder.build_global_string_ptr("undefined", "native_callback_undefined_name")
+            .map_err(|error| error.to_string())?;
+        let undefined = self.builder.build_call(
+            self.module.get_function("thaw_js_get_global").unwrap(),
+            &[undefined_name.as_pointer_value().into()], "native_callback_undefined_handle",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("thaw_js_get_global returned no undefined handle")?;
+        let absent_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(done);
+        let result = self.builder.build_phi(value.get_type(), "native_callback_handle")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[(&value, present_end), (&undefined, absent_end)]);
+        Ok(result.as_basic_value())
     }
 
     fn compile_napi_undefined_json(&mut self) -> Result<BasicValueEnum<'ctx>, String> {
