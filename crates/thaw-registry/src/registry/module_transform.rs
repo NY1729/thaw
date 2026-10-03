@@ -209,6 +209,28 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         fn visit_function(&mut self, _: &Function) {}
         fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
     }
+    fn creates_require(call: &CallExpr, calls: &Calls) -> bool {
+        let Callee::Expr(callee) = &call.callee else { return false; };
+        match callee.as_ref() {
+            Expr::Ident(identifier) => calls.create_require_functions.iter().any(|name| name == identifier.sym.as_ref()),
+            Expr::Member(member) if property_name(&member.prop).as_deref() == Some("createRequire") => {
+                if matches!(member.obj.as_ref(), Expr::Ident(identifier)
+                    if calls.module_namespaces.iter().any(|name| name == identifier.sym.as_ref())) {
+                    return true;
+                }
+                let Expr::Call(module_call) = member.obj.as_ref() else { return false; };
+                let Callee::Expr(module_callee) = &module_call.callee else { return false; };
+                matches!(module_callee.as_ref(), Expr::Ident(identifier)
+                    if calls.require_functions.iter().any(|name| name == identifier.sym.as_ref()))
+                    && module_call.args.len() == 1
+                    && module_call.args[0].spread.is_none()
+                    && static_module_specifiers(&module_call.args[0].expr)
+                        .is_some_and(|specs| !specs.is_empty() && specs.iter().all(|spec| matches!(spec.as_str(), "module" | "node:module")))
+            }
+            _ => false,
+        }
+    }
+
     impl Visit for Calls {
         fn visit_expr(&mut self, expression: &Expr) {
             if matches!(expression, Expr::MetaProp(meta) if meta.kind == MetaPropKind::ImportMeta) {
@@ -261,6 +283,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
                 &call.callee,
                 Callee::Expr(callee)
                     if matches!(callee.as_ref(), Expr::Ident(ident) if self.require_functions.iter().any(|name| name == ident.sym.as_ref()))
+                        || matches!(callee.as_ref(), Expr::Call(created) if creates_require(created, self))
             );
             let is_require_resolve = matches!(
                 &call.callee,
@@ -314,22 +337,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
                 declaration.visit_children_with(self);
                 return;
             };
-            let creates_require = match &call.callee {
-                Callee::Expr(callee) => match callee.as_ref() {
-                    Expr::Ident(identifier) => self
-                        .create_require_functions
-                        .iter()
-                        .any(|name| name == identifier.sym.as_ref()),
-                    Expr::Member(member) => {
-                        matches!(member.obj.as_ref(), Expr::Ident(identifier)
-                            if self.module_namespaces.iter().any(|name| name == identifier.sym.as_ref()))
-                            && property_name(&member.prop).as_deref() == Some("createRequire")
-                    }
-                    _ => false,
-                },
-                _ => false,
-            };
-            if creates_require {
+            if creates_require(call, self) {
                 let name = binding.id.sym.to_string();
                 if !self.require_functions.contains(&name) {
                     self.require_functions.push(name);
@@ -339,12 +347,22 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         }
 
         fn visit_assign_expr(&mut self, assignment: &AssignExpr) {
-            let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assignment.left else {
-                assignment.visit_children_with(self);
-                return;
-            };
-            if let Some(name) = commonjs_export_name(member) {
-                self.commonjs_exports.push(name);
+            if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assignment.left {
+                if let Some(name) = commonjs_export_name(member) {
+                    self.commonjs_exports.push(name);
+                }
+            }
+            if assignment.op == thaw_parser::ast::AssignOp::Assign {
+                if let (AssignTarget::Simple(SimpleAssignTarget::Ident(binding)), Expr::Call(call)) =
+                    (&assignment.left, assignment.right.as_ref())
+                {
+                    if creates_require(call, self) {
+                        let name = binding.id.sym.to_string();
+                        if !self.require_functions.contains(&name) {
+                            self.require_functions.push(name);
+                        }
+                    }
+                }
             }
             assignment.visit_children_with(self);
         }
@@ -1726,4 +1744,19 @@ fn esm_origin_parameter_named(source: &str, source_name: &thaw_parser::common::F
         .map(|_| rewritten_js_source_name(source_name, "dynamic import rewrite"));
     let source = dynamic_source.as_deref().unwrap_or(source);
     Some(format!("__thaw_esm_origin_{}", esm_synthetic_offset_named(source, dynamic_name.as_ref().unwrap_or(source_name))?))
+}
+
+#[cfg(test)]
+#[test]
+fn inline_and_assigned_create_require_collect_query_instances() {
+    let source = "const first = require('node:module').createRequire(__filename); let second; second = require('module').createRequire(__filename); first('./leaf.mjs?one'); second('./leaf.mjs?two'); require('node:module').createRequire(__filename)('./leaf.mjs?three'); require('node:module').createRequire(__filename)('./leaf.mjs?' + suffix);";
+    let analysis = analyze_module(source);
+    assert!(analysis.require_condition_specs.contains(&"./leaf.mjs?one".to_string()));
+    assert!(analysis.require_condition_specs.contains(&"./leaf.mjs?two".to_string()));
+    assert!(analysis.require_condition_specs.contains(&"./leaf.mjs?three".to_string()));
+    assert!(analysis.has_nonliteral_module_load);
+    assert!(analysis.specs.contains(&"node:module".to_string()));
+    assert!(analysis.specs.contains(&"module".to_string()));
+    let unrelated = analyze_module("const fake = require('node:fs').createRequire(__filename); fake('./not-a-module.js');");
+    assert!(!unrelated.specs.contains(&"./not-a-module.js".to_string()));
 }
