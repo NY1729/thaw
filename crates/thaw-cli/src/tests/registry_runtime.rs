@@ -739,15 +739,17 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: () => string },
+        request: { method: string; url: string; statusCode: number; body: () => string; getHeader: (name: string) => string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         if (request.url === "/pieces") {
+            const retained = request.getHeader("HOST");
+            const missing = request.getHeader("missing");
             response.write("a");
             await delay(5);
             response.write("b");
             await delay(5);
-            response.end("c");
+            response.end("c|" + retained + "|" + missing);
             return;
         }
         await delay(5);
@@ -807,7 +809,7 @@ function main(): void {
                     .write_all(b"GET /pieces HTTP/1.1\r\nHost: localhost\r\n\r\n")
                     .unwrap();
                 let body = read_one_response_body_any(&mut stream);
-                if body != "abc" {
+                if body != "abc|localhost|" {
                     failures
                         .lock()
                         .unwrap()
