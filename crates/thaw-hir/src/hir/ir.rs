@@ -78,6 +78,10 @@ pub enum HirExpr {
     /// A typed `.then`/`.catch` continuation. `on_rejected` distinguishes
     /// catch from then while retaining the input and output native layouts.
     PromiseThen(Box<HirExpr>, Box<HirExpr>, HirType, HirType, bool, bool),
+    /// Both callbacks attach to the same source and settle one output.
+    /// The fulfillment callback may be omitted, in which case fulfillment
+    /// is forwarded without converting its value or exception provenance.
+    PromiseThenBoth(Box<HirExpr>, Option<Box<HirExpr>>, Box<HirExpr>, HirType, HirType, bool, bool),
     /// A `.finally` continuation. The callback return type records whether
     /// codegen must wait for a returned Promise before forwarding settlement.
     PromiseFinally(Box<HirExpr>, Box<HirExpr>, HirType, HirType),

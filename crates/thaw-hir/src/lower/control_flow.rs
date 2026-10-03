@@ -167,6 +167,13 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_referenced_bindings(source, names);
             collect_referenced_bindings(callback, names);
         }
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+            collect_referenced_bindings(source, names);
+            if let Some(fulfilled) = fulfilled {
+                collect_referenced_bindings(fulfilled, names);
+            }
+            collect_referenced_bindings(rejected, names);
+        }
         HirExpr::PromiseFinally(source, callback, _, _) => {
             collect_referenced_bindings(source, names);
             collect_referenced_bindings(callback, names);
@@ -295,6 +302,11 @@ fn contains_await(expr: &HirExpr) -> bool {
         HirExpr::PromiseThen(source, callback, _, _, _, _)
         | HirExpr::PromiseFinally(source, callback, _, _) => {
             contains_await(source) || contains_await(callback)
+        }
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+            contains_await(source)
+                || fulfilled.as_ref().is_some_and(|callback| contains_await(callback))
+                || contains_await(rejected)
         }
         HirExpr::IndexAssign(array, index, value) => {
             contains_await(array) || contains_await(index) || contains_await(value)

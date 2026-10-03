@@ -45,6 +45,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::PromiseNew(_, _, _, _)
                 | HirExpr::PromiseNewMixed(_, _, _)
                 | HirExpr::PromiseThen(_, _, _, _, _, _)
+                | HirExpr::PromiseThenBoth(_, _, _, _, _, _, _)
                 | HirExpr::PromiseFinally(_, _, _, _)
                 | HirExpr::PromiseAll(_, _)
                 | HirExpr::PromiseAllArray(_, _)

@@ -251,8 +251,9 @@ impl<'a> FnLowerer<'a> {
                             );
                         };
                         self.validate_promise_callback_value(callback, &[], None)?;
+                        let callback = self.normalize_promise_callback(callback.clone(), &[])?;
                         bindings.insert(0, (source_name.clone(), source_type, source));
-                        (HirExpr::Var(source_name), callback.clone(), bindings)
+                        (HirExpr::Var(source_name), callback, bindings)
                     } else {
                         (
                             source,
@@ -276,8 +277,9 @@ impl<'a> FnLowerer<'a> {
                     && call.args.len() == 2
                     && call.args.iter().all(|argument| argument.spread.is_none())
                 {
-                    // `p.then(onFulfilled, onRejected)` is exactly
-                    // `p.then(onFulfilled).catch(onRejected)` in behavior.
+                    // Both handlers observe the original settlement. A
+                    // fulfillment callback's own failure must not enter the
+                    // rejection callback supplied as the second argument.
                     let source = self.lower_expr(&member.obj)?;
                     let HirType::Promise(input) = self.infer_expr_type(&source)? else {
                         return Err("`.then` requires a Promise receiver".into());
@@ -330,23 +332,14 @@ impl<'a> FnLowerer<'a> {
                             "`.then` rejection callback resolves to {rejected_output:?}, expected {output:?}"
                         ));
                     }
-                    let fulfilled = match fulfilled {
-                        Some((callback, output, flatten)) => HirExpr::PromiseThen(
-                            Box::new(source),
-                            Box::new(callback),
-                            input,
-                            output,
-                            false,
-                            flatten,
-                        ),
-                        None => source,
-                    };
-                    return Ok(HirExpr::PromiseThen(
-                        Box::new(fulfilled),
+                    let flatten_fulfilled = fulfilled.as_ref().is_some_and(|(_, _, flatten)| *flatten);
+                    return Ok(HirExpr::PromiseThenBoth(
+                        Box::new(source),
+                        fulfilled.map(|(callback, _, _)| Box::new(callback)),
                         Box::new(on_rejected),
-                        output.clone(),
+                        input,
                         output,
-                        true,
+                        flatten_fulfilled,
                         flatten_rejected,
                     ));
                 }
@@ -384,8 +377,9 @@ impl<'a> FnLowerer<'a> {
                             ));
                         };
                         self.validate_promise_callback_value(callback, &callback_params, None)?;
+                        let callback = self.normalize_promise_callback(callback.clone(), &callback_params)?;
                         bindings.insert(0, (source_name.clone(), source_type, source));
-                        (HirExpr::Var(source_name), callback.clone(), bindings)
+                        (HirExpr::Var(source_name), callback, bindings)
                     } else {
                         (
                             source,

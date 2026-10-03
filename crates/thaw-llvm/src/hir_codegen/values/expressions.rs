@@ -481,6 +481,12 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::PromiseThen(source, callback, input, output, on_rejected, flatten) => {
                 self.compile_promise_then(source, callback, input, output, *on_rejected, *flatten)
             }
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, input, output, flatten_fulfilled, flatten_rejected) => {
+                self.compile_promise_then_both(
+                    source, fulfilled.as_deref(), rejected, input, output,
+                    *flatten_fulfilled, *flatten_rejected,
+                )
+            }
             HirExpr::PromiseFinally(source, callback, input, callback_return) => {
                 self.compile_promise_finally(source, callback, input, callback_return)
             }
