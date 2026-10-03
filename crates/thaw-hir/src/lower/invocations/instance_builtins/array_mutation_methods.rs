@@ -1433,7 +1433,16 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.join()` expects zero or one argument".into());
                     }
                     let separator = if let Some(argument) = arguments.first() {
-                        self.coerce_primitive_to_string(argument.clone())?
+                        let is_undefined = self.lower_strict_equality(
+                            argument.clone(),
+                            HirExpr::Lit(HirLit::Undefined),
+                        )?;
+                        HirExpr::Conditional(
+                            Box::new(is_undefined),
+                            Box::new(HirExpr::Lit(HirLit::Str(",".to_string()))),
+                            Box::new(self.coerce_primitive_to_string(argument.clone())?),
+                            HirType::Str,
+                        )
                     } else {
                         HirExpr::Lit(HirLit::Str(",".to_string()))
                     };
