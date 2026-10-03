@@ -227,6 +227,62 @@ fn lowers_numeric_and_string_enum_members_declared_after_functions() {
 }
 
 #[test]
+fn enum_bitwise_initializers_use_javascript_wrapped_int32_values() {
+    let program = lower(
+        r#"enum Wrap {
+               Zero = 4294967296 | 0,
+               Negative = -4294967297 | 0,
+               Xor = 4294967296 ^ -1,
+               And = 4294967297.9 & 3.9,
+               Left = 1 << 4294967297,
+               NegativeCount = 1 << -31,
+               Signed = 4294967295 >> 31,
+               Unsigned = -1 >>> 0,
+               Not = ~4294967296,
+               NonFinite = (1 / 0) ^ (0 / 0)
+           }
+           enum Auto { Zero = 4294967296 | 0, Next }
+           function zero(): number { return Wrap.Zero; }
+           function negative(): number { return Wrap.Negative; }
+           function xor(): number { return Wrap.Xor; }
+           function and(): number { return Wrap.And; }
+           function left(): number { return Wrap.Left; }
+           function negativeCount(): number { return Wrap.NegativeCount; }
+           function signed(): number { return Wrap.Signed; }
+           function unsigned(): number { return Wrap.Unsigned; }
+           function not(): number { return Wrap.Not; }
+           function nonFinite(): number { return Wrap.NonFinite; }
+           function next(): number { return Auto.Next; }
+           function reverse(index: number): string | undefined { return Auto[index]; }"#,
+    );
+    for (name, expected) in [
+        ("zero", 0.0),
+        ("negative", -1.0),
+        ("xor", -1.0),
+        ("and", 1.0),
+        ("left", 2.0),
+        ("negativeCount", 2.0),
+        ("signed", -1.0),
+        ("unsigned", 4_294_967_295.0),
+        ("not", -1.0),
+        ("nonFinite", 0.0),
+        ("next", 1.0),
+    ] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        assert!(matches!(
+            &function.body[0],
+            HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(value)))) if *value == expected
+        ), "{name}: {:?}", function.body);
+    }
+    let reverse = program.functions.iter().find(|function| function.name == "reverse").unwrap();
+    assert!(matches!(
+        &reverse.body[0],
+        HirStmt::Return(Some(HirExpr::EnumReverseLookup(_, entries)))
+            if entries == &vec![(0.0, "Zero".into()), (1.0, "Next".into())]
+    ));
+}
+
+#[test]
 fn rejects_invalid_enum_native_layouts_and_members() {
     for (source, expected) in [
         (
