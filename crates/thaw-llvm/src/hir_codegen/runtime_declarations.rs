@@ -1713,6 +1713,20 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_object_register_field_offsets",
+            self.context.bool_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_field_offset",
+            self.context.i64_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_object_register_projector",
             self.context.bool_type().fn_type(
                 &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false,

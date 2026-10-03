@@ -9,10 +9,15 @@ thread_local! {
     // enumerable, and configurable for a visible fixed data field.
     static OBJECT_PROPERTY_FLAGS: RefCell<HashMap<usize, HashMap<String, u8>>> =
         RefCell::new(HashMap::new());
-    // The full typed view is retained when a pointer is narrowed to a prefix
-    // layout. The closure is an arena child of its owner and runs only on the
+    // The full typed view is retained when a pointer is structurally narrowed.
+    // Layout checks include fields by exact name/type, regardless of order. The closure is an arena child of its owner and runs only on the
     // first reference projection.
     static OBJECT_PROJECTORS: RefCell<HashMap<usize, (String, usize)>> =
+        RefCell::new(HashMap::new());
+    // A structural alias can enumerate fields in a different order from the
+    // physical allocation. Record its original byte offsets at the first
+    // type-erasure boundary, without copying or changing the object ABI.
+    static OBJECT_FIELD_OFFSETS: RefCell<HashMap<usize, (String, HashMap<String, u64>)>> =
         RefCell::new(HashMap::new());
     // The source HIR type carries class ancestry in the marker field name;
     // the compiled object stores only that field's Boolean value. Keep the
@@ -445,6 +450,103 @@ pub unsafe extern "C" fn thaw_object_accessor(
     })
 }
 
+/// Decodes compiler-owned `offset:hex(field-name);` entries. Hex field names
+/// preserve NUL and every UTF-8 source name across the native string ABI.
+fn parse_object_offset_layout(layout: &str) -> Option<HashMap<String, u64>> {
+    let mut fields = HashMap::new();
+    if layout.is_empty() { return Some(fields); }
+    for entry in layout.split_terminator(';') {
+        let (offset, hex_name) = entry.split_once(':')?;
+        let offset = offset.parse::<u64>().ok()?;
+        if hex_name.len() % 2 != 0 || !hex_name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        if fields.insert(hex_name.to_owned(), offset).is_some() { return None; }
+    }
+    Some(fields)
+}
+
+#[no_mangle]
+/// Registers the physical field offsets of an arena-owned object before a
+/// nonprefix structural alias erases its full type. A later narrower view may
+/// repeat a subset; the first full owner layout remains authoritative.
+///
+/// # Safety
+/// `layout` points to a live native string of compiler-generated entries.
+pub unsafe extern "C" fn thaw_object_register_field_offsets(
+    owner: *mut u8, layout: *const c_char, descriptor: *const c_char,
+) -> bool {
+    if owner.is_null() || layout.is_null() || descriptor.is_null()
+        || !thaw_arena::contains_allocation(owner as usize) { return false; }
+    let Ok(layout) = thaw_arena::NativeStr::from_ptr(layout).to_str() else { return false; };
+    let Ok(descriptor) = thaw_arena::NativeStr::from_ptr(descriptor).to_str() else { return false; };
+    let Some(fields) = parse_object_offset_layout(layout) else { return false; };
+    let Some(segments) = object_layout_segments(descriptor) else { return false; };
+    if segments.len() != fields.len() { return false; }
+    OBJECT_FIELD_OFFSETS.with(|all| {
+        let mut all = all.borrow_mut();
+        if let Some((physical, offsets)) = all.get(&(owner as usize)) {
+            // A second structural view supplies apparent offsets. Validate
+            // names and types against the first physical descriptor, then
+            // keep its offsets intact. An unknown field cannot be inferred.
+            return object_layout_contains(physical, descriptor)
+                && fields.keys().all(|name| offsets.contains_key(name));
+        }
+        all.insert(owner as usize, (descriptor.to_owned(), fields));
+        true
+    })
+}
+
+#[no_mangle]
+/// Resolves an aliased field through its physical owner layout. With no
+/// registered alias, the caller's static offset remains correct. A registered
+/// owner missing the field returns a sentinel that codegen must reject.
+///
+/// # Safety
+/// `field` points to a live hex-encoded native string.
+pub unsafe extern "C" fn thaw_object_field_offset(
+    owner: *const u8, field: *const c_char, static_offset: u64,
+) -> u64 {
+    if owner.is_null() || field.is_null() { return u64::MAX; }
+    let Ok(field) = thaw_arena::NativeStr::from_ptr(field).to_str() else { return u64::MAX; };
+    OBJECT_FIELD_OFFSETS.with(|all| all.borrow().get(&(owner as usize))
+        .map(|(_, fields)| fields.get(field).copied().unwrap_or(u64::MAX))
+        .unwrap_or(static_offset))
+}
+
+/// Reads field-name/type pairs from the compiler's length-prefixed hex
+/// layout token. A structural view may list the same fields in any order.
+fn object_layout_segments(layout: &str) -> Option<Vec<&str>> {
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < layout.len() {
+        let start = cursor;
+        for _ in 0..2 {
+            let colon = layout.get(cursor..)?.find(':')?.checked_add(cursor)?;
+            let bytes = layout.get(cursor..colon)?.parse::<usize>().ok()?;
+            let end = colon.checked_add(1)?.checked_add(bytes.checked_mul(2)?)?;
+            let hex = layout.get(colon + 1..end)?;
+            if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) { return None; }
+            cursor = end;
+        }
+        segments.push(layout.get(start..cursor)?);
+    }
+    Some(segments)
+}
+
+fn object_layout_contains(actual: &str, expected: &str) -> bool {
+    if actual == expected { return true; }
+    let (Some(actual), Some(expected)) =
+        (object_layout_segments(actual), object_layout_segments(expected)) else { return false; };
+    let mut used = vec![false; actual.len()];
+    expected.iter().all(|field| actual.iter().enumerate().any(|(index, actual)| {
+        if !used[index] && actual == field {
+            used[index] = true;
+            true
+        } else { false }
+    }))
+}
+
 #[no_mangle]
 /// # Safety
 /// `layout` is a live native string; `owner` and `closure` are arena objects.
@@ -458,8 +560,8 @@ pub unsafe extern "C" fn thaw_object_register_projector(
         let mut projectors = projectors.borrow_mut();
         let previous = projectors.get(&(owner as usize));
         if let Some((existing, _)) = previous {
-            if existing.starts_with(layout) { return true; }
-            if !layout.starts_with(existing) { return false; }
+            if object_layout_contains(existing, layout) { return true; }
+            if !object_layout_contains(layout, existing) { return false; }
         }
         let old = projectors.insert(owner as usize, (layout.to_owned(), closure as usize))
             .map(|(_, pointer)| pointer).unwrap_or_default();
@@ -479,7 +581,7 @@ pub unsafe extern "C" fn thaw_object_projector(
         return std::ptr::null_mut();
     };
     OBJECT_PROJECTORS.with(|projectors| projectors.borrow().get(&(owner as usize))
-        .filter(|(actual, _)| actual.starts_with(layout))
+        .filter(|(actual, _)| object_layout_contains(actual, layout))
         .map(|(_, closure)| *closure as *mut u8)
         .unwrap_or(std::ptr::null_mut()))
 }
@@ -489,6 +591,7 @@ fn clear_object_states() {
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().clear());
     OBJECT_PROPERTY_FLAGS.with(|flags| flags.borrow_mut().clear());
     OBJECT_PROJECTORS.with(|projectors| projectors.borrow_mut().clear());
+    OBJECT_FIELD_OFFSETS.with(|offsets| offsets.borrow_mut().clear());
     OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().clear());
 }
 
@@ -498,6 +601,7 @@ fn prune_object_states() {
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_PROPERTY_FLAGS.with(|flags| flags.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_PROJECTORS.with(|projectors| projectors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
+    OBJECT_FIELD_OFFSETS.with(|offsets| offsets.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
 }
 

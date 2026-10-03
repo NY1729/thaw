@@ -1101,16 +1101,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let base = value.into_pointer_value();
                 let i64_type = self.context.i64_type();
                 for (index, (name, field_ty)) in fields.iter().enumerate() {
-                    let pointer = unsafe {
-                        self.builder
-                            .build_in_bounds_gep(
-                                self.context.i8_type(),
-                                base,
-                                &[i64_type.const_int(object_field_offset(fields, index)?, false)],
-                                "ffi_object_field_pointer",
-                            )
-                            .map_err(|error| error.to_string())?
-                    };
+                    let pointer = self.compile_field_ptr_from_pointer(base, fields, index)?;
                     let field = self
                         .builder
                         .build_load(
@@ -1260,19 +1251,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(fields) => {
                 let base = value.into_pointer_value();
                 for (index, (_, field_type)) in fields.iter().enumerate() {
-                    let field_pointer = unsafe {
-                        self.builder
-                            .build_in_bounds_gep(
-                                self.context.i8_type(),
-                                base,
-                                &[self
-                                    .context
-                                    .i64_type()
-                                    .const_int(object_field_offset(fields, index)?, false)],
-                                "ffi_aggregate_vararg_field",
-                            )
-                            .map_err(|error| error.to_string())?
-                    };
+                    let field_pointer = self.compile_field_ptr_from_pointer(base, fields, index)?;
                     let field = self
                         .builder
                         .build_load(

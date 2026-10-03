@@ -441,15 +441,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             other => return Err(format!("native object getter has type {other:?}")),
         };
-        let offset = self
-            .context
-            .i64_type()
-            .const_int(object_field_offset(fields, getter_index)?, false);
-        let pointer = unsafe {
-            self.builder
-                .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "getter_field")
-                .map_err(|error| error.to_string())?
-        };
+        let pointer = self.compile_field_ptr_from_pointer(object, fields, getter_index)?;
         let closure = self
             .builder
             .build_load(self.context.ptr_type(AddressSpace::default()), pointer, "getter_closure")

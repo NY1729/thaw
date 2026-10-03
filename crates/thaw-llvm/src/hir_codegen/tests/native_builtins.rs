@@ -10620,6 +10620,96 @@ fn native_object_narrow_view_reuses_full_layout_and_later_wide_view() {
 }
 
 #[test]
+fn native_object_nonprefix_alias_remains_native_only() {
+    let source = r#"
+        interface Narrow { later: number; value: number; }
+        function main(): void {
+            const owner = { value: 1, later: 9, tail: 3 };
+            const narrow: Narrow = owner;
+            narrow.value = 7;
+            console.log(owner.value, narrow.later, owner.tail);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_object_nonprefix_native_only"), "7 9 3\n");
+}
+
+#[test]
+fn native_object_nonprefix_alias_uses_physical_fields_and_full_wrapper() {
+    let source = r#"
+        interface Narrow { later: number; value: number; }
+        function update(view: Narrow): number {
+            view.value += 1;
+            return view.later;
+        }
+        function main(): void {
+            const owner = { value: 1, later: 9, tail: 'full' };
+            const narrow: Narrow = owner;
+            narrow.later = 12;
+            console.log(owner.value, owner.later, narrow.value);
+            console.log(update(owner), narrow.value);
+            const first: any = narrow;
+            const second: any = owner;
+            console.log(first === second, first.tail, second.value);
+            first.value = 8;
+            console.log(owner.value, narrow.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_object_nonprefix_alias"),
+        "1 12 1\n12 2\ntrue full 2\n8 8\n",
+    );
+}
+
+#[test]
+fn nested_native_aliases_keep_the_first_physical_field_layout() {
+    let source = r#"
+        interface Prefix { a: number; b: number; }
+        interface Reverse { b: number; a: number; }
+        interface Leaf { a: number; }
+        function main(): void {
+            const owner = { a: 1, b: 2, c: 3 };
+            const prefix: Prefix = owner;
+            const reverse: Reverse = prefix;
+            const leaf: Leaf = reverse;
+            reverse.b = 9;
+            leaf.a = 7;
+            console.log(owner.a, owner.b, owner.c, prefix.a, reverse.a, leaf.a);
+            const narrow: any = leaf;
+            const full: any = owner;
+            console.log(narrow === full, full.c, narrow.b);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_nested_nonprefix_alias"),
+        "7 9 3 7 7 7\ntrue 3 9\n",
+    );
+}
+
+#[test]
+fn native_accessor_nonprefix_alias_uses_original_setter() {
+    let source = r#"
+        interface Narrow { later: number; value: number; }
+        function main(): void {
+            let backing = 1;
+            const owner = {
+                get value(): number { return backing; },
+                set value(next: number) { backing = next; },
+                later: 9,
+            };
+            const narrow: Narrow = owner;
+            narrow.value = 5;
+            const first: any = narrow;
+            const second: any = owner;
+            console.log(first === second, first.later, narrow.value, backing);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_accessor_nonprefix_alias"),
+        "true 9 5 5\n",
+    );
+}
+
+#[test]
 fn projected_native_accessors_write_original_storage() {
     let source = r#"
         function main(): void {

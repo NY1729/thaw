@@ -39,6 +39,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
             "__thaw_register_native_object_projector" =>
                 self.compile_register_native_object_projector(args),
+            "__thaw_register_native_object_layout" =>
+                self.compile_register_native_object_layout(args),
             "__thaw_require_native_owner" => self.compile_require_native_owner(args),
             "__thaw_release_native_projection_callbacks" =>
                 self.compile_release_native_projection_callbacks(args),
@@ -360,6 +362,50 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_throw_builtin_error("TypeError", "Live native object requires arena-owned storage")?;
         self.builder.position_at_end(continuation);
         Ok(self.context.i8_type().const_zero().into())
+    }
+
+    fn compile_register_native_object_layout(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [owner, HirExpr::Lit(HirLit::Bool(required))] = args else {
+            return Err("native layout registration expects owner and required flag".into());
+        };
+        let Some(HirType::Object(fields)) = self.expr_hir_type(owner) else {
+            return Err("native layout registration requires a typed object".into());
+        };
+        let mut layout = String::new();
+        for (index, (name, _)) in fields.iter().enumerate() {
+            layout.push_str(&format!("{}:", object_field_offset(&fields, index)?));
+            for byte in name.as_bytes() {
+                layout.push_str(&format!("{byte:02x}"));
+            }
+            layout.push(';');
+        }
+        let descriptor = thaw_hir::native_object_layout_token(&fields);
+        let owner = self.compile_expr(owner)?.into_pointer_value();
+        let layout = self.builder.build_global_string_ptr(&layout, "native_field_offsets")
+            .map_err(|error| error.to_string())?;
+        let descriptor = self.builder.build_global_string_ptr(&descriptor, "native_field_descriptor")
+            .map_err(|error| error.to_string())?;
+        let accepted = self.builder.build_call(
+            self.module.get_function("thaw_object_register_field_offsets").unwrap(),
+            &[owner.into(), layout.as_pointer_value().into(), descriptor.as_pointer_value().into()],
+            "register_native_field_offsets",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native layout registration returned no value")?.into_int_value();
+        if *required {
+            let rejected = self.builder.build_not(accepted, "native_layout_rejected")
+                .map_err(|error| error.to_string())?;
+            let function = self.current_function();
+            let invalid = self.context.append_basic_block(function, "native_layout_invalid");
+            let ready = self.context.append_basic_block(function, "native_layout_ready");
+            self.builder.build_conditional_branch(rejected, invalid, ready)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(invalid);
+            self.compile_throw_builtin_error("TypeError", "Nonprefix native object requires arena-owned storage")?;
+            self.builder.position_at_end(ready);
+        }
+        Ok(accepted.into())
     }
 
     fn compile_register_native_object_projector(
