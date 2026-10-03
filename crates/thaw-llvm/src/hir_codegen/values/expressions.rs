@@ -437,7 +437,32 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonAsBool(inner) => self.compile_json_as_bool(inner),
             HirExpr::JsonAsNative(inner, ty) => {
                 let json = self.compile_expr(inner)?;
-                self.compile_json_to_native(json, ty)
+                // This is a second root for recursive Object/Array decoding.
+                // A Function field can register its original JS handle before
+                // a later sibling getter fails, so keep one failure scope
+                // around the complete conversion.
+                let function = self.current_function();
+                let failed = self.context.append_basic_block(function, "json_as_native_failed");
+                let done = self.context.append_basic_block(function, "json_as_native_done");
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_typed_decode_scope_begin").unwrap(),
+                    &[], "begin_json_as_native_scope",
+                ).map_err(|error| error.to_string())?;
+                self.catch_stack.push(failed);
+                let value = self.compile_json_to_native(json, ty);
+                self.catch_stack.pop();
+                let value = value?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
+                    &[self.context.i8_type().const_int(2, false).into()], "merge_json_as_native_scope",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(failed);
+                self.compile_discard_typed_decode_scope()?;
+                self.branch_on_pending_exception()?;
+                self.builder.build_unreachable().map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+                Ok(value)
             }
 
             // Real suspension points are extracted by the async frame plan.

@@ -5,10 +5,16 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirType],
         ret: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // A decoded Function can escape through a global or capture. Tracing
+        // must be enabled before module initialization allocates the closure.
+        self.tracks_owned_json_roots = true;
+        // The callback-origin acquisition needs the same captured Host ops
+        // while decoding, before the generated adapter is ever invoked.
+        self.compile_register_js_callback_host_operations()?;
         let retained_handle = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_handle_id").unwrap(),
+                self.module.get_function("thaw_json_callback_origin_acquire").unwrap(),
                 &[json.into()],
                 "js_callback_handle",
             )
@@ -218,6 +224,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
             }
         }
+        let registered = self.builder.build_call(
+            self.module.get_function("thaw_json_register_callback_origin").unwrap(),
+            &[closure.into(), retained_handle.into()], "register_js_callback_origin",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("callback origin registration returned no value")?;
+        self.compile_check_json_host_error(registered, None)?;
         Ok(closure.into())
     }
 

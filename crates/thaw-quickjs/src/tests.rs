@@ -6993,6 +6993,70 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
 }
 
 #[test]
+fn typed_callback_origin_registration_returns_the_original_js_function() {
+    std::thread::spawn(|| {
+        unsafe extern "C" {
+            fn thaw_json_register_callback_origin(closure: *const u8, handle: u64) -> u8;
+        }
+        unsafe extern "C" fn callback(
+            _context: *const c_void, _arguments: *const c_char,
+        ) -> *const c_char { c"null".as_ptr() }
+        assert_eq!(load("globalThis.__thaw_origin_test = function () { return 42; }"), 1);
+        let original = with_context(|ctx| {
+            let value: Value = ctx.globals().get("__thaw_origin_test").unwrap();
+            retain_value(&ctx, value).unwrap()
+        });
+        let closure = thaw_arena::thaw_arena_alloc(24, 8);
+        assert!(!closure.is_null());
+        assert_eq!(unsafe { thaw_json_register_callback_origin(closure, original) }, 1);
+        let restored = thaw_js_register_native_callback_graph(
+            callback as *const c_void, closure.cast(), 0, 0, 0,
+            std::ptr::null(), 0,
+        );
+        assert!(restored.error.is_null());
+        with_context(|ctx| {
+            let strict: Function = ctx.globals().get("__thaw_strict_equal_dynamic").unwrap();
+            let left = value_for_handle(&ctx, original).unwrap();
+            let right = value_for_handle(&ctx, restored.value).unwrap();
+            assert!(strict.call::<_, bool>((left, right, 3.0, 3.0)).unwrap());
+        });
+        assert_eq!(thaw_js_release_handle(restored.value), 1);
+        with_context(|ctx| assert!(value_for_handle(&ctx, original).is_ok()));
+    }).join().unwrap();
+}
+
+#[test]
+fn callback_origin_type_check_ignores_mutable_host_query_global() {
+    std::thread::spawn(|| {
+        assert_eq!(load(r#"
+            globalThis.__thaw_origin_object = {};
+            globalThis.__thaw_origin_callable = new Proxy(function () {}, {});
+            globalThis.__thaw_json_host_query = () => '1';
+        "#), 1);
+        let (object, callable) = with_context(|ctx| {
+            let object: Value = ctx.globals().get("__thaw_origin_object").unwrap();
+            let callable: Value = ctx.globals().get("__thaw_origin_callable").unwrap();
+            (retain_value(&ctx, object).unwrap(), retain_value(&ctx, callable).unwrap())
+        });
+        let spoofed = thaw_js_host_query_result(object, 0);
+        assert!(spoofed.error.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(spoofed.value) }.to_string_lossy(), "1");
+        unsafe { thaw_arena::destroy_string(spoofed.value.cast_mut()) };
+        let rejected = thaw_js_host_query_result(object, 14);
+        let accepted = thaw_js_host_query_result(callable, 14);
+        assert!(rejected.error.is_null() && accepted.error.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(rejected.value) }.to_string_lossy(), "0");
+        assert_eq!(unsafe { CStr::from_ptr(accepted.value) }.to_string_lossy(), "1");
+        unsafe {
+            thaw_arena::destroy_string(rejected.value.cast_mut());
+            thaw_arena::destroy_string(accepted.value.cast_mut());
+        }
+        assert_eq!(thaw_js_release_handle(object), 1);
+        assert_eq!(thaw_js_release_handle(callable), 1);
+    }).join().unwrap();
+}
+
+#[test]
 fn result_error_abi_keeps_embedded_nul_in_throw_rejection_and_getter() {
     assert_eq!(load(r#"
         function throwNulResult() {
