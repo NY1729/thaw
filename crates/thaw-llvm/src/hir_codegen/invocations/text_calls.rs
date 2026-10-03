@@ -399,7 +399,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("template strings .raw returned no value")?
                     .into_pointer_value();
-                return Ok(self.compile_array_wrap(result)?.into());
+                // The runtime returns the original array handle, preserving .raw identity.
+                return Ok(result.into());
             }
             "__thaw_regex_exec_advance" => {
                 let [value, source, flags, last_index] = args else {
