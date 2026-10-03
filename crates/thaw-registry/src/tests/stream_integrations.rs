@@ -85,6 +85,59 @@ fn async_hooks_preserve_storage_and_resource_scope() {
 }
 
 #[test]
+fn async_hooks_disable_releases_registration_and_run_reactivates_it() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_async_hooks_disable");
+    fs::write(
+        dir.join("index.js"),
+        r#"var hooks = require('node:async_hooks');
+            module.exports = function () {
+              var storage = new hooks.AsyncLocalStorage({ defaultValue: 'default' });
+              var registered = globalThis.__thawAsyncLocalStorages;
+              var initial = registered.has(storage);
+              storage.disable();
+              var released = !registered.has(storage);
+              storage.disable();
+              var repeated = !registered.has(storage);
+              var withoutDisabled = hooks.AsyncLocalStorage.snapshot();
+              var duringRun = storage.run('run', function () {
+                return [registered.has(storage), storage.getStore(),
+                        withoutDisabled(function () { return storage.getStore(); })];
+              });
+              var reusedByRun = registered.has(storage);
+              storage.disable();
+              storage.enterWith('enter');
+              var reusedByEnter = registered.has(storage);
+              var withEnabled = hooks.AsyncLocalStorage.snapshot();
+              storage.enterWith('changed');
+              var capturedEnabled = withEnabled(function () { return storage.getStore(); });
+              var restored = storage.getStore();
+              storage.disable();
+              return [initial, released, repeated, duringRun, reusedByRun,
+                      reusedByEnter, capturedEnabled, restored, !registered.has(storage)];
+            };"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_async_hooks_disable_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
+         globalThis.exports = globalThis.module.exports;\n\
+         globalThis.require = function(name) {{ throw new Error('unexpected require ' + name); }};\n\
+         {bundle}\n\
+         globalThis.exerciseAsyncHooksDisable = module.exports;\n"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseAsyncHooksDisable".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"[true,true,true,[true,"run","run"],true,true,"enter","changed",true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn tty_builtin_reports_capabilities_and_emits_ansi_sequences() {
     use std::ffi::{CStr, CString};
 
