@@ -39,6 +39,13 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(object) {
+        if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
+            return record_status(env, NAPI_OBJECT_EXPECTED);
+        }
+        return qjs_property_names(env, handle, key_mode, key_filter, key_conversion, out);
+    }
     let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -50,6 +57,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     let mut current = Some(object as usize);
     let mut visited = HashSet::new();
     while let Some(owner) = current.filter(|owner| visited.insert(*owner)) {
+        let owner_start = keys.len();
         let value = owner as NapiValue;
         let mut property_keys = match value_ref(value) {
             Ok(Value::Object(properties)) => properties.keys().cloned().collect::<Vec<_>>(),
@@ -111,8 +119,16 @@ pub unsafe extern "C" fn napi_get_all_property_names(
         property_keys.sort_by(|left, right| {
             let category = |key: &PropertyKey| match (property_array_index(key), key) {
                 (Some(index), _) => (0, index, usize::MAX),
-                (None, PropertyKey::String(_)) => {
-                    (1, 0, property_order_for_owner(env_ptr, owner, key))
+                (None, PropertyKey::String(name))
+                    if matches!(value_ref(value), Ok(Value::Array(_))) && name == "length" =>
+                {
+                    // ArrayOwnPropertyKeys places length after indexed keys
+                    // and before every other string, even a string inserted
+                    // earlier through N-API.
+                    (1, 0, 0)
+                }
+                (None, PropertyKey::String(_) | PropertyKey::Utf16(_)) => {
+                    (1, 1, property_order_for_owner(env_ptr, owner, key))
                 }
                 (None, PropertyKey::Symbol(_)) => {
                     (2, 0, property_order_for_owner(env_ptr, owner, key))
@@ -129,12 +145,39 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                 .unwrap_or(EnumeratedPropertyKey::Property(key));
             (key, owner)
         }));
+        if matches!(value_ref(value), Ok(Value::Array(_))) {
+            // Indexed data slots were collected before accessor/host keys.
+            // Sort their combined own-key slice so an accessor at index 1
+            // precedes a data slot at index 2 and both precede `length`.
+            let rank = |key: &EnumeratedPropertyKey| match key {
+                EnumeratedPropertyKey::Number(index) => (0, *index, 0),
+                EnumeratedPropertyKey::Property(PropertyKey::String(name))
+                    if name == "length" => (1, 0, 0),
+                EnumeratedPropertyKey::Property(PropertyKey::String(_) |
+                    PropertyKey::Utf16(_)) => (2, 0,
+                        property_order_for_owner(env_ptr, owner, match key {
+                            EnumeratedPropertyKey::Property(key) => key,
+                            _ => unreachable!(),
+                        })),
+                EnumeratedPropertyKey::Property(PropertyKey::Symbol(_)) => (3, 0,
+                    property_order_for_owner(env_ptr, owner, match key {
+                        EnumeratedPropertyKey::Property(key) => key,
+                        _ => unreachable!(),
+                    })),
+            };
+            keys[owner_start..].sort_by(|(left, _), (right, _)|
+                rank(left).cmp(&rank(right)));
+        }
         current = if key_mode == NAPI_KEY_INCLUDE_PROTOTYPES {
             prototype_for_owner(env_ptr, owner)
         } else {
             None
         };
     }
+    // An own key shadows the same prototype key even when an attribute
+    // filter excludes the own descriptor.
+    let mut seen = HashSet::new();
+    keys.retain(|(key, _)| seen.insert(key.clone()));
     let attribute_filter = key_filter & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
     keys.retain(|(key, owner)| match key {
         EnumeratedPropertyKey::Number(index) => {
@@ -144,7 +187,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                     || property_attributes_for(env_ptr, *owner, &key) & attribute_filter
                         == attribute_filter)
         }
-        EnumeratedPropertyKey::Property(PropertyKey::String(_)) => {
+        EnumeratedPropertyKey::Property(PropertyKey::String(_) | PropertyKey::Utf16(_)) => {
             key_filter & NAPI_KEY_SKIP_STRINGS == 0
                 && (attribute_filter == NAPI_KEY_ALL_PROPERTIES
                     || property_attributes_for(
@@ -171,8 +214,6 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                         == attribute_filter)
         }
     });
-    let mut seen = HashSet::new();
-    keys.retain(|(key, _)| seen.insert(key.clone()));
     let mut values = Vec::with_capacity(keys.len());
     for (key, _) in keys {
         let value = match key {
@@ -182,6 +223,11 @@ pub unsafe extern "C" fn napi_get_all_property_names(
             EnumeratedPropertyKey::Number(index) => env.alloc(Value::String(index.to_string())),
             EnumeratedPropertyKey::Property(PropertyKey::String(name)) => {
                 env.alloc(Value::String(name))
+            }
+            EnumeratedPropertyKey::Property(PropertyKey::Utf16(units)) => {
+                let value = env.alloc(Value::String(String::from_utf16_lossy(&units)));
+                env.utf16_strings.insert(value as usize, units);
+                value
             }
             EnumeratedPropertyKey::Property(PropertyKey::Symbol(id)) => {
                 let Some(value) = symbol_for(env_ptr, id) else {
@@ -203,6 +249,10 @@ pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> Na
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(object) {
+        return qjs_object_integrity(env, handle, false);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -230,14 +280,24 @@ pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> Na
             .filter(|(owner, _)| *owner == object as usize)
             .map(|(_, name)| name.clone()),
     );
+    if matches!(value_ref(object), Ok(Value::Array(_))) {
+        names.push(PropertyKey::String("length".into()));
+    }
     names.sort();
     names.dedup();
     for name in names {
+        let initial = if matches!(value_ref(object), Ok(Value::Array(_)))
+            && matches!(&name, PropertyKey::String(key) if key == "length") {
+            NAPI_WRITABLE
+        } else {
+            NAPI_DEFAULT_PROPERTY_ATTRIBUTES
+        };
         *env.property_attributes
             .entry((object as usize, name))
-            .or_insert(NAPI_DEFAULT_PROPERTY_ATTRIBUTES) &= !NAPI_CONFIGURABLE;
+            .or_insert(initial) &= !NAPI_CONFIGURABLE;
     }
     env.sealed_objects.insert(object as usize);
+    env.nonextensible_objects.insert(object as usize);
     NAPI_OK
 }
 
@@ -248,6 +308,10 @@ pub unsafe extern "C" fn napi_object_freeze(env: NapiEnv, object: NapiValue) -> 
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(object) {
+        return qjs_object_integrity(env, handle, true);
     }
     let status = napi_object_seal(env, object);
     if status != NAPI_OK {
@@ -360,6 +424,30 @@ pub unsafe extern "C" fn napi_typeof(env: NapiEnv, value: NapiValue, out: *mut i
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        let kind = match qjs_query(handle, 0) {
+            Ok(kind) => kind,
+            Err(error) => return qjs_error_status(env, error),
+        };
+        *out = match kind.as_str() {
+            "undefined" => 0,
+            "boolean" => 2,
+            "number" => 3,
+            "string" => 4,
+            "symbol" => 5,
+            "function" => 7,
+            "bigint" => 9,
+            "object" => match qjs_query(handle, 7) {
+                Ok(value) if value == "1" => 1,
+                Ok(_) => 6,
+                Err(error) => return qjs_error_status(env, error),
+            },
+            _ => return record_status(env, NAPI_GENERIC_FAILURE),
+        };
+        return NAPI_OK;
+    }
     *out = match value_ref(value) {
         Ok(Value::Undefined) => 0,
         Ok(Value::Null) => 1,
@@ -385,6 +473,14 @@ pub unsafe extern "C" fn napi_is_array(
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        return match qjs_query(handle, 4) {
+            Ok(answer) => { *out = answer == "1"; NAPI_OK },
+            Err(error) => qjs_error_status(env, error),
+        };
+    }
     *out = matches!(value_ref(value), Ok(Value::Array(_)));
     NAPI_OK
 }
@@ -401,6 +497,11 @@ pub unsafe extern "C" fn napi_is_promise(
     let Some(result) = result.as_mut() else {
         return record_status(env, NAPI_INVALID_ARG);
     };
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        return qjs_is_promise(env, handle, result);
+    }
     *result = matches!(value_ref(value), Ok(Value::Promise(_)));
     NAPI_OK
 }
@@ -413,6 +514,11 @@ pub unsafe extern "C" fn napi_get_array_length(
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(value) {
+        let _foreign_dispatch = ForeignCallbackGuard::new();
+        return qjs_array_length(env, handle, out);
     }
     let status = match value_ref(value) {
         Ok(Value::Array(values)) => {
@@ -434,7 +540,7 @@ pub unsafe extern "C" fn napi_set_element(
     if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
-    let status = set_property_key(env, object, PropertyKey::String(index.to_string()), value);
+    let status = set_property_key(env, object, PropertyKey::String(index.to_string()), value, object);
     record_status(env, status)
 }
 
@@ -452,6 +558,10 @@ pub unsafe extern "C" fn napi_has_element(
         return record_status(env, NAPI_INVALID_ARG);
     };
     let key = PropertyKey::String(index.to_string());
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(object) {
+        return qjs_property_predicate(env, handle, &key, 0, result);
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
@@ -471,6 +581,10 @@ pub unsafe extern "C" fn napi_delete_element(
         return NAPI_INVALID_ARG;
     }
     let key = PropertyKey::String(index.to_string());
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(object) {
+        return qjs_property_predicate(env, handle, &key, 2, result);
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
@@ -494,15 +608,17 @@ pub unsafe extern "C" fn napi_delete_element(
         }
         return NAPI_OK;
     }
-    if let Ok(env) = env_mut(env) {
-        let status = remove_own_property(env, object, &key);
+    let removed_accessor = if let Ok(owner) = env_mut(env) {
+        let status = remove_own_property(owner, object, &key);
         if status != NAPI_OK {
             return record_status(env, status);
         }
-        env.accessors.remove(&(object as usize, key.clone()));
-        remove_property_order(env, object as usize, &key);
-        env.property_attributes.remove(&(object as usize, key));
-    }
+        let removed = owner.accessors.remove(&(object as usize, key.clone()));
+        remove_property_order(owner, object as usize, &key);
+        owner.property_attributes.remove(&(object as usize, key));
+        removed
+    } else { None };
+    drop(removed_accessor);
     if let Some(result) = result.as_mut() {
         *result = true;
     }
@@ -531,7 +647,7 @@ pub unsafe extern "C" fn napi_get_element(
                     args: Vec::new(),
                     this_arg: object,
                     new_target: ptr::null_mut(),
-                    data: accessor.data,
+                    data: accessor.getter_data,
                 };
                 let value = invoke_napi_callback(env, getter, &mut info);
                 if env_mut(env)
@@ -551,4 +667,3 @@ pub unsafe extern "C" fn napi_get_element(
     };
     record_status(env, status)
 }
-

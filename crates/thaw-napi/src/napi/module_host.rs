@@ -287,6 +287,53 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             unsafe { (*env).released_handles.remove(&(handle as usize)) };
             return Ok(serde_json::json!({ "kind": "value", "value": true }));
         }
+        if operation == "retain_graph_handle" {
+            let handle = target.parse::<u64>()
+                .map_err(|_| "invalid native graph handle")?;
+            let reference = retain_napi_graph_handle(handle);
+            if reference == 0 { return Err("native graph handle is no longer live".into()); }
+            return Ok(serde_json::json!({ "kind": "value", "value": reference.to_string() }));
+        }
+        if operation == "symbol_metadata" {
+            let handle = target.parse::<u64>()
+                .map_err(|_| "invalid native Symbol handle")?;
+            let env = live_graph_owner_env(handle)
+                .ok_or("native Symbol graph handle is no longer live")?;
+            let symbol = handle as NapiValue;
+            let (id, description) = match value_ref(symbol) {
+                Ok(Value::Symbol { id, description }) => (*id, description.clone()),
+                _ => return Err("native graph handle is not a Symbol".into()),
+            };
+            let units = env.as_ref().and_then(|owner|
+                owner.utf16_symbols.get(&(symbol as usize))).cloned()
+                .unwrap_or_else(|| description.encode_utf16().collect());
+            let registered = GLOBAL_SYMBOLS.get().is_some_and(|symbols| {
+                symbols.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&units) == Some(&id)
+            });
+            return Ok(serde_json::json!({ "kind": "value", "value": {
+                "id": id.to_string(), "handle": handle.to_string(),
+                "units": units, "registered": registered
+            } }));
+        }
+        if operation == "symbol_handle" {
+            let id = target.parse::<u64>()
+                .map_err(|_| "invalid native Symbol identity")?;
+            let handle = HOST.with(|host| {
+                let host = host.borrow();
+                host.module_envs.iter().chain(host.pending_call_envs.iter())
+                    .filter(|env| !env.finalizing && !env.finalized
+                        && !env.shutdown_requested && env.graph_owner_id != 0)
+                    .filter_map(|env| env.symbols.get(&id)
+                        .copied().filter(|value|
+                            !env.finalized_handles.contains(&(*value as usize))
+                                && matches!(unsafe { (*value).as_ref() },
+                                    Some(Value::Symbol { id: actual, .. }) if *actual == id))
+                        .map(|value| value as u64))
+                    .next()
+            }).ok_or("native Symbol identity has no live owner")?;
+            return Ok(serde_json::json!({ "kind": "value", "value": handle.to_string() }));
+        }
         if operation == "sync_reference" {
             let reference = target
                 .parse::<u64>()
@@ -342,6 +389,260 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         if handle == 0 {
             return Err("unknown native addon export".into());
         }
+        if operation == "array_kind_graph" {
+            let _ = module_env_for_handle(handle)?;
+            return Ok(serde_json::json!({ "kind": "value", "value":
+                matches!(value_ref(handle as NapiValue), Ok(Value::Array(_))) }));
+        }
+        if matches!(operation.as_str(), "get_graph" | "set_graph" | "has_graph"
+            | "own_keys_graph" | "descriptor_graph" | "delete_graph"
+            | "get_prototype_graph" | "set_prototype_graph"
+            | "prevent_extensions_graph" | "is_extensible_graph"
+            | "define_accessor_graph" | "define_data_graph"
+            | "reconfigure_graph") {
+            // A property key may be an exact UTF-16 string or Symbol. Decode
+            // it through the same graph/lease owner as callback arguments,
+            // before any user getter or setter can reenter addon retirement.
+            let graph = text(args)?;
+            let input = NapiGraphInput::parse(&graph);
+            let env = module_env_for_handle(handle)?;
+            let cached_before = if operation == "define_accessor_graph" {
+                env.as_ref().ok_or("invalid native addon environment")?
+                    .quickjs_live_values.keys().copied().collect::<HashSet<_>>()
+            } else { HashSet::new() };
+            let values = parse_napi_arguments(env, &graph, true, true, Some(&input))?;
+            let object = handle as NapiValue;
+            if operation == "is_extensible_graph" || operation == "prevent_extensions_graph" {
+                if !values.is_empty() { return Err("native integrity query expects no arguments".into()); }
+                let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
+                let identity = object as usize;
+                if operation == "prevent_extensions_graph" {
+                    owner.nonextensible_objects.insert(identity);
+                }
+                return Ok(serde_json::json!({"kind": "value",
+                    "value": operation == "prevent_extensions_graph"
+                        || !owner.nonextensible_objects.contains(&identity)}));
+            }
+            if operation == "reconfigure_graph" {
+                let [key, flags] = values.as_slice() else {
+                    return Err("native descriptor reconfiguration expects key and flags".into());
+                };
+                let key = property_key(env, *key)
+                    .map_err(|status| format!("invalid native descriptor key: status {status}"))?;
+                let flags = match value_ref(*flags).map_err(|_| "invalid native descriptor flags")? {
+                    Value::Number(number) if number.is_finite() && *number >= 0.0
+                        && number.fract() == 0.0 && *number <= 7.0 => *number as u32,
+                    _ => return Err("invalid native descriptor attributes".into()),
+                };
+                let identity = object as usize;
+                let old = property_attributes_for(env, identity, &key);
+                let has_data = own_property_value(env, object, &key).is_some();
+                let has_accessor = accessor_for_owner(env, identity, &key).is_some();
+                let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
+                let exists = has_data || has_accessor;
+                let readonly_transition = old & NAPI_CONFIGURABLE == 0
+                    && old & NAPI_WRITABLE != 0 && flags & NAPI_WRITABLE == 0
+                    && (old ^ flags) & (NAPI_ENUMERABLE | NAPI_CONFIGURABLE) == 0
+                    && !has_accessor;
+                let changed = exists && (old & NAPI_CONFIGURABLE != 0
+                    || old == flags || readonly_transition);
+                if changed { owner.property_attributes.insert((identity, key), flags); }
+                return Ok(serde_json::json!({"kind": "value", "value": changed}));
+            }
+            if operation == "define_data_graph" {
+                let [key, value, flags, presence] = values.as_slice() else {
+                    return Err("native data definition expects key, value, flags and presence".into());
+                };
+                let key = property_key(env, *key)
+                    .map_err(|status| format!("invalid native data key: status {status}"))?;
+                let flags = match value_ref(*flags).map_err(|_| "invalid native data flags")? {
+                    Value::Number(number) if number.is_finite() && *number >= 0.0
+                        && number.fract() == 0.0 && *number <= 7.0 => *number as u32,
+                    _ => return Err("invalid native data attributes".into()),
+                };
+                let presence = match value_ref(*presence).map_err(|_| "invalid native data presence")? {
+                    Value::Number(number) if *number == 0.0 || *number == 1.0 => *number != 0.0,
+                    _ => return Err("invalid native data presence".into()),
+                };
+                let status = qjs_install_native_data_property(env, object, key,
+                    *value, presence, flags);
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                return Ok(serde_json::json!({"kind": "value", "value": status == NAPI_OK}));
+            }
+            if operation == "define_accessor_graph" {
+                let [key, getter, setter, flags, presence] = values.as_slice() else {
+                    return Err("native accessor definition expects key, get, set, flags and presence".into());
+                };
+                let key = property_key(env, *key)
+                    .map_err(|status| format!("invalid native accessor key: status {status}"))?;
+                let callback = |value: NapiValue| -> Result<(u64, NapiValue), String> {
+                    match value_ref(value).map_err(|_| "invalid native accessor callback")? {
+                        Value::Undefined => Ok((0, ptr::null_mut())),
+                        Value::QuickJsHandle { handle, .. } => Ok((*handle, ptr::null_mut())),
+                        Value::Function(_) => Ok((0, value)),
+                        _ => Err("native graph accessor is not a JavaScript Function".into()),
+                    }
+                };
+                let (getter, getter_native) = callback(*getter)?;
+                let (setter, setter_native) = callback(*setter)?;
+                let flags = match value_ref(*flags).map_err(|_| "invalid native accessor flags")? {
+                    Value::Number(value) if value.is_finite() && *value >= 0.0
+                        && value.fract() == 0.0 && *value <= 7.0 => *value as u32,
+                    _ => return Err("invalid native accessor attributes".into()),
+                };
+                let presence = match value_ref(*presence).map_err(|_| "invalid native accessor presence")? {
+                    Value::Number(value) if *value >= 1.0 && *value <= 3.0
+                        && value.fract() == 0.0 => *value as u8,
+                    _ => return Err("invalid native accessor presence".into()),
+                };
+                // Own each retain immediately. Any later validation, Env
+                // lookup, graph-carrier cleanup, or descriptor install can
+                // fail and will then release every acquired root.
+                // The graph decoder returns a raw native Function only when
+                // it belongs to this Env. Foreign Functions arrive as
+                // retained QuickJsHandle values instead. A same-Env positive
+                // Reference here would cycle with the descriptor table and
+                // prevent Env retirement.
+                let mut roots = Arc::new(QuickJsAccessorRoots {
+                    getter: 0, setter: 0, getter_native, setter_native,
+                });
+                for (index, handle) in [getter, setter].into_iter().enumerate() {
+                    if handle == 0 { continue; }
+                    if thaw_quickjs::thaw_js_retain_handle(handle) == 0 {
+                        return Err("released JavaScript accessor callback".into());
+                    }
+                    let owner = Arc::get_mut(&mut roots).unwrap();
+                    if index == 0 { owner.getter = handle; }
+                    else { owner.setter = handle; }
+                }
+                // The graph decoder needed carriers to validate this packet,
+                // but descriptor callbacks have their own Arc roots. Remove
+                // only newly-created callback-only carriers; preexisting Env
+                // values may be used elsewhere. Release registry handles after
+                // the Env borrow and before any accessor installation reentry.
+                let temporary = {
+                    let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
+                    [getter, setter].into_iter().filter(|id| *id != 0)
+                        .filter(|id| !cached_before.contains(id))
+                        .collect::<HashSet<_>>().into_iter().filter_map(|id| {
+                            let value = owner.quickjs_live_values.remove(&id)?;
+                            *value = Value::Undefined;
+                            Some(id)
+                        }).collect::<Vec<_>>()
+                };
+                for id in temporary { thaw_quickjs::thaw_js_release_handle(id); }
+                let status = qjs_install_native_accessor(env, object, key,
+                    roots,
+                    presence & 1 != 0, presence & 2 != 0, flags);
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                return Ok(serde_json::json!({"kind": "value", "value": status == NAPI_OK}));
+            }
+            if operation == "get_prototype_graph" {
+                if !values.is_empty() { return Err("native prototype read expects no arguments".into()); }
+                let mut prototype = ptr::null_mut();
+                let status = napi_get_prototype(env, object, &mut prototype);
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                if status != NAPI_OK || prototype.is_null() {
+                    return Err(format!("native prototype read failed: status {status}"));
+                }
+                return Ok(serde_json::json!({"kind": "graph",
+                    "value": napi_result_graph_for_env(env, prototype, true)? }));
+            }
+            if operation == "set_prototype_graph" {
+                let [prototype] = values.as_slice() else {
+                    return Err("native prototype write expects one value".into());
+                };
+                let status = node_api_set_prototype(env, object, *prototype);
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                return Ok(serde_json::json!({"kind": "value", "value": status == NAPI_OK}));
+            }
+            if operation == "own_keys_graph" {
+                if !values.is_empty() { return Err("native ownKeys graph expects no arguments".into()); }
+                let mut keys = ptr::null_mut();
+                let status = napi_get_all_property_names(env, object, NAPI_KEY_OWN_ONLY,
+                    NAPI_KEY_ALL_PROPERTIES, NAPI_KEY_NUMBERS_TO_STRINGS, &mut keys);
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                if status != NAPI_OK || keys.is_null() {
+                    return Err(format!("native ownKeys graph failed: status {status}"));
+                }
+                return Ok(serde_json::json!({"kind": "graph",
+                    "value": napi_result_graph_for_env(env, keys, true)? }));
+            }
+            let Some(key) = values.first().copied() else {
+                return Err("native property graph has no key".into());
+            };
+            if operation == "get_graph" {
+                if values.is_empty() || values.len() > 2 {
+                    return Err("native get graph expects a key and optional receiver".into());
+                }
+                let native_key = property_key(env, key)
+                    .map_err(|status| format!("invalid native get key: status {status}"))?;
+                let receiver = values.get(1).copied().unwrap_or(object);
+                let mut value = ptr::null_mut();
+                let status = get_property_key(env, object, &native_key, &mut value, receiver);
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                if status != NAPI_OK || value.is_null() {
+                    return Err(format!("native get graph failed: status {status}"));
+                }
+                return Ok(serde_json::json!({"kind": "graph",
+                    "value": napi_result_graph_for_env(env, value, true)? }));
+            }
+            if operation == "set_graph" {
+                if values.len() < 2 || values.len() > 3 {
+                    return Err("native set graph expects key, value and optional receiver".into());
+                }
+                let native_key = property_key(env, key)
+                    .map_err(|status| format!("invalid native set key: status {status}"))?;
+                let receiver = values.get(2).copied().unwrap_or(object);
+                let status = set_property_key(env, object, native_key, values[1], receiver);
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                // A readonly or nonextensible ordinary assignment reports
+                // failure to the Proxy trap. A pending native exception was
+                // already returned by take_env_exception_graph above.
+                return Ok(serde_json::json!({"kind": "value", "value": status == NAPI_OK}));
+            }
+            if values.len() != 1 { return Err("native property graph expects one key".into()); }
+            if operation == "has_graph" || operation == "delete_graph" {
+                let mut result = false;
+                let status = if operation == "has_graph" {
+                    napi_has_property(env, object, key, &mut result)
+                } else {
+                    napi_delete_property(env, object, key, &mut result)
+                };
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                if status != NAPI_OK {
+                    return Err(format!("native property graph failed: status {status}"));
+                }
+                return Ok(serde_json::json!({"kind": "value", "value": result}));
+            }
+            let native_key = property_key(env, key)
+                .map_err(|status| format!("invalid native descriptor key: status {status}"))?;
+            let accessor = accessor_for_owner(env, object as usize, &native_key);
+            let own = own_property_value(env, object, &native_key).is_some()
+                || accessor.is_some();
+            if !own { return Ok(serde_json::json!({"kind": "value", "value": null})); }
+            let flags = property_attributes_for(env, object as usize, &native_key);
+            let getter_source = match accessor.as_ref() {
+                Some(accessor) => qjs_reflected_native_accessor_source(
+                    env, object, &native_key, accessor, true)?,
+                None => serde_json::Value::Null,
+            };
+            let setter_source = match accessor.as_ref() {
+                Some(accessor) => qjs_reflected_native_accessor_source(
+                    env, object, &native_key, accessor, false)?,
+                None => serde_json::Value::Null,
+            };
+            return Ok(serde_json::json!({"kind": "value", "value": {
+                "configurable": flags & NAPI_CONFIGURABLE != 0,
+                "enumerable": flags & NAPI_ENUMERABLE != 0,
+                "writable": flags & NAPI_WRITABLE != 0,
+                "accessor": accessor.is_some(),
+                "getter": accessor.as_ref().is_some_and(|accessor| accessor.getter.is_some()),
+                "setter": accessor.as_ref().is_some_and(|accessor| accessor.setter.is_some()),
+                "getter_source": getter_source,
+                "setter_source": setter_source,
+            }}));
+        }
         match operation.as_str() {
             "construct" => {
                 let value = construct_handle_impl(handle, args, true, false);
@@ -395,7 +696,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     let property = CString::new(name).map_err(|_| "property contains NUL")?;
                     napi_get_named_property(env, handle as NapiValue, property.as_ptr(), &mut value)
                 };
-                take_env_exception(env)?;
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
                 if status != NAPI_OK || value.is_null() {
                     return Err(format!("failed to get native property: status {status}"));
                 }
@@ -417,7 +718,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     let property = CString::new(name).map_err(|_| "property contains NUL")?;
                     napi_has_named_property(env, handle as NapiValue, property.as_ptr(), &mut present)
                 };
-                take_env_exception(env)?;
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
                 if status != NAPI_OK { return Err(format!("failed to check native property: status {status}")); }
                 Ok(serde_json::json!({ "kind": "value", "value": present }))
             }
@@ -426,7 +727,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 let mut keys = ptr::null_mut();
                 let status = napi_get_all_property_names(env, handle as NapiValue, NAPI_KEY_OWN_ONLY,
                     NAPI_KEY_ALL_PROPERTIES, NAPI_KEY_NUMBERS_TO_STRINGS, &mut keys);
-                take_env_exception(env)?;
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
                 if status != NAPI_OK { return Err(format!("failed to enumerate native properties: status {status}")); }
                 let Value::Array(keys) = value_ref(keys).map_err(|_| "invalid native keys")? else {
                     return Err("native property names were not an array".into());
@@ -471,6 +772,65 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 let value = callback_result(env, invoke_napi_callback(env, function.callback, &mut info));
                 take_env_exception(env)?;
                 Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
+            }
+            "call_captured_graph" => {
+                let graph = text(args)?;
+                let env = match module_env_for_handle(handle) {
+                    Ok(env) => env,
+                    Err(error) => {
+                        release_unconsumed_napi_callback_graph(&graph);
+                        return Err(error);
+                    }
+                };
+                // The graph decoder consumes both QuickJS and NAPI transfer
+                // leases before user callback code can reenter addon unload.
+                let graph_input = NapiGraphInput::parse(&graph);
+                let mut values = parse_napi_arguments(
+                    env, &graph, true, true, Some(&graph_input))?;
+                if values.is_empty() { return Err("captured callback graph lacks this".into()); }
+                let receiver = values.remove(0);
+                let function = match value_ref(handle as NapiValue)
+                    .map_err(|_| "invalid native callback")? {
+                    Value::Function(function) => function.clone(),
+                    _ => return Err("captured native property is not callable".into()),
+                };
+                let mut info = CallbackInfo { args: values, this_arg: receiver,
+                    new_target: ptr::null_mut(), data: function.data };
+                let value = callback_result(env, invoke_napi_callback(env, function.callback, &mut info));
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                Ok(serde_json::json!({ "kind": "graph",
+                    "value": napi_result_graph_for_env(env, value, true)? }))
+            }
+            "construct_captured_graph" => {
+                let graph = text(args)?;
+                let env = match module_env_for_handle(handle) {
+                    Ok(env) => env,
+                    Err(error) => {
+                        release_unconsumed_napi_callback_graph(&graph);
+                        return Err(error);
+                    }
+                };
+                let graph_input = NapiGraphInput::parse(&graph);
+                let values = parse_napi_arguments(
+                    env, &graph, true, true, Some(&graph_input))?;
+                if !matches!(value_ref(handle as NapiValue), Ok(Value::Function(_))) {
+                    return Err("captured native constructor is not callable".into());
+                }
+                let Some((new_target, tail)) = values.split_first() else {
+                    return Err("captured constructor graph lacks new.target".into());
+                };
+                let Some((fallback_prototype, arguments)) = tail.split_first() else {
+                    return Err("captured constructor graph lacks realm fallback".into());
+                };
+                let mut result = ptr::null_mut();
+                let status = napi_new_instance_with_target(env, handle as NapiValue,
+                    *new_target, *fallback_prototype, arguments.len(), arguments.as_ptr(), &mut result);
+                if let Some(exception) = take_env_exception_graph(env)? { return Ok(exception); }
+                if status != NAPI_OK {
+                    return Err(format!("native constructor failed: status {status}"));
+                }
+                Ok(serde_json::json!({ "kind": "graph",
+                    "value": napi_result_graph_for_env(env, result, true)? }))
             }
             "call" => {
                 let name = CString::new(name).map_err(|_| "method contains NUL")?;
@@ -1079,7 +1439,7 @@ fn value_from_json_with_undefined(
                     callback: thaw_compiled_callback,
                     data: Arc::as_ptr(&bridge) as *mut c_void,
                     properties: HashMap::new(),
-                    _thaw_bridge: Some(bridge),
+                    _thaw_bridge: Some(bridge), _accessor_owner: None,
                 }));
                 env.quickjs_references.insert(reference, function);
                 return Ok(function);
@@ -1284,14 +1644,59 @@ fn decimal_bigint_words(decimal: &str) -> Option<(bool, Vec<u64>)> {
     Some((negative, words))
 }
 
+fn napi_graph_utf16_units(value: &JsonValue) -> Result<Vec<u16>, String> {
+    let units = value.as_array().ok_or("invalid native UTF-16 graph units")?;
+    units.iter().map(|unit| unit.as_u64().and_then(|unit| u16::try_from(unit).ok())
+        .ok_or_else(|| "invalid native UTF-16 graph unit".into())).collect()
+}
+
+// A graph token's decimal native handle is untrusted until it resolves to a
+// live owner. In particular, never dereference a foreign Symbol key merely
+// because its paired QuickJS wrapper passed the independent JS-side check.
+fn napi_graph_symbol_identity(handle: NapiValue) -> Result<u64, String> {
+    let _owner = live_graph_owner_env(handle as u64)
+        .ok_or("native graph Symbol owner is no longer live")?;
+    match unsafe { value_ref(handle) } {
+        Ok(Value::Symbol { id, .. }) => Ok(*id),
+        _ => Err("native graph handle is not a Symbol".into()),
+    }
+}
+
 fn napi_graph_token(env: &mut Env, token: &JsonValue, nodes: &[NapiValue]) -> Result<NapiValue, String> {
     let fields = token.as_object().ok_or("invalid native argument graph token")?;
-    if fields.len() != 1 { return Err("invalid native argument graph token".into()); }
+    if fields.len() != 1 && !(fields.len() == 2
+        && fields.contains_key("nsy") && fields.contains_key("hdl")) {
+        return Err("invalid native argument graph token".into());
+    }
     if let Some(index) = fields.get("r").and_then(JsonValue::as_u64) {
         return nodes.get(index as usize).copied().ok_or("native argument graph reference is out of range".into());
     }
     if fields.get("u") == Some(&JsonValue::from(1)) {
         return Ok(env.alloc(Value::Undefined));
+    }
+    if let Some(units) = fields.get("su") {
+        let units = napi_graph_utf16_units(units)?;
+        return Ok(match String::from_utf16(&units) {
+            Ok(text) => env.alloc(Value::String(text)),
+            Err(_) => {
+                let value = env.alloc(Value::String(String::from_utf16_lossy(&units)));
+                env.utf16_strings.insert(value as usize, units);
+                value
+            }
+        });
+    }
+    if let Some(handle) = fields.get("nsy").and_then(JsonValue::as_str) {
+        let handle = handle.parse::<u64>()
+            .map_err(|_| "invalid native Symbol graph handle")? as NapiValue;
+        if env.values.contains(&handle)
+            && !env.finalized_handles.contains(&(handle as usize))
+            && matches!(unsafe { handle.as_ref() }, Some(Value::Symbol { .. })) {
+            return Ok(handle);
+        }
+        let source = fields.get("hdl").and_then(JsonValue::as_u64)
+            .ok_or("foreign native Symbol has no JavaScript wrapper")?;
+        return env.quickjs_live_values.get(&source).copied()
+            .ok_or("unretained native Symbol wrapper");
     }
     if let Some(decimal) = fields.get("bi").and_then(JsonValue::as_str) {
         let (negative, words) = decimal_bigint_words(decimal)
@@ -1319,13 +1724,43 @@ fn napi_graph_token(env: &mut Env, token: &JsonValue, nodes: &[NapiValue]) -> Re
     Err("unknown native argument graph token".into())
 }
 
+fn napi_graph_property_key(
+    env: &mut Env, key: &JsonValue, nodes: &[NapiValue],
+) -> Result<PropertyKey, String> {
+    if let Some(key) = key.as_str() {
+        return Ok(PropertyKey::String(key.to_string()));
+    }
+    if key.as_object().is_some_and(|fields| fields.len() == 1 && fields.contains_key("su")) {
+        let units = napi_graph_utf16_units(&key["su"])?;
+        return Ok(match String::from_utf16(&units) {
+            Ok(text) => PropertyKey::String(text),
+            Err(_) => PropertyKey::Utf16(units),
+        });
+    }
+    let symbol = napi_graph_token(env, key, nodes)?;
+    match unsafe { value_ref(symbol) }.map_err(|_| "invalid native graph Symbol key")? {
+        Value::Symbol { id, .. } => Ok(PropertyKey::Symbol(*id)),
+        #[cfg(feature = "quickjs")]
+        Value::QuickJsHandle { handle, .. } => Ok(PropertyKey::Symbol(
+            *env.quickjs_symbol_ids.get(handle)
+                .ok_or("unverified JavaScript graph Symbol key")?)),
+        #[cfg(not(feature = "quickjs"))]
+        Value::QuickJsHandle { .. } => Err("JavaScript graph Symbol keys require QuickJS".into()),
+        _ => Err("invalid native graph property name".into()),
+    }
+}
+
 fn napi_graph_value(env: &mut Env, graph: &JsonValue) -> Result<NapiValue, String> {
     let descriptions = graph.get("nodes").and_then(JsonValue::as_array)
         .ok_or("native argument graph has no nodes")?;
     let mut nodes = Vec::with_capacity(descriptions.len());
     for description in descriptions {
         let fields = description.as_object().ok_or("invalid native argument graph node")?;
-        if fields.len() != 1 { return Err("invalid native argument graph node".into()); }
+        if fields.len() != 1 && !(fields.len() == 2
+            && ((fields.contains_key("a") && fields.contains_key("p"))
+                || (fields.contains_key("nfn") && fields.contains_key("hdl")))) {
+            return Err("invalid native argument graph node".into());
+        }
         let node = if fields.get("a").and_then(JsonValue::as_array).is_some() {
             env.alloc(Value::Array(Vec::new()))
         } else if fields.get("o").and_then(JsonValue::as_array).is_some() {
@@ -1338,6 +1773,20 @@ fn napi_graph_value(env: &mut Env, graph: &JsonValue) -> Result<NapiValue, Strin
             let bytes = bytes.iter().map(|byte| byte.as_u64().and_then(|byte| u8::try_from(byte).ok())
                 .ok_or("invalid native Buffer byte")).collect::<Result<Vec<_>, _>>()?;
             env.alloc(Value::Buffer(bytes))
+        } else if let Some(handle) = fields.get("nfn").and_then(JsonValue::as_str) {
+            let handle = handle.parse::<u64>().map_err(|_| "invalid native Function ID")? as NapiValue;
+            if env.values.contains(&handle) && !env.finalized_handles.contains(&(handle as usize))
+                && matches!(unsafe { handle.as_ref() }, Some(Value::Function(_))) {
+                handle
+            } else {
+                let source = fields.get("hdl").and_then(JsonValue::as_u64)
+                    .ok_or("foreign native Function has no JavaScript wrapper")?;
+                env.quickjs_live_values.get(&source).copied()
+                    .ok_or("unretained native Function wrapper")?
+            }
+        } else if let Some(handle) = fields.get("hdl").and_then(JsonValue::as_u64) {
+            env.quickjs_live_values.get(&handle).copied()
+                .ok_or("unretained JavaScript graph handle")?
         } else if let Some(handle) = fields.get("nh").and_then(JsonValue::as_str) {
             let handle = handle.parse::<u64>().map_err(|_| "invalid native handle ID")? as NapiValue;
             if !env.values.contains(&handle) || env.finalized_handles.contains(&(handle as usize)) {
@@ -1368,17 +1817,77 @@ fn napi_graph_value(env: &mut Env, graph: &JsonValue) -> Result<NapiValue, Strin
             }
             let Some(Value::Array(target)) = (unsafe { node.as_mut() }) else { return Err("native graph array changed type".into()); };
             *target = decoded;
+            if let Some(entries) = description.get("p") {
+                let entries = entries.as_array().ok_or("invalid native graph array properties")?;
+                let mut order = Vec::with_capacity(entries.len());
+                let mut attributes = Vec::with_capacity(entries.len());
+                let mut extras = HashMap::new();
+                for entry in entries {
+                    let Some([key, token, flags]) = entry.as_array().map(Vec::as_slice)
+                        else { return Err("invalid native graph array property".into()); };
+                    let flags = flags.as_u64().and_then(|flags| u32::try_from(flags).ok())
+                        .filter(|flags| flags & !NAPI_DEFAULT_PROPERTY_ATTRIBUTES == 0)
+                        .ok_or("invalid native graph array property attributes")?;
+                    let key = napi_graph_property_key(env, key, &nodes)?;
+                    if order.contains(&key) { return Err("duplicate native graph array property".into()); }
+                    if matches!(&key, PropertyKey::String(name) if name == "length") {
+                        if token.get("v").and_then(JsonValue::as_f64) != Some(items.len() as f64) {
+                            return Err("native graph array length changed".into());
+                        }
+                    } else if let Some(index) = property_array_index(&key) {
+                        if index >= items.len() || items[index].get("h").is_some() {
+                            return Err("invalid native graph array index property".into());
+                        }
+                        // The indexed value was installed from `a` above;
+                        // `p` carries its descriptor. Compare wire tokens so
+                        // scalar values are not decoded into a second Box.
+                        if token != &items[index] {
+                            return Err("conflicting native graph array index".into());
+                        }
+                    } else {
+                        let child = napi_graph_token(env, token, &nodes)?;
+                        extras.insert(key.clone(), child);
+                    }
+                    order.push(key.clone());
+                    attributes.push((key, flags));
+                }
+                env.host_properties.insert(node as usize, extras);
+                env.property_order.insert(node as usize, order);
+                for (key, flags) in attributes {
+                    env.property_attributes.insert((node as usize, key), flags);
+                }
+            }
         } else if let Some(entries) = description.get("o").and_then(JsonValue::as_array) {
             let mut decoded = HashMap::new();
+            let mut order = Vec::with_capacity(entries.len());
+            let mut attributes = Vec::with_capacity(entries.len());
             for entry in entries {
-                let [key, token] = entry.as_array().ok_or("invalid native graph entry")?.as_slice() else {
-                    return Err("invalid native graph entry".into());
+                let parts = entry.as_array().ok_or("invalid native graph entry")?;
+                let (key, token, flags) = match parts.as_slice() {
+                    [key, token] => (key, token, NAPI_DEFAULT_PROPERTY_ATTRIBUTES),
+                    [key, token, flags] => {
+                        let flags = flags.as_u64().and_then(|flags| u32::try_from(flags).ok())
+                            .filter(|flags| flags & !NAPI_DEFAULT_PROPERTY_ATTRIBUTES == 0)
+                            .ok_or("invalid native graph property attributes")?;
+                        (key, token, flags)
+                    }
+                    _ => return Err("invalid native graph entry".into()),
                 };
-                let key = key.as_str().ok_or("invalid native graph property name")?;
-                decoded.insert(PropertyKey::String(key.to_string()), napi_graph_token(env, token, &nodes)?);
+                let key = napi_graph_property_key(env, key, &nodes)?;
+                if decoded.contains_key(&key) {
+                    return Err("duplicate native graph property key".into());
+                }
+                let child = napi_graph_token(env, token, &nodes)?;
+                order.push(key.clone());
+                attributes.push((key.clone(), flags));
+                decoded.insert(key, child);
             }
             let Some(Value::Object(target)) = (unsafe { node.as_mut() }) else { return Err("native graph object changed type".into()); };
             *target = decoded;
+            env.property_order.insert(node as usize, order);
+            for (key, flags) in attributes {
+                env.property_attributes.insert((node as usize, key), flags);
+            }
         } else if let Some(token) = description.get("m").or_else(|| description.get("s")) {
             let key = if description.get("m").is_some() { "__thaw_map_entries__" }
                 else { "__thaw_set_values__" };
@@ -1515,6 +2024,48 @@ struct NapiGraphInput {
     _dispatch: ForeignCallbackGuard,
 }
 
+// An inbound live native Function/Symbol carries both its native pointer and
+// the exact JS wrapper handle. The latter is the safe recipient carrier when
+// a different addon Env owns the native pointer. Collect from tokens and
+// nodes alike: Symbols can occur directly as keys or scalar children.
+fn inbound_graph_handles(
+    value: &JsonValue, handles: &mut Vec<u64>, standalone: &mut Vec<u64>,
+    pairs: &mut Vec<(u64, u64, u8)>,
+) -> Result<(), String> {
+    match value {
+        JsonValue::Array(items) => {
+            for item in items { inbound_graph_handles(item, handles, standalone, pairs)?; }
+        }
+        JsonValue::Object(fields) => {
+            if let Some(raw) = fields.get("hdl") {
+                let handle = raw.as_u64().filter(|handle| *handle != 0)
+                    .ok_or("invalid JavaScript graph handle")?;
+                if fields.len() != 1 && !(fields.len() == 2
+                    && (fields.contains_key("nfn") ^ fields.contains_key("nsy"))) {
+                    return Err("invalid paired native graph handle".into());
+                }
+                if let Some((native, kind)) = fields.get("nfn").map(|native| (native, 1))
+                    .or_else(|| fields.get("nsy").map(|native| (native, 2))) {
+                    let native = native.as_str().and_then(|native| native.parse::<u64>().ok())
+                        .filter(|native| *native != 0)
+                        .ok_or("invalid paired native graph identity")?;
+                    pairs.push((handle, native, kind));
+                } else {
+                    standalone.push(handle);
+                }
+                handles.push(handle);
+            } else if fields.contains_key("nfn") || fields.contains_key("nsy") {
+                return Err("native graph identity has no JavaScript wrapper lease".into());
+            }
+            for child in fields.values() {
+                inbound_graph_handles(child, handles, standalone, pairs)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 impl NapiGraphInput {
     fn parse(text: &str) -> Self {
         let parsed: Result<JsonValue, String> = serde_json::from_str(text)
@@ -1563,10 +2114,218 @@ impl NapiGraphInput {
         if self.malformed_lease {
             return Err("invalid native argument graph lease".into());
         }
-        let decoded = {
-            let env = env_mut(env).map_err(|_| "invalid native addon environment")?;
-            napi_graph_value(env, parsed)
+        // Preflight every hdl without holding an Env borrow across QuickJS.
+        // The wire leases remain owned by this input until a decoded carrier
+        // acquires its own independent registry retain.
+        #[cfg(not(feature = "quickjs"))]
+        if parsed.get("nodes").and_then(JsonValue::as_array).is_some_and(|nodes|
+            nodes.iter().any(|node| node.get("hdl").is_some())) {
+            return Err("JavaScript graph handles require QuickJS".into());
+        }
+        #[cfg(feature = "quickjs")]
+        let mut wire_handles = Vec::new();
+        #[cfg(feature = "quickjs")]
+        let mut standalone_handles = Vec::new();
+        #[cfg(feature = "quickjs")]
+        let mut native_pairs = Vec::new();
+        #[cfg(feature = "quickjs")]
+        inbound_graph_handles(parsed, &mut wire_handles, &mut standalone_handles,
+            &mut native_pairs)?;
+        #[cfg(feature = "quickjs")]
+        let mut new_handles = {
+            let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
+            let leases = self.leases.borrow();
+            let host_leases = &leases.as_ref().ok_or("native graph leases already consumed")?.host;
+            let mut handles = Vec::new();
+            for handle in wire_handles {
+                if !host_leases.contains(&handle) {
+                    return Err("JavaScript graph handle has no transfer lease".into());
+                }
+                if !owner.quickjs_live_values.contains_key(&handle)
+                    && !handles.contains(&handle) { handles.push(handle); }
+            }
+            handles
         };
+        #[cfg(feature = "quickjs")]
+        struct EnvRetains(Vec<u64>);
+        #[cfg(feature = "quickjs")]
+        impl Drop for EnvRetains {
+            fn drop(&mut self) {
+                for handle in self.0.drain(..) {
+                    thaw_quickjs::thaw_js_release_handle(handle);
+                }
+            }
+        }
+        #[cfg(feature = "quickjs")]
+        let mut owned = EnvRetains(Vec::new());
+        #[cfg(feature = "quickjs")]
+        for handle in &new_handles {
+            if thaw_quickjs::thaw_js_retain_handle(*handle) == 0 {
+                return Err("released JavaScript graph handle".into());
+            }
+            owned.0.push(*handle);
+        }
+        #[cfg(feature = "quickjs")]
+        let mut object_likes = HashMap::new();
+        #[cfg(feature = "quickjs")]
+        for handle in &new_handles {
+            object_likes.insert(*handle, qjs_query(*handle, 9)? == "1");
+        }
+        // A forged packet must not pair a live native pointer with some other
+        // retained JS handle. The private wrapper maps validate the exact
+        // Function or Symbol provenance before an Env borrow begins.
+        #[cfg(feature = "quickjs")]
+        for (handle, native, kind) in &native_pairs {
+            let checked = thaw_quickjs::thaw_js_graph_native_pair_matches_result(
+                *handle, *native, *kind);
+            if !checked.error.is_null() {
+                let error = thaw_arena::NativeStr::from_ptr(checked.error)
+                    .to_string_lossy().into_owned();
+                thaw_arena::destroy_string(checked.error);
+                return Err(error);
+            }
+            if checked.value != 1 {
+                return Err("native graph wrapper identity does not match its handle".into());
+            }
+        }
+        // A same-Env native value already owns its Function/Symbol identity.
+        // Retaining its JS wrapper in that Env would form a cycle:
+        // Env -> hdl wrapper -> native positive Reference -> Env.
+        // Keep an hdl only if the graph also uses it standalone, or some
+        // paired occurrence belongs to a different Env.
+        #[cfg(feature = "quickjs")]
+        {
+            let owner = env.as_ref().ok_or("invalid native addon environment")?;
+            new_handles.retain(|handle| {
+                if standalone_handles.contains(handle) { return true; }
+                let has_pair = native_pairs.iter().any(|pair| pair.0 == *handle);
+                !has_pair || native_pairs.iter().filter(|pair| pair.0 == *handle)
+                    .any(|pair| {
+                    let value = pair.1 as NapiValue;
+                    !owner.values.contains(&value)
+                        || owner.finalized_handles.contains(&(value as usize))
+                        || !matches!((pair.2, unsafe { value.as_ref() }),
+                            (1, Some(Value::Function(_))) | (2, Some(Value::Symbol { .. })))
+                })
+            });
+        }
+        // A graph key may refer to an hdl node. Verify its actual Symbol
+        // type before entering the mutable Env decoder; QuickJS may reenter
+        // addon code during a query, while the decoder's Env borrow may not.
+        #[cfg(feature = "quickjs")]
+        let mut symbol_key_handles = Vec::new();
+        #[cfg(feature = "quickjs")]
+        for (handle, native, kind) in &native_pairs {
+            if *kind != 2 { continue; }
+            let native = *native as NapiValue;
+            if env.as_ref().is_some_and(|owner|
+                owner.values.contains(&native)
+                    && !owner.finalized_handles.contains(&(native as usize))) {
+                continue;
+            }
+            // Pair validation above proved this is a live native Symbol and
+            // that its hdl denotes the exact same JS Symbol. Assign its
+            // stable native ID even when this transfer uses it only as a
+            // value; it may become a property key later in the recipient.
+            let id = napi_graph_symbol_identity(native)?;
+            if !symbol_key_handles.iter().any(|(seen, _)| seen == handle) {
+                if qjs_query(*handle, 0)? != "symbol" {
+                    return Err("native graph Symbol wrapper changed type".into());
+                }
+                symbol_key_handles.push((*handle, Some(id)));
+            }
+        }
+        #[cfg(feature = "quickjs")]
+        {
+            let nodes = parsed.get("nodes").and_then(JsonValue::as_array)
+                .ok_or("native argument graph has no nodes")?;
+            for node in nodes {
+                let Some(entries) = node.get("o").or_else(|| node.get("p"))
+                    .and_then(JsonValue::as_array) else { continue };
+                for entry in entries {
+                    let Some(key) = entry.as_array().and_then(|entry| entry.first())
+                        else { continue };
+                    let (handle, stable_id) = if let Some(index) = key.get("r").and_then(JsonValue::as_u64) {
+                        (nodes.get(index as usize)
+                            .and_then(|node| node.get("hdl")).and_then(JsonValue::as_u64)
+                            .ok_or("native graph Symbol key has no live handle")?, None)
+                    } else if key.get("nsy").is_some() {
+                        let native = key.get("nsy").and_then(JsonValue::as_str)
+                            .and_then(|native| native.parse::<u64>().ok())
+                            .ok_or("invalid native graph Symbol key")? as NapiValue;
+                        let stable_id = napi_graph_symbol_identity(native)?;
+                        if env.as_ref().is_some_and(|owner|
+                            owner.values.contains(&native)
+                                && !owner.finalized_handles.contains(&(native as usize))
+                                && matches!(unsafe { native.as_ref() },
+                                    Some(Value::Symbol { .. }))) {
+                            continue;
+                        }
+                        (key.get("hdl").and_then(JsonValue::as_u64)
+                            .ok_or("native graph Symbol key has no wrapper handle")?,
+                            Some(stable_id))
+                    } else { continue };
+                    if !symbol_key_handles.iter().any(|(seen, _)| *seen == handle) {
+                        if qjs_query(handle, 0)? != "symbol" {
+                            return Err("native graph property key is not a Symbol".into());
+                        }
+                        symbol_key_handles.push((handle, stable_id));
+                    }
+                }
+            }
+        }
+        let (decoded, inserted, new_symbol_ids) = {
+            let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
+            #[cfg(feature = "quickjs")]
+            let mut inserted = Vec::new();
+            #[cfg(feature = "quickjs")]
+            for handle in new_handles.drain(..) {
+                if owner.quickjs_live_values.contains_key(&handle) {
+                    continue;
+                }
+                let value = owner.alloc(Value::QuickJsHandle {
+                    handle, object_like: object_likes[&handle],
+                });
+                owner.quickjs_live_values.insert(handle, value);
+                inserted.push((handle, value));
+            }
+            #[cfg(feature = "quickjs")]
+            let mut new_symbol_ids = Vec::new();
+            #[cfg(feature = "quickjs")]
+            for (handle, stable_id) in symbol_key_handles {
+                if owner.quickjs_symbol_ids.contains_key(&handle) { continue; }
+                let value = owner.quickjs_live_values.get(&handle).copied()
+                    .ok_or("unretained JavaScript graph Symbol key")?;
+                let id = stable_id.unwrap_or_else(|| NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed));
+                owner.quickjs_symbol_ids.insert(handle, id);
+                let inserted_owner = if owner.symbols.contains_key(&id) { false }
+                    else { owner.symbols.insert(id, value); true };
+                new_symbol_ids.push((handle, id, inserted_owner));
+            }
+            #[cfg(not(feature = "quickjs"))]
+            let inserted: Vec<(u64, NapiValue)> = Vec::new();
+            #[cfg(not(feature = "quickjs"))]
+            let new_symbol_ids: Vec<(u64, u64, bool)> = Vec::new();
+            (napi_graph_value(owner, parsed), inserted, new_symbol_ids)
+        };
+        #[cfg(feature = "quickjs")]
+        {
+            if decoded.is_err() {
+                let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
+                for (handle, id, inserted_owner) in &new_symbol_ids {
+                    owner.quickjs_symbol_ids.remove(handle);
+                    if *inserted_owner { owner.symbols.remove(id); }
+                }
+                for (handle, value) in &inserted {
+                    owner.quickjs_live_values.remove(handle);
+                    **value = Value::Undefined;
+                }
+            } else {
+                // A nested callback may have installed one of these handles
+                // during preflight. Retain ownership only for inserted values.
+                owned.0.retain(|handle| !inserted.iter().any(|(entry, _)| entry == handle));
+            }
+        }
         // The decoded N-API value may be an nh instance whose old JS proxy
         // finalized while this wire was in flight. Move its positive native
         // reference into the enclosing dispatch guard, which outlives even
@@ -1590,6 +2349,1122 @@ unsafe fn parse_napi_graph_value(env: NapiEnv, text: &str) -> Result<NapiValue, 
 
 unsafe fn graph_input_for_args(args: *const c_char, graph_args: bool) -> Option<NapiGraphInput> {
     graph_args.then(|| text(args).ok().map(|text| NapiGraphInput::parse(&text))).flatten()
+}
+
+unsafe fn release_unconsumed_napi_callback_graph(text: &str) {
+    let _input = NapiGraphInput::parse(text);
+}
+
+// The public N-API property/call adapters use this same live carrier. No
+// Env reference or HOST borrow may survive a call into the QuickJS engine.
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_handle(value: NapiValue) -> Option<u64> {
+    match value_ref(value).ok()? {
+        Value::QuickJsHandle { handle, .. } => Some(*handle),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_take_result_text(result: thaw_quickjs::ThawResult) -> Result<String, String> {
+    let (pointer, error) = if result.error.is_null() {
+        (result.value, false)
+    } else {
+        (result.error, true)
+    };
+    if pointer.is_null() { return Err("empty JavaScript bridge result".into()); }
+    let text = thaw_arena::NativeStr::from_ptr(pointer).to_string_lossy().into_owned();
+    thaw_arena::destroy_string(pointer);
+    if error { Err(text) } else { Ok(text) }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_error_status(env: NapiEnv, error: String) -> NapiStatus {
+    let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+    let exception = owner.alloc(Value::Error(error));
+    owner.exception = Some(exception);
+    record_status(env, NAPI_PENDING_EXCEPTION)
+}
+
+// A handle-valued QuickJS API result already owns one registry reference.
+// Adopt it for a new Env carrier or release it when the Env cache already has
+// the same JS identity. Release only after leaving the mutable Env borrow.
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_adopt_handle_result(
+    env: NapiEnv, result: thaw_quickjs::ThawHandleResult, out: *mut NapiValue,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    if result.value == 0 { return record_status(env, NAPI_INVALID_ARG); }
+    if out.is_null() {
+        thaw_quickjs::thaw_js_release_handle(result.value);
+        return NAPI_OK;
+    }
+    let object_like = match qjs_query(result.value, 9) {
+        Ok(value) => value == "1",
+        Err(error) => {
+            thaw_quickjs::thaw_js_release_handle(result.value);
+            return qjs_error_status(env, error);
+        }
+    };
+    let (value, duplicate) = {
+        let Ok(owner) = env_mut(env) else {
+            thaw_quickjs::thaw_js_release_handle(result.value);
+            return NAPI_INVALID_ARG;
+        };
+        if let Some(value) = owner.quickjs_live_values.get(&result.value).copied() {
+            (value, true)
+        } else {
+            let value = owner.alloc(Value::QuickJsHandle {
+                handle: result.value, object_like,
+            });
+            owner.quickjs_live_values.insert(result.value, value);
+            (value, false)
+        }
+    };
+    if duplicate { thaw_quickjs::thaw_js_release_handle(result.value); }
+    if out.is_null() { NAPI_OK } else { write_value(out, value) }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_adopt_thrown_handle(
+    env: NapiEnv, handle: u64, object_like: bool,
+) -> NapiStatus {
+    let (exception, duplicate) = {
+        let Ok(owner) = env_mut(env) else {
+            thaw_quickjs::thaw_js_release_handle(handle);
+            return NAPI_INVALID_ARG;
+        };
+        if let Some(value) = owner.quickjs_live_values.get(&handle).copied() {
+            (value, true)
+        } else {
+            let value = owner.alloc(Value::QuickJsHandle { handle, object_like });
+            owner.quickjs_live_values.insert(handle, value);
+            (value, false)
+        }
+    };
+    if duplicate { thaw_quickjs::thaw_js_release_handle(handle); }
+    let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG; };
+    owner.exception = Some(exception);
+    record_status(env, NAPI_PENDING_EXCEPTION)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_adopt_property_read_result(
+    env: NapiEnv, result: thaw_quickjs::ThawCallWithExceptionResult,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if result.exception_handle != 0 {
+        return qjs_adopt_thrown_handle(env, result.exception_handle,
+            result.exception_object_like != 0);
+    }
+    qjs_adopt_handle_result(env, thaw_quickjs::ThawHandleResult {
+        value: result.value, error: result.error,
+    }, out)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_finish_property_write_result(
+    env: NapiEnv, result: thaw_quickjs::ThawCallWithExceptionResult,
+) -> NapiStatus {
+    if result.exception_handle != 0 {
+        return qjs_adopt_thrown_handle(env, result.exception_handle,
+            result.exception_object_like != 0);
+    }
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    if result.value == 0 { return record_status(env, NAPI_GENERIC_FAILURE); }
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_utf16_key_handle(env: NapiEnv, units: &[u16]) -> Result<u64, NapiStatus> {
+    let encoded = serde_json::to_string(units)
+        .map_err(|_| record_status(env, NAPI_GENERIC_FAILURE))?;
+    let encoded = CString::new(encoded)
+        .map_err(|_| record_status(env, NAPI_INVALID_ARG))?;
+    let result = thaw_quickjs::thaw_js_string_from_utf16_units_result(encoded.as_ptr());
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return Err(qjs_error_status(env, error));
+    }
+    if result.value == 0 { return Err(record_status(env, NAPI_GENERIC_FAILURE)); }
+    Ok(result.value)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_native_symbol_key_handle(
+    env: NapiEnv, symbol: NapiValue,
+) -> Result<u64, NapiStatus> {
+    match value_ref(symbol) {
+        Ok(Value::Symbol { .. }) => {},
+        _ => return Err(record_status(env, NAPI_INVALID_ARG)),
+    }
+    // The QuickJS helper requests owner-validated metadata for this exact
+    // native handle. Callers cannot seed its identity cache with an arbitrary
+    // id/description pair.
+    let result = thaw_quickjs::thaw_js_native_symbol_handle_result(symbol as u64);
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return Err(qjs_error_status(env, error));
+    }
+    if result.value == 0 { return Err(record_status(env, NAPI_GENERIC_FAILURE)); }
+    Ok(result.value)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_nonstring_key_handle(
+    env: NapiEnv, key: &PropertyKey,
+) -> Option<Result<u64, NapiStatus>> {
+    match key {
+        PropertyKey::String(_) => None,
+        PropertyKey::Utf16(units) => Some(qjs_utf16_key_handle(env, units)),
+        PropertyKey::Symbol(id) => {
+            let symbol = match env.as_ref().and_then(|owner| owner.symbols.get(id).copied()) {
+                Some(value) => value,
+                None => return Some(Err(record_status(env, NAPI_INVALID_ARG))),
+            };
+            if let Some(source) = qjs_handle(symbol) {
+                return Some(if thaw_quickjs::thaw_js_retain_handle(source) != 0 {
+                    Ok(source)
+                } else {
+                    Err(record_status(env, NAPI_INVALID_ARG))
+                });
+            }
+            Some(qjs_native_symbol_key_handle(env, symbol))
+        }
+    }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_get_property(
+    env: NapiEnv, handle: u64, key: &PropertyKey, out: *mut NapiValue,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    if let Some(key_handle) = qjs_nonstring_key_handle(env, key) {
+        let key_handle = match key_handle {
+            Ok(handle) => handle, Err(status) => return status,
+        };
+        let status = qjs_get_property_live_key(env, handle, key_handle, out);
+        thaw_quickjs::thaw_js_release_handle(key_handle);
+        return status;
+    }
+    let PropertyKey::String(key) = key else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(key_json) = serde_json::to_string(key) else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(key_json) = CString::new(key_json) else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
+    let result = thaw_quickjs::thaw_js_get_property_json_key_with_exception_result(
+        handle, key_json.as_ptr());
+    qjs_adopt_property_read_result(env, result, out)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_get_property_live_key(
+    env: NapiEnv, handle: u64, key_handle: u64, out: *mut NapiValue,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_get_property_key_handle_with_exception_result(
+        handle, key_handle);
+    qjs_adopt_property_read_result(env, result, out)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_property_predicate_live_key(
+    env: NapiEnv, handle: u64, key_handle: u64, operation: u8, out: *mut bool,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_property_predicate_key_handle_result(
+        handle, key_handle, operation);
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    if let Some(out) = out.as_mut() { *out = result.value != 0; }
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_set_property_live_key(
+    env: NapiEnv, handle: u64, key_handle: u64, value: NapiValue,
+    receiver_data: bool,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let Ok(encoded) = napi_result_graph_for_env(env, value, true) else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(encoded) = CString::new(encoded) else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
+    let result = thaw_quickjs::thaw_js_set_property_key_handle_graph_with_exception_result(
+        handle, key_handle, encoded.as_ptr(), receiver_data as u8);
+    qjs_finish_property_write_result(env, result)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_descriptor_key_handle(env: NapiEnv, key: NapiValue)
+    -> Result<(u64, bool), NapiStatus> {
+    if let Some(handle) = qjs_handle(key) { return Ok((handle, false)); }
+    if matches!(value_ref(key), Ok(Value::Symbol { .. })) {
+        return qjs_native_symbol_key_handle(env, key).map(|handle| (handle, true));
+    }
+    let key = property_key(env, key)?;
+    let units = match key {
+        PropertyKey::String(text) => text.encode_utf16().collect::<Vec<_>>(),
+        PropertyKey::Utf16(units) => units,
+        PropertyKey::Symbol(_) => return Err(record_status(env, NAPI_INVALID_ARG)),
+    };
+    qjs_utf16_key_handle(env, &units).map(|handle| (handle, true))
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_define_data_property(
+    env: NapiEnv, handle: u64, key: NapiValue, value: NapiValue, attributes: u32,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let (key_handle, owned_key) = match qjs_descriptor_key_handle(env, key) {
+        Ok(key) => key, Err(status) => return status,
+    };
+    let status = (|| {
+        let encoded = napi_result_graph_for_env(env, value, true)
+            .map_err(|_| record_status(env, NAPI_GENERIC_FAILURE))?;
+        let encoded = CString::new(encoded)
+            .map_err(|_| record_status(env, NAPI_INVALID_ARG))?;
+        let result = thaw_quickjs::thaw_js_define_data_property_key_handle_graph_result(
+            handle, key_handle, encoded.as_ptr(), attributes);
+        if !result.error.is_null() {
+            let error = thaw_arena::NativeStr::from_ptr(result.error)
+                .to_string_lossy().into_owned();
+            thaw_arena::destroy_string(result.error);
+            return Err(qjs_error_status(env, error));
+        }
+        Ok(())
+    })();
+    if owned_key { thaw_quickjs::thaw_js_release_handle(key_handle); }
+    match status { Ok(()) => NAPI_OK, Err(status) => status }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_define_callback_property(
+    env: NapiEnv, handle: u64, key: NapiValue,
+    getter: Option<NapiCallback>, setter: Option<NapiCallback>,
+    method: Option<NapiCallback>, data: *mut c_void, attributes: u32,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let (key_handle, owned_key) = match qjs_descriptor_key_handle(env, key) {
+        Ok(key) => key, Err(status) => return status,
+    };
+    let status = (|| {
+        let mut create = |callback| -> Result<u64, NapiStatus> {
+            let mut value = ptr::null_mut();
+            let status = napi_create_function(env, ptr::null(), NAPI_AUTO_LENGTH,
+                Some(callback), data, &mut value);
+            if status != NAPI_OK { return Err(status); }
+            Ok(value as u64)
+        };
+        let getter_id = getter.map(&mut create).transpose()?.unwrap_or(0);
+        let setter_id = setter.map(&mut create).transpose()?.unwrap_or(0);
+        let method_id = method.map(&mut create).transpose()?.unwrap_or(0);
+        // A JS descriptor can outlive the addon call which installed it.
+        // Retain each native Function before handing its identity to QuickJS;
+        // the QuickJS closure owns these references after the FFI call.
+        let mut roots = [0; 3];
+        for (slot, id) in roots.iter_mut().zip([getter_id, setter_id, method_id]) {
+            if id == 0 { continue; }
+            *slot = retain_napi_graph_handle(id);
+            if *slot == 0 {
+                for root in roots.iter().copied().filter(|root| *root != 0) {
+                    release_napi_graph_reference(root);
+                }
+                return Err(record_status(env, NAPI_GENERIC_FAILURE));
+            }
+        }
+        let result = thaw_quickjs::thaw_js_define_callback_property_key_handle_result(
+            handle, key_handle, getter_id, setter_id, method_id, attributes,
+            roots[0], roots[1], roots[2]);
+        if !result.error.is_null() {
+            let error = thaw_arena::NativeStr::from_ptr(result.error)
+                .to_string_lossy().into_owned();
+            thaw_arena::destroy_string(result.error);
+            return Err(qjs_error_status(env, error));
+        }
+        Ok(())
+    })();
+    if owned_key { thaw_quickjs::thaw_js_release_handle(key_handle); }
+    match status { Ok(()) => NAPI_OK, Err(status) => status }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_object_integrity(env: NapiEnv, handle: u64, freeze: bool) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_host_object_integrity_result(handle, u8::from(freeze));
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    if result.value == 0 { return record_status(env, NAPI_GENERIC_FAILURE); }
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_set_property(
+    env: NapiEnv, handle: u64, key: &PropertyKey, value: NapiValue,
+    receiver_data: bool,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    if let Some(key_handle) = qjs_nonstring_key_handle(env, key) {
+        let key_handle = match key_handle {
+            Ok(handle) => handle, Err(status) => return status,
+        };
+        let status = qjs_set_property_live_key(env, handle, key_handle, value, receiver_data);
+        thaw_quickjs::thaw_js_release_handle(key_handle);
+        return status;
+    }
+    let PropertyKey::String(key) = key else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(key_json) = serde_json::to_string(key) else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(key_json) = CString::new(key_json) else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
+    let Ok(encoded) = napi_result_graph_for_env(env, value, true) else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(encoded) = CString::new(encoded) else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
+    let result = if receiver_data {
+        thaw_quickjs::thaw_js_set_receiver_data_graph_with_exception_result(
+            handle, key_json.as_ptr(), encoded.as_ptr())
+    } else {
+        thaw_quickjs::thaw_js_set_property_graph_with_exception_result(
+            handle, key_json.as_ptr(), encoded.as_ptr())
+    };
+    qjs_finish_property_write_result(env, result)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_property_predicate(
+    env: NapiEnv, handle: u64, key: &PropertyKey,
+    operation: u8, out: *mut bool,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    if let Some(key_handle) = qjs_nonstring_key_handle(env, key) {
+        let key_handle = match key_handle {
+            Ok(handle) => handle, Err(status) => return status,
+        };
+        let status = qjs_property_predicate_live_key(env, handle, key_handle, operation, out);
+        thaw_quickjs::thaw_js_release_handle(key_handle);
+        return status;
+    }
+    let PropertyKey::String(key) = key else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(key_json) = serde_json::to_string(key) else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(key_json) = CString::new(key_json) else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
+    let result = thaw_quickjs::thaw_js_property_predicate_json_key_result(
+        handle, key_json.as_ptr(), operation);
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    if let Some(out) = out.as_mut() { *out = result.value != 0; }
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_query(handle: u64, operation: u8) -> Result<String, String> {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    qjs_take_result_text(thaw_quickjs::thaw_js_host_query_result(handle, operation))
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_number_value(handle: u64) -> Result<f64, String> {
+    // Operation 14 is the captured engine-level IsCallable query. Numeric
+    // coercion uses its own host-query slot and may run ToPrimitive.
+    let text = qjs_query(handle, 16)?;
+    match text.as_str() {
+        "NaN" => Ok(f64::NAN),
+        "Infinity" => Ok(f64::INFINITY),
+        "-Infinity" => Ok(f64::NEG_INFINITY),
+        "-0" => Ok(-0.0),
+        _ => text.parse::<f64>().map_err(|_| "invalid JavaScript numeric result".into()),
+    }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_actual_number(env: NapiEnv, handle: u64) -> Result<f64, NapiStatus> {
+    match qjs_query(handle, 0) {
+        Ok(kind) if kind == "number" => {},
+        Ok(_) => return Err(record_status(env, NAPI_NUMBER_EXPECTED)),
+        Err(error) => return Err(qjs_error_status(env, error)),
+    }
+    qjs_number_value(handle).map_err(|error| qjs_error_status(env, error))
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_actual_string_units(env: NapiEnv, handle: u64) -> Result<Vec<u16>, NapiStatus> {
+    match qjs_query(handle, 0) {
+        Ok(kind) if kind == "string" => {},
+        Ok(_) => return Err(record_status(env, NAPI_STRING_EXPECTED)),
+        Err(error) => return Err(qjs_error_status(env, error)),
+    }
+    let text = qjs_query(handle, 15).map_err(|error| qjs_error_status(env, error))?;
+    serde_json::from_str::<Vec<u16>>(&text)
+        .map_err(|_| record_status(env, NAPI_GENERIC_FAILURE))
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_strict_equals(
+    env: NapiEnv, left: u64, right: u64, out: *mut bool,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let compared = thaw_quickjs::thaw_js_strict_equal_handles_result(left, right);
+    if !compared.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(compared.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(compared.error);
+        return qjs_error_status(env, error);
+    }
+    *out = compared.value != 0;
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_strict_equals_native_symbol(
+    env: NapiEnv, handle: u64, symbol: NapiValue, out: *mut bool,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let symbol_handle = match qjs_native_symbol_key_handle(env, symbol) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    let status = qjs_strict_equals(env, handle, symbol_handle, out);
+    thaw_quickjs::thaw_js_release_handle(symbol_handle);
+    status
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_is_promise(env: NapiEnv, handle: u64, out: *mut bool) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_handle_is_promise_result(handle);
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    *out = result.value != 0;
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_array_length(env: NapiEnv, handle: u64, out: *mut u32) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    match qjs_query(handle, 4) {
+        Ok(answer) if answer == "1" => {},
+        Ok(_) => return record_status(env, NAPI_ARRAY_EXPECTED),
+        Err(error) => return qjs_error_status(env, error),
+    }
+    let result = thaw_quickjs::thaw_js_get_property_json_key_result(
+        handle, c"\"length\"".as_ptr());
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    if result.value == 0 { return record_status(env, NAPI_GENERIC_FAILURE); }
+    let length = qjs_query(result.value, 16);
+    thaw_quickjs::thaw_js_release_handle(result.value);
+    match length {
+        Ok(length) => match length.parse::<u32>() {
+            Ok(length) => { *out = length; NAPI_OK },
+            Err(_) => record_status(env, NAPI_GENERIC_FAILURE),
+        },
+        Err(error) => qjs_error_status(env, error),
+    }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_call_function(
+    env: NapiEnv, handle: u64, this_arg: NapiValue,
+    args: &[NapiValue], out: *mut NapiValue,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let arguments = {
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+        let mut items = Vec::with_capacity(args.len() + 1);
+        items.push(Some(this_arg));
+        items.extend(args.iter().copied().map(Some));
+        owner.alloc(Value::Array(items))
+    };
+    let guard = CallbackGraphArguments { env, value: arguments };
+    let encoded = napi_result_graph_for_env(env, arguments, true);
+    drop(guard);
+    let Ok(encoded) = encoded else {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    let Ok(encoded) = CString::new(encoded) else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
+    let result = thaw_quickjs::thaw_js_call_handle_with_this_graph_result(handle, encoded.as_ptr());
+    if result.exception_handle != 0 {
+        return qjs_adopt_thrown_handle(env, result.exception_handle,
+            result.exception_object_like != 0);
+    }
+    qjs_adopt_handle_result(env,
+        thaw_quickjs::ThawHandleResult { value: result.value, error: result.error }, out)
+}
+
+// An accessor descriptor owns its callback handles independently of the
+// graph packet which installed it. `find_accessor` returns an Accessor clone,
+// keeping these roots alive through the entire invocation even if a getter
+// replaces or deletes its own descriptor. No Env borrow crosses QuickJS.
+#[cfg(feature = "quickjs")]
+unsafe extern "C" fn reflected_native_getter(
+    env: NapiEnv, info: NapiCallbackInfo,
+) -> NapiValue {
+    let Some(info) = info.as_ref() else { return ptr::null_mut() };
+    let Some(source) = (info.data as *const Accessor).as_ref() else {
+        return ptr::null_mut();
+    };
+    let Some(getter) = source.getter else { return ptr::null_mut() };
+    let mut forwarded = CallbackInfo {
+        args: info.args.clone(), this_arg: info.this_arg,
+        new_target: ptr::null_mut(), data: source.getter_data,
+    };
+    invoke_napi_callback(env, getter, &mut forwarded)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe extern "C" fn reflected_native_setter(
+    env: NapiEnv, info: NapiCallbackInfo,
+) -> NapiValue {
+    let Some(info) = info.as_ref() else { return ptr::null_mut() };
+    let Some(source) = (info.data as *const Accessor).as_ref() else {
+        return ptr::null_mut();
+    };
+    let Some(setter) = source.setter else { return ptr::null_mut() };
+    let mut forwarded = CallbackInfo {
+        args: info.args.clone(), this_arg: info.this_arg,
+        new_target: ptr::null_mut(), data: source.setter_data,
+    };
+    invoke_napi_callback(env, setter, &mut forwarded)
+}
+
+// A reflected accessor is the original callback, not a property-name
+// forwarding shim. Keep its descriptor snapshot with the Function value so
+// `.call(other)` and calls after replacement use the original callback and
+// call-time receiver. The descriptor caches only the value's address; the
+// snapshot deliberately omits reflection addresses to avoid a retention cycle.
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_reflected_native_accessor_source(
+    env: NapiEnv, object: NapiValue, key: &PropertyKey,
+    accessor: &Accessor, getter: bool,
+) -> Result<serde_json::Value, String> {
+    let callback = if getter { accessor.getter } else { accessor.setter };
+    if callback.is_none() { return Ok(serde_json::Value::Null); }
+    if let Some(roots) = accessor.js_owner.as_ref() {
+        let (handle, native) = if getter {
+            (roots.getter, roots.getter_native)
+        } else { (roots.setter, roots.setter_native) };
+        if handle != 0 { return Ok(serde_json::json!({"hdl": handle})); }
+        if !native.is_null() {
+            return Ok(serde_json::json!({"nfn": (native as u64).to_string()}));
+        }
+    }
+    let identity = (object as usize, key.clone());
+    let owner = env_mut(env).map_err(|_| "invalid native accessor owner")?;
+    let previous = owner.accessors.get(&identity)
+        .ok_or("native accessor was replaced during reflection")?;
+    let cached = if getter { previous.getter_reflection }
+        else { previous.setter_reflection };
+    if let Some(value) = cached {
+        return Ok(serde_json::json!({"nfn": (value as u64).to_string()}));
+    }
+    let mut snapshot = accessor.clone();
+    snapshot.getter_reflection = None;
+    snapshot.setter_reflection = None;
+    let snapshot = Arc::new(snapshot);
+    let callback = if getter { reflected_native_getter }
+        else { reflected_native_setter };
+    let value = owner.alloc(Value::Function(Function {
+        callback, data: Arc::as_ptr(&snapshot) as *mut c_void,
+        properties: HashMap::new(), _thaw_bridge: None,
+        _accessor_owner: Some(snapshot),
+    }));
+    let entry = owner.accessors.get_mut(&identity)
+        .ok_or("native accessor was replaced during reflection")?;
+    if getter { entry.getter_reflection = Some(value); }
+    else { entry.setter_reflection = Some(value); }
+    Ok(serde_json::json!({"nfn": (value as u64).to_string()}))
+}
+
+#[cfg(feature = "quickjs")]
+unsafe extern "C" fn quickjs_accessor_getter(
+    env: NapiEnv, info: NapiCallbackInfo,
+) -> NapiValue {
+    let Some(info) = info.as_ref() else { return ptr::null_mut() };
+    let Some(roots) = (info.data as *const QuickJsAccessorRoots).as_ref() else {
+        return ptr::null_mut();
+    };
+    if roots.getter == 0 && roots.getter_native.is_null() { return ptr::null_mut(); }
+    let mut result = ptr::null_mut();
+    let status = if roots.getter_native.is_null() {
+        qjs_call_function(env, roots.getter, info.this_arg, &[], &mut result)
+    } else {
+        napi_call_function(env, info.this_arg, roots.getter_native,
+            0, ptr::null(), &mut result)
+    };
+    if status == NAPI_OK {
+        result
+    } else {
+        ptr::null_mut()
+    }
+}
+
+#[cfg(feature = "quickjs")]
+unsafe extern "C" fn quickjs_accessor_setter(
+    env: NapiEnv, info: NapiCallbackInfo,
+) -> NapiValue {
+    let Some(info) = info.as_ref() else { return ptr::null_mut() };
+    let Some(roots) = (info.data as *const QuickJsAccessorRoots).as_ref() else {
+        return ptr::null_mut();
+    };
+    if (roots.setter == 0 && roots.setter_native.is_null()) || info.args.len() != 1 {
+        return ptr::null_mut();
+    }
+    // A setter's returned value is discarded by property assignment. The
+    // QuickJS result handle is released rather than stored in Env's carrier
+    // cache, while the callback error still becomes the pending exception.
+    if roots.setter_native.is_null() {
+        qjs_call_function(env, roots.setter, info.this_arg, &info.args, ptr::null_mut());
+    } else {
+        napi_call_function(env, info.this_arg, roots.setter_native,
+            1, info.args.as_ptr(), ptr::null_mut());
+    }
+    ptr::null_mut()
+}
+
+// `roots` already owns independent retained QuickJS callback handles.
+// It owns them across every validation failure. Its final drop is deliberately
+// outside the Env mutation borrow, because releasing a handle may reenter JS.
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_install_native_accessor(
+    env: NapiEnv, object: NapiValue, key: PropertyKey,
+    mut roots: Arc<QuickJsAccessorRoots>,
+    getter_present: bool, setter_present: bool,
+    attributes: u32,
+) -> NapiStatus {
+    let previous = accessor_for_owner(env, object as usize, &key);
+    let old_attributes = property_attributes_for(env, object as usize, &key);
+    let _dispatch = ForeignCallbackGuard::new();
+    if !getter_present && !setter_present { return record_status(env, NAPI_INVALID_ARG); }
+    if !value_belongs_to_environment(env, object)
+        || qjs_handle(object).is_some()
+        || !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return record_status(env, NAPI_OBJECT_EXPECTED);
+    }
+    // A partial accessor descriptor preserves its existing opposite side.
+    // Transfer a fresh registry retain into the new Arc if that side was a
+    // QuickJS callback; a native callback keeps its original data pointer.
+    if !getter_present {
+        if let Some(native) = previous.as_ref().and_then(|old| old.js_owner.as_ref())
+            .map(|owner| owner.getter_native).filter(|native| !native.is_null()) {
+            Arc::get_mut(&mut roots).unwrap().getter_native = native;
+        }
+        if let Some(handle) = previous.as_ref().and_then(|old| old.js_owner.as_ref())
+            .map(|owner| owner.getter).filter(|handle| *handle != 0) {
+            if thaw_quickjs::thaw_js_retain_handle(handle) == 0 {
+                return record_status(env, NAPI_INVALID_ARG);
+            }
+            Arc::get_mut(&mut roots).unwrap().getter = handle;
+        }
+    }
+    if !setter_present {
+        if let Some(native) = previous.as_ref().and_then(|old| old.js_owner.as_ref())
+            .map(|owner| owner.setter_native).filter(|native| !native.is_null()) {
+            Arc::get_mut(&mut roots).unwrap().setter_native = native;
+        }
+        if let Some(handle) = previous.as_ref().and_then(|old| old.js_owner.as_ref())
+            .map(|owner| owner.setter).filter(|handle| *handle != 0) {
+            if thaw_quickjs::thaw_js_retain_handle(handle) == 0 {
+                return record_status(env, NAPI_INVALID_ARG);
+            }
+            Arc::get_mut(&mut roots).unwrap().setter = handle;
+        }
+    }
+    for handle in [roots.getter, roots.setter].into_iter().filter(|handle| *handle != 0) {
+        // The ordinary typeof query is a writable bootstrap global. Use the
+        // engine-level IsCallable slot so user code cannot bless a data value
+        // as a native accessor callback.
+        match qjs_query(handle, 14) {
+            Ok(kind) if kind == "1" => {},
+            Ok(_) => return record_status(env, NAPI_FUNCTION_EXPECTED),
+            Err(error) => return qjs_error_status(env, error),
+        }
+    }
+    if old_attributes & NAPI_CONFIGURABLE == 0 {
+        let matches_side = |present: bool, handle: u64, native: NapiValue,
+                            old_handle: u64, old_native: NapiValue,
+                            old_callback: Option<NapiCallback>| {
+            !present || (handle == old_handle && native == old_native
+                && (handle != 0 || !native.is_null()) == old_callback.is_some())
+        };
+        let Some(old) = previous.as_ref() else {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        };
+        let old_owner = old.js_owner.as_ref();
+        if attributes & (NAPI_ENUMERABLE | NAPI_CONFIGURABLE)
+                != old_attributes & (NAPI_ENUMERABLE | NAPI_CONFIGURABLE)
+            || !matches_side(getter_present, roots.getter, roots.getter_native,
+                old_owner.map_or(0, |owner| owner.getter),
+                old_owner.map_or(ptr::null_mut(), |owner| owner.getter_native), old.getter)
+            || !matches_side(setter_present, roots.setter, roots.setter_native,
+                old_owner.map_or(0, |owner| owner.setter),
+                old_owner.map_or(ptr::null_mut(), |owner| owner.setter_native), old.setter) {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        }
+    }
+    // The slot lookup can allocate for an indexed native view. Resolve both
+    // answers before taking the Env's exclusive mutation borrow.
+    let had_data = own_property_value(env, object, &key).is_some();
+    let beyond_readonly_length = array_index_exceeds_readonly_length(env, object, &key);
+    let old = {
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG; };
+        let identity = object as usize;
+        if owner.nonextensible_objects.contains(&identity)
+            && previous.is_none() && !had_data {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        }
+        if beyond_readonly_length {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        }
+        if had_data {
+            let status = remove_own_property(owner, object, &key);
+            if status != NAPI_OK { return record_status(env, status); }
+        }
+        extend_array_for_own_index(object, &key);
+        let descriptor = Accessor {
+            getter: if getter_present {
+                (roots.getter != 0 || !roots.getter_native.is_null())
+                    .then_some(quickjs_accessor_getter as NapiCallback)
+            } else { previous.as_ref().and_then(|old| old.getter) },
+            setter: if setter_present {
+                (roots.setter != 0 || !roots.setter_native.is_null())
+                    .then_some(quickjs_accessor_setter as NapiCallback)
+            } else { previous.as_ref().and_then(|old| old.setter) },
+            getter_data: if roots.getter != 0 || !roots.getter_native.is_null() {
+                Arc::as_ptr(&roots) as *mut c_void
+            } else { previous.as_ref().map(|old| old.getter_data).unwrap_or(ptr::null_mut()) },
+            setter_data: if roots.setter != 0 || !roots.setter_native.is_null() {
+                Arc::as_ptr(&roots) as *mut c_void
+            } else { previous.as_ref().map(|old| old.setter_data).unwrap_or(ptr::null_mut()) },
+            getter_reflection: if getter_present { None }
+                else { previous.as_ref().and_then(|old| old.getter_reflection) },
+            setter_reflection: if setter_present { None }
+                else { previous.as_ref().and_then(|old| old.setter_reflection) },
+            js_owner: Some(roots.clone()),
+        };
+        let old = owner.accessors.insert((identity, key.clone()), descriptor);
+        record_property_order(owner, identity, &key);
+        owner.property_attributes.insert((identity, key), attributes & (NAPI_ENUMERABLE | NAPI_CONFIGURABLE));
+        old
+    };
+    drop(old);
+    NAPI_OK
+}
+
+// Define a native data descriptor without invoking a replaced setter. The
+// old accessor owns callback handles, so release it only after the mutable
+// Env scope ends; a QuickJS finalizer may reenter this addon.
+unsafe fn qjs_install_native_data_property(
+    env: NapiEnv, object: NapiValue, key: PropertyKey,
+    value: NapiValue, value_present: bool, attributes: u32,
+) -> NapiStatus {
+    #[cfg(feature = "quickjs")]
+    let is_quickjs_object = qjs_handle(object).is_some();
+    #[cfg(not(feature = "quickjs"))]
+    let is_quickjs_object = false;
+    if !value_belongs_to_environment(env, object)
+        || (value_present && !value_belongs_to_environment(env, value))
+        || is_quickjs_object
+        || !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return record_status(env, NAPI_OBJECT_EXPECTED);
+    }
+    let value = if value_present { value } else {
+        match own_property_value(env, object, &key) {
+            Some(value) => value,
+            None => match env_mut(env) {
+                Ok(owner) => owner.alloc(Value::Undefined),
+                Err(status) => return record_status(env, status),
+            },
+        }
+    };
+    let old_value = own_property_value(env, object, &key);
+    let old_accessor = accessor_for_owner(env, object as usize, &key);
+    let old_attributes = property_attributes_for(env, object as usize, &key);
+    let same_value = if let Some(previous) = old_value {
+        match (value_ref(previous), value_ref(value)) {
+            (Ok(Value::Number(left)), Ok(Value::Number(right))) =>
+                left.to_bits() == right.to_bits() || (left.is_nan() && right.is_nan()),
+            _ => {
+                let mut equal = false;
+                let status = napi_strict_equals(env, previous, value, &mut equal);
+                if status != NAPI_OK { return record_status(env, status); }
+                equal
+            }
+        }
+    } else { false };
+    let nonconfigurable = old_value.is_some() || old_accessor.is_some();
+    let nonconfigurable = nonconfigurable && old_attributes & NAPI_CONFIGURABLE == 0;
+    if nonconfigurable {
+        // JS permits a writable nonconfigurable data property to change its
+        // value or become readonly. Its enumerable/configurable flags cannot
+        // change, and an accessor cannot become data at this point.
+        if old_accessor.is_some()
+            || (attributes ^ old_attributes) & (NAPI_ENUMERABLE | NAPI_CONFIGURABLE) != 0
+            || (old_attributes & NAPI_WRITABLE == 0 && attributes & NAPI_WRITABLE != 0) {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        }
+        if old_attributes & NAPI_WRITABLE == 0 && value_present && !same_value {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        }
+    }
+    let array_length = is_array_length_property(object, &key);
+    if array_length && value_present && !same_value
+        && env.as_ref().is_some_and(|owner| owner.frozen_objects.contains(&(object as usize))) {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    }
+    let length_status = if array_length && !(old_attributes & NAPI_WRITABLE == 0 && !value_present) {
+        set_array_length(env, object, value,
+            attributes & NAPI_WRITABLE == 0)
+    } else { NAPI_OK };
+    if length_status != NAPI_OK {
+        return record_status(env, length_status);
+    }
+    if array_length {
+        // ArraySetLength already published the intrinsic descriptor state
+        // before releasing removed accessor roots. A release callback may
+        // redefine or freeze the Array; writing the pre-call `attributes`
+        // below would revive a stale writable bit after that reentry.
+        return NAPI_OK;
+    }
+    let (status, old) = {
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG; };
+        let identity = object as usize;
+        if (!array_length && owner.nonextensible_objects.contains(&identity)
+                && old_value.is_none() && old_accessor.is_none())
+            || (!array_length && owner.frozen_objects.contains(&identity)
+                && value_present && !same_value) {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        }
+        // Omitting a value preserves an existing data slot, but converting a
+        // configurable accessor to data must still install an own Undefined
+        // slot. Accessors have no writable bit, so the old shortcut would
+        // remove the accessor without creating its replacement.
+        let status = if array_length || (old_accessor.is_none()
+            && old_attributes & NAPI_WRITABLE == 0
+            && (!value_present || same_value)) {
+            NAPI_OK
+        } else { set_own_property(owner, object, &key, value) };
+        if status != NAPI_OK { return record_status(env, status); }
+        let old = owner.accessors.remove(&(identity, key.clone()));
+        record_property_order(owner, identity, &key);
+        owner.property_attributes.insert((identity, key),
+            attributes & NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
+        (status, old)
+    };
+    drop(old);
+    record_status(env, status)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_construct_function(
+    env: NapiEnv, handle: u64, args: &[NapiValue], out: *mut NapiValue,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let arguments = {
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+        owner.alloc(Value::Array(args.iter().copied().map(Some).collect()))
+    };
+    let guard = CallbackGraphArguments { env, value: arguments };
+    let encoded = napi_result_graph_for_env(env, arguments, true);
+    drop(guard);
+    let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
+    let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
+    let result = thaw_quickjs::thaw_js_construct_handle_graph_args_result(handle, encoded.as_ptr());
+    qjs_adopt_handle_result(env, result, out)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_get_prototype(
+    env: NapiEnv, handle: u64, out: *mut NapiValue,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_get_prototype_handle_result(handle);
+    if result.error.is_null() && result.value != 0 {
+        match qjs_query(result.value, 7) {
+            Ok(kind) if kind == "1" => {
+                thaw_quickjs::thaw_js_release_handle(result.value);
+                let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+                let null = owner.alloc(Value::Null);
+                return write_value(out, null);
+            }
+            Ok(_) => {},
+            Err(error) => {
+                thaw_quickjs::thaw_js_release_handle(result.value);
+                return qjs_error_status(env, error);
+            }
+        }
+    }
+    qjs_adopt_handle_result(env, result, out)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_property_names(
+    env: NapiEnv, handle: u64, key_mode: i32, key_filter: u32,
+    key_conversion: i32, out: *mut NapiValue,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_host_property_names_result(
+        handle, key_mode, key_filter, key_conversion);
+    let text = match qjs_take_result_text(result) {
+        Ok(text) => text,
+        Err(error) => return qjs_error_status(env, error),
+    };
+    let value = match parse_napi_graph_value(env, &text) {
+        Ok(value) => value,
+        Err(error) => return qjs_error_status(env, error),
+    };
+    if !matches!(value_ref(value), Ok(Value::Array(_))) {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    }
+    write_value(out, value)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_set_prototype(env: NapiEnv, handle: u64, prototype: NapiValue) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let arguments = {
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+        owner.alloc(Value::Array(vec![Some(prototype)]))
+    };
+    let guard = CallbackGraphArguments { env, value: arguments };
+    let encoded = napi_result_graph_for_env(env, arguments, true);
+    drop(guard);
+    let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
+    let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
+    let result = thaw_quickjs::thaw_js_set_prototype_graph_result(handle, encoded.as_ptr());
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    if result.value == 0 { return record_status(env, NAPI_GENERIC_FAILURE); }
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_instanceof(env: NapiEnv, object: NapiValue, constructor: NapiValue, out: *mut bool) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let arguments = {
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+        owner.alloc(Value::Array(vec![Some(object), Some(constructor)]))
+    };
+    let guard = CallbackGraphArguments { env, value: arguments };
+    let encoded = napi_result_graph_for_env(env, arguments, true);
+    drop(guard);
+    let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
+    let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
+    let result = thaw_quickjs::thaw_js_instanceof_graph_result(encoded.as_ptr());
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    *out = result.value != 0;
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_instanceof_handles(
+    env: NapiEnv, object: u64, constructor: u64, out: *mut bool,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_instanceof_handles_result(object, constructor);
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    *out = result.value != 0;
+    NAPI_OK
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_strict_equals_scalar(
+    env: NapiEnv, handle: u64, scalar: NapiValue, out: *mut bool,
+) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let (kind, number, text) = match value_ref(scalar) {
+        Ok(Value::Undefined) => (0, 0.0, String::new()),
+        Ok(Value::Null) => (1, 0.0, String::new()),
+        Ok(Value::Bool(value)) => (2, f64::from(u8::from(*value)), String::new()),
+        Ok(Value::Number(value)) => (3, *value, String::new()),
+        Ok(Value::String(value)) => {
+            let units = env.as_ref().and_then(|owner| owner.utf16_strings.get(&(scalar as usize)));
+            let encoded = match units {
+                Some(units) => serde_json::to_string(units),
+                None => serde_json::to_string(value),
+            };
+            let encoded = match encoded {
+                Ok(text) => text, Err(_) => return record_status(env, NAPI_GENERIC_FAILURE),
+            };
+            (if units.is_some() { 6 } else { 4 }, 0.0, encoded)
+        },
+        Ok(Value::BigInt { negative, words }) => (5, 0.0, bigint_to_decimal(*negative, words)),
+        _ => return record_status(env, NAPI_INVALID_ARG),
+    };
+    let Ok(text) = CString::new(text) else { return record_status(env, NAPI_INVALID_ARG) };
+    let result = thaw_quickjs::thaw_js_strict_equal_handle_scalar_result(
+        handle, kind, number, text.as_ptr());
+    if !result.error.is_null() {
+        let error = thaw_arena::NativeStr::from_ptr(result.error).to_string_lossy().into_owned();
+        thaw_arena::destroy_string(result.error);
+        return qjs_error_status(env, error);
+    }
+    *out = result.value != 0;
+    NAPI_OK
 }
 
 unsafe fn parse_napi_arguments(
@@ -1640,6 +3515,7 @@ fn quickjs_child_path(path: &[JsonValue], segment: JsonValue) -> Vec<JsonValue> 
 struct OwnKeySnapshot {
     env: NapiEnv,
     items: Vec<(String, NapiValue)>,
+    graph_keys: Vec<NapiValue>,
     allocated: Vec<NapiValue>,
 }
 
@@ -1648,6 +3524,7 @@ impl Drop for OwnKeySnapshot {
         let Ok(env) = (unsafe { env_mut(self.env) }) else { return };
         for value in self.allocated.drain(..) {
             if let Some(index) = env.values.iter().position(|item| *item == value) {
+                env.utf16_strings.remove(&(value as usize));
                 env.values.swap_remove(index);
                 unsafe { drop(Box::from_raw(value)); }
             }
@@ -1657,10 +3534,25 @@ impl Drop for OwnKeySnapshot {
 
 // Copy the own string key set before any accessor can reenter the bridge.
 unsafe fn snapshot_own_string_keys(env: NapiEnv, object: NapiValue) -> Result<OwnKeySnapshot, String> {
-    let mut snapshot = OwnKeySnapshot { env, items: Vec::new(), allocated: Vec::new() };
+    snapshot_own_keys(env, object, false)
+}
+
+// The graph codec preserves all own keys in N-API's enumeration order. The
+// older plain JSON snapshot intentionally requests only string keys.
+unsafe fn snapshot_own_graph_keys(env: NapiEnv, object: NapiValue) -> Result<OwnKeySnapshot, String> {
+    snapshot_own_keys(env, object, true)
+}
+
+unsafe fn snapshot_own_keys(
+    env: NapiEnv, object: NapiValue, include_symbols: bool,
+) -> Result<OwnKeySnapshot, String> {
+    let mut snapshot = OwnKeySnapshot {
+        env, items: Vec::new(), graph_keys: Vec::new(), allocated: Vec::new(),
+    };
     let mut names = ptr::null_mut();
     let status = napi_get_all_property_names(env, object, NAPI_KEY_OWN_ONLY,
-        NAPI_KEY_ALL_PROPERTIES | NAPI_KEY_SKIP_SYMBOLS, NAPI_KEY_NUMBERS_TO_STRINGS, &mut names);
+        NAPI_KEY_ALL_PROPERTIES | (if include_symbols { 0 } else { NAPI_KEY_SKIP_SYMBOLS }),
+        NAPI_KEY_NUMBERS_TO_STRINGS, &mut names);
     if !names.is_null() {
         snapshot.allocated.push(names);
         let Value::Array(keys) = value_ref(names).map_err(|_| "invalid native property names")? else {
@@ -1669,11 +3561,15 @@ unsafe fn snapshot_own_string_keys(env: NapiEnv, object: NapiValue) -> Result<Ow
         let keys = keys.clone();
         for key in keys {
             let key = key.ok_or("invalid native property name")?;
-            snapshot.allocated.push(key);
-            let Value::String(name) = value_ref(key).map_err(|_| "invalid native property name")? else {
-                return Err("native property name was not a string".into());
-            };
-            snapshot.items.push((name.clone(), key));
+            snapshot.graph_keys.push(key);
+            match value_ref(key).map_err(|_| "invalid native property name")? {
+                Value::String(name) => {
+                    snapshot.allocated.push(key);
+                    snapshot.items.push((name.clone(), key));
+                }
+                Value::Symbol { .. } | Value::QuickJsHandle { .. } if include_symbols => {},
+                _ => return Err("native property name was not a string or Symbol".into()),
+            }
         }
     }
     take_env_exception(env)?;
@@ -1837,20 +3733,14 @@ unsafe fn quickjs_reference_json(
 unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, String> {
     let _dispatch = ForeignCallbackGuard::new();
     let marker = |value| Ok(QuickJsWireValue { value, origins: Vec::new() });
-    let live_owner = HOST.with(|host| {
-        let host = host.borrow();
-        host.module_envs.iter().chain(host.pending_call_envs.iter())
-            .any(|env| !env.finalized && env.values.contains(&value))
-    });
-    if !live_owner {
-        return Err("native addon result belongs to an unknown environment".into());
-    }
+    let symbol_owner = owner_env_for_value(value)?;
     match value_ref(value) {
         Ok(Value::Promise(_)) => return marker(serde_json::json!({ "__thaw_napi_promise__": (value as u64).to_string() })),
         Ok(Value::Symbol { id, description }) => {
             let global = GLOBAL_SYMBOLS.get().is_some_and(|symbols| {
                 symbols.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .get(description) == Some(id)
+                    .get(&symbol_owner.as_ref().and_then(|owner| owner.utf16_symbols.get(&(value as usize)))
+                        .cloned().unwrap_or_else(|| description.encode_utf16().collect())) == Some(id)
             });
             return marker(serde_json::json!({ "__thaw_napi_symbol__": id.to_string(), "description": description, "global": global }));
         }
@@ -1923,7 +3813,7 @@ unsafe fn json_from_value_with_undefined_for_env_mode_inner(
             let Value::Object(fields) = value_ref(value).map_err(|_| "invalid napi_value")? else { unreachable!() };
             let fields = fields.iter().filter_map(|(key, child)| match key {
                 PropertyKey::String(name) => Some((name.clone(), *child)),
-                PropertyKey::Symbol(_) => None,
+                PropertyKey::Symbol(_) | PropertyKey::Utf16(_) => None,
             }).collect::<Vec<_>>();
             let mut out = serde_json::Map::new();
             for (key, child) in fields {
@@ -2017,6 +3907,7 @@ unsafe fn json_from_value_with_undefined_for_env_mode_inner(
             return Err("cannot JSON-encode an ArrayBuffer view".into());
         }
         Value::Function(_) => return Err("cannot JSON-encode a function".into()),
+        Value::QuickJsHandle { .. } => return Err("live JavaScript value requires graph transport".into()),
         Value::External(_) => return Err("cannot JSON-encode an external value".into()),
         Value::BigInt { .. } => return Err("cannot JSON-encode a BigInt".into()),
         Value::Promise(state) => {
@@ -2072,13 +3963,45 @@ impl NapiResultGraph {
                 else { serde_json::json!({"v": null}) }),
             Value::Null => Ok(serde_json::json!({"v": null})),
             Value::Bool(value) => Ok(serde_json::json!({"v": value})),
-            Value::String(value) | Value::Error(value) => Ok(serde_json::json!({"v": value})),
+            Value::String(text) => {
+                let units = snapshot_owner_env(self.env, value)?.as_ref()
+                    .and_then(|owner| owner.utf16_strings.get(&(value as usize))).cloned();
+                Ok(match units {
+                    Some(units) => serde_json::json!({"su": units}),
+                    None => serde_json::json!({"v": text}),
+                })
+            },
+            Value::Error(value) => Ok(serde_json::json!({"v": value})),
             Value::Number(number) if !number.is_finite() => Ok(serde_json::json!({
                 "nf": if number.is_nan() { "NaN" } else if *number > 0.0 { "Infinity" } else { "-Infinity" }
             })),
             Value::Number(number) => Ok(serde_json::json!({"v": number})),
-            Value::Function(_) => Err("cannot JSON-encode a function".into()),
-            Value::Symbol { .. } => Err("cannot JSON-encode a Symbol".into()),
+            Value::QuickJsHandle { .. } => {
+                let identity = value as usize;
+                let index = if let Some(index) = self.ids.get(&identity) { *index } else {
+                    let index = self.pending.len();
+                    self.ids.insert(identity, index);
+                    self.pending.push(value);
+                    index
+                };
+                Ok(serde_json::json!({"r": index}))
+            },
+            Value::Function(_) => {
+                let identity = value as usize;
+                let index = if let Some(index) = self.ids.get(&identity) { *index } else {
+                    let index = self.pending.len();
+                    self.ids.insert(identity, index);
+                    self.pending.push(value);
+                    index
+                };
+                Ok(serde_json::json!({"r": index}))
+            },
+            Value::Symbol { .. } => {
+                let reference = retain_napi_graph_handle(value as u64);
+                if reference == 0 { return Err("cannot retain native Symbol graph value".into()); }
+                self.leases.napi.push(reference);
+                Ok(serde_json::json!({"nsy": (value as u64).to_string()}))
+            },
             Value::BigInt { negative, words } => Ok(serde_json::json!({
                 "bi": bigint_to_decimal(*negative, words)
             })),
@@ -2106,24 +4029,69 @@ impl NapiResultGraph {
                 .or_else(|| self.wrapper_kinds.get(&(value as usize)).copied());
             let array = matches!(value_ref(value), Ok(Value::Array(_)));
             let array = if array { Some(snapshot_array_keys(owner_env, value)?) } else { None };
-            let node = if let Some((_array_keys, values)) = array {
+            let node = if let Ok(Value::QuickJsHandle { handle, .. }) = value_ref(value) {
+                #[cfg(not(feature = "quickjs"))]
+                return Err("JavaScript graph handles require QuickJS".into());
+                #[cfg(feature = "quickjs")]
+                if thaw_quickjs::thaw_js_retain_handle(*handle) == 0 {
+                    return Err("released JavaScript graph handle".into());
+                }
+                #[cfg(feature = "quickjs")]
+                self.leases.host.push(*handle);
+                serde_json::json!({"hdl": handle})
+            } else if matches!(value_ref(value), Ok(Value::Function(_))) {
+                let reference = retain_napi_graph_handle(value as u64);
+                if reference == 0 { return Err("cannot retain native Function graph value".into()); }
+                self.leases.napi.push(reference);
+                serde_json::json!({"nfn": (value as u64).to_string()})
+            } else if let Some((_array_keys, values)) = array {
+                if owner_env.as_ref().is_some_and(|owner|
+                    owner.live_constructor_returns.contains(&(value as usize))
+                    || owner.accessors.keys().any(|(object, _)| *object == value as usize)) {
+                    let reference = retain_napi_graph_handle(value as u64);
+                    if reference == 0 {
+                        return Err("cannot retain live native addon graph array".into());
+                    }
+                    self.leases.napi.push(reference);
+                    self.nodes.push(serde_json::json!({"nh": (value as u64).to_string()}));
+                    continue;
+                }
                 let mut items = Vec::with_capacity(values.len());
                 for (index, key) in values.into_iter().enumerate() {
                     items.push(match key {
                         Some(key) => {
                             let child = snapshot_property(owner_env, value, &index.to_string(), key)?;
-                            if matches!(value_ref(child), Ok(Value::Function(_) | Value::Symbol { .. })) {
-                                serde_json::json!({"v": null})
-                            } else { self.token(child)? }
+                            self.token(child)?
                         }
                         None => serde_json::json!({"h": 1}),
                     });
                 }
-                serde_json::json!({"a": items})
+                let keys = snapshot_own_graph_keys(owner_env, value)?;
+                let mut properties = Vec::with_capacity(keys.graph_keys.len());
+                for key_value in keys.graph_keys.iter().copied() {
+                    let native_key = property_key(owner_env, key_value)
+                        .map_err(|status| format!("invalid native array graph key: status {status}"))?;
+                    let wire_key = match value_ref(key_value).map_err(|_| "invalid native array graph key")? {
+                        Value::String(key) => owner_env.as_ref()
+                            .and_then(|owner| owner.utf16_strings.get(&(key_value as usize)))
+                            .map(|units| serde_json::json!({"su": units}))
+                            .unwrap_or_else(|| serde_json::json!(key)),
+                        Value::Symbol { .. } | Value::QuickJsHandle { .. } => self.token(key_value)?,
+                        _ => return Err("invalid native array graph key type".into()),
+                    };
+                    let child = snapshot_property(owner_env, value, "array graph key", key_value)?;
+                    let attributes = property_attributes_for(owner_env, value as usize, &native_key);
+                    properties.push(serde_json::json!([wire_key, self.token(child)?, attributes]));
+                }
+                serde_json::json!({"a": items, "p": properties})
             } else if matches!(value_ref(value), Ok(Value::Object(_))) {
-                if is_native_instance(value as usize) {
+                let has_accessor = owner_env.as_ref().is_some_and(|owner|
+                    owner.accessors.keys().any(|(object, _)| *object == value as usize));
+                let explicit_live = owner_env.as_ref().is_some_and(|owner|
+                    owner.live_constructor_returns.contains(&(value as usize)));
+                if is_native_instance(value as usize) || has_accessor || explicit_live {
                     let reference = retain_napi_graph_handle(value as u64);
-                    if reference == 0 { return Err("cannot retain native addon graph instance".into()); }
+                    if reference == 0 { return Err("cannot retain live native addon graph object".into()); }
                     self.leases.napi.push(reference);
                     serde_json::json!({"nh": (value as u64).to_string()})
                 } else if matches!(wrapper_kind, Some(NapiGraphWrapperKind::Map | NapiGraphWrapperKind::Set)) {
@@ -2163,13 +4131,22 @@ impl NapiResultGraph {
                     }
                     serde_json::json!({"re": encoded})
                 } else {
-                    let keys = snapshot_own_string_keys(owner_env, value)?;
+                    let keys = snapshot_own_graph_keys(owner_env, value)?;
                     let mut entries = Vec::new();
-                    for (key, key_value) in keys.items.iter().cloned() {
-                        let child = snapshot_property(owner_env, value, &key, key_value)?;
-                        if !matches!(value_ref(child), Ok(Value::Function(_) | Value::Symbol { .. })) {
-                            entries.push(serde_json::json!([key, self.token(child)?]));
-                        }
+                    for key_value in keys.graph_keys.iter().copied() {
+                        let native_key = property_key(owner_env, key_value)
+                            .map_err(|status| format!("invalid native graph property key: status {status}"))?;
+                        let wire_key = match value_ref(key_value).map_err(|_| "invalid native graph key")? {
+                            Value::String(key) => owner_env.as_ref()
+                                .and_then(|owner| owner.utf16_strings.get(&(key_value as usize)))
+                                .map(|units| serde_json::json!({"su": units}))
+                                .unwrap_or_else(|| serde_json::json!(key)),
+                            Value::Symbol { .. } | Value::QuickJsHandle { .. } => self.token(key_value)?,
+                            _ => return Err("invalid native graph key type".into()),
+                        };
+                        let child = snapshot_property(owner_env, value, "graph key", key_value)?;
+                        let attributes = property_attributes_for(owner_env, value as usize, &native_key);
+                        entries.push(serde_json::json!([wire_key, self.token(child)?, attributes]));
                     }
                     serde_json::json!({"o": entries})
                 }
@@ -2194,10 +4171,12 @@ impl NapiResultGraph {
             self.nodes.push(node);
         }
         let wire = serde_json::to_string(&serde_json::json!({
-            "root": root, "nodes": self.nodes, "leases": [],
+            "root": root, "nodes": self.nodes,
+            "leases": &self.leases.host,
             "napiLeases": self.leases.napi.iter().map(u64::to_string).collect::<Vec<_>>(),
         })).map_err(|error| error.to_string())?;
         // The wire, not this temporary encoder, now owns these references.
+        self.leases.host.clear();
         self.leases.napi.clear();
         Ok(wire)
     }
@@ -2649,7 +4628,7 @@ unsafe fn call_export_with_functions(
                         callback: thaw_compiled_callback,
                         data: Arc::as_ptr(&bridge) as *mut c_void,
                         properties: HashMap::new(),
-                        _thaw_bridge: Some(bridge),
+                        _thaw_bridge: Some(bridge), _accessor_owner: None,
                     }));
                 HOST.with(|host| {
                     host.borrow_mut()
@@ -2799,6 +4778,24 @@ unsafe fn take_env_exception(env: NapiEnv) -> Result<(), String> {
     else {
         return Ok(());
     };
+    Err(describe_env_exception(env, exception)?)
+}
+
+// Graph bridge callers can return a thrown QuickJS value itself, retaining
+// its lease until the receiving realm decodes it. Native-only exceptions keep
+// the established tagged-text fallback.
+unsafe fn take_env_exception_graph(env: NapiEnv) -> Result<Option<JsonValue>, String> {
+    let Some(exception) = env_mut(env)
+        .map_err(|_| "invalid native addon environment")?
+        .exception.take()
+    else { return Ok(None); };
+    #[cfg(feature = "quickjs")]
+    if matches!(value_ref(exception), Ok(Value::QuickJsHandle { .. })) {
+        return match napi_result_graph_for_env(env, exception, true) {
+            Ok(wire) => Ok(Some(serde_json::json!({ "__thaw_exception_graph__": wire }))),
+            Err(_) => Err(describe_env_exception(env, exception)?),
+        };
+    }
     Err(describe_env_exception(env, exception)?)
 }
 
@@ -3323,7 +5320,7 @@ unsafe fn call_with_callback_impl(
                     callback: thaw_compiled_callback,
                     data: bridge_data,
                     properties: HashMap::new(),
-                    _thaw_bridge: Some(bridge),
+                    _thaw_bridge: Some(bridge), _accessor_owner: None,
                 }));
             created_callback = Some(value);
             value
@@ -3452,7 +5449,7 @@ unsafe fn call_method_with_callback_impl(
                 callback: thaw_compiled_callback,
                 data: bridge_data,
                 properties: HashMap::new(),
-                _thaw_bridge: Some(bridge),
+                _thaw_bridge: Some(bridge), _accessor_owner: None,
             }));
             HOST.with(|host| {
                 host.borrow_mut()
@@ -3730,6 +5727,126 @@ mod native_graph_pin_tests {
         retire_owned_envs();
         assert!(unsafe { (*env_ptr).finalized });
         FINALIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
+        drop(env);
+    }
+}
+
+#[cfg(all(test, feature = "quickjs"))]
+mod typed_native_graph_value_tests {
+    use super::*;
+
+    unsafe extern "C" fn echo_native(_: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
+        ptr::null_mut()
+    }
+
+    #[test]
+    fn function_and_surrogate_symbol_have_distinct_graph_tokens_and_owned_pins() {
+        let mut env = Box::new(Env::new());
+        env.graph_owner_id = next_graph_owner_id().unwrap();
+        let function = env.alloc(Value::Function(Function {
+            callback: echo_native, data: ptr::null_mut(), properties: HashMap::new(),
+            _thaw_bridge: None, _accessor_owner: None,
+        }));
+        let symbol = env.alloc(Value::Symbol {
+            id: NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed),
+            description: String::from_utf16_lossy(&[0xD800]),
+        });
+        env.utf16_symbols.insert(symbol as usize, vec![0xD800]);
+        let env_ptr = &mut *env as NapiEnv;
+        HOST.with(|host| host.borrow_mut().module_envs.push(env));
+
+        let function_wire = unsafe { napi_result_graph_for_env(env_ptr, function, true) }.unwrap();
+        let symbol_wire = unsafe { napi_result_graph_for_env(env_ptr, symbol, true) }.unwrap();
+        let function_json: JsonValue = serde_json::from_str(&function_wire).unwrap();
+        let symbol_json: JsonValue = serde_json::from_str(&symbol_wire).unwrap();
+        assert_eq!(function_json["nodes"][0]["nfn"], (function as u64).to_string());
+        assert_eq!(symbol_json["root"]["nsy"], (symbol as u64).to_string());
+        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 2);
+        assert_eq!(unsafe { NapiGraphInput::parse(&function_wire).decode(env_ptr) }.unwrap(), function);
+        assert_eq!(unsafe { NapiGraphInput::parse(&symbol_wire).decode(env_ptr) }.unwrap(), symbol);
+        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
+        assert_eq!(unsafe { (*env_ptr).utf16_symbols.get(&(symbol as usize)) }, Some(&vec![0xD800]));
+
+        let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
+        drop(env);
+    }
+
+    #[test]
+    fn native_graph_preserves_symbol_key_order_flags_and_nested_value() {
+        let mut env = Box::new(Env::new());
+        env.graph_owner_id = next_graph_owner_id().unwrap();
+        let symbol_id = NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed);
+        let symbol = env.alloc(Value::Symbol { id: symbol_id, description: "key".into() });
+        env.symbols.insert(symbol_id, symbol);
+        let nested = env.alloc(Value::Object(HashMap::new()));
+        let mut fields = HashMap::new();
+        fields.insert(PropertyKey::Symbol(symbol_id), nested);
+        let object = env.alloc(Value::Object(fields));
+        env.property_order.insert(object as usize, vec![PropertyKey::Symbol(symbol_id)]);
+        env.property_attributes.insert(
+            (object as usize, PropertyKey::Symbol(symbol_id)), NAPI_WRITABLE,
+        );
+        let env_ptr = &mut *env as NapiEnv;
+        HOST.with(|host| host.borrow_mut().module_envs.push(env));
+
+        let wire = unsafe { napi_result_graph_for_env(env_ptr, object, true) }.unwrap();
+        let graph: JsonValue = serde_json::from_str(&wire).unwrap();
+        assert_eq!(graph["nodes"][0]["o"][0][0]["nsy"], (symbol as u64).to_string());
+        assert_eq!(graph["nodes"][0]["o"][0][2], NAPI_WRITABLE);
+        let decoded = unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap();
+        let Value::Object(decoded_fields) = unsafe { value_ref(decoded) }.unwrap() else {
+            panic!("native graph result is not an object");
+        };
+        let child = decoded_fields.get(&PropertyKey::Symbol(symbol_id)).copied().unwrap();
+        assert!(matches!(unsafe { value_ref(child) }, Ok(Value::Object(fields)) if fields.is_empty()));
+        assert_eq!(unsafe { (*env_ptr).property_order.get(&(decoded as usize)) },
+            Some(&vec![PropertyKey::Symbol(symbol_id)]));
+        assert_eq!(unsafe { (*env_ptr).property_attributes.get(
+            &(decoded as usize, PropertyKey::Symbol(symbol_id))) }, Some(&NAPI_WRITABLE));
+        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
+
+        let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
+        drop(env);
+    }
+
+    #[test]
+    fn native_graph_array_retains_symbol_extra_property_and_index_attributes() {
+        let mut env = Box::new(Env::new());
+        env.graph_owner_id = next_graph_owner_id().unwrap();
+        let symbol_id = NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed);
+        let symbol = env.alloc(Value::Symbol { id: symbol_id, description: "extra".into() });
+        env.symbols.insert(symbol_id, symbol);
+        let indexed = env.alloc(Value::Number(7.0));
+        let extra = env.alloc(Value::Object(HashMap::new()));
+        let array = env.alloc(Value::Array(vec![Some(indexed), None]));
+        env.host_properties.insert(array as usize,
+            HashMap::from([(PropertyKey::Symbol(symbol_id), extra)]));
+        env.property_order.insert(array as usize,
+            vec![PropertyKey::Symbol(symbol_id)]);
+        env.property_attributes.insert((array as usize, PropertyKey::String("0".into())),
+            NAPI_ENUMERABLE);
+        env.property_attributes.insert((array as usize, PropertyKey::Symbol(symbol_id)),
+            NAPI_WRITABLE);
+        let env_ptr = &mut *env as NapiEnv;
+        HOST.with(|host| host.borrow_mut().module_envs.push(env));
+
+        let wire = unsafe { napi_result_graph_for_env(env_ptr, array, true) }.unwrap();
+        let graph: JsonValue = serde_json::from_str(&wire).unwrap();
+        let props = graph["nodes"][0]["p"].as_array().unwrap();
+        assert!(props.iter().any(|part| part[0]["nsy"] == (symbol as u64).to_string()
+            && part[2] == NAPI_WRITABLE));
+        assert!(props.iter().any(|part| part[0] == "0" && part[2] == NAPI_ENUMERABLE));
+        let decoded = unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap();
+        assert!(matches!(unsafe { value_ref(decoded) }, Ok(Value::Array(values))
+            if values.len() == 2 && values[0].is_some() && values[1].is_none()));
+        assert_eq!(unsafe { (*env_ptr).host_properties.get(&(decoded as usize))
+            .and_then(|properties| properties.get(&PropertyKey::Symbol(symbol_id))) },
+            Some(&extra));
+        assert_eq!(unsafe { (*env_ptr).property_attributes.get(
+            &(decoded as usize, PropertyKey::String("0".into()))) }, Some(&NAPI_ENUMERABLE));
+        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
+
         let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
         drop(env);
     }
