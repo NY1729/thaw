@@ -44,7 +44,7 @@ pub extern "C" fn thaw_js_new_function(args_json: *const c_char) -> ThawHandleRe
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -448,7 +448,7 @@ pub extern "C" fn thaw_js_call_result(
         },
         Err(reason) => ThawResult {
             value: std::ptr::null(),
-            error: CString::new(reason).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(reason),
         },
     }
 }
@@ -1378,7 +1378,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_result(
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1409,7 +1409,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_handle_result(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1465,7 +1465,7 @@ pub extern "C" fn thaw_js_construct_handle_result(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1756,7 +1756,7 @@ pub extern "C" fn thaw_js_register_native_callback(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1786,7 +1786,7 @@ pub extern "C" fn thaw_js_call_handle_handle_result(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1811,7 +1811,7 @@ pub extern "C" fn thaw_js_call_handle_value_result(handle: u64, argument: u64) -
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1915,7 +1915,7 @@ pub extern "C" fn thaw_js_get_property_result(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1942,7 +1942,7 @@ pub extern "C" fn thaw_js_retain_json_result(value_json: *const c_char) -> ThawH
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -1976,7 +1976,7 @@ pub extern "C" fn thaw_js_set_property_result(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -2031,7 +2031,7 @@ pub extern "C" fn thaw_js_set_property_json_result(
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -2089,7 +2089,7 @@ fn dynamic_property_predicate(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -2169,7 +2169,7 @@ pub extern "C" fn thaw_js_call_method_result(
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -2221,7 +2221,7 @@ pub extern "C" fn thaw_js_call_method_handle_result(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -2239,7 +2239,7 @@ pub extern "C" fn thaw_js_resolve_handle_result(handle: u64) -> ThawResult {
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -2263,7 +2263,7 @@ pub extern "C" fn thaw_js_resolve_handle_handle_result(handle: u64) -> ThawHandl
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: CString::new(error).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(error),
         },
     }
 }
@@ -2292,7 +2292,7 @@ pub extern "C" fn thaw_js_call_handle_result(handle: u64, args_json: *const c_ch
         },
         Err(reason) => ThawResult {
             value: std::ptr::null(),
-            error: CString::new(reason).unwrap_or_default().into_raw(),
+            error: thaw_arena::owned_string(reason),
         },
     }
 }

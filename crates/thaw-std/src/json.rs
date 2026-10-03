@@ -1146,7 +1146,9 @@ pub unsafe extern "C" fn thaw_json_destroy(value: *mut Value) {
 
 /// # Safety
 ///
-/// `value` must be null or an owned pointer returned by `CString::into_raw`.
+/// `value` must be null or an owned pointer returned by `CString::into_raw`
+/// or `thaw_arena::owned_string`. Use `NativeStr` to read embedded NUL bytes
+/// before destroying the pointer.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_cstring_destroy(value: *mut c_char) {
     if !value.is_null() {
