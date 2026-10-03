@@ -959,6 +959,7 @@ fn constructor_class(
             is_override: false,
         }));
     }
+    let mut declared_static_fields = std::collections::HashSet::new();
     for (name, right) in &statics {
         if let Some(mut function) = resolve_function(right) {
             make_params_default_undefined(&mut function.params);
@@ -973,22 +974,41 @@ fn constructor_class(
                 is_optional: false,
                 is_override: false,
             }));
-        } else {
+        } else if declared_static_fields.insert(name.clone()) {
+            // Keep each assignment at its original module position.  The
+            // declaration only reserves storage; it must not evaluate RHS.
+            let values: Vec<&Expr> = statics.iter()
+                .filter(|(member, value)| member == name && resolve_function(value).is_none())
+                .map(|(_, value)| *value)
+                .collect();
+            let inferred: Vec<TsType> = values.iter()
+                .map(|value| inferred_field_type(value, &param_types).unwrap_or_else(ts_any_type))
+                .collect();
+            let same_keyword = |kind: TsKeywordTypeKind| inferred.iter().all(|ty|
+                matches!(ty, TsType::TsKeywordType(keyword) if keyword.kind == kind));
+            let ty = if inferred.len() == 1
+                || same_keyword(TsKeywordTypeKind::TsNumberKeyword)
+                || same_keyword(TsKeywordTypeKind::TsStringKeyword)
+                || same_keyword(TsKeywordTypeKind::TsBooleanKeyword) {
+                inferred.into_iter().next().unwrap()
+            } else {
+                // Distinct inferred value kinds need one shared writable
+                // slot, rather than duplicate class members.
+                ts_any_type()
+            };
             body.push(ClassMember::ClassProp(ClassProp {
                 span: swc_common::DUMMY_SP,
                 key: property(name),
-                value: Some(Box::new((**right).clone())),
+                value: None,
                 type_ann: Some(Box::new(TsTypeAnn {
                     span: swc_common::DUMMY_SP,
-                    type_ann: Box::new(
-                        inferred_field_type(right, &param_types).unwrap_or_else(ts_any_type),
-                    ),
+                    type_ann: Box::new(ty),
                 })),
                 is_static: true,
                 decorators: Vec::new(),
                 accessibility: None,
                 is_abstract: false,
-                is_optional: false,
+                is_optional: true,
                 is_override: false,
                 readonly: false,
                 declare: false,
@@ -1549,8 +1569,18 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
             continue;
         };
         let list = assignments.remove(&name).unwrap_or_default();
-        for (item_index, ..) in &list {
-            consumed.insert(*item_index);
+        let callable_statics: std::collections::HashSet<Symbol> = list.iter()
+            .filter(|(_, on_prototype, _, right)| !*on_prototype &&
+                (rhs_function(right).is_some() || matches!(right, Expr::Ident(ident)
+                    if functions.contains_key(ident.sym.as_ref()))))
+            .map(|(_, _, member, _)| member.clone())
+            .collect();
+        for (item_index, on_prototype, member, _) in &list {
+            // Callable and prototype members still use the legacy class
+            // method conversion.  Ordinary static writes stay in place.
+            if *on_prototype || callable_statics.contains(member) {
+                consumed.insert(*item_index);
+            }
         }
         let replacement_object = match prototype_replacements.remove(&name) {
             Some((replacement_index, object)) => {

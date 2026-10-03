@@ -398,6 +398,50 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
+        // A normalized constructor-function static field starts absent and
+        // therefore has Optional(F64) storage.  Update its numeric value at
+        // the original expression, without using scalar-only PostfixUpdate.
+        if let (Expr::Member(member), Target::Var(symbol)) = (update.arg.as_ref(), &target) {
+            let class = match member.obj.as_ref() {
+                Expr::Ident(class) => Some(class.sym.to_string()),
+                Expr::This(_) if self.class_static_context => self.class_context.clone(),
+                _ => None,
+            };
+            let is_static_field = class.and_then(|class| member_property_name(&member.prop)
+                .map(|property| class_static_field_symbol(&class, &property)))
+                .as_deref() == Some(symbol.as_str());
+            if is_static_field && self.scope.get(symbol)
+                == Some(&HirType::Optional(Box::new(HirType::F64))) {
+                self.record_binding_write(symbol);
+                let old_name = format!("__thaw_static_optional_old_{}", self.next_binding);
+                self.next_binding += 1;
+                let updated_name = format!("__thaw_static_optional_updated_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(old_name.clone(), HirType::F64);
+                self.scope.insert(updated_name.clone(), HirType::F64);
+                let current = self.coerce_primitive_to_number(HirExpr::Var(symbol.clone()))?;
+                let updated = HirExpr::BinOp(
+                    match update.op { UpdateOp::PlusPlus => BinOp::Add, UpdateOp::MinusMinus => BinOp::Sub },
+                    Box::new(HirExpr::Var(old_name.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                );
+                let result = HirExpr::Block(vec![
+                    HirStmt::Expr(HirExpr::Assign(symbol.clone(), Box::new(HirExpr::OptionalSome(
+                        Box::new(HirExpr::Var(updated_name.clone())), HirType::F64,
+                    )))),
+                    HirStmt::Return(Some(HirExpr::Var(if update.prefix {
+                        updated_name.clone()
+                    } else {
+                        old_name.clone()
+                    }))),
+                ]);
+                return self.wrap_call_argument_bindings(result, &[
+                    (old_name, HirType::F64, current),
+                    (updated_name, HirType::F64, updated),
+                ]);
+            }
+        }
+
         let op = match update.op {
             UpdateOp::PlusPlus => BinOp::Add,
             UpdateOp::MinusMinus => BinOp::Sub,

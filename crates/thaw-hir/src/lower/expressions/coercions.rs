@@ -758,6 +758,7 @@ impl<'a> FnLowerer<'a> {
     fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
             HirType::Str => Ok(value),
+            HirType::StrLiteral(_) => Ok(HirExpr::TypedClosure(HirType::Str, Box::new(value))),
             HirType::Symbol => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_symbol_key".to_string())),
                 vec![value],
@@ -1855,7 +1856,32 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn coerce_primitive_to_number(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        self.coerce_primitive_to_number_impl(value, false)
+    }
+
+    // Binary `+` needs to build its numeric branch even when a different
+    // runtime branch concatenates a string. Keep BigInt/Symbol failures local
+    // to that branch; ordinary numeric coercions retain their existing ABI.
+    fn coerce_primitive_to_number_for_add(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        self.coerce_primitive_to_number_impl(value, true)
+    }
+
+    fn coerce_primitive_to_number_impl(
+        &mut self, value: HirExpr, for_add: bool,
+    ) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
+            HirType::I64 if for_add => Ok(HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(
+                    "\u{1}TypeError\u{1}Cannot mix BigInt and other types".into(),
+                ))),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            )),
+            HirType::Symbol if for_add => Ok(HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(
+                    "\u{1}TypeError\u{1}Cannot convert a Symbol value to a number".into(),
+                ))),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            )),
             HirType::F64 => Ok(value),
             HirType::Bool => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
@@ -1864,6 +1890,10 @@ impl<'a> FnLowerer<'a> {
             HirType::Str => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
                 vec![value],
+            )),
+            HirType::StrLiteral(_) => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                vec![HirExpr::TypedClosure(HirType::Str, Box::new(value))],
             )),
             HirType::Json => Ok(HirExpr::JsonAsNumber(Box::new(value))),
             HirType::JsValue => Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
@@ -1942,10 +1972,10 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), optional_type.clone());
                 let bound = HirExpr::Var(name.clone());
-                let present = self.coerce_primitive_to_number(HirExpr::OptionalValue(
+                let present = self.coerce_primitive_to_number_impl(HirExpr::OptionalValue(
                     Box::new(bound.clone()),
                     payload.as_ref().clone(),
-                ))?;
+                ), for_add)?;
                 let result = HirExpr::Block(vec![HirStmt::If(
                     HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
                     vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(f64::NAN))))],
@@ -1959,9 +1989,9 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
                 let bound = HirExpr::Var(name.clone());
-                let present = self.coerce_primitive_to_number(HirExpr::NullableValue(
+                let present = self.coerce_primitive_to_number_impl(HirExpr::NullableValue(
                     Box::new(bound.clone()), payload.as_ref().clone(),
-                ))?;
+                ), for_add)?;
                 let result = HirExpr::Block(vec![HirStmt::If(
                     HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone()),
                     vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(0.0))))],
@@ -1975,9 +2005,9 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
                 let bound = HirExpr::Var(name.clone());
-                let present = self.coerce_primitive_to_number(HirExpr::NullishValue(
+                let present = self.coerce_primitive_to_number_impl(HirExpr::NullishValue(
                     Box::new(bound.clone()), payload.as_ref().clone(),
-                ))?;
+                ), for_add)?;
                 let result = HirExpr::Block(vec![
                     HirStmt::If(
                         HirExpr::NullishIsNull(Box::new(bound.clone()), payload.as_ref().clone()),
@@ -1992,10 +2022,94 @@ impl<'a> FnLowerer<'a> {
                 ]);
                 self.wrap_call_argument_bindings(result, &[(name, ty, value)])
             }
+            HirType::Union(members) => {
+                let ty = HirType::Union(members.clone());
+                let name = format!("__thaw_number_union_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let mut statements = Vec::with_capacity(members.len());
+                for index in 0..members.len() {
+                    let part = self.coerce_primitive_to_number_impl(HirExpr::UnionValue(
+                        Box::new(HirExpr::Var(name.clone())), index, members.clone(),
+                    ), for_add)?;
+                    if index + 1 == members.len() {
+                        statements.push(HirStmt::Return(Some(part)));
+                    } else {
+                        statements.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(
+                                    Box::new(HirExpr::Var(name.clone())), members.clone(),
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            vec![HirStmt::Return(Some(part))],
+                            Vec::new(),
+                        ));
+                    }
+                }
+                self.wrap_call_argument_bindings(
+                    HirExpr::Block(statements), &[(name, ty, value)],
+                )
+            }
             other => Err(format!(
                 "numeric conversion is not defined for native type {other:?}"
             )),
         }
+    }
+
+    // The graph encoder has no native I64 field. Reconstruct a BigInt
+    // primitive from its exact decimal digits using the already-registered
+    // host constructor, then let the host `+` operator add two BigInts.
+    fn add_bigint_live_handle(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let decimal = self.coerce_primitive_to_string(value)?;
+        let arguments = self.wrap_native_value_as_json(
+            HirExpr::ArrayLit(vec![decimal]), HirType::Array(Box::new(HirType::Str)),
+        )?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str("BigInt".into()))],
+                ),
+                arguments,
+            ],
+        ))
+    }
+
+    fn add_bigint_pair_as_json(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
+        let lhs_handle = format!("__thaw_add_bigint_lhs_{}", self.next_binding);
+        self.next_binding += 1;
+        let rhs_handle = format!("__thaw_add_bigint_rhs_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(lhs_handle.clone(), HirType::JsValue);
+        self.scope.insert(rhs_handle.clone(), HirType::JsValue);
+        let empty_arguments = self.wrap_native_value_as_json(
+            HirExpr::ArrayLit(Vec::new()), HirType::Array(Box::new(HirType::Json)),
+        )?;
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("readDynamicValue".into())),
+            vec![HirExpr::Call(
+                Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+                vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_add".into()))],
+                    ),
+                    empty_arguments,
+                    HirExpr::ArrayLit(vec![
+                        HirExpr::Var(lhs_handle.clone()), HirExpr::Var(rhs_handle.clone()),
+                    ]),
+                ],
+            )],
+        );
+        let lhs_live = self.add_bigint_live_handle(lhs)?;
+        let rhs_live = self.add_bigint_live_handle(rhs)?;
+        self.wrap_call_argument_bindings(result, &[
+            (lhs_handle, HirType::JsValue, lhs_live),
+            (rhs_handle, HirType::JsValue, rhs_live),
+        ])
     }
 
     /// `ECMA-262`'s own `ToPrimitive(value)` (no hint override -- the
@@ -2009,6 +2123,14 @@ impl<'a> FnLowerer<'a> {
     /// (round28/30 only ever added the explicit `Symbol.toPrimitive` path).
     fn add_operand_to_primitive(&mut self, value: HirExpr) -> Result<(HirExpr, HirType), String> {
         let ty = self.infer_expr_type(&value)?;
+        // `any` fields normalized from constructor-function statics are
+        // Optional<Json>.  Convert the optional tag to the existing JSON
+        // undefined sentinel before the shared runtime string/number test.
+        if matches!(&ty, HirType::Optional(inner) | HirType::Nullable(inner)
+            | HirType::Nullish(inner) if inner.as_ref() == &HirType::Json) {
+            let json = self.coerce_to_declared(&HirType::Json, value)?;
+            return Ok((json, HirType::Json));
+        }
         let HirType::Object(fields) = &ty else {
             return Ok((value, ty));
         };
@@ -2029,75 +2151,298 @@ impl<'a> FnLowerer<'a> {
     /// *fixed*, compile-time-known hint), `+`'s own algorithm calls
     /// `ToPrimitive` with hint `"default"` *once* per operand, then decides
     /// string-concat vs. numeric-add from the *actual runtime type* of
-    /// each result -- a class can legitimately return a different value
+    /// each result. A statically `Str` operand also selects concat when
+    /// this helper is reached from a Json-backed compound assignment.
+    /// A class can legitimately return a different value
     /// for `"default"` than for `"string"`/`"number"` (confirmed real
     /// trigger: a `Money` class's `toPrimitive` returns the formatted
     /// `` `Money(${amount})` `` string for `"default"` alone). Builds the
     /// real spec dispatch: if either resulting primitive is a string
-    /// (checked via `__thaw_json_typeof` for the `Object`-derived side;
-    /// statically known `false` for an already-primitive side, since a
-    /// statically `Str`-typed operand is already handled by the "one side
-    /// is `Str`" arm above this one), stringify-and-concat both; otherwise
-    /// numeric-add both. Both branches reuse the existing, generic
+    /// (including a present optional string or a literal-typed string),
+    /// stringify-and-concat both; otherwise numeric-add both (with two
+    /// BigInts delegated to the existing host operator). Both branches reuse the existing, generic
     /// `coerce_primitive_to_string`/`coerce_primitive_to_number` (already
     /// handling a `Json` result via a plain decode, no second `ToPrimitive`
     /// call).
+    fn add_operand_may_be_string(ty: &HirType) -> bool {
+        match ty {
+            HirType::Str | HirType::StrLiteral(_) => true,
+            HirType::Optional(payload) | HirType::Nullable(payload)
+            | HirType::Nullish(payload) => Self::add_operand_may_be_string(payload),
+            HirType::Union(members) => members.iter().any(Self::add_operand_may_be_string),
+            _ => false,
+        }
+    }
+
+    fn add_operand_may_be_bigint(ty: &HirType) -> bool {
+        match ty {
+            HirType::I64 | HirType::Json => true,
+            HirType::Optional(payload) | HirType::Nullable(payload)
+            | HirType::Nullish(payload) => Self::add_operand_may_be_bigint(payload),
+            HirType::Union(members) => members.iter().any(Self::add_operand_may_be_bigint),
+            _ => false,
+        }
+    }
+
+    // The native `+` decision is made after both operand values have been
+    // evaluated and each has undergone ToPrimitive in left-to-right order.
+    // Tagged string wrappers are only strings when their payload is present.
+    fn add_operand_has_primitive_type(
+        &mut self, value: HirExpr, ty: &HirType, primitive: &str,
+    ) -> HirExpr {
+        let bool_lit = |value| HirExpr::Lit(HirLit::Bool(value));
+        let choose = |test, yes, no| HirExpr::Conditional(
+            Box::new(test), Box::new(yes), Box::new(no), HirType::Bool,
+        );
+        match ty {
+            HirType::Str | HirType::StrLiteral(_) => bool_lit(primitive == "string"),
+            HirType::Symbol => bool_lit(primitive == "symbol"),
+            HirType::I64 => bool_lit(primitive == "bigint"),
+            HirType::Json => HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                    vec![value],
+                )),
+                Box::new(HirExpr::Lit(HirLit::Str(primitive.into()))),
+            ),
+            HirType::Optional(payload) => choose(
+                HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
+                bool_lit(false),
+                self.add_operand_has_primitive_type(
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()), payload, primitive,
+                ),
+            ),
+            HirType::Nullable(payload) => choose(
+                HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone()),
+                bool_lit(false),
+                self.add_operand_has_primitive_type(
+                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()), payload, primitive,
+                ),
+            ),
+            HirType::Nullish(payload) => choose(
+                HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone()),
+                bool_lit(false),
+                choose(
+                    HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone()),
+                    bool_lit(false),
+                    self.add_operand_has_primitive_type(
+                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()), payload, primitive,
+                    ),
+                ),
+            ),
+            HirType::Union(members) => {
+                let mut result = bool_lit(false);
+                for (index, member) in members.iter().enumerate().rev() {
+                    result = choose(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
+                        self.add_operand_has_primitive_type(
+                            HirExpr::UnionValue(Box::new(value.clone()), index, members.clone()),
+                            member, primitive,
+                        ),
+                        result,
+                    );
+                }
+                result
+            }
+            _ => bool_lit(false),
+        }
+    }
+
     fn lower_add_with_to_primitive(
         &mut self,
         lhs: HirExpr,
         rhs: HirExpr,
     ) -> Result<HirExpr, String> {
-        let (lhs_prim, lhs_ty) = self.add_operand_to_primitive(lhs)?;
-        let (rhs_prim, rhs_ty) = self.add_operand_to_primitive(rhs)?;
+        // The value of each operand precedes *both* ToPrimitive calls. In
+        // particular, a left Symbol.toPrimitive hook must not run before a
+        // right-hand call expression has completed.
+        let lhs_raw_ty = self.infer_expr_type(&lhs)?;
+        let rhs_raw_ty = self.infer_expr_type(&rhs)?;
+        let lhs_raw_name = format!("__thaw_add_raw_lhs_{}", self.next_binding);
+        self.next_binding += 1;
+        let rhs_raw_name = format!("__thaw_add_raw_rhs_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(lhs_raw_name.clone(), lhs_raw_ty.clone());
+        self.scope.insert(rhs_raw_name.clone(), rhs_raw_ty.clone());
+        let (lhs_prim, lhs_ty) = self.add_operand_to_primitive(HirExpr::Var(lhs_raw_name.clone()))?;
+        let (rhs_prim, rhs_ty) = self.add_operand_to_primitive(HirExpr::Var(rhs_raw_name.clone()))?;
         let lhs_name = format!("__thaw_add_to_primitive_lhs_{}", self.next_binding);
         self.next_binding += 1;
         let rhs_name = format!("__thaw_add_to_primitive_rhs_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(lhs_name.clone(), lhs_ty.clone());
         self.scope.insert(rhs_name.clone(), rhs_ty.clone());
-        let is_result_string = |ty: &HirType, name: &str| {
-            if *ty == HirType::Json {
-                HirExpr::BinOp(
-                    BinOp::EqEqEq,
-                    Box::new(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_json_typeof".to_string())),
-                        vec![HirExpr::Var(name.to_string())],
-                    )),
-                    Box::new(HirExpr::Lit(HirLit::Str("string".to_string()))),
-                )
-            } else {
-                HirExpr::Lit(HirLit::Bool(false))
-            }
-        };
-        let either_is_string = self.lower_logical_expr(
-            is_result_string(&lhs_ty, &lhs_name),
-            is_result_string(&rhs_ty, &rhs_name),
-            false,
-        )?;
+        let guaranteed_string = matches!(&lhs_raw_ty, HirType::Str | HirType::StrLiteral(_))
+            || matches!(&rhs_raw_ty, HirType::Str | HirType::StrLiteral(_));
         let concat = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+            Box::new(HirExpr::Var("__thaw_string_concat".into())),
             vec![
                 self.coerce_primitive_to_string(HirExpr::Var(lhs_name.clone()))?,
                 self.coerce_primitive_to_string(HirExpr::Var(rhs_name.clone()))?,
             ],
         );
-        let numeric = HirExpr::BinOp(
-            BinOp::Add,
-            Box::new(self.coerce_primitive_to_number(HirExpr::Var(lhs_name.clone()))?),
-            Box::new(self.coerce_primitive_to_number(HirExpr::Var(rhs_name.clone()))?),
-        );
-        let concat = self.coerce_to_declared(&HirType::Json, concat)?;
-        let numeric = self.coerce_to_declared(&HirType::Json, numeric)?;
-        let result = HirExpr::Conditional(
-            Box::new(either_is_string),
-            Box::new(concat),
-            Box::new(numeric),
-            HirType::Json,
-        );
-        self.wrap_call_argument_bindings(
+        let result = if guaranteed_string {
+            // A guaranteed string cannot need numeric conversion (including
+            // BigInt), but implicit `+` still throws on a Symbol operand.
+            let lhs_symbol = self.add_operand_has_primitive_type(
+                HirExpr::Var(lhs_name.clone()), &lhs_ty, "symbol",
+            );
+            let rhs_symbol = self.add_operand_has_primitive_type(
+                HirExpr::Var(rhs_name.clone()), &rhs_ty, "symbol",
+            );
+            let symbol = self.lower_logical_expr(lhs_symbol, rhs_symbol, false)?;
+            let invalid_symbol = HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(
+                    "\u{1}TypeError\u{1}Cannot convert a Symbol value to a string".into(),
+                ))),
+                Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+            );
+            HirExpr::Conditional(
+                Box::new(symbol), Box::new(invalid_symbol), Box::new(concat), HirType::Str,
+            )
+        } else {
+            let lhs_is_string = self.add_operand_has_primitive_type(
+                HirExpr::Var(lhs_name.clone()), &lhs_ty, "string",
+            );
+            let rhs_is_string = self.add_operand_has_primitive_type(
+                HirExpr::Var(rhs_name.clone()), &rhs_ty, "string",
+            );
+            let either_is_string = self.lower_logical_expr(
+                lhs_is_string, rhs_is_string, false,
+            )?;
+            let numeric = HirExpr::BinOp(
+                BinOp::Add,
+                Box::new(self.coerce_primitive_to_number_for_add(HirExpr::Var(lhs_name.clone()))?),
+                Box::new(self.coerce_primitive_to_number_for_add(HirExpr::Var(rhs_name.clone()))?),
+            );
+            let concat = self.coerce_to_declared(&HirType::Json, concat)?;
+            let numeric = self.coerce_to_declared(&HirType::Json, numeric)?;
+            let lhs_bigint = self.add_operand_has_primitive_type(
+                HirExpr::Var(lhs_name.clone()), &lhs_ty, "bigint",
+            );
+            let rhs_bigint = self.add_operand_has_primitive_type(
+                HirExpr::Var(rhs_name.clone()), &rhs_ty, "bigint",
+            );
+            let either_bigint = self.lower_logical_expr(lhs_bigint, rhs_bigint, false)?;
+            let numeric = HirExpr::Conditional(
+                Box::new(either_bigint),
+                Box::new(HirExpr::ThrowValue(
+                    Box::new(HirExpr::Lit(HirLit::Str(
+                        "\u{1}TypeError\u{1}Cannot mix BigInt and other types".into(),
+                    ))),
+                    Box::new(Self::unreachable_value(&HirType::Json)?),
+                )),
+                Box::new(numeric),
+                HirType::Json,
+            );
+            // Building the host arm at all makes an otherwise native-only
+            // module depend on QuickJS. Only two bigint-capable static types
+            // can ever reach this path at runtime.
+            let numeric = if Self::add_operand_may_be_bigint(&lhs_ty)
+                && Self::add_operand_may_be_bigint(&rhs_ty)
+            {
+                let lhs_bigint = self.add_operand_has_primitive_type(
+                    HirExpr::Var(lhs_name.clone()), &lhs_ty, "bigint",
+                );
+                let rhs_bigint = self.add_operand_has_primitive_type(
+                    HirExpr::Var(rhs_name.clone()), &rhs_ty, "bigint",
+                );
+                let both_bigint = self.lower_logical_expr(lhs_bigint, rhs_bigint, true)?;
+                let bigint_sum = self.add_bigint_pair_as_json(
+                    HirExpr::Var(lhs_name.clone()), HirExpr::Var(rhs_name.clone()),
+                )?;
+                HirExpr::Conditional(
+                    Box::new(both_bigint), Box::new(bigint_sum), Box::new(numeric),
+                    HirType::Json,
+                )
+            } else {
+                numeric
+            };
+            let selected = HirExpr::Conditional(
+                Box::new(either_is_string), Box::new(concat), Box::new(numeric),
+                HirType::Json,
+            );
+            // `String(Symbol)` is legal, but implicit `+` never uses that
+            // conversion, including when its other operand is a string.
+            let lhs_symbol = self.add_operand_has_primitive_type(
+                HirExpr::Var(lhs_name.clone()), &lhs_ty, "symbol",
+            );
+            let rhs_symbol = self.add_operand_has_primitive_type(
+                HirExpr::Var(rhs_name.clone()), &rhs_ty, "symbol",
+            );
+            let symbol = self.lower_logical_expr(lhs_symbol, rhs_symbol, false)?;
+            HirExpr::Conditional(
+                Box::new(symbol),
+                Box::new(HirExpr::ThrowValue(
+                    Box::new(HirExpr::Lit(HirLit::Str(
+                        "\u{1}TypeError\u{1}Cannot convert a Symbol value to a string".into(),
+                    ))),
+                    Box::new(Self::unreachable_value(&HirType::Json)?),
+                )),
+                Box::new(selected),
+                HirType::Json,
+            )
+        };
+        let after_values = self.wrap_call_argument_bindings(
             result,
             &[(lhs_name, lhs_ty, lhs_prim), (rhs_name, rhs_ty, rhs_prim)],
-        )
+        )?;
+        self.wrap_call_argument_bindings(after_values, &[
+            (lhs_raw_name, lhs_raw_ty, lhs),
+            (rhs_raw_name, rhs_raw_ty, rhs),
+        ])
+    }
+
+    /// A Json-backed value plus a live JS value must execute `+` in that
+    /// JS realm. Both operands stay in their original graph positions: the
+    /// mixed-call ABI appends separate handle arguments after JSON arguments,
+    /// which would reverse ToPrimitive order for a live left operand.
+    fn lower_add_with_live_json(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let lhs_ty = self.infer_expr_type(&lhs)?;
+        let rhs_ty = self.infer_expr_type(&rhs)?;
+        let lhs_name = format!("__thaw_add_live_lhs_{}", self.next_binding);
+        self.next_binding += 1;
+        let rhs_name = format!("__thaw_add_live_rhs_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(lhs_name.clone(), lhs_ty.clone());
+        self.scope.insert(rhs_name.clone(), rhs_ty.clone());
+        let left = if matches!(&lhs_ty, HirType::StrLiteral(_)) {
+            HirExpr::TypedClosure(HirType::Str, Box::new(HirExpr::Var(lhs_name.clone())))
+        } else {
+            HirExpr::Var(lhs_name.clone())
+        };
+        let right = if matches!(&rhs_ty, HirType::StrLiteral(_)) {
+            HirExpr::TypedClosure(HirType::Str, Box::new(HirExpr::Var(rhs_name.clone())))
+        } else {
+            HirExpr::Var(rhs_name.clone())
+        };
+        let left = self.coerce_to_declared(&HirType::Json, left)?;
+        let right = self.coerce_to_declared(&HirType::Json, right)?;
+        let arguments = self.wrap_native_value_as_json(
+            HirExpr::ArrayLit(vec![left, right]),
+            HirType::Array(Box::new(HirType::Json)),
+        )?;
+        let callable = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_add".into()))],
+        );
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixed".into())),
+            vec![callable, arguments, HirExpr::ArrayLit(Vec::new())],
+        );
+        self.wrap_call_argument_bindings(result, &[
+            (lhs_name, lhs_ty, lhs),
+            (rhs_name, rhs_ty, rhs),
+        ])
     }
 
     /// The decimal digits of a `bigint`-like operand: a native `i64` via

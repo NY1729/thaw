@@ -2127,3 +2127,73 @@ fn tuple_spread_shifts_contextual_generic_callback_position() {
     );
     assert_eq!(program.functions.iter().filter(|function| function.name == symbol).count(), 1);
 }
+
+#[test]
+fn normalized_constructor_static_writes_keep_original_statement_order() {
+    let source = "let state: number = 0; function Box() { this.value = 0; } \
+        let before: number | undefined = Box.count; state = 4; \
+        Box.count = state + 0; Box.count = state + 1; ++Box.count;";
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let normalized = normalize_constructor_functions(&module).unwrap();
+    let class = normalized.body.iter().find_map(|item| match item {
+        ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) if class.ident.sym == *"Box" => Some(class),
+        _ => None,
+    }).unwrap();
+    let generated: Vec<_> = class.class.body.iter().filter_map(|member| match member {
+        ClassMember::ClassProp(field) if field.is_static => Some(field),
+        _ => None,
+    }).collect();
+    assert_eq!(generated.len(), 1);
+    assert!(generated[0].value.is_none());
+    assert!(generated[0].is_optional);
+    let assignments = normalized.body.iter().filter(|item| matches!(item,
+        ModuleItem::Stmt(Stmt::Expr(swc_ecma_ast::ExprStmt { expr, .. }))
+            if matches!(expr.as_ref(), Expr::Assign(_)))).count();
+    // state=4 and both writes to Box.count remain separate statements.
+    assert_eq!(assignments, 3);
+    let _ = lower_module(&module).unwrap();
+}
+
+#[test]
+fn normalized_constructor_static_optional_update_lowers_before_first_write() {
+    let source = "function Box() { this.value = 0; } \
+        let previous: number = Box.count++; Box.count = 2; \
+        let updated: number = ++Box.count; Box.count += 1;";
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let _ = lower_module(&module).unwrap();
+}
+
+#[test]
+fn normalized_constructor_repeated_mixed_value_kinds_share_one_static_field() {
+    let module = thaw_parser::parse_typescript(
+        "function Box() { this.value = 0; } Box.mixed = 1; Box.mixed = 'later';"
+    ).unwrap();
+    let normalized = normalize_constructor_functions(&module).unwrap();
+    let class = normalized.body.iter().find_map(|item| match item {
+        ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) if class.ident.sym == *"Box" => Some(class),
+        _ => None,
+    }).unwrap();
+    assert_eq!(class.class.body.iter().filter(|member| matches!(member,
+        ClassMember::ClassProp(field) if field.is_static)).count(), 1);
+    let _ = lower_module(&module).unwrap();
+}
+#[test]
+fn native_string_union_add_does_not_construct_bigint_host_calls() {
+    let program = lower(
+        r#"function optional(present: boolean): string | undefined {
+            return present ? "S" : undefined;
+        }
+        function choose(present: boolean): string | number {
+            return present ? "S" : 2;
+        }
+        function nativeOptional(): any { return optional(true) + 2; }
+        function nativeUnion(): any { return choose(true) + 2; }
+        function nativeJson(value: any): any { return value + 2; }"#,
+    );
+    for name in ["nativeOptional", "nativeUnion", "nativeJson"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let body = format!("{:?}", function.body);
+        assert!(!body.contains("callDynamicValue"), "{name}: {body}");
+        assert!(!body.contains("getDynamicValue"), "{name}: {body}");
+    }
+}

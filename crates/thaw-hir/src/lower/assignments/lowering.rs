@@ -1200,6 +1200,19 @@ impl<'a> FnLowerer<'a> {
                 rhs
             };
             if assign.op == AssignOp::AddAssign
+                && self.infer_expr_type(&rhs)? == HirType::JsValue
+                && (current_type == HirType::Json
+                    || current_type == HirType::Optional(Box::new(HirType::Json)))
+            {
+                self.lower_add_with_live_json(current, rhs)?
+            } else if assign.op == AssignOp::AddAssign
+                && self.infer_expr_type(&rhs)? != HirType::JsValue
+                && (current_type == HirType::Json
+                    || current_type == HirType::Optional(Box::new(HirType::Json))
+                    || self.infer_expr_type(&rhs)? == HirType::Json)
+            {
+                self.lower_add_with_to_primitive(current, rhs)?
+            } else if assign.op == AssignOp::AddAssign
                 && (current_type == HirType::Str
                     || current_type == HirType::Optional(Box::new(HirType::Str))
                     || self.infer_expr_type(&rhs)? == HirType::Str)

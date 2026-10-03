@@ -2054,37 +2054,53 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Lit(HirLit::Bool(false))),
                     ),
                     BinaryOp::Add
-                        if matches!(self.infer_expr_type(&lhs)?, HirType::Str)
-                            || matches!(
-                                self.infer_expr_type(&lhs)?,
-                                HirType::Optional(payload) if payload.as_ref() == &HirType::Str
-                            )
-                            || matches!(self.infer_expr_type(&rhs)?, HirType::Str)
-                            || matches!(
-                                self.infer_expr_type(&rhs)?,
-                                HirType::Optional(payload) if payload.as_ref() == &HirType::Str
-                            ) =>
+                        if matches!(self.infer_expr_type(&lhs)?, HirType::Str | HirType::StrLiteral(_))
+                            || matches!(self.infer_expr_type(&rhs)?, HirType::Str | HirType::StrLiteral(_)) =>
                     {
-                        // Real JS's `+` always calls `ToPrimitive(operand)`
-                        // with hint `"default"` for *both* operands, then
-                        // decides string-concat purely from whichever
-                        // result(s) are already strings -- it never passes
-                        // hint `"string"` just because the *other* operand
-                        // happens to be one (confirmed: a class returning a
-                        // different value for `"string"` than `"default"`
-                        // diverged from Node here before this fix).
-                        // `add_operand_to_primitive` is a no-op for an
-                        // already-`Str`/other-primitive operand, so this
-                        // only changes behavior for an `Object`-typed side.
-                        let (lhs, _) = self.add_operand_to_primitive(lhs)?;
-                        let (rhs, _) = self.add_operand_to_primitive(rhs)?;
-                        HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                            vec![
-                                self.coerce_primitive_to_string(lhs)?,
-                                self.coerce_primitive_to_string(rhs)?,
-                            ],
-                        )
+                        // A guaranteed string result keeps its existing Str
+                        // contract, but both raw operands must be evaluated
+                        // before either ToPrimitive call. A live handle uses
+                        // the JS realm's default-hint `+` operator.
+                        let live = self.infer_expr_type(&lhs)? == HirType::JsValue
+                            || self.infer_expr_type(&rhs)? == HirType::JsValue;
+                        if live {
+                            let added = self.lower_add_with_live_json(lhs, rhs)?;
+                            self.coerce_to_declared(&HirType::Str, added)?
+                        } else {
+                            self.lower_add_with_to_primitive(lhs, rhs)?
+                        }
+                    }
+                    BinaryOp::Add
+                        if Self::add_operand_may_be_string(&self.infer_expr_type(&lhs)?)
+                            || Self::add_operand_may_be_string(&self.infer_expr_type(&rhs)?) =>
+                    {
+                        let live = self.infer_expr_type(&lhs)? == HirType::JsValue
+                            || self.infer_expr_type(&rhs)? == HirType::JsValue;
+                        if live {
+                            self.lower_add_with_live_json(lhs, rhs)?
+                        } else {
+                            self.lower_add_with_to_primitive(lhs, rhs)?
+                        }
+                    }
+                    BinaryOp::Add
+                        if (self.infer_expr_type(&lhs)? == HirType::JsValue
+                            && (self.infer_expr_type(&rhs)? == HirType::Json
+                                || self.infer_expr_type(&rhs)? == HirType::Optional(Box::new(HirType::Json))))
+                            || (self.infer_expr_type(&rhs)? == HirType::JsValue
+                                && (self.infer_expr_type(&lhs)? == HirType::Json
+                                    || self.infer_expr_type(&lhs)? == HirType::Optional(Box::new(HirType::Json)))) =>
+                    {
+                        self.lower_add_with_live_json(lhs, rhs)?
+                    }
+                    BinaryOp::Add
+                        if self.infer_expr_type(&lhs)? != HirType::JsValue
+                            && self.infer_expr_type(&rhs)? != HirType::JsValue
+                            && (matches!(self.infer_expr_type(&lhs)?, HirType::Json)
+                                || self.infer_expr_type(&lhs)? == HirType::Optional(Box::new(HirType::Json))
+                                || matches!(self.infer_expr_type(&rhs)?, HirType::Json)
+                                || self.infer_expr_type(&rhs)? == HirType::Optional(Box::new(HirType::Json))) =>
+                    {
+                        self.lower_add_with_to_primitive(lhs, rhs)?
                     }
                     other
                         if (matches!(
