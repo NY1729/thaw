@@ -439,7 +439,13 @@ fn intl_datetime_resolved_options_json(locale_tag: &str) -> String {
                 ).is_ok()
             })
         }).unwrap_or(default_numbering);
-        Some(serde_json::json!({ "calendar": calendar, "numberingSystem": numbering }))
+        let requested_hour_cycle = locale.extensions.unicode.keywords
+            .get(&"hc".parse().ok()?).map(|value| value.to_string());
+        let hour_cycle = requested_hour_cycle.as_deref()
+            .filter(|cycle| matches!(*cycle, "h11" | "h12" | "h23" | "h24"))
+            .or(thaw_icu_data::preferred_hour_cycle(resolve_curated_locale(&locale.id)))
+            .unwrap_or("h23");
+        Some(serde_json::json!({ "calendar": calendar, "numberingSystem": numbering, "hourCycle": hour_cycle }))
     };
     resolve().map_or_else(|| "{}".to_string(), |value| value.to_string())
 }

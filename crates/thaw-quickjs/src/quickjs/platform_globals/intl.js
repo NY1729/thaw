@@ -541,7 +541,9 @@
         }
         this._hourCycle = opts.hourCycle;
       } else {
-        this._hourCycle = 'h12';
+        const resolved = this._useRealLocaleData && typeof __thaw_intl_datetime_resolved_options === 'function'
+          ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
+        this._hourCycle = resolved && resolved.hourCycle ? resolved.hourCycle : 'h12';
       }
       intlValidateDateTimeFields(opts);
     }
@@ -764,9 +766,11 @@
       // 0-23), so its midnight hour comes back as `0`/`00`; real
       // ECMA-402 `hourCycle: 'h24'` renders that same instant as `24`
       // (the one instant where the two cycles differ).
-      if (this._hourCycle === 'h24') {
+      if (this._hourCycle === 'h24' && zoned.hour === 0) {
         for (const part of parts) {
-          if (part.type === 'hour' && /^0+$/.test(part.value)) part.value = '24';
+          if (part.type === 'hour') {
+            part.value = String(__thaw_intl_number_format(this.locale, '24', false));
+          }
         }
       }
       if (this._fractionalSecondDigits !== undefined && !fractionHandled) {
