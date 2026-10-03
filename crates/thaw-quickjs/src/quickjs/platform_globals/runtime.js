@@ -77,6 +77,352 @@
   };
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
     JSON.stringify(value, replacer, space);
+  const thawGraphDateConstructor = Date;
+  const thawGraphMapConstructor = Map;
+  const thawGraphWeakMapConstructor = WeakMap;
+  const thawGraphArrayConstructor = Array;
+  const thawGraphArrayBufferConstructor = ArrayBuffer;
+  const thawGraphUint8ArrayConstructor = Uint8Array;
+  const thawGraphSetConstructor = Set;
+  const thawGraphRegExpConstructor = RegExp;
+  const thawGraphBigInt = BigInt;
+  const thawGraphNumber = Number;
+  const thawGraphNumberIsFinite = Number.isFinite;
+  const thawGraphNumberIsNaN = Number.isNaN;
+  const thawGraphNumberIsInteger = Number.isInteger;
+  const thawGraphNumberIsSafeInteger = Number.isSafeInteger;
+  const thawGraphString = String;
+  const thawGraphTypeError = TypeError;
+  const thawGraphParse = JSON.parse;
+  const thawGraphStringify = JSON.stringify;
+  const thawGraphObjectKeys = Object.keys;
+  const thawGraphObjectEntries = Object.entries;
+  const thawGraphObjectValues = Object.values;
+  const thawGraphObjectCreate = Object.create;
+  const thawGraphDefineProperty = Object.defineProperty;
+  const thawGraphOwnProperty = Object.prototype.hasOwnProperty;
+  const thawGraphArrayIsArray = Array.isArray;
+  const thawGraphArrayFrom = Array.from;
+  const thawGraphArrayMap = Array.prototype.map;
+  const thawGraphArrayForEach = Array.prototype.forEach;
+  const thawGraphArrayEvery = Array.prototype.every;
+  const thawGraphArrayPush = Array.prototype.push;
+  const thawGraphMapSet = Map.prototype.set;
+  const thawGraphSetAdd = Set.prototype.add;
+  const thawGraphSetHas = Set.prototype.has;
+  const thawGraphWeakMapGet = WeakMap.prototype.get;
+  const thawGraphWeakMapSet = WeakMap.prototype.set;
+  const thawGraphWeakMapHas = WeakMap.prototype.has;
+  const thawGraphRetain = globalThis.__thaw_retain_dynamic_value;
+  const thawGraphRelease = globalThis.__thaw_release_dynamic_value;
+  let thawGraphBufferFrom;
+  let thawGraphBufferIsBuffer;
+  const nativeDateGetTime = thawGraphDateConstructor.prototype.getTime;
+  const nativeDateSetTime = thawGraphDateConstructor.prototype.setTime;
+  globalThis.__thaw_json_host_date_set = (value, timestamp) =>
+    thawGraphString(thawGraphApply(nativeDateSetTime, value, [timestamp]));
+  globalThis.__thaw_json_host_query = (value, operation) => {
+    switch (operation) {
+      case 0: return typeof value;
+      case 1: return value ? '1' : '0';
+      case 2: return thawGraphString(thawGraphNumber(value));
+      case 3: return thawGraphStringify(thawGraphString(value));
+      case 4: return thawGraphArrayIsArray(value) ? '1' : '0';
+      case 5: return value === undefined ? '1' : '0';
+      case 6: return value == null ? '1' : '0';
+      case 7: return value === null ? '1' : '0';
+      case 8: return thawGraphStringify(value) ?? 'null';
+      case 9: return value !== null && (typeof value === 'object' || typeof value === 'function') ? '1' : '0';
+      case 10: return thawGraphObjectIs(value, -0) ? '-0' : thawGraphString(value);
+      case 11: return thawGraphBufferIsBuffer(value) ? '1' : '0';
+      case 12: {
+        if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return '0';
+        // A revoked Proxy must propagate its error rather than be mistaken
+        // for an ordinary object rejected by the Date internal-slot check.
+        thawGraphGetPrototypeOf(value);
+        // The captured native method checks the Date internal slot; a
+        // matching prototype or `timestamp` property cannot impersonate it.
+        try { thawGraphApply(nativeDateGetTime, value, []); return '1'; }
+        catch (error) { if (error instanceof thawGraphTypeError) return '0'; throw error; }
+      }
+      case 13: return thawGraphString(thawGraphApply(nativeDateGetTime, value, []));
+      default: throw new thawGraphTypeError('Invalid native host query');
+    }
+  };
+  globalThis.__thaw_json_host_enumerate = (value, operation) => {
+    const entries = operation === 0 ? thawGraphObjectEntries(value)
+      : operation === 1 ? thawGraphReflectOwnKeys(value)
+      : operation === 2 ? thawGraphObjectKeys(value)
+      : operation === 3 ? thawGraphObjectValues(value)
+      : null;
+    if (entries === null) throw new thawGraphTypeError('Invalid native host enumeration');
+    return thawGraphEncode(entries, 0, true);
+  };
+  // The native Json bridge sends an index-based graph only for the function
+  // replacer route. Allocate every node first so back edges and sibling aliases
+  // recover exactly one JS object; user keys live in pairs, outside metadata.
+  const thawGraphApply = Reflect.apply;
+  const thawGraphGetPrototypeOf = Reflect.getPrototypeOf;
+  const thawGraphReflectOwnKeys = Reflect.ownKeys;
+  const thawGraphObjectIs = Object.is;
+  const thawGraphOwn = (object, key) => thawGraphApply(thawGraphOwnProperty, object, [key]);
+  const thawGraphGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const thawGraphDateTime = thawGraphDateConstructor.prototype.getTime;
+  const thawGraphArrayBufferLength = thawGraphGetOwnPropertyDescriptor(thawGraphArrayBufferConstructor.prototype, 'byteLength').get;
+  const thawGraphIsView = thawGraphArrayBufferConstructor.isView;
+  const thawGraphMapSize = thawGraphGetOwnPropertyDescriptor(thawGraphMapConstructor.prototype, 'size').get;
+  const thawGraphSetSize = thawGraphGetOwnPropertyDescriptor(thawGraphSetConstructor.prototype, 'size').get;
+  const thawGraphRegExpSource = thawGraphGetOwnPropertyDescriptor(thawGraphRegExpConstructor.prototype, 'source').get;
+  const thawGraphRegExpFlags = thawGraphGetOwnPropertyDescriptor(thawGraphRegExpConstructor.prototype, 'flags').get;
+  const thawGraphRegExpTest = thawGraphRegExpConstructor.prototype.test;
+  const thawGraphBigIntDecimalPattern = /^(?:0|-?[1-9][0-9]*)(?![\s\S])/;
+  const thawGraphMapEntries = thawGraphMapConstructor.prototype.entries;
+  const thawGraphSetValues = thawGraphSetConstructor.prototype.values;
+  const thawGraphKind = (getter, value) => {
+    if (value === null || typeof value !== 'object') return false;
+    try { thawGraphApply(getter, value, []); return true; }
+    catch (_) { return false; }
+  };
+  const thawGraphDate = value => {
+    if (value === null || typeof value !== 'object') return null;
+    try { return { time: thawGraphApply(thawGraphDateTime, value, []) }; }
+    catch (_) { return null; }
+  };
+  const thawGraphArrayBuffer = value => {
+    if (value === null || typeof value !== 'object') return false;
+    try { thawGraphApply(thawGraphArrayBufferLength, value, []); return true; }
+    catch (_) { return false; }
+  };
+  const thawGraphEncode = (root, handleMask = 0, live = false, plainResult = false) => {
+    const handleCarriers = new thawGraphWeakMapConstructor();
+    const retained = [];
+    const retain = value => {
+      const handle = thawGraphRetain(value);
+      thawGraphApply(thawGraphArrayPush, retained, [handle]);
+      return handle;
+    };
+    try {
+    if (thawGraphArrayIsArray(root) && handleMask && !live) {
+      thawGraphApply(thawGraphArrayForEach, root, [(item, index) => {
+        if ((handleMask & (1 << index)) !== 0) {
+          const carrier = thawGraphObjectCreate(null);
+          thawGraphApply(thawGraphWeakMapSet, handleCarriers, [carrier, retain(item)]);
+          root[index] = carrier;
+        }
+      }]);
+    }
+    const ids = new thawGraphWeakMapConstructor();
+    const sources = [];
+    const nodes = [];
+    const livePrimitives = new thawGraphSetConstructor();
+    const token = (value, key = '') => {
+      // JSON.stringify invokes an object's toJSON before its replacer. The
+      // existing binary replacer then restores real Date/Buffer identity, so
+      // keep those native kinds but honor user toJSON on ordinary objects.
+      if (plainResult && value !== null
+        && (typeof value === 'object' || typeof value === 'function')
+        && !thawGraphDate(value) && !thawGraphArrayBuffer(value)
+        && !thawGraphIsView(value) && typeof value.toJSON === 'function')
+        value = value.toJSON(key);
+      // Compiled result calls return JSON data, not live function handles.
+      // Preserve JSON's undefined-like treatment without creating a lease
+      // that the ordinary result path has no registered Host owner for.
+      if (plainResult && (typeof value === 'function' || typeof value === 'symbol'))
+        return { u: 1 };
+      if (plainResult && typeof value === 'bigint')
+        throw new thawGraphTypeError('Do not know how to serialize a BigInt');
+      // Ordinary primitives, including BigInt, have exact scalar tokens.
+      // Symbol needs a live handle; objects/functions stay live below so getters
+      // and Proxies are not traversed before the replacer reads them.
+      if (typeof value === 'bigint') return { bi: thawGraphString(value) };
+      if (live && typeof value === 'symbol') {
+        const id = sources.length;
+        thawGraphApply(thawGraphArrayPush, sources, [value]);
+        thawGraphApply(thawGraphSetAdd, livePrimitives, [id]);
+        return { r: id };
+      }
+      if (value === undefined) return { u: 1 };
+      if (typeof value === 'number' && !thawGraphNumberIsFinite(value))
+        return { nf: thawGraphNumberIsNaN(value) ? 'NaN' : value > 0 ? 'Infinity' : '-Infinity' };
+      if (value === null || typeof value === 'string' || typeof value === 'number'
+        || typeof value === 'boolean') return { v: value };
+      if ((typeof value !== 'object' && typeof value !== 'function'))
+        throw new thawGraphTypeError('Unsupported native callback graph value');
+      let id = thawGraphApply(thawGraphWeakMapGet, ids, [value]);
+      if (id === undefined) {
+        id = sources.length;
+        thawGraphApply(thawGraphWeakMapSet, ids, [value, id]);
+        thawGraphApply(thawGraphArrayPush, sources, [value]);
+      }
+      return { r: id };
+    };
+    const rootToken = token(root, '');
+    for (let index = 0; index < sources.length; index++) {
+      const value = sources[index];
+      if (thawGraphApply(thawGraphSetHas, livePrimitives, [index])) {
+        thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: retain(value) }]);
+      } else if (thawGraphApply(thawGraphWeakMapHas, handleCarriers, [value])) {
+        thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: thawGraphApply(thawGraphWeakMapGet, handleCarriers, [value]) }]);
+      } else if (live && index !== 0) {
+        // Only the wrapper-created argument array is copied. Replacer
+        // holders and values stay live: a Proxy/getter must not be visited
+        // until compiled code actually reads it.
+        thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: retain(value) }]);
+      } else if (typeof value === 'function') {
+        thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: retain(value) }]);
+      } else if (thawGraphArrayBuffer(value) || thawGraphIsView(value)) {
+        const bytes = thawGraphArrayBuffer(value)
+          ? new thawGraphUint8ArrayConstructor(value)
+          : new thawGraphUint8ArrayConstructor(value.buffer, value.byteOffset, value.byteLength);
+        thawGraphApply(thawGraphArrayPush, nodes, [{ b: thawGraphArrayFrom(bytes) }]);
+      } else if (thawGraphDate(value)) {
+        const time = thawGraphDate(value).time;
+        thawGraphApply(thawGraphArrayPush, nodes, [{ d: thawGraphNumberIsFinite(time) ? time : null }]);
+      } else if (thawGraphKind(thawGraphMapSize, value)) {
+        thawGraphApply(thawGraphArrayPush, nodes, [{ m: token(thawGraphArrayFrom(thawGraphApply(thawGraphMapEntries, value, []))) }]);
+      } else if (thawGraphKind(thawGraphSetSize, value)) {
+        thawGraphApply(thawGraphArrayPush, nodes, [{ s: token(thawGraphArrayFrom(thawGraphApply(thawGraphSetValues, value, []))) }]);
+      } else if (thawGraphKind(thawGraphRegExpSource, value)) {
+        thawGraphApply(thawGraphArrayPush, nodes, [{ re: [thawGraphApply(thawGraphRegExpSource, value, []),
+          thawGraphApply(thawGraphRegExpFlags, value, []), value.lastIndex] }]);
+      } else if (thawGraphArrayIsArray(value)) {
+        const entries = [];
+        for (let slot = 0; slot < value.length; slot++)
+          thawGraphApply(thawGraphArrayPush, entries, [thawGraphOwn(value, slot)
+            ? token(value[slot], thawGraphString(slot)) : { h: 1 }]);
+        thawGraphApply(thawGraphArrayPush, nodes, [{ a: entries }]);
+      } else {
+        thawGraphApply(thawGraphArrayPush, nodes, [{ o: thawGraphApply(thawGraphArrayMap, thawGraphObjectKeys(value), [key => [key, token(value[key], key)]]) }]);
+      }
+    }
+    return thawGraphStringify({ root: rootToken, nodes, leases: retained });
+    } catch (error) {
+      for (let index = 0; index < retained.length; index++)
+        thawGraphRelease(retained[index]);
+      throw error;
+    }
+  };
+  globalThis.__thaw_json_graph_encode_js = thawGraphEncode;
+  // The result ABI trusts node kinds from this encoder. Loaded user scripts
+  // may call it, but cannot replace it with a forged metadata producer.
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_encode_js', {
+    value: globalThis.__thaw_json_graph_encode_js,
+    writable: false,
+    configurable: false,
+  });
+  const thawGraphDecode = graph => {
+    if (!graph || typeof graph !== 'object' || !thawGraphArrayIsArray(graph.nodes)
+      || !thawGraphOwn(graph, 'root'))
+      throw new thawGraphTypeError('Invalid native JSON graph');
+    const own = (value, key) => thawGraphOwn(value, key);
+    const nodes = thawGraphApply(thawGraphArrayMap, graph.nodes, [node => {
+      if (!node || typeof node !== 'object' || thawGraphArrayIsArray(node) || thawGraphObjectKeys(node).length !== 1)
+        throw new thawGraphTypeError('Invalid native JSON graph node');
+      if (own(node, 'a') && thawGraphArrayIsArray(node.a)) return new thawGraphArrayConstructor(node.a.length);
+      if (own(node, 'o') && thawGraphArrayIsArray(node.o)) return {};
+      if (own(node, 'd') && (node.d === null || typeof node.d === 'number'))
+        return new thawGraphDateConstructor(node.d === null ? NaN : node.d);
+      if (own(node, 'hdl') && thawGraphNumberIsSafeInteger(node.hdl) && node.hdl > 0) {
+        const id = node.hdl;
+        if (!globalThis.__thaw_value_handle_live || !globalThis.__thaw_value_handle_live[id - 1])
+          throw new thawGraphTypeError('Invalid native JSON graph handle');
+        return globalThis.__thaw_value_handles[id - 1];
+      }
+      if (own(node, 'b') && thawGraphArrayIsArray(node.b)
+        && thawGraphApply(thawGraphArrayEvery, node.b, [byte => thawGraphNumberIsInteger(byte) && byte >= 0 && byte <= 255]))
+        return thawGraphBufferFrom(node.b);
+      if (own(node, 'm')) return new thawGraphMapConstructor();
+      if (own(node, 's')) return new thawGraphSetConstructor();
+      if (own(node, 're') && thawGraphArrayIsArray(node.re) && node.re.length === 3
+        && typeof node.re[0] === 'string' && typeof node.re[1] === 'string') {
+        const pattern = new thawGraphRegExpConstructor(node.re[0], node.re[1]);
+        pattern.lastIndex = thawGraphNumber(node.re[2] || 0);
+        return pattern;
+      }
+      throw new thawGraphTypeError('Invalid native JSON graph node');
+    }]);
+    const decode = token => {
+      if (!token || typeof token !== 'object' || thawGraphArrayIsArray(token))
+        throw new thawGraphTypeError('Invalid native JSON graph token');
+      const keys = thawGraphObjectKeys(token);
+      if (keys.length !== 1) throw new thawGraphTypeError('Invalid native JSON graph token');
+      if (own(token, 'r')) {
+        if (!thawGraphNumberIsSafeInteger(token.r) || token.r < 0 || token.r >= nodes.length)
+          throw new thawGraphTypeError('Invalid native JSON graph reference');
+        return nodes[token.r];
+      }
+      if (own(token, 'v')) {
+        if (token.v !== null && typeof token.v === 'object')
+          throw new thawGraphTypeError('Invalid native JSON graph scalar');
+        return token.v;
+      }
+      if (own(token, 'u') && token.u === 1) return undefined;
+      if (own(token, 'bi') && typeof token.bi === 'string'
+        && thawGraphApply(thawGraphRegExpTest, thawGraphBigIntDecimalPattern, [token.bi]))
+        return thawGraphBigInt(token.bi);
+      if (own(token, 'h') && token.h === 1) return undefined;
+      if (own(token, 'nf') && (token.nf === 'NaN' || token.nf === 'Infinity' || token.nf === '-Infinity'))
+        return thawGraphNumber(token.nf);
+      throw new thawGraphTypeError('Invalid native JSON graph token');
+    };
+    thawGraphApply(thawGraphArrayForEach, graph.nodes, [(node, index) => {
+      if (own(node, 'a')) {
+        thawGraphApply(thawGraphArrayForEach, node.a, [(token, slot) => {
+          if (!token || typeof token !== 'object' || token.h !== 1 || thawGraphObjectKeys(token).length !== 1)
+            nodes[index][slot] = decode(token);
+        }]);
+      } else if (own(node, 'o')) {
+        thawGraphApply(thawGraphArrayForEach, node.o, [pair => {
+          if (!thawGraphArrayIsArray(pair) || pair.length !== 2 || typeof pair[0] !== 'string')
+            throw new thawGraphTypeError('Invalid native JSON graph property');
+          thawGraphDefineProperty(nodes[index], pair[0], {
+            value: decode(pair[1]), writable: true, enumerable: true, configurable: true,
+          });
+        }]);
+      }
+    }]);
+    // Container nodes are fully populated before Map/Set entries are read.
+    // Their entries can themselves refer back to the Map/Set being filled.
+    thawGraphApply(thawGraphArrayForEach, graph.nodes, [(node, index) => {
+      if (own(node, 'm')) {
+        const entries = decode(node.m);
+        if (!thawGraphArrayIsArray(entries)) throw new thawGraphTypeError('Invalid native Map entries');
+        thawGraphApply(thawGraphArrayForEach, entries, [pair => {
+          if (!thawGraphArrayIsArray(pair) || pair.length < 2)
+            throw new thawGraphTypeError('Invalid native Map entry');
+          thawGraphApply(thawGraphMapSet, nodes[index], [pair[0], pair[1]]);
+        }]);
+      } else if (own(node, 's')) {
+        const values = decode(node.s);
+        if (!thawGraphArrayIsArray(values)) throw new thawGraphTypeError('Invalid native Set values');
+        thawGraphApply(thawGraphArrayForEach, values, [value => thawGraphApply(thawGraphSetAdd, nodes[index], [value])]);
+      }
+    }]);
+    return decode(graph.root);
+  };
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_decode', {
+    value: thawGraphDecode, writable: false, configurable: false,
+  });
+  // Native result Json can be destroyed before this decoder runs. The graph
+  // owns one extra registry reference per live host node until reconstruction
+  // finishes, including when a malformed graph or getter throws.
+  const thawGraphDecodeOwned = text => {
+    const graph = thawGraphParse(text);
+    try {
+      return thawGraphDecode(graph);
+    } finally {
+      if (thawGraphArrayIsArray(graph?.leases)) {
+        for (let index = 0; index < graph.leases.length; index++) {
+          const handle = graph.leases[index];
+          if (thawGraphNumberIsSafeInteger(handle) && handle > 0)
+            thawGraphRelease(handle);
+        }
+      }
+    }
+  };
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_decode_owned', {
+    value: thawGraphDecodeOwned, writable: false, configurable: false,
+  });
   globalThis.__thaw_object_with_native_getters = (keys, readable, ...getters) => {
     const object = {};
     for (let i = 0; i < keys.length; i++) {
