@@ -1681,6 +1681,19 @@ fn compiles_dynamic_uniform_tagged_object_reads_without_nested_tags() {
 
 
 #[test]
+fn json_stringify_non_arrow_replacer_mutates_live_holder() {
+    let source = r#"function main(): void {
+        const value: Json = JSON.parse('{"keep":2,"other":3}');
+        console.log(JSON.stringify(value, function(key: string, current: Json): Json {
+            if (key === "keep") this["other"] = 9;
+            return current;
+        }));
+    }"#;
+    assert_eq!(compile_and_run(source, "json_stringify_non_arrow_holder"),
+        "{\"keep\":2,\"other\":9}\n");
+}
+
+#[test]
 fn non_arrow_function_expression_boxes_scalar_this_arguments() {
     let source = r#"function main(): void {
         const kind = function(): string { return typeof this; };
@@ -1781,6 +1794,19 @@ fn borrowed_union_callback_argument_keeps_its_json_owner_until_adapter_cleanup()
 }
 
 #[test]
+fn nested_typed_json_absence_chain_tracks_inner_nullable_state() {
+    let nested = HirType::Optional(Box::new(HirType::Nullable(Box::new(HirType::Json))));
+    let reverse = HirType::Nullable(Box::new(HirType::Optional(Box::new(HirType::Json))));
+    let optional_only = HirType::Optional(Box::new(HirType::Optional(Box::new(HirType::Json))));
+    for ty in [&nested, &reverse, &optional_only] {
+        assert!(HirCompiler::<'static>::typed_result_embeds_input_json(ty));
+    }
+    assert!(HirCompiler::<'static>::typed_result_null_is_absent(&nested));
+    assert!(HirCompiler::<'static>::typed_result_null_is_absent(&reverse));
+    assert!(!HirCompiler::<'static>::typed_result_null_is_absent(&optional_only));
+}
+
+#[test]
 fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
     fn ir(source: &str) -> String {
         let module = thaw_parser::parse_typescript(source).unwrap();
@@ -1863,6 +1889,42 @@ fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
         // A Promise decoder-side destroy would add a third site for the
         // same input, beyond the mutually exclusive host-error and owner sites.
         assert_one_normal_destroy(&promised, child, "json_host_failed", tuple_store_line(&promised, slot));
+    }
+    // A non-scalar Promise member still borrows the Union input. Its native
+    // object is detached; the outer tuple owns exactly one indexed Box.
+    let promised_object = ir(r#"
+        declare function __thaw_typed_js_70726f6d6973654f626a656374(): [string | Promise<{ value: number }>, number];
+        function main(): void { const value = __thaw_typed_js_70726f6d6973654f626a656374(); console.log(value[1]); }
+    "#);
+    let promised_object_children = owned_result_ids(&promised_object, "@thaw_json_index(");
+    let promised_object_slots = tuple_slot_ids(&promised_object);
+    assert_eq!(promised_object_children.len(), 2, "{promised_object}");
+    assert_eq!(promised_object_slots.len(), 2, "{promised_object}");
+    for (child, slot) in promised_object_children.iter().zip(&promised_object_slots) {
+        assert_one_normal_destroy(&promised_object, child, "json_host_failed",
+            tuple_store_line(&promised_object, slot));
+    }
+    // Detached direct typed results consume their decoded root once on the
+    // normal path; the invalid-graph path has its own exclusive release.
+    for (source, produced) in [
+        (r#"declare function __thaw_typed_js_6e756d4172726179(): number[];
+            function main(): void { const xs = __thaw_typed_js_6e756d4172726179(); console.log(xs.length); }"#,
+            "dynamic_number_array_result"),
+        (r#"declare function __thaw_typed_js_70726f6d697365566f6964(): Promise<void>;
+            async function main(): Promise<void> { await __thaw_typed_js_70726f6d697365566f6964(); }"#,
+            "dynamic_promise"),
+        (r#"declare function __thaw_typed_js_6f626a656374526573756c74(): { value: number };
+            function main(): void { const item = __thaw_typed_js_6f626a656374526573756c74(); console.log(item.value); }"#,
+            "dynamic_result_field_json"),
+        (r#"declare function __thaw_typed_js_6e756c6c556e646566(): { nil: null, missing: undefined };
+            function main(): void { const item = __thaw_typed_js_6e756c6c556e646566(); console.log(item.nil, item.missing); }"#,
+            "dynamic_result_field_json"),
+    ] {
+        let decoded = ir(source);
+        let roots = owned_result_ids(&decoded, "@thaw_json_graph_decode(");
+        assert_eq!(roots.len(), 1, "{decoded}");
+        let output = decoded.lines().position(|line| line.contains(produced)).expect(&decoded);
+        assert_one_normal_destroy(&decoded, &roots[0], "quickjs_graph_invalid", output);
     }
     // The top-level typed-result Union is also an owned JSON wrapper.
     let top_level = ir(r#"

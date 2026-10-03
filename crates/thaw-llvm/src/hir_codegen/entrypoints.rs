@@ -396,6 +396,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_stringify did not return a value")?;
+        let text = self.compile_check_json_stringify_error(text)?;
         self.builder
             .build_return(Some(&text))
             .map_err(|error| error.to_string())?;

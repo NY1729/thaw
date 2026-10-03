@@ -76,7 +76,9 @@
     };
   };
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
-    JSON.stringify(value, replacer, space);
+    JSON.stringify(value, function (key, item) {
+      return thawDateApply(replacer, this, [key, item]);
+    }, space);
   const thawGraphDateConstructor = Date;
   const thawGraphMapConstructor = Map;
   const thawGraphWeakMapConstructor = WeakMap;
@@ -108,6 +110,7 @@
   const thawGraphArrayEvery = Array.prototype.every;
   const thawGraphArrayPush = Array.prototype.push;
   const thawGraphMapSet = Map.prototype.set;
+  const thawGraphMapGet = Map.prototype.get;
   const thawGraphSetAdd = Set.prototype.add;
   const thawGraphSetHas = Set.prototype.has;
   const thawGraphWeakMapGet = WeakMap.prototype.get;
@@ -176,6 +179,266 @@
   const thawGraphRegExpFlags = thawGraphGetOwnPropertyDescriptor(thawGraphRegExpConstructor.prototype, 'flags').get;
   const thawGraphRegExpTest = thawGraphRegExpConstructor.prototype.test;
   const thawGraphBigIntDecimalPattern = /^(?:0|-?[1-9][0-9]*)(?![\s\S])/;
+  const thawGraphPositiveDecimalPattern = /^[1-9][0-9]*(?![\s\S])/;
+  const thawGraphNapiOwner = globalThis.__thaw_napi_graph_owner;
+  const thawGraphNapiRelease = globalThis.__thaw_napi_graph_release;
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_owner_of_handle', {
+    value: handle => typeof thawGraphNapiOwner === 'function' ? thawGraphNapiOwner(handle) : '',
+    writable: false, configurable: false,
+  });
+  // The native owner decides which proxy cache owns a handle. Factory code
+  // lives in this bootstrap closure: user scripts cannot pre-register a
+  // factory for a guessed future owner ID.
+  const thawNapiProxyConstructor = Proxy;
+  const thawNapiSymbolConstructor = Symbol;
+  const thawNapiSymbolFor = Symbol.for;
+  const thawNapiSymbolKeyFor = Symbol.keyFor;
+  const thawNapiReflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+  const thawNapiReflectDefineProperty = Reflect.defineProperty;
+  const thawNapiReflectGet = Reflect.get;
+  const thawNapiReflectHas = Reflect.has;
+  const thawNapiArraySlice = Array.prototype.slice;
+  const thawNapiArrayShift = Array.prototype.shift;
+  const thawNapiArraySome = Array.prototype.some;
+  const thawNapiArrayIndexOf = Array.prototype.indexOf;
+  const thawNapiArrayConcat = Array.prototype.concat;
+  const thawNapiStringStartsWith = String.prototype.startsWith;
+  const thawNapiStringSlice = String.prototype.slice;
+  const thawNapiStringIndexOf = String.prototype.indexOf;
+  const thawNapiMathMin = Math.min;
+  const thawNapiUint8Set = Uint8Array.prototype.set;
+  const thawNapiArrayMap = (array, callback) => thawGraphApply(thawGraphArrayMap, array, [callback]);
+  const thawNapiArrayEach = (array, callback) => thawGraphApply(thawGraphArrayForEach, array, [callback]);
+  const thawNapiArraySomeOf = (array, callback) => thawGraphApply(thawNapiArraySome, array, [callback]);
+  const thawNapiArrayAppend = (array, value) => thawGraphApply(thawGraphArrayPush, array, [value]);
+  const thawNapiObjectPrototype = Object.prototype;
+  const thawNapiSharedArrayBufferConstructor = typeof SharedArrayBuffer === 'function'
+    ? SharedArrayBuffer : null;
+  const thawNapiDataViewConstructor = DataView;
+  const thawNapiTypedArrayConstructors = [Int8Array, Uint8Array, Uint8ClampedArray,
+    Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array,
+    Float64Array, globalThis.BigInt64Array, globalThis.BigUint64Array];
+  const thawNapiFunctionHasInstance = Function.prototype[Symbol.hasInstance];
+  const thawNapiHasInstance = (ctor, value) => ctor &&
+    thawGraphApply(thawNapiFunctionHasInstance, ctor, [value]);
+  const thawNapiTypedArrayKind = value => {
+    for (let kind = 0; kind < thawNapiTypedArrayConstructors.length; kind++) {
+      if (thawNapiHasInstance(thawNapiTypedArrayConstructors[kind], value)) return kind;
+    }
+    return -1;
+  };
+  const thawNapiWeakRef = typeof WeakRef === 'function' ? WeakRef : null;
+  const thawNapiWeakRefDeref = thawNapiWeakRef ? thawNapiWeakRef.prototype.deref : null;
+  const thawNapiDeref = stored => {
+    if (!stored || !thawNapiWeakRefDeref) return stored;
+    try { return thawGraphApply(thawNapiWeakRefDeref, stored, []); }
+    catch (_) { return stored; }
+  };
+  const thawNapiErrorConstructor = Error;
+  const thawNapiRangeErrorConstructor = RangeError;
+  const thawNapiPromiseConstructor = Promise;
+  const thawNapiFinalizationRegistry = typeof FinalizationRegistry === 'function'
+    ? FinalizationRegistry : null;
+  const thawNapiFinalizationRegister = thawNapiFinalizationRegistry
+    ? thawNapiFinalizationRegistry.prototype.register : null;
+  const thawNapiMapDelete = thawGraphMapConstructor.prototype.delete;
+  const thawNapiWeakSetConstructor = WeakSet;
+  const thawNapiWeakSetAdd = WeakSet.prototype.add;
+  const thawNapiWeakSetHas = WeakSet.prototype.has;
+  const thawNapiWeakSetDelete = WeakSet.prototype.delete;
+  const thawNapiSafeMap = entries => {
+    const map = new thawGraphMapConstructor(entries);
+    return {
+      get: key => thawGraphApply(thawGraphMapGet, map, [key]),
+      set: (key, value) => thawGraphApply(thawGraphMapSet, map, [key, value]),
+      delete: key => thawGraphApply(thawNapiMapDelete, map, [key]),
+    };
+  };
+  const thawNapiSafeWeakMap = () => {
+    const map = new thawGraphWeakMapConstructor();
+    return {
+      get: key => thawGraphApply(thawGraphWeakMapGet, map, [key]),
+      set: (key, value) => thawGraphApply(thawGraphWeakMapSet, map, [key, value]),
+      has: key => thawGraphApply(thawGraphWeakMapHas, map, [key]),
+    };
+  };
+  const thawNapiSafeSet = entries => {
+    const set = new thawGraphSetConstructor(entries);
+    return { has: value => thawGraphApply(thawGraphSetHas, set, [value]) };
+  };
+  const thawNapiSafeWeakSet = () => {
+    const set = new thawNapiWeakSetConstructor();
+    return {
+      add: value => thawGraphApply(thawNapiWeakSetAdd, set, [value]),
+      has: value => thawGraphApply(thawNapiWeakSetHas, set, [value]),
+      delete: value => thawGraphApply(thawNapiWeakSetDelete, set, [value]),
+    };
+  };
+  const thawNapiSafeFinalizer = callback => {
+    const finalizer = new thawNapiFinalizationRegistry(callback);
+    return { register: (value, held) =>
+      thawGraphApply(thawNapiFinalizationRegister, finalizer, [value, held]) };
+  };
+  const thawGraphNapiBridgeHandle = globalThis.__thaw_napi_bridge_handle;
+  const thawGraphNapiBridgeCall = globalThis.__thaw_napi_bridge_call;
+  const thawGraphNapiBridgeExports = globalThis.__thaw_napi_bridge_exports;
+  const thawGraphNapiBridgeAvailable = globalThis.__thaw_napi_bridge_available;
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_napi_bridge_available', {
+    value: () => thawGraphNapiBridgeAvailable(), writable: false, configurable: false,
+  });
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_napi_exports', {
+    value: () => thawGraphParse(thawGraphNapiBridgeExports()),
+    writable: false, configurable: false,
+  });
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_napi_each_export', {
+    value: (info, prefix, packageName, install) => {
+      const qualified = thawGraphApply(thawNapiArrayIndexOf,
+        info.qualifiedPackages, [packageName]) !== -1;
+      thawNapiArrayEach(info.names, name => {
+        if (qualified) {
+          if (!thawGraphApply(thawNapiStringStartsWith, name, [prefix])) return;
+          install(name, thawGraphApply(thawNapiStringSlice, name, [prefix.length]));
+        } else if (thawGraphApply(thawNapiStringIndexOf, name, ['::']) === -1) {
+          install(name, name);
+        }
+      });
+    },
+    writable: false, configurable: false,
+  });
+  const thawGraphNapiOwnerOfHandle = handle =>
+    typeof thawGraphNapiOwner === 'function' ? thawGraphNapiOwner(handle) : '';
+  const thawGraphNapiReferenceAllocator = { next: 0 };
+  const thawGraphNapiHandles = thawNapiSafeWeakMap();
+  const thawGraphNapiProxyOwners = thawNapiSafeWeakMap();
+  const thawGraphNapiStates = new thawGraphMapConstructor();
+  const thawGraphNapiState = owner => {
+    if (typeof owner !== 'string'
+      || !thawGraphApply(thawGraphRegExpTest, thawGraphPositiveDecimalPattern, [owner]))
+      throw new thawGraphTypeError('Invalid native addon graph owner');
+    const previous = thawGraphApply(thawGraphMapGet, thawGraphNapiStates, [owner]);
+    if (previous) return previous;
+    var __thaw_napi_owner_metadata = true;
+    var __thaw_napi_reference_allocator = thawGraphNapiReferenceAllocator;
+    var __thaw_napi_proxy_owners = thawGraphNapiProxyOwners;
+    var __thaw_napi_reference_ids = thawNapiSafeWeakMap();
+    var __thaw_napi_reference_values = thawNapiSafeMap();
+    var __thaw_napi_handles = thawGraphNapiHandles;
+    var __thaw_napi_owner_ids = thawNapiSafeSet([owner]);
+    var __thaw_napi_proxies = thawNapiSafeMap();
+    var __thaw_napi_symbol_values = thawNapiSafeMap(), __thaw_napi_symbol_ids = thawNapiSafeMap();
+    var __thaw_napi_binary_values = thawNapiSafeMap();
+    var __thaw_napi_binary_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(held) { if (__thaw_napi_binary_values.get(held.id) !== held.entry) return; __thaw_napi_binary_values.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }) : null;
+    var __thaw_napi_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(id) { __thaw_napi_reference_values.delete(id); __thaw_napi_handle('release', id, '', []); }) : null;
+    var __thaw_napi_proxy_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(held) { if (__thaw_napi_proxies.get(held.id) !== held.entry) return; __thaw_napi_proxies.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }) : null;
+    var __thaw_napi_reference_value = function(id, active) { var stored = __thaw_napi_reference_values.get(id), value = thawNapiDeref(stored), properties = {}; if (!value) return properties; thawNapiArrayEach(thawGraphObjectKeys(value), function(key) { properties[key] = __thaw_napi_argument(value[key], active); }); return properties; };
+    var __thaw_napi_argument = function(value, active) {
+    if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;
+    var handle = __thaw_napi_handles.get(value); if (handle) { var owner = thawGraphNapiOwnerOfHandle(thawGraphString(handle)); if (__thaw_napi_owner_metadata && !__thaw_napi_owner_ids.has(owner)) throw new thawGraphTypeError('native object belongs to another addon'); return { __thaw_napi_handle__: handle }; } if (__thaw_napi_proxy_owners.has(value)) throw new thawGraphTypeError('native object belongs to another addon');
+    active = active || thawNapiSafeWeakSet();
+    var id = __thaw_napi_reference_ids.get(value);
+    if (id && active.has(value)) return { __thaw_napi_ref__: id };
+    var fresh = !id; if (fresh) { if (__thaw_napi_reference_allocator.next >= 9007199254740991) throw new thawNapiRangeErrorConstructor('native reference limit exceeded'); id = ++__thaw_napi_reference_allocator.next; __thaw_napi_reference_ids.set(value, id); }
+    if (typeof value === 'function') { if (fresh) { __thaw_napi_reference_values.set(id, thawNapiWeakRef ? new thawNapiWeakRef(value) : value); thawGraphDefineProperty(globalThis, '__thaw_napi_reference_' + id, { value: function() { var args = thawGraphApply(thawNapiArraySlice, arguments, []), meta = thawGraphApply(thawNapiArrayShift, args, []), receiver; if (meta && meta.__thaw_napi_argument_handles__) thawNapiArrayEach(meta.__thaw_napi_argument_handles__, function(entry) { var path = entry[0], parent = args; for (var i = 0; i + 1 < path.length; i++) { var own = thawGraphGetOwnPropertyDescriptor(parent, path[i]); if (!own) throw new thawGraphTypeError('invalid native callback path'); parent = own.value; } thawGraphDefineProperty(parent, path[path.length - 1], { value: __thaw_napi_proxy(entry[1]), writable: true, enumerable: true, configurable: true }); }); if (meta && meta.__thaw_napi_this_handle__) { var stored = __thaw_napi_proxies.get(meta.__thaw_napi_this_handle__); receiver = thawNapiDeref(stored); if (!receiver) receiver = __thaw_napi_proxy(meta.__thaw_napi_this_handle__); } var returned = thawGraphApply(value, receiver, args); return typeof returned === 'function' ? __thaw_napi_argument(returned) : returned; }, writable: false, configurable: false }); } return { __thaw_napi_function__: id }; }
+    __thaw_napi_reference_values.set(id, thawNapiWeakRef ? new thawNapiWeakRef(value) : value);
+    if (fresh && __thaw_napi_finalizers) __thaw_napi_finalizers.register(value, id);
+    active.add(value);
+    var view = thawGraphIsView(value), buffer = thawNapiHasInstance(thawGraphArrayBufferConstructor, value) || (thawNapiSharedArrayBufferConstructor !== null && thawNapiHasInstance(thawNapiSharedArrayBufferConstructor, value)), isBuffer = thawGraphBufferIsBuffer && thawGraphBufferIsBuffer(value);
+    var dataView = view && thawNapiHasInstance(thawNapiDataViewConstructor, value);
+    var typedKind = view && !isBuffer && !dataView ? thawNapiTypedArrayKind(value) : -1;
+    if (view && !isBuffer && !dataView && typedKind < 0) throw new thawGraphTypeError('unsupported native typed array kind');
+    var encoded = isBuffer ? { __thaw_napi_buffer__: id, value: thawGraphApply(thawNapiArraySlice, value, []) } : buffer ? { __thaw_napi_arraybuffer__: id, shared: thawNapiSharedArrayBufferConstructor !== null && thawNapiHasInstance(thawNapiSharedArrayBufferConstructor, value), value: thawGraphApply(thawNapiArraySlice, new thawGraphUint8ArrayConstructor(value), []) } : view ? { __thaw_napi_view__: id, kind: dataView ? -1 : typedKind, length: dataView ? value.byteLength : value.length, byte_offset: value.byteOffset, buffer: __thaw_napi_argument(value.buffer, active) } : thawGraphArrayIsArray(value) ? { __thaw_napi_array__: id, value: thawNapiArrayMap(value, function(item) { return __thaw_napi_argument(item, active); }) } : { __thaw_napi_object__: id, value: __thaw_napi_reference_value(id, active) };
+    active.delete(value); return encoded;
+    };
+    var __thaw_napi_arguments = function(args) { var active = thawNapiSafeWeakSet(); return thawGraphApply(thawGraphArrayMap, args, [function(value) { return __thaw_napi_argument(value, active); }]); };
+    // A plain object argument can carry a getter-only accessor
+    // property (real trigger: better-sqlite3's own `Database`
+    // instance, passed as `prepare(sql, this, ...)`'s second
+    // argument, whose `name`/`open`/`inTransaction`/`readonly`/
+    // `memory` are all getter-only via `Object.defineProperties`)
+    // -- syncing the native side's echoed-back value onto it
+    // with a plain `=` assignment threw a real engine
+    // `TypeError: no setter for property` the moment any such
+    // key came back, even though the native round trip never
+    // actually changed it. A getter-only property is always
+    // freshly computed on the next real read anyway, so there is
+    // nothing meaningful to "sync" for one -- skip a key the
+    // assignment itself rejects instead of crashing the whole
+    // call.
+    var __thaw_napi_decode = function(value, origins, path) { path = path || []; if (thawGraphArrayIsArray(origins)) origins = thawNapiSafeMap(thawNapiArrayMap(origins, function(entry) { return [thawGraphStringify(entry[0]), entry]; })); var origin = origins && origins.get(thawGraphStringify(path)); if (origin && origin[1] === 'date') return new thawGraphDateConstructor(origin[2] === null ? NaN : origin[2]); if (origin && origin[1] === 'nonfinite') return thawGraphNumber(origin[2]); var plain = origin && origin[1] === 'plain'; if (value && typeof value === 'object') { if (!plain && value['$__thaw_napi_undefined$'] === true) return undefined; if (!plain && thawGraphOwn(value, '__thaw_napi_error__')) { var ctor = value.name === 'TypeError' ? thawGraphTypeError : value.name === 'RangeError' ? thawNapiRangeErrorConstructor : thawNapiErrorConstructor, error = new ctor(value.__thaw_napi_error__); if (value.name && error.name !== value.name) error.name = value.name; return error; } if (!plain && value.__thaw_napi_symbol__) { var symbol = __thaw_napi_symbol_values.get(value.__thaw_napi_symbol__); if (!symbol) { symbol = value.global ? thawNapiSymbolFor(value.description) : thawNapiSymbolConstructor(value.description); __thaw_napi_symbol_values.set(value.__thaw_napi_symbol__, symbol); __thaw_napi_symbol_ids.set(symbol, value.__thaw_napi_symbol__); } return symbol; } if (!plain && value.__thaw_napi_ref__) { var stored = __thaw_napi_reference_values.get(value.__thaw_napi_ref__); return thawNapiDeref(stored); } if (!plain && value.__thaw_napi_handle__) return __thaw_napi_proxy(value.__thaw_napi_handle__); if (!plain && value.__thaw_napi_promise__) return __thaw_napi_result_value(value); if (!plain && value.__thaw_napi_binary__) { var id = value.__thaw_napi_binary__, stored = __thaw_napi_binary_values.get(id), existing = thawNapiDeref(stored); if (existing) return existing; var binary; if (value.kind === 'ArrayBuffer' || value.kind === 'SharedArrayBuffer') { binary = value.kind === 'SharedArrayBuffer' ? new thawNapiSharedArrayBufferConstructor(value.data.length) : new thawGraphArrayBufferConstructor(value.data.length); thawGraphApply(thawNapiUint8Set, new thawGraphUint8ArrayConstructor(binary), [value.data]); } else { var backing = __thaw_napi_decode(value.buffer, origins, thawGraphApply(thawNapiArrayConcat, path, ['buffer'])); if (value.kind === 'DataView') binary = new thawNapiDataViewConstructor(backing, value.byte_offset, value.length); else { var constructors = thawNapiTypedArrayConstructors, viewCtor = constructors[value.array_type]; if (!viewCtor) throw new thawGraphTypeError('unsupported native typed array kind'); binary = new viewCtor(backing, value.byte_offset, value.length); } } var entry = thawNapiWeakRef ? new thawNapiWeakRef(binary) : binary; __thaw_napi_binary_values.set(id, entry); __thaw_napi_handles.set(binary, id); __thaw_napi_proxy_owners.set(binary, owner); if (__thaw_napi_binary_finalizers) __thaw_napi_binary_finalizers.register(binary, { id: id, entry: entry }); return binary; } if (!plain && value.type === 'Buffer' && thawGraphArrayIsArray(value.data) && thawGraphBufferFrom) return thawGraphBufferFrom(value.data); if (thawGraphArrayIsArray(value)) return thawNapiArrayMap(value, function(child, index) { return __thaw_napi_decode(child, origins, thawGraphApply(thawNapiArrayConcat, path, [index])); }); var decoded = {}; thawNapiArrayEach(thawGraphObjectKeys(value), function(key) { thawGraphDefineProperty(decoded, key, { value: __thaw_napi_decode(value[key], origins, thawGraphApply(thawNapiArrayConcat, path, [key])), enumerable: true, configurable: true, writable: true }); }); return decoded; } return value; };
+    var __thaw_napi_sync_arguments = function(args) { var seen = thawNapiSafeWeakSet(); var sync = function(value) { if (value === null || typeof value !== 'object' || seen.has(value)) return; seen.add(value); if (true && thawGraphIsView(value) && !(thawGraphBufferIsBuffer && thawGraphBufferIsBuffer(value))) { sync(value.buffer); return; } var handle = __thaw_napi_handles.get(value), id = __thaw_napi_reference_ids.get(value); if (handle && __thaw_napi_owner_metadata && !__thaw_napi_owner_ids.has(thawGraphNapiOwnerOfHandle(thawGraphString(handle)))) throw new thawGraphTypeError('native object belongs to another addon'); if (!handle && !id) return; var response = __thaw_napi_handle(handle ? 'sync_handle' : 'sync_reference', handle || id, '', []), updated = response.value, originMap = thawNapiSafeMap(thawNapiArrayMap((response.origins || []), function(entry) { return [thawGraphStringify(entry[0]), entry]; })); if (true && (thawNapiHasInstance(thawGraphArrayBufferConstructor, value) || (thawNapiSharedArrayBufferConstructor !== null && thawNapiHasInstance(thawNapiSharedArrayBufferConstructor, value)))) { thawGraphApply(thawNapiUint8Set, new thawGraphUint8ArrayConstructor(value), [thawGraphApply(thawNapiArraySlice, updated, [0, value.byteLength])]); return; } if (thawGraphBufferIsBuffer && thawGraphBufferIsBuffer(value)) { for (var i = 0; i < thawNapiMathMin(value.length, updated.length); i++) value[i] = updated[i]; return; } if (handle) return; if (thawGraphArrayIsArray(value)) value.length = updated.length; else thawNapiArrayEach(thawGraphObjectKeys(value), function(key) { if (!thawGraphOwn(updated, key)) { try { delete value[key]; } catch (e) {} } }); thawNapiArrayEach(thawGraphObjectKeys(updated), function(key) { var next = handle ? updated[key] : __thaw_napi_decode(updated[key], originMap, [thawGraphArrayIsArray(updated) ? thawGraphNumber(key) : key]); if (key === '__proto__') thawGraphDefineProperty(value, key, { value: next, writable: true, enumerable: true, configurable: true }); else if (value[key] !== next) { try { value[key] = next; } catch (e) {} } if (next && typeof next === 'object') sync(next); }); }; thawGraphApply(thawGraphArrayForEach, args, [sync]); };
+    var __thaw_napi_promises = thawNapiSafeMap();
+    var __thaw_napi_promise_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(held) { if (__thaw_napi_promises.get(held.id) === held.entry) __thaw_napi_promises.delete(held.id); }) : null;
+    var __thaw_napi_result_value = function(value, origins) {
+    if (value && typeof value === 'object' && !thawNapiArraySomeOf((origins || []), function(entry) { return entry[0].length === 0 && entry[1] === 'plain'; }) && thawGraphOwn(value, '__thaw_napi_promise__')) { var id = value.__thaw_napi_promise__, stored = __thaw_napi_promises.get(id), existing = thawNapiDeref(stored); if (existing) return existing; var promise = new thawNapiPromiseConstructor(function(resolve, reject) { var check = function() { var state; try { state = __thaw_napi_handle('promise_state', id, '', []); } catch (error) { reject(error); return; } if (state.kind === 'pending') { setTimeout(check, 0); return; } if (state.kind === 'rejected') { reject(state.value); return; } resolve(state.value); }; setTimeout(check, 0); }); var entry = thawNapiWeakRef ? new thawNapiWeakRef(promise) : promise; __thaw_napi_promises.set(id, entry); if (__thaw_napi_promise_finalizers) __thaw_napi_promise_finalizers.register(promise, { id: id, entry: entry }); return promise; }
+    return __thaw_napi_decode(value, origins);
+    };
+    var __thaw_napi_handle = function(operation, target, name, args) {
+    var result = thawGraphParse(thawGraphNapiBridgeHandle(operation, thawGraphString(target), name || '', thawGraphStringify(__thaw_napi_arguments(args || []))));
+    if (result && thawGraphOwn(result, '__thaw_error__')) throw new thawNapiErrorConstructor(result.__thaw_error__);
+    if (result && result.value && !thawNapiArraySomeOf((result.origins || []), function(entry) { return entry[0].length === 0 && entry[1] === 'plain'; }) && thawGraphOwn(result.value, '$__thaw_napi_undefined$') && result.value['$__thaw_napi_undefined$'] === true) result.value = undefined;
+    else if (result && thawGraphOwn(result, 'value') && result.kind !== 'method' && operation !== 'sync_reference') result.value = __thaw_napi_result_value(result.value, result.origins);
+    return result;
+    };
+    var __thaw_napi_symbol_id = function(handle, symbol) { var id = __thaw_napi_symbol_ids.get(symbol), global = thawNapiSymbolKeyFor(symbol), created = __thaw_napi_handle('symbol', handle, global === undefined ? symbol.description || '' : global, [global !== undefined, id || null]); id = created.value; __thaw_napi_symbol_ids.set(symbol, id); __thaw_napi_symbol_values.set(id, symbol); return id; };
+    var __thaw_napi_key = function(handle, name, operation, args) { return typeof name === 'symbol' ? __thaw_napi_handle(operation + '_symbol', handle, thawGraphString(__thaw_napi_symbol_id(handle, name)), args) : __thaw_napi_handle(operation, handle, thawGraphString(name), args); };
+    var __thaw_napi_proxy = function(handle, prototype) { var stored = __thaw_napi_proxies.get(thawGraphString(handle)), existing = thawNapiDeref(stored); if (existing) return existing; __thaw_napi_handle('renew_handle', handle, '', []); var target = thawGraphObjectCreate(prototype || thawNapiObjectPrototype), methods = thawNapiSafeMap();
+    var read = function(name) { var result = __thaw_napi_key(handle, name, 'get', []); if (result.kind !== 'method') return result.value; var method = methods.get(result.value); if (!method) { var captured = result.value; method = function() { var args = thawGraphApply(thawNapiArraySlice, arguments, []), value = __thaw_napi_handle('call_captured', captured, thawGraphString(__thaw_napi_handles.get(proxy)), args).value; __thaw_napi_sync_arguments(args); return value; }; methods.set(captured, method); } return method; };
+    var descriptor = function(name) { var meta = __thaw_napi_key(handle, name, 'descriptor', []).value; if (!meta) return undefined; var desc = meta.accessor ? { configurable: meta.configurable, enumerable: meta.enumerable, get: function() { return read(name); }, set: meta.setter ? function(value) { __thaw_napi_key(handle, name, 'set', [value]); } : undefined } : { configurable: meta.configurable, enumerable: meta.enumerable, writable: meta.writable, value: read(name) }; if (!meta.configurable) { var own = thawNapiReflectGetOwnPropertyDescriptor(target, name); if (!own) thawNapiReflectDefineProperty(target, name, desc); else if (!meta.accessor && own.writable) thawNapiReflectDefineProperty(target, name, { value: desc.value }); return thawNapiReflectGetOwnPropertyDescriptor(target, name); } return desc; };
+    var proxy = new thawNapiProxyConstructor(target, {
+    get: function(_, name, receiver) { if (!__thaw_napi_key(handle, name, 'has', []).value) return thawNapiReflectGet(_, name, receiver); var own = thawNapiReflectGetOwnPropertyDescriptor(_, name); if (own && !own.configurable && !own.writable && thawGraphOwn(own, 'value')) return own.value; return read(name); },
+    set: function(_, name, value) { __thaw_napi_key(handle, name, 'set', [value]); __thaw_napi_sync_arguments([value]); var own = thawNapiReflectGetOwnPropertyDescriptor(_, name); if (own && !own.configurable && own.writable) thawNapiReflectDefineProperty(_, name, { value: read(name) }); return true; },
+    has: function(_, name) { return thawNapiReflectHas(_, name) || __thaw_napi_key(handle, name, 'has', []).value; },
+    ownKeys: function(_) { var keys = __thaw_napi_handle('own_keys', handle, '', []).value; thawNapiArrayEach(thawGraphReflectOwnKeys(_), function(key) { if (thawGraphApply(thawNapiArrayIndexOf, keys, [key]) < 0) thawNapiArrayAppend(keys, key); }); thawNapiArrayEach(keys, function(key) { descriptor(key); }); return keys; },
+    getOwnPropertyDescriptor: function(_, name) { return descriptor(name) || thawNapiReflectGetOwnPropertyDescriptor(_, name); },
+    preventExtensions: function() { return false; }
+    }); __thaw_napi_handles.set(proxy, handle); __thaw_napi_proxy_owners.set(proxy, owner); var entry = thawNapiWeakRef ? new thawNapiWeakRef(proxy) : proxy, id = thawGraphString(handle); __thaw_napi_proxies.set(id, entry); if (__thaw_napi_proxy_finalizers) __thaw_napi_proxy_finalizers.register(proxy, { id: id, entry: entry }); return proxy; };
+    const state = {
+      proxy: __thaw_napi_proxy,
+      callExport(name, args) {
+        const result = thawGraphParse(thawGraphNapiBridgeCall(name,
+          thawGraphStringify(__thaw_napi_arguments(args))));
+        if (result && thawGraphOwn(result, '__thaw_error__'))
+          throw new thawGraphTypeError(result.__thaw_error__);
+        __thaw_napi_sync_arguments(args);
+        return __thaw_napi_result_value(result.value, result.origins);
+      },
+      construct(name, args, prototype) {
+        const created = __thaw_napi_handle('construct', name, '', args);
+        thawNapiArrayEach(thawGraphObjectKeys(prototype), key => {
+          __thaw_napi_handle('set', created.value, key, [prototype[key]]);
+        });
+        return __thaw_napi_proxy(created.value, prototype);
+      },
+    };
+    thawGraphApply(thawGraphMapSet, thawGraphNapiStates, [owner, state]);
+    return state;
+  };
+  const thawGraphNapiProxyForHandle = (handle, prototype) => {
+    if (typeof handle !== 'string'
+      || !thawGraphApply(thawGraphRegExpTest, thawGraphPositiveDecimalPattern, [handle]))
+      throw new thawGraphTypeError('Invalid native addon graph handle');
+    const owner = thawGraphNapiOwnerOfHandle(handle);
+    return thawGraphNapiState(owner).proxy(handle, prototype);
+  };
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_proxy_for_handle', {
+    value: thawGraphNapiProxyForHandle, writable: false, configurable: false,
+  });
+  const thawGraphNapiOwnerForExport = name => {
+    const info = thawGraphParse(thawGraphNapiBridgeExports());
+    const owner = info && info.ownerByExportName && info.ownerByExportName[name];
+    if (typeof owner !== 'string')
+      throw new thawGraphTypeError('Native addon export has no live owner');
+    return owner;
+  };
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_napi_call_export', {
+    value: (name, args) => thawGraphNapiState(thawGraphNapiOwnerForExport(name)).callExport(name, args),
+    writable: false, configurable: false,
+  });
+  thawGraphDefineProperty(globalThis, '__thaw_json_graph_napi_construct', {
+    value: (name, args, prototype) =>
+      thawGraphNapiState(thawGraphNapiOwnerForExport(name)).construct(name, args, prototype),
+    writable: false, configurable: false,
+  });
   const thawGraphMapEntries = thawGraphMapConstructor.prototype.entries;
   const thawGraphSetValues = thawGraphSetConstructor.prototype.values;
   const thawGraphKind = (getter, value) => {
@@ -328,6 +591,10 @@
           throw new thawGraphTypeError('Invalid native JSON graph handle');
         return globalThis.__thaw_value_handles[id - 1];
       }
+      if (own(node, 'nh') && typeof node.nh === 'string'
+        && thawGraphApply(thawGraphRegExpTest, thawGraphPositiveDecimalPattern, [node.nh])) {
+        return thawGraphNapiProxyForHandle(node.nh);
+      }
       if (own(node, 'b') && thawGraphArrayIsArray(node.b)
         && thawGraphApply(thawGraphArrayEvery, node.b, [byte => thawGraphNumberIsInteger(byte) && byte >= 0 && byte <= 255]))
         return thawGraphBufferFrom(node.b);
@@ -411,11 +678,23 @@
     try {
       return thawGraphDecode(graph);
     } finally {
-      if (thawGraphArrayIsArray(graph?.leases)) {
-        for (let index = 0; index < graph.leases.length; index++) {
-          const handle = graph.leases[index];
-          if (thawGraphNumberIsSafeInteger(handle) && handle > 0)
-            thawGraphRelease(handle);
+      try {
+        if (thawGraphArrayIsArray(graph?.leases)) {
+          for (let index = 0; index < graph.leases.length; index++) {
+            const handle = graph.leases[index];
+            if (thawGraphNumberIsSafeInteger(handle) && handle > 0)
+              thawGraphRelease(handle);
+          }
+        }
+      } finally {
+        if (thawGraphArrayIsArray(graph?.napiLeases)) {
+          for (let index = 0; index < graph.napiLeases.length; index++) {
+            const reference = graph.napiLeases[index];
+            if (typeof reference === 'string'
+              && thawGraphApply(thawGraphRegExpTest, thawGraphPositiveDecimalPattern, [reference])
+              && typeof thawGraphNapiRelease === 'function')
+              thawGraphNapiRelease(reference);
+          }
         }
       }
     }
@@ -628,7 +907,10 @@
     if (raw.charCodeAt(0) === 1) {
       const separator = raw.indexOf('\u0001', 1);
       if (separator > 1) {
-        name = raw.slice(1, separator);
+        const chain = raw.slice(1, separator);
+        name = chain.charCodeAt(0) === 30
+          ? chain.slice(1).split('\u001f')[0]
+          : chain.split('$')[0];
         message = raw.slice(separator + 1);
       }
     }

@@ -2253,12 +2253,11 @@ impl<'a> FnLowerer<'a> {
                             let space = space
                                 .map(|(value, _)| value)
                                 .unwrap_or(HirExpr::Lit(HirLit::Null));
-                            let arguments = self.coerce_to_declared(
-                                &HirType::Json,
-                                HirExpr::ArrayLit(vec![value, space]),
-                            )?;
+                            // Keep the live native Json graph intact until the JS
+                            // replacer has had a chance to remove a back edge.
+                            let space = self.coerce_to_declared(&HirType::Json, space)?;
                             let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("callDynamicValueMixed".into())),
+                                Box::new(HirExpr::Var("callDynamicValueMixedNativeJson".into())),
                                 vec![
                                     HirExpr::Call(
                                         Box::new(HirExpr::Var("getDynamicValue".into())),
@@ -2266,9 +2265,10 @@ impl<'a> FnLowerer<'a> {
                                             "__thaw_json_stringify_replacer".into(),
                                         ))],
                                     ),
-                                    arguments,
+                                    value,
+                                    space,
                                     HirExpr::ArrayLit(vec![HirExpr::Call(
-                                        Box::new(HirExpr::Var("registerNativeCallback".into())),
+                                        Box::new(HirExpr::Var("registerNativeCallbackGraph".into())),
                                         vec![replacer],
                                     )]),
                                 ],

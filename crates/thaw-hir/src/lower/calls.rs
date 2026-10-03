@@ -157,6 +157,21 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        if *ty == date_object_type() {
+            let name = format!("__thaw_date_object_tag_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            let result = HirExpr::Conditional(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_date_has_native_identity".into())),
+                    vec![HirExpr::Var(name.clone())],
+                )),
+                Box::new(HirExpr::Lit(HirLit::Str("[object Date]".into()))),
+                Box::new(HirExpr::Lit(HirLit::Str("[object Object]".into()))),
+                HirType::Str,
+            );
+            return self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)]);
+        }
         let static_tag = match ty {
             HirType::Undefined => "Undefined",
             HirType::Null => "Null",

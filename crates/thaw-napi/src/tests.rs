@@ -1426,6 +1426,231 @@ fn parcel_watcher_callback_bridge_reuses_identity_when_supplied() {
 }
 
 #[test]
+fn private_napi_result_graph_separates_value_kinds_from_user_fields() {
+    let mut env = Env::new();
+    let real_date = env.alloc(Value::Date(0.0));
+    let timestamp = env.alloc(Value::Number(0.0));
+    let ordinary_date_shape = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("timestamp".into()), timestamp),
+    ])));
+    let real_undefined = env.alloc(Value::Undefined);
+    let truth = env.alloc(Value::Bool(true));
+    let ordinary_undefined_shape = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("$__thaw_napi_undefined$".into()), truth),
+    ])));
+    let root = env.alloc(Value::Array(vec![
+        Some(real_date), Some(ordinary_date_shape), Some(real_undefined),
+        Some(ordinary_undefined_shape),
+    ]));
+    let graph: serde_json::Value = serde_json::from_str(
+        &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
+    ).unwrap();
+    assert_eq!(graph["nodes"][1]["d"], 0);
+    assert!(graph["nodes"][2].get("o").is_some());
+    assert_eq!(graph["nodes"][0]["a"][2]["u"], 1);
+    assert!(graph["nodes"][3].get("o").is_some());
+}
+
+#[test]
+fn private_napi_result_graph_retains_cycle_aliases() {
+    let mut env = Env::new();
+    let root = env.alloc(Value::Array(vec![None]));
+    let Value::Array(items) = unsafe { root.as_mut() }.unwrap() else {
+        unreachable!()
+    };
+    items[0] = Some(root);
+    let graph: serde_json::Value = serde_json::from_str(
+        &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
+    ).unwrap();
+    assert_eq!(graph["root"]["r"], 0);
+    assert_eq!(graph["nodes"][0]["a"][0]["r"], 0);
+}
+
+#[test]
+fn private_napi_event_graph_keeps_user_marker_objects_ordinary() {
+    unsafe extern "C" fn capture(
+        context: *mut c_void, error: *const c_char, result: *const c_char,
+    ) {
+        let output = &mut *(context as *mut Option<(JsonValue, JsonValue)>);
+        *output = Some((
+            serde_json::from_str(CStr::from_ptr(error).to_str().unwrap()).unwrap(),
+            serde_json::from_str(CStr::from_ptr(result).to_str().unwrap()).unwrap(),
+        ));
+    }
+    let mut env = Env::new();
+    let zero = env.alloc(Value::Number(0.0));
+    let ordinary_date = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("timestamp".into()), zero),
+    ])));
+    let real_date = env.alloc(Value::Date(0.0));
+    let mut output = None;
+    let bridge = Arc::new(ThawCallbackBridge {
+        callback: ThawCallback::EventGraph(capture),
+        context: (&mut output as *mut Option<(JsonValue, JsonValue)>) as usize,
+    });
+    let mut info = CallbackInfo {
+        args: vec![ordinary_date, real_date],
+        this_arg: ptr::null_mut(),
+        new_target: ptr::null_mut(),
+        data: Arc::as_ptr(&bridge) as *mut c_void,
+    };
+    unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info); }
+    let (ordinary, date) = output.unwrap();
+    assert!(ordinary["nodes"][0].get("o").is_some());
+    assert_eq!(date["nodes"][0]["d"], 0);
+}
+
+#[test]
+fn private_napi_argument_graph_preserves_origin_and_aliases() {
+    let mut env = Env::new();
+    let graph = r#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"r":2},{"u":1},{"r":3},{"r":2}]},{"d":0},{"o":[["timestamp",{"v":0}]]},{"o":[["$__thaw_napi_undefined$",{"v":true}]]}],"leases":[]}"#;
+    let args = unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, true, None) }.unwrap();
+    assert!(matches!(unsafe { value_ref(args[0]) }, Ok(Value::Date(time)) if *time == 0.0));
+    assert!(matches!(unsafe { value_ref(args[1]) }, Ok(Value::Object(_))));
+    assert!(matches!(unsafe { value_ref(args[2]) }, Ok(Value::Undefined)));
+    assert!(matches!(unsafe { value_ref(args[3]) }, Ok(Value::Object(_))));
+    assert_eq!(args[1], args[4]);
+    // The same envelope is ordinary data on the public plain-JSON ABI.
+    assert!(unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, false, None) }.is_err());
+}
+
+#[test]
+fn private_napi_value_callback_graph_preserves_arguments_and_result() {
+    unsafe extern "C" fn callback(context: *mut c_void, args: *const c_char) -> *const c_char {
+        let output = &mut *(context as *mut Option<JsonValue>);
+        *output = Some(serde_json::from_str(CStr::from_ptr(args).to_str().unwrap()).unwrap());
+        CString::new(r#"{"root":{"u":1},"nodes":[],"leases":[]}"#)
+            .unwrap().into_raw()
+    }
+    let mut env = Env::new();
+    let zero = env.alloc(Value::Number(0.0));
+    let ordinary_date = env.alloc(Value::Object(HashMap::from([
+        (PropertyKey::String("timestamp".into()), zero),
+    ])));
+    let mut output = None;
+    let bridge = Arc::new(ThawCallbackBridge {
+        callback: ThawCallback::ValueGraph(callback),
+        context: (&mut output as *mut Option<JsonValue>) as usize,
+    });
+    let mut info = CallbackInfo {
+        args: vec![ordinary_date],
+        this_arg: ptr::null_mut(),
+        new_target: ptr::null_mut(),
+        data: Arc::as_ptr(&bridge) as *mut c_void,
+    };
+    let result = unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info) };
+    assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Undefined)));
+    let graph = output.unwrap();
+    assert_eq!(graph["nodes"][0]["a"][0]["r"], 1);
+    assert!(graph["nodes"][1].get("o").is_some());
+}
+
+#[test]
+fn private_napi_graph_wrapper_kinds_survive_roundtrip_without_shape_spoofing() {
+    let mut env = Env::new();
+    let graph: JsonValue = serde_json::from_str(r#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"r":2},{"r":3},{"r":4}]},{"m":{"r":5}},{"s":{"r":6}},{"re":["x","g",0]},{"o":[["__thaw_map_entries__",{"r":5}]]},{"a":[]},{"a":[]}],"leases":[]}"#).unwrap();
+    let root = napi_graph_value(&mut env, &graph).unwrap();
+    let encoded: JsonValue = serde_json::from_str(
+        &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
+    ).unwrap();
+    assert!(encoded["nodes"][1].get("m").is_some());
+    assert!(encoded["nodes"][2].get("s").is_some());
+    assert!(encoded["nodes"][3].get("re").is_some());
+    assert!(encoded["nodes"][4].get("o").is_some());
+}
+
+#[test]
+fn private_napi_regexp_graph_last_index_keeps_nonfinite_number_kind() {
+    for name in ["NaN", "Infinity", "-Infinity"] {
+        let mut env = Env::new();
+        let graph: JsonValue = serde_json::from_str(&format!(
+            r#"{{"root":{{"r":0}},"nodes":[{{"re":["x","g","{name}"]}}],"leases":[]}}"#
+        )).unwrap();
+        let root = napi_graph_value(&mut env, &graph).unwrap();
+        let Value::Object(wrapper) = unsafe { value_ref(root) }.unwrap() else { panic!("expected RegExp wrapper") };
+        let pattern = wrapper[&PropertyKey::String("__thaw_regexp__".into())];
+        let Value::Object(fields) = unsafe { value_ref(pattern) }.unwrap() else { panic!("expected RegExp pattern") };
+        let index = fields[&PropertyKey::String("lastIndex".into())];
+        assert!(matches!(unsafe { value_ref(index) }, Ok(Value::Number(_))));
+        let encoded: JsonValue = serde_json::from_str(
+            &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
+        ).unwrap();
+        assert_eq!(encoded["nodes"][0]["re"][2], name);
+    }
+}
+
+#[cfg(feature = "quickjs")]
+#[test]
+fn private_napi_graph_arguments_release_lease_when_export_is_missing() {
+    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiLeaseInput = {};".as_ptr()), 1);
+    let handle = thaw_quickjs::thaw_js_get_global(c"napiLeaseInput".as_ptr());
+    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    let graph = CString::new(format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{handle}]}}"#
+    )).unwrap();
+    let result = unsafe {
+        thaw_napi_call_graph_result(c"missingNativeLeaseExport".as_ptr(), graph.as_ptr())
+    };
+    assert!(!result.error.is_null());
+    unsafe { thaw_arena::destroy_string(result.error); }
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
+}
+
+#[cfg(feature = "quickjs")]
+#[test]
+fn public_graph_arguments_release_lease_before_native_callback() {
+    unsafe extern "C" fn callback(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        assert_eq!(thaw_napi_begin_shutdown(), 0);
+        assert_eq!((*info).args.len(), 0);
+        env_mut(env).unwrap().alloc(Value::Number(7.0))
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let function = Function { callback, data: ptr::null_mut(),
+        properties: HashMap::new(), _thaw_bridge: None };
+    let value = env.alloc(Value::Function(function.clone()));
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.functions.insert("graph-lease-test::call".into(), function);
+        host.exports.insert("graph-lease-test::call".into(), (env_ptr as usize, value));
+        host.module_envs.push(env);
+    });
+    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiPublicLeaseInput = {};".as_ptr()), 1);
+    let handle = thaw_quickjs::thaw_js_get_global(c"napiPublicLeaseInput".as_ptr());
+    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    let graph = CString::new(format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{handle}]}}"#
+    )).unwrap();
+    unsafe {
+        let result = thaw_napi_call_graph_result(c"graph-lease-test::call".as_ptr(), graph.as_ptr());
+        assert!(result.error.is_null());
+        thaw_arena::destroy_string(result.value);
+        assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+        assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
+        // The valid lease must still be released when a later list entry is malformed.
+        let malformed_handle = thaw_quickjs::thaw_js_get_global(c"napiPublicLeaseInput".as_ptr());
+        assert_eq!(thaw_quickjs::thaw_js_retain_handle(malformed_handle), 1);
+        let malformed = CString::new(format!(
+            r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{malformed_handle},0]}}"#
+        )).unwrap();
+        let result = thaw_napi_call_graph_result(c"graph-lease-test::call".as_ptr(), malformed.as_ptr());
+        assert!(!result.error.is_null());
+        assert_eq!(thaw_arena::NativeStr::from_ptr(result.error).to_bytes(),
+            b"invalid native argument graph lease");
+        thaw_arena::destroy_string(result.error);
+        assert_eq!(thaw_quickjs::thaw_js_release_handle(malformed_handle), 1);
+        assert_eq!(thaw_quickjs::thaw_js_release_handle(malformed_handle), 0);
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.functions.remove("graph-lease-test::call");
+        host.exports.remove("graph-lease-test::call");
+        host.module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+    });
+}
+
+#[test]
 fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
     let mut env = Env::new();
     let date = env.alloc(Value::Date(f64::NAN));
@@ -1521,6 +1746,49 @@ fn library_destructor_cannot_reenter_shutdown_or_load() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// Source-only regression for the graph callback's borrowed-Env boundary.
+// The external callback may reenter N-API; its synthetic encode root must
+// already be gone, and a nested shutdown must observe the outer dispatch.
+#[test]
+fn graph_callback_reentry_has_no_synthetic_root_or_nested_shutdown() {
+    unsafe extern "C" fn callback(context: *mut c_void, _args: *const c_char) -> *const c_char {
+        let env = context as NapiEnv;
+        assert_eq!(thaw_napi_begin_shutdown(), 0);
+        assert_eq!((*env).values.len(), 1);
+        assert!(env_mut(env).is_ok());
+        CString::new(r#"{"root":{"u":1},"nodes":[],"leases":[]}"#).unwrap().into_raw()
+    }
+    let mut env = Env::new();
+    let argument = env.alloc(Value::Number(7.0));
+    let bridge = Arc::new(ThawCallbackBridge {
+        callback: ThawCallback::ValueGraph(callback),
+        context: (&mut env as *mut Env) as usize,
+    });
+    let mut info = CallbackInfo { args: vec![argument], this_arg: ptr::null_mut(),
+        new_target: ptr::null_mut(), data: Arc::as_ptr(&bridge) as *mut c_void };
+    let result = unsafe { thaw_compiled_callback(&mut env, &mut info) };
+    assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Undefined)));
+    assert_eq!(env.values.len(), 2); // argument + decoded result, no encode root
+}
+
+#[test]
+fn graph_callback_encode_error_releases_synthetic_root() {
+    static CALLED: AtomicBool = AtomicBool::new(false);
+    unsafe extern "C" fn unexpected_callback(_: *mut c_void, _: *const c_char) -> *const c_char {
+        CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        ptr::null()
+    }
+    let mut env = Env::new();
+    let external = env.alloc(Value::External(ptr::null_mut()));
+    let bridge = Arc::new(ThawCallbackBridge {
+        callback: ThawCallback::ValueGraph(unexpected_callback), context: 0,
+    });
+    let mut info = CallbackInfo { args: vec![external], this_arg: ptr::null_mut(),
+        new_target: ptr::null_mut(), data: Arc::as_ptr(&bridge) as *mut c_void };
+    assert!(unsafe { thaw_compiled_callback(&mut env, &mut info) }.is_null());
+    assert!(!CALLED.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(env.values.len(), 1);
+}
 // Source-only regression: a callback may ask to shut down its Host, but the
 // surrounding conversion/dispatch must keep the Env live until return.
 #[test]
@@ -1583,6 +1851,29 @@ fn snapshot_walkers_read_own_getters_with_original_receiver() {
     assert_eq!(wire.value["nested"]["a\0b"], 42.0);
     assert_eq!(wire.value["items"][0], "from getter");
     HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+}
+
+#[test]
+fn graph_snapshot_reads_nested_getter_with_original_receiver() {
+    unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        let info = info.as_ref().unwrap();
+        assert_eq!(info.this_arg as usize, info.data as usize);
+        env_mut(env).unwrap().alloc(Value::Number(9.0))
+    }
+    let mut env = Env::new();
+    let env_ptr: NapiEnv = &mut env;
+    let child = env.alloc(Value::Object(HashMap::new()));
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
+        getter: Some(getter), setter: None, value: ptr::null_mut(),
+        attributes: 0, data: child.cast(),
+    };
+    unsafe { assert_eq!(napi_define_properties(env_ptr, child, 1, &descriptor), NAPI_OK); }
+    let root = env.alloc(Value::Array(vec![Some(child)]));
+    let graph: JsonValue = serde_json::from_str(
+        &unsafe { napi_result_graph_for_env(env_ptr, root, true) }.unwrap(),
+    ).unwrap();
+    assert_eq!(graph["nodes"][1]["o"][0], serde_json::json!(["computed", {"v": 9.0}]));
 }
 
 #[test]
@@ -1793,6 +2084,42 @@ fn snapshot_walkers_use_cross_environment_child_and_promise_owner() {
             let result = CString::from_raw(wire.cast_mut()).into_string().unwrap();
             assert!(result.contains("\"computed\":9.0"), "{result}");
         }
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        drop(host.module_envs.pop());
+        drop(host.module_envs.pop());
+    });
+}
+
+#[test]
+fn graph_snapshot_uses_cross_environment_accessor_owner() {
+    unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        assert_eq!(env as usize, info.as_ref().unwrap().data as usize);
+        env_mut(env).unwrap().alloc(Value::Number(11.0))
+    }
+    let mut first = Box::new(Env::new());
+    let mut second = Box::new(Env::new());
+    let first_env: NapiEnv = &mut *first;
+    let second_env: NapiEnv = &mut *second;
+    let root = first.alloc(Value::Array(vec![None]));
+    let child = second.alloc(Value::Object(HashMap::new()));
+    let descriptor = NapiPropertyDescriptor {
+        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
+        getter: Some(getter), setter: None, value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: second_env.cast(),
+    };
+    unsafe { assert_eq!(napi_define_properties(second_env, child, 1, &descriptor), NAPI_OK); }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.module_envs.push(first);
+        host.module_envs.push(second);
+    });
+    unsafe {
+        assert_eq!(napi_set_element(first_env, root, 0, child), NAPI_OK);
+        let graph = napi_result_graph_for_env(first_env, root, true).unwrap();
+        assert!(graph.contains("\"computed\""), "{graph}");
+        assert!(graph.contains("11.0"), "{graph}");
     }
     HOST.with(|host| {
         let mut host = host.borrow_mut();

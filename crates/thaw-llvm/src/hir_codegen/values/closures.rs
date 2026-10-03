@@ -583,7 +583,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     if claimed.contains(&7) {
                         return Err("Json and dictionary receiver union members share the same source tag".into());
                     }
-                    for tag in [0_u64, 1, 2, 3, 5, 7] {
+                    for tag in [0_u64, 1, 2, 3, 4, 5, 7] {
                         if tag == 5 && (!string_literals.is_empty() || string_catchall.is_some()) {
                             continue;
                         }
@@ -777,7 +777,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<PointerValue<'ctx>, String> {
         let join = self.context.append_basic_block(entry_fn, "receiver_json_ready");
         let rejected = self.context.append_basic_block(entry_fn, "receiver_json_rejected");
-        let cases = [0_u64, 1, 2, 3, 5, 7]
+        let cases = [0_u64, 1, 2, 3, 4, 5, 7]
             .map(|tag| (tag, self.context.append_basic_block(entry_fn, &format!("receiver_json_{tag}"))));
         let branches = cases.iter().map(|(tag, block)|
             (self.context.i8_type().const_int(*tag, false), *block)).collect::<Vec<_>>();
@@ -809,6 +809,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?.try_as_basic_value().basic()
                         .ok_or("number receiver constructor returned no value")?.into_pointer_value()
                 }
+                4 => self.builder.build_call(self.module.get_function("thaw_json_receiver_bigint").unwrap(),
+                    &[word.into()], "receiver_json_bigint_root")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("BigInt receiver constructor returned no value")?.into_pointer_value(),
                 5 => {
                     let value = self.builder.build_int_to_ptr(word, pointer, "receiver_json_string")
                         .map_err(|error| error.to_string())?;

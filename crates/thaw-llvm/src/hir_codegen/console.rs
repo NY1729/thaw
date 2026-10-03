@@ -374,6 +374,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("JSON console formatter returned no value")?
             .into_pointer_value();
+        let text = if formatter == "thaw_json_stringify" {
+            self.compile_check_json_stringify_error(text.into())?.into_pointer_value()
+        } else {
+            text
+        };
         self.compile_console_text(text, newline, "console_structured", descriptor)
     }
 

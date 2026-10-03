@@ -28,6 +28,39 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 return self.compile_throw_text(value).map(Into::into);
             }
+            "__thaw_date_assert_native_identity" => {
+                let [value] = args else { return Err("Date identity assertion expects one operand".into()); };
+                let value = self.compile_expr(value)?;
+                let date = self.builder.build_global_string_ptr("Date", "date_assert_name")
+                    .map_err(|error| error.to_string())?;
+                let trusted = self.builder.build_call(
+                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                    &[value.into(), date.as_pointer_value().into()],
+                    "date_assert_identity",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Date identity assertion returned no value")?.into_int_value();
+                let function = self.current_function();
+                let accepted = self.context.append_basic_block(function, "date_identity_accepted");
+                let rejected = self.context.append_basic_block(function, "date_identity_rejected");
+                self.builder.build_conditional_branch(trusted, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.compile_throw_type_error("Date method called on a non-Date value")?;
+                self.builder.position_at_end(accepted);
+                return Ok(value);
+            }
+            "__thaw_date_has_native_identity" => {
+                let [value] = args else { return Err("Date identity check expects one operand".into()); };
+                let value = self.compile_expr(value)?;
+                let date = self.builder.build_global_string_ptr("Date", "date_identity_name")
+                    .map_err(|error| error.to_string())?;
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                    &[value.into(), date.as_pointer_value().into()],
+                    "date_has_native_identity",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("Date identity check returned no value".into());
+            }
 
             "__thaw_assert_class_identity" => {
                 let [object, HirExpr::Lit(HirLit::Str(class_name))] = args else {

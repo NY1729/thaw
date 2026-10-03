@@ -259,6 +259,9 @@ impl<'a> FnLowerer<'a> {
             if actual_fields.starts_with(declared_fields) {
                 return Ok(value);
             }
+            if HirType::Object(actual_fields.clone()) == date_object_type() {
+                return Err("native Date cannot be reinterpreted as a different fixed object layout".into());
+            }
             if let Some(class) = class_name_from_type(&HirType::Object(actual_fields.clone())) {
                 let compatible = declared_fields.iter().all(|(name, expected)| {
                     if actual_fields
@@ -366,12 +369,15 @@ impl<'a> FnLowerer<'a> {
                 self.scope.insert(temp.clone(), HirType::JsValue);
                 let null_json =
                     self.wrap_native_value_as_json(HirExpr::Lit(HirLit::Null), HirType::Null)?;
-                let undefined_json = HirExpr::JsonObjectLit(
-                    vec![(
-                        "$__thaw_napi_undefined$".to_string(),
-                        HirExpr::Lit(HirLit::Bool(true)),
+                let undefined_json = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
+                    vec![HirExpr::JsonObjectLit(
+                        vec![(
+                            "$__thaw_napi_undefined$".to_string(),
+                            HirExpr::Lit(HirLit::Bool(true)),
+                        )],
+                        HirType::Bool,
                     )],
-                    HirType::Bool,
                 );
                 let is_null = self.dynamic_value_is_null(HirExpr::Var(temp.clone()));
                 let is_undefined = self.dynamic_value_is_undefined(HirExpr::Var(temp.clone()));
@@ -508,12 +514,15 @@ impl<'a> FnLowerer<'a> {
             if actual == HirType::Undefined {
                 let temp = format!("__thaw_json_undefined_source_{}", self.next_binding);
                 self.next_binding += 1;
-                let sentinel = HirExpr::JsonObjectLit(
-                    vec![(
-                        "$__thaw_napi_undefined$".to_string(),
-                        HirExpr::Lit(HirLit::Bool(true)),
+                let sentinel = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
+                    vec![HirExpr::JsonObjectLit(
+                        vec![(
+                            "$__thaw_napi_undefined$".to_string(),
+                            HirExpr::Lit(HirLit::Bool(true)),
+                        )],
+                        HirType::Bool,
                     )],
-                    HirType::Bool,
                 );
                 return self.wrap_call_argument_bindings(
                     sentinel,
@@ -538,9 +547,12 @@ impl<'a> FnLowerer<'a> {
                     )),
                 );
                 let entries = self.wrap_native_value_as_json(entries, entries_type)?;
-                return Ok(HirExpr::JsonObjectLit(
-                    vec![("__thaw_map_entries__".into(), entries)],
-                    HirType::Json,
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
+                    vec![HirExpr::JsonObjectLit(
+                        vec![("__thaw_map_entries__".into(), entries)],
+                        HirType::Json,
+                    )],
                 ));
             }
             if let HirType::Set(element) = &actual {
@@ -558,16 +570,22 @@ impl<'a> FnLowerer<'a> {
                     )),
                 );
                 let values = self.wrap_native_value_as_json(values, values_type)?;
-                return Ok(HirExpr::JsonObjectLit(
-                    vec![("__thaw_set_values__".into(), values)],
-                    HirType::Json,
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
+                    vec![HirExpr::JsonObjectLit(
+                        vec![("__thaw_set_values__".into(), values)],
+                        HirType::Json,
+                    )],
                 ));
             }
             if actual == regex_object_type() {
                 let pattern = self.wrap_native_value_as_json(value, actual)?;
-                return Ok(HirExpr::JsonObjectLit(
-                    vec![("__thaw_regexp__".into(), pattern)],
-                    HirType::Json,
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
+                    vec![HirExpr::JsonObjectLit(
+                        vec![("__thaw_regexp__".into(), pattern)],
+                        HirType::Json,
+                    )],
                 ));
             }
             // A `Buffer`/`Uint8Array` (`HirType::Bytes`) has no direct
@@ -606,9 +624,12 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::Lit(HirLit::Str("Buffer".to_string())),
                     HirType::Str,
                 )?;
-                return Ok(HirExpr::JsonObjectLit(
-                    vec![("type".into(), kind), ("data".into(), data)],
-                    HirType::Json,
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
+                    vec![HirExpr::JsonObjectLit(
+                        vec![("type".into(), kind), ("data".into(), data)],
+                        HirType::Json,
+                    )],
                 ));
             }
             // An instance of a *decorated* class (see `module/globals.rs`'s
