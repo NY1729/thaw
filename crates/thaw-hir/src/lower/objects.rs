@@ -24,6 +24,48 @@ fn callback_signature(ty: &HirType, supplied: usize) -> Option<(Vec<HirType>, Hi
     }
 }
 
+/// Only a direct static field access can use a prefix view safely. A whole
+/// `this` value could enumerate the synthetic marker's physical offset, and
+/// a nested closure or member call can let that receiver escape indirectly.
+fn method_this_stays_in_prefix(
+    function: &swc_ecma_ast::Function,
+    fields: &[(Symbol, HirExpr)],
+) -> bool {
+    struct Inspector<'a> { fields: &'a [(Symbol, HirExpr)], safe: bool }
+    impl Visit for Inspector<'_> {
+        fn visit_expr(&mut self, expression: &Expr) {
+            if matches!(expression, Expr::OptChain(_) | Expr::TaggedTpl(_) | Expr::New(_) | Expr::SuperProp(_)) {
+                self.safe = false;
+            }
+            expression.visit_children_with(self);
+        }
+        fn visit_member_expr(&mut self, member: &swc_ecma_ast::MemberExpr) {
+            if matches!(member.obj.as_ref(), Expr::This(_)) {
+                self.safe &= matches!(&member.prop, MemberProp::Ident(name)
+                    if self.fields.iter().any(|(field, _)| field.as_str() == name.sym.as_ref()));
+                return;
+            }
+            member.visit_children_with(self);
+        }
+        fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+            if matches!(&call.callee, swc_ecma_ast::Callee::Expr(callee)
+                if matches!(callee.as_ref(), Expr::Member(member)
+                    if matches!(member.obj.as_ref(), Expr::This(_)))) {
+                self.safe = false;
+            }
+            call.visit_children_with(self);
+        }
+        fn visit_this_expr(&mut self, _: &swc_ecma_ast::ThisExpr) { self.safe = false; }
+        fn visit_function(&mut self, _: &swc_ecma_ast::Function) { self.safe = false; }
+        fn visit_arrow_expr(&mut self, _: &swc_ecma_ast::ArrowExpr) { self.safe = false; }
+    }
+    let mut inspector = Inspector { fields, safe: true };
+    for parameter in &function.params { parameter.visit_with(&mut inspector); }
+    for decorator in &function.decorators { decorator.visit_with(&mut inspector); }
+    if let Some(body) = &function.body { body.visit_with(&mut inspector); }
+    inspector.safe
+}
+
 impl<'a> FnLowerer<'a> {
     /// Visit the fixed fields present when enumeration began in effective
     /// own-key order. Actions remain lazy so an earlier getter can change a
@@ -208,7 +250,7 @@ impl<'a> FnLowerer<'a> {
         fields: &[(Symbol, HirExpr)],
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<Option<Vec<(Symbol, HirExpr)>>, String> {
-        let receiver = || -> Result<HirType, String> {
+        let receiver = |prefix_only: bool| -> Result<HirType, String> {
             if let Some(expected) = expected_fields {
                 if !expected
                     .iter()
@@ -223,7 +265,7 @@ impl<'a> FnLowerer<'a> {
                     .map(|(name, value)| Ok((name.clone(), self.infer_expr_type(value)?)))
                     .chain(std::iter::once(Ok((
                         "__thaw_object_method_receiver".into(),
-                        HirType::Undefined,
+                        if prefix_only { HirType::Bool } else { HirType::Undefined },
                     ))))
                     .collect::<Result<Vec<_>, String>>()?,
             ))
@@ -240,7 +282,8 @@ impl<'a> FnLowerer<'a> {
                 });
                 Some(vec![(
                     name,
-                    self.lower_object_method(method, receiver()?, expected)?,
+                    self.lower_object_method(method,
+                        receiver(method_this_stays_in_prefix(&method.function, fields))?, expected)?,
                 )])
             }
             Prop::Getter(getter) => {
@@ -248,7 +291,7 @@ impl<'a> FnLowerer<'a> {
                     .static_object_property_name(&getter.key)
                     .ok_or_else(|| "object getter name must be static".to_string())?;
                 let value =
-                    self.lower_object_function(&getter.function, receiver()?, None, true)?;
+                    self.lower_object_function(&getter.function, receiver(false)?, None, true)?;
                 let return_type = match self.infer_expr_type(&value)? {
                     HirType::Function(_, ret) => *ret,
                     HirType::CallableFunction(_, _, _, ret) => *ret,
@@ -264,7 +307,7 @@ impl<'a> FnLowerer<'a> {
                     .static_object_property_name(&setter.key)
                     .ok_or_else(|| "object setter name must be static".to_string())?;
                 let value =
-                    self.lower_object_function(&setter.function, receiver()?, None, true)?;
+                    self.lower_object_function(&setter.function, receiver(false)?, None, true)?;
                 let parameter_type = setter
                     .function
                     .params
@@ -3824,6 +3867,51 @@ fn well_known_symbol_from_expr(expr: &Expr) -> Option<&'static str> {
 }
 
 impl<'a> FnLowerer<'a> {
+    /// A method's synthetic marker is type metadata, not a physical field
+    /// used by its body. When all readable/writable receiver fields are an
+    /// exact prefix of the real allocation, alias the original pointer under
+    /// the method's narrow receiver type. The body then reads and writes the
+    /// original slots. Other layouts retain the existing materialization
+    /// path until they have an explicit projection.
+    fn native_object_method_receiver(
+        &mut self,
+        source: HirExpr,
+        actual: &HirType,
+        fields: &[(Symbol, HirType)],
+    ) -> (HirExpr, Option<(Symbol, HirType, HirExpr)>) {
+        let marker = "__thaw_object_method_receiver";
+        let prefix = fields.iter().take_while(|(name, _)| name.as_str() != marker)
+            .collect::<Vec<_>>();
+        let compatible = matches!(actual, HirType::Object(actual_fields)
+            if fields.last().is_some_and(|(name, ty)| name == marker && *ty == HirType::Bool)
+                && fields[..fields.len() - 1].iter().all(|(name, _)| name.as_str() != marker)
+                && actual_fields.iter().all(|(name, _)| name.as_str() != marker)
+                // Accessor callbacks can return the whole aliased receiver.
+                && !actual_fields.iter().any(|(name, _)| is_hidden_accessor_field(name))
+                && prefix.len() <= actual_fields.len()
+                && prefix.iter().copied().eq(actual_fields.iter().take(prefix.len())));
+        if compatible {
+            let view_type = HirType::Object(fields.to_vec());
+            let name = format!("__thaw_live_method_receiver_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), view_type.clone());
+            return (HirExpr::Var(name.clone()), Some((name, view_type, source)));
+        }
+        let copied = fields.iter().map(|(name, _)| {
+            if name == marker {
+                (name.clone(), HirExpr::Lit(if fields.last().is_some_and(|(_, ty)| *ty == HirType::Bool) {
+                    HirLit::Bool(false)
+                } else {
+                    HirLit::Undefined
+                }))
+            } else {
+                (name.clone(), HirExpr::PropAccess(
+                    Box::new(source.clone()), actual.clone(), name.clone()))
+            }
+        }).collect();
+        (HirExpr::ObjectLit(copied), None)
+    }
+
     /// If an object literal's compiled field table (`fields`) includes a
     /// `[Symbol.toPrimitive]` method (stored under `well_known_symbol_
     /// key`'s sentinel), builds a call to it with the given ECMAScript
@@ -3856,28 +3944,16 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(name.clone(), object_type.clone());
         let bound = HirExpr::Var(name.clone());
         let method = HirExpr::PropAccess(Box::new(bound.clone()), object_type.clone(), key);
-        let this_arg = HirExpr::ObjectLit(
-            receiver_fields
-                .into_iter()
-                .map(|(field_name, _)| {
-                    if field_name == "__thaw_object_method_receiver" {
-                        (field_name, HirExpr::Lit(HirLit::Undefined))
-                    } else {
-                        let access = HirExpr::PropAccess(
-                            Box::new(bound.clone()),
-                            object_type.clone(),
-                            field_name.clone(),
-                        );
-                        (field_name, access)
-                    }
-                })
-                .collect(),
+        let (this_arg, view_binding) = self.native_object_method_receiver(
+            bound.clone(), &object_type, &receiver_fields,
         );
         let call = HirExpr::Call(
             Box::new(method),
             vec![this_arg, HirExpr::Lit(HirLit::Str(hint.to_string()))],
         );
-        let result = self.wrap_call_argument_bindings(call, &[(name, object_type, value)])?;
+        let mut bindings = vec![(name, object_type, value)];
+        if let Some(binding) = view_binding { bindings.push(binding); }
+        let result = self.wrap_call_argument_bindings(call, &bindings)?;
         Ok(Some(result))
     }
 

@@ -1173,7 +1173,7 @@ impl<'a> FnLowerer<'a> {
             return Err("optional native calls do not accept type arguments".into());
         }
         let receiver_offset = usize::from(receiver.is_some());
-        let (mut arguments, spread_bindings) = self.lower_native_spread_values_with_expected(
+        let (mut arguments, mut spread_bindings) = self.lower_native_spread_values_with_expected(
             &call.args,
             "optional native call",
             &params[receiver_offset..],
@@ -1183,14 +1183,11 @@ impl<'a> FnLowerer<'a> {
             let HirType::Object(fields) = &params[0] else {
                 return Err("object method receiver has no object parameter".into());
             };
-            arguments.insert(0, HirExpr::ObjectLit(fields.iter().map(|(name, _)| {
-                if name == "__thaw_object_method_receiver" {
-                    (name.clone(), HirExpr::Lit(HirLit::Undefined))
-                } else {
-                    (name.clone(), HirExpr::PropAccess(
-                        Box::new(receiver.clone()), receiver_type.clone(), name.clone()))
-                }
-            }).collect()));
+            let (this_arg, view_binding) = self.native_object_method_receiver(
+                receiver.clone(), &receiver_type, fields,
+            );
+            if let Some(binding) = view_binding { spread_bindings.insert(0, binding); }
+            arguments.insert(0, this_arg);
         }
         if arguments.len() > params.len() && rest.is_none() {
             return Err(format!(
