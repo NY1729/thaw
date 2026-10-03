@@ -1935,3 +1935,52 @@ fn fs_write_stream_uses_configured_default_encoding() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn fs_filehandle_close_waits_for_preceding_async_iterable_writes() {
+    // Unrun regression: close must drain the whole iterable, not only its first await.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_filehandle_pending_close");
+    fs::write(dir.join("index.js"), r#"var fs = require('node:fs'); module.exports = async function(root) {
+        async function check(path, throughPromises) {
+            var handle = await fs.promises.open(path, 'w+'), release, entered;
+            var gate = new Promise(function(resolve) { release = resolve; });
+            var started = new Promise(function(resolve) { entered = resolve; });
+            async function* chunks() { yield 'A'; entered(); await gate; yield 'B'; }
+            var events = [], write = throughPromises ? fs.promises.writeFile(handle, chunks()) : handle.writeFile(chunks());
+            write.then(function() { events.push('write'); });
+            await started;
+            var close = handle.close();
+            var sameClose = close === handle.close();
+            close.then(function() { events.push('close'); });
+            release(); await write; await close;
+            var after;
+            try { await handle.stat(); } catch (error) { after = error.code; }
+            return [fs.readFileSync(path, 'utf8'), events.join(','), sameClose, after];
+        }
+        var first = await check(root + '/method', false), second = await check(root + '/promises', true);
+        var failedHandle = await fs.promises.open(root + '/failed', 'w+'), failRelease, failEntered;
+        var failGate = new Promise(function(resolve) { failRelease = resolve; });
+        var failStarted = new Promise(function(resolve) { failEntered = resolve; });
+        async function* failing() { yield 'X'; failEntered(); await failGate; throw new Error('chunk failed'); }
+        var pendingFailure = failedHandle.writeFile(failing()); await failStarted;
+        var closeAfterFailure = failedHandle.close(); failRelease();
+        var failure; try { await pendingFailure; } catch (error) { failure = error.message; }
+        await closeAfterFailure;
+        return [first, second, [failure, fs.readFileSync(root + '/failed', 'utf8'), failedHandle.closed]];
+    };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_filehandle_pending_close_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFilehandleClose = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseFsFilehandleClose").unwrap();
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["AB","write,close",true,"EBADF"],["AB","write,close",true,"EBADF"],["chunk failed","X",true]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
