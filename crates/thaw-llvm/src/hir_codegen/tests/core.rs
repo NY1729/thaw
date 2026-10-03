@@ -3333,3 +3333,54 @@ fn branch_capture_of_parameter_claims_before_condition_enables_quickjs() {
         && retains[0] < conditions[1] && conditions[1] < retains[1], "{ir}");
     assert!(compiler.uses_quickjs() && compiler.uses_quickjs_handles, "{ir}");
 }
+
+#[test]
+fn absent_function_pointer_checks_after_plain_call_arguments() {
+    // Direct HIR isolates the consumer gate before the class method read
+    // starts producing absent Function values in a later dependent unit.
+    let callback = HirType::Function(vec![HirType::F64], Box::new(HirType::Void));
+    let absent = HirExpr::OptionalValue(
+        Box::new(HirExpr::OptionalNone(callback.clone())),
+        callback.clone(),
+    );
+    let program = HirProgram {
+        functions: vec![
+            HirFunction {
+                name: "effect".into(),
+                params: vec![],
+                ret: HirType::F64,
+                is_async: false,
+                body: vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(1.0))))],
+            },
+            HirFunction {
+                name: "main".into(),
+                params: vec![],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![
+                    HirStmt::Let("maybe_function".into(), callback,
+                        absent),
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("maybe_function".into())),
+                        vec![HirExpr::Call(Box::new(HirExpr::Var("effect".into())), vec![])],
+                    )),
+                    HirStmt::Return(None),
+                ],
+            },
+        ],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "absent_function_call_order");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.lines()
+        .skip_while(|line| !(line.starts_with("define ") && line.contains("@main(")))
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let effect = main.find("@effect(").expect(&ir);
+    let check = main.find("callable_is_undefined").expect(&ir);
+    let load = main.find("closure_code").expect(&ir);
+    assert!(effect < check && check < load, "{ir}");
+}
