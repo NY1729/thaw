@@ -899,6 +899,7 @@
         return { r: id };
       }
       if (value === undefined) return { u: 1 };
+      if (typeof value === 'number' && thawGraphObjectIs(value, -0)) return { nf: '-0' };
       if (typeof value === 'number' && !thawGraphNumberIsFinite(value))
         return { nf: thawGraphNumberIsNaN(value) ? 'NaN' : value > 0 ? 'Infinity' : '-Infinity' };
       if (typeof value === 'string') {
@@ -1504,7 +1505,7 @@
         return symbol;
       }
       if (own(token, 'h') && token.h === 1) return undefined;
-      if (own(token, 'nf') && (token.nf === 'NaN' || token.nf === 'Infinity' || token.nf === '-Infinity'))
+      if (own(token, 'nf') && (token.nf === 'NaN' || token.nf === 'Infinity' || token.nf === '-Infinity' || token.nf === '-0'))
         return thawGraphNumber(token.nf);
       throw new thawGraphTypeError('Invalid native JSON graph token');
     };

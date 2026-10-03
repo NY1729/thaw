@@ -1897,6 +1897,18 @@ fn install_graph_handle_functions(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 
 #[cfg(test)]
 #[test]
+fn graph_codec_roundtrip_preserves_negative_zero() {
+    let valid: bool = with_context(|ctx| ctx.eval(r#"(() => {
+      const source = [-0, 0, NaN, Infinity, -Infinity];
+      const result = __thaw_json_graph_decode_owned(__thaw_json_graph_encode_js(source));
+      return result.every((value, index) => Object.is(value, source[index]))
+        && JSON.stringify(source.slice(0, 2)) === '[0,0]';
+    })()"#).expect("negative zero graph roundtrip"));
+    assert!(valid);
+}
+
+#[cfg(test)]
+#[test]
 fn graph_codec_roundtrip_retains_identity_and_releases_live_lease() {
     let valid: bool = with_context(|ctx| ctx.eval(r#"(() => {
       const source = { own: { __thaw_js_handle_id__: 19 }, big: 123n };
