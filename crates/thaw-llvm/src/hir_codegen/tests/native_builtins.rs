@@ -10421,3 +10421,52 @@ fn public_dynamic_method_helper_evaluates_arguments_before_get_but_member_call_s
     "#;
     assert_eq!(compile_and_run(source, "public_helper_vs_member_get_order"), "4\nAGC\n5\nGAC\n");
 }
+
+#[test]
+fn decoded_js_function_call_apply_bind_preserve_explicit_receiver() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.holder = {base:20}; globalThis.original = function(n) { 'use strict'; return this === undefined ? -1 : this === globalThis.holder ? 100 + n : this.base + n; }; globalThis.original.call = () => { throw new Error('overwritten call'); }; globalThis.invokeTyped = callback => callback(globalThis.original);");
+            const receiver: Json = JSON.parse('{"base":5}');
+            const callback = (fn: (n: number) => number): number => {
+                console.log(fn.call(receiver, 2));
+                console.log(fn.apply(receiver, [3]));
+                console.log(fn.bind(receiver, 4)());
+                const live: JsValue = getDynamicValue("holder");
+                console.log(fn.call(live, 5));
+                releaseDynamicValue(live);
+                return fn(9);
+            };
+            const handle: JsValue = registerNativeCallbackGraph(callback);
+            console.log(Number(callDynamicValueWithValue(getDynamicValue("invokeTyped"), handle)));
+            releaseDynamicValue(handle);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "decoded_js_function_receiver"), "7\n8\n9\n105\n-1\n");
+}
+
+#[test]
+fn decoded_js_function_argument_marshaling_failure_keeps_original_error() {
+    let source = r#"
+        let calls = 0;
+        class Bad {
+            get value(): number { throw new Error("native getter failed"); }
+        }
+        function invoke(fn: (item: { value: number }) => number): number {
+            try {
+                fn(new Bad());
+                console.log("missed native getter");
+            } catch (error) {
+                console.log((error as Error).message === "native getter failed");
+            }
+            return fn({ value: 4 });
+        }
+        function main(): void {
+            loadScript("globalThis.acceptNative = callback => callback(item => { globalThis.nativeCalls = (globalThis.nativeCalls || 0) + 1; return item.value; }); globalThis.nativeCalls = 0;");
+            const callback: JsValue = registerNativeCallbackGraph(invoke);
+            console.log(Number(callDynamicValueWithValue(getDynamicValue("acceptNative"), callback)), Number(getDynamicValue("nativeCalls")));
+            releaseDynamicValue(callback);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "typed_function_marshal_failure"), "true\n4 1\n");
+}

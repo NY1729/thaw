@@ -263,6 +263,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
+            &[json.into()], "track_marshaled_object",
+        ).map_err(|error| error.to_string())?;
         // Only ClassAlloc records this native Date identity. An ordinary
         // object with the same fields is still serialized as ordinary data.
         let date_identity = if fields.len() == 2
@@ -545,7 +549,11 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Null => value = self.compile_json_null()?,
             _ => {}
         }
-        let owned = owned || (preserve_undefined && matches!(field_type, HirType::Undefined));
+        let owned = owned
+            || matches!(field_type, HirType::Null | HirType::Undefined
+                | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                | HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
+            || (matches!(field_type, HirType::Json | HirType::Dictionary(_)) && value.is_int_value());
         let mut setter = match field_type {
                 HirType::F64 => "thaw_json_object_set_number",
                 HirType::Str => "thaw_json_object_set_string",
@@ -884,9 +892,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 json,
                 key,
                 null,
-                &HirType::Null,
+                &HirType::Json,
                 preserve_undefined,
-                false,
+                true,
             )?;
             self.builder
                 .build_unconditional_branch(done)
@@ -900,7 +908,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     undefined,
                     &HirType::Json,
                     true,
-                    false,
+                    true,
                 )?;
             }
         } else if absent_is_null {
@@ -909,9 +917,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 json,
                 key,
                 null,
-                &HirType::Null,
+                &HirType::Json,
                 preserve_undefined,
-                false,
+                true,
             )?;
         } else if preserve_undefined {
             let undefined = self.compile_napi_undefined_json()?;
@@ -921,7 +929,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 undefined,
                 &HirType::Json,
                 true,
-                false,
+                true,
             )?;
         }
         self.builder
@@ -974,6 +982,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_array_new returned no value")?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
+            &[json.into()], "track_marshaled_array",
+        ).map_err(|error| error.to_string())?;
         let i64_type = self.context.i64_type();
         let length = self
             .builder
@@ -1177,6 +1189,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_array_new returned no value")?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
+            &[json.into()], "track_marshaled_tuple",
+        ).map_err(|error| error.to_string())?;
         let stride = tuple_element_storage_bytes(element_types)?;
         for (index, element_type) in element_types.iter().enumerate() {
             let offset = self
@@ -1275,6 +1291,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             _ => {}
         }
+        let generated_owned = matches!(element_type,
+            HirType::Null | HirType::Undefined | HirType::Void
+            | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+            | HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
+            || (matches!(element_type, HirType::Json | HirType::Dictionary(_)) && value.is_int_value());
         let push = match element_type {
             HirType::F64 => "thaw_json_array_push_number",
             HirType::Str => "thaw_json_array_push_string",
@@ -1358,6 +1379,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_array_push",
             )
             .map_err(|error| error.to_string())?;
+        if generated_owned {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[value.into()], "destroy_marshaled_array_element",
+            ).map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 
@@ -1554,6 +1581,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 "push_collection_absent",
             )
             .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[absent.into()], "destroy_marshaled_array_absence",
+        ).map_err(|error| error.to_string())?;
         self.builder
             .build_unconditional_branch(done)
             .map_err(|error| error.to_string())?;
