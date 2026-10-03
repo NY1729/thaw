@@ -935,11 +935,11 @@ impl<'a> FnLowerer<'a> {
                             vec![result, HirExpr::Lit(HirLit::Str(",".to_string()))],
                         );
                     }
-                    let part = self.coerce_primitive_to_string(HirExpr::TypedIndex(
+                    let part = self.coerce_tuple_join_slot_to_string(HirExpr::TypedIndex(
                         Box::new(tuple.clone()),
                         Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                         element.clone(),
-                    ))?;
+                    ), element)?;
                     result = HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                         vec![result, part],
@@ -953,6 +953,100 @@ impl<'a> FnLowerer<'a> {
             other => Err(format!(
                 "string concatenation cannot convert native type {other:?}"
             )),
+        }
+    }
+
+    /// Tuple joins use the empty string for absent elements, while
+    /// ordinary `String(value)` keeps "null" and "undefined".
+    fn coerce_tuple_join_slot_to_string(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
+        let empty = || HirExpr::Lit(HirLit::Str(String::new()));
+        match ty {
+            HirType::Null | HirType::Undefined => Ok(empty()),
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                let name = format!("__thaw_join_slot_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let bound = HirExpr::Var(name.clone());
+                let kind = match ty {
+                    HirType::Optional(_) => AbsenceKind::Optional,
+                    HirType::Nullable(_) => AbsenceKind::Nullable,
+                    HirType::Nullish(_) => AbsenceKind::Nullish,
+                    _ => unreachable!(),
+                };
+                let is_none = self.absence_is_none(kind, bound.clone(), payload.as_ref().clone());
+                let present = self.absence_value(kind, bound, payload.as_ref().clone());
+                let text = self.coerce_tuple_join_slot_to_string(present, payload)?;
+                let result = HirExpr::Conditional(
+                    Box::new(is_none),
+                    Box::new(empty()),
+                    Box::new(text),
+                    HirType::Str,
+                );
+                self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)])
+            }
+            HirType::Union(members) => {
+                let name = format!("__thaw_join_union_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let mut statements = Vec::with_capacity(members.len());
+                for (index, member) in members.iter().enumerate() {
+                    let part = self.coerce_tuple_join_slot_to_string(
+                        HirExpr::UnionValue(
+                            Box::new(HirExpr::Var(name.clone())),
+                            index,
+                            members.clone(),
+                        ),
+                        member,
+                    )?;
+                    if index + 1 == members.len() {
+                        statements.push(HirStmt::Return(Some(part)));
+                    } else {
+                        statements.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(
+                                    Box::new(HirExpr::Var(name.clone())),
+                                    members.clone(),
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            vec![HirStmt::Return(Some(part))],
+                            Vec::new(),
+                        ));
+                    }
+                }
+                self.wrap_call_argument_bindings(
+                    HirExpr::Block(statements),
+                    &[(name, ty.clone(), value)],
+                )
+            }
+            HirType::Json | HirType::JsValue => {
+                let name = format!("__thaw_join_dynamic_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let bound = HirExpr::Var(name.clone());
+                let is_nullish = if *ty == HirType::Json {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_is_nullish".to_string())),
+                        vec![bound.clone()],
+                    )
+                } else {
+                    self.dynamic_value_is_nullish(bound.clone())
+                };
+                let present = self.coerce_primitive_to_string(bound)?;
+                let result = HirExpr::Conditional(
+                    Box::new(is_nullish),
+                    Box::new(empty()),
+                    Box::new(present),
+                    HirType::Str,
+                );
+                self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)])
+            }
+            _ => self.coerce_primitive_to_string(value),
         }
     }
 
@@ -979,11 +1073,11 @@ impl<'a> FnLowerer<'a> {
                     vec![result, separator_var.clone()],
                 );
             }
-            let part = self.coerce_primitive_to_string(HirExpr::TypedIndex(
+            let part = self.coerce_tuple_join_slot_to_string(HirExpr::TypedIndex(
                 Box::new(tuple.clone()),
                 Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-                element,
-            ))?;
+                element.clone(),
+            ), &element)?;
             result = HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                 vec![result, part],
