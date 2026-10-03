@@ -5199,6 +5199,52 @@ fn compiles_bytes_base64_hex() {
     );
 }
 
+/// setFromBase64 reports the original UTF-16 source position, not a guess
+/// from the number of bytes written. These controls remain unrun.
+#[test]
+fn compiles_bytes_set_from_base64_read_boundaries() {
+    let source = r#"
+        function main(): void {
+            const zero = Buffer.alloc(0).setFromBase64("YQ==");
+            const short = Buffer.alloc(1).setFromBase64("YQ");
+            const padded = Buffer.alloc(1).setFromBase64("YQ==");
+            const two = Buffer.alloc(2).setFromBase64("YWI");
+            const twoPadded = Buffer.alloc(2).setFromBase64("YWI=");
+            console.log(zero.read, zero.written, short.read, short.written,
+                padded.read, padded.written, two.read, two.written,
+                twoPadded.read, twoPadded.written);
+            const oneOfThree = Buffer.alloc(1);
+            const oneResult = oneOfThree.setFromBase64("YWJj");
+            const twoOfThree = Buffer.alloc(2);
+            const twoResult = twoOfThree.setFromBase64("YWJj");
+            console.log(oneResult.read, oneResult.written, oneOfThree.toHex(),
+                twoResult.read, twoResult.written, twoOfThree.toHex());
+            const exact = Buffer.alloc(3);
+            const exactResult = exact.setFromBase64("YWJj ");
+            const extra = Buffer.alloc(4);
+            const extraResult = extra.setFromBase64("YWJj ");
+            console.log(exactResult.read, exactResult.written, exact.toHex(),
+                extraResult.read, extraResult.written, extra.toHex());
+            const spaced = Buffer.alloc(3);
+            const spacedResult = spaced.setFromBase64(" Y W J j Z A==");
+            const whitespace = Buffer.alloc(1).setFromBase64(" \t\f\rYQ==\n");
+            console.log(spacedResult.read, spacedResult.written, spaced.toHex(),
+                whitespace.read, whitespace.written);
+            const hex = Buffer.alloc(2).setFromHex("deadbeef");
+            console.log(hex.read, hex.written);
+            let order = "";
+            function receiver(): Buffer { order += "R"; return Buffer.alloc(1); }
+            function text(): string { order += "S"; return "YQ"; }
+            const ordered = receiver().setFromBase64(text());
+            console.log(order, ordered.read, ordered.written);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bytes_set_from_base64_read_boundaries"),
+        "0 0 2 1 4 1 3 2 4 2\n0 0 00 0 0 0000\n4 3 616263 5 3 61626300\n8 3 616263 9 1\n4 2\nRS 2 1\n"
+    );
+}
+
 /// Sparse array holes remain absent for callback iteration, while an explicit
 /// `undefined` element remains present.
 #[test]
