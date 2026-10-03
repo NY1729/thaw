@@ -2824,6 +2824,46 @@ pub extern "C" fn thaw_js_call_handle_graph_result(handle: u64, args_json: *cons
     call_handle_result_impl(handle, args_json, true)
 }
 
+/// Calls the original retained function with a graph-transported receiver.
+/// This uses Args::this, not a mutable `fn.call` property.
+#[no_mangle]
+pub extern "C" fn thaw_js_call_handle_with_this_graph_wire_result(
+    handle: u64, args_json: *const c_char,
+) -> ThawResult {
+    let args_json = to_str(args_json);
+    let result = with_active_or_context(|ctx| {
+        let target = before_graph_decode(&ctx, &args_json, true, || {
+            Function::from_value(value_for_handle(&ctx, handle)?)
+                .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+        })?;
+        let args_array = decode_argument_array(&ctx, &args_json, true)?;
+        if args_array.len() == 0 {
+            return Err("JS callback receiver payload is empty".into());
+        }
+        let mut call_args = Args::new_unsized(ctx.clone());
+        let receiver: Value = args_array.get(0).map_err(|error| error.to_string())?;
+        call_args.this(receiver).map_err(|error| error.to_string())?;
+        for index in 1..args_array.len() {
+            let arg: Value = args_array.get(index).map_err(|error| error.to_string())?;
+            call_args.push_arg(arg).map_err(|error| error.to_string())?;
+        }
+        let result: Value = target.call_arg(call_args).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+            error => error.to_string(),
+        })?;
+        resolve_value_graph_impl(ctx, result,
+            &format!("JavaScript value #{handle}"), true)
+    });
+    match result {
+        Ok(text) => ThawResult {
+            value: thaw_arena::owned_string(text), error: std::ptr::null(),
+        },
+        Err(reason) => ThawResult {
+            value: std::ptr::null(), error: thaw_arena::owned_string(reason),
+        },
+    }
+}
+
 /// `rquickjs::Error::Exception` doesn't carry the thrown value itself
 /// (just a generic placeholder message) -- the real value has to be
 /// fetched separately via `Ctx::catch`.

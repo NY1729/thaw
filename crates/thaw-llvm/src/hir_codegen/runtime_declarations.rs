@@ -2627,6 +2627,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ("thaw_js_call_graph_result", "thaw_js_call_result"),
             ("thaw_js_set_property_json_graph_result", "thaw_js_set_property_json_result"),
             ("thaw_js_call_handle_graph_result", "thaw_js_call_handle_result"),
+            ("thaw_js_call_handle_with_this_graph_wire_result", "thaw_js_call_handle_result"),
             ("thaw_js_call_handle_value_graph_result", "thaw_js_call_handle_value_result"),
             ("thaw_js_call_method_graph_result", "thaw_js_call_method_result"),
             ("thaw_js_resolve_handle_graph_result", "thaw_js_resolve_handle_result"),
