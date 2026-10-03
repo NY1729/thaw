@@ -1093,9 +1093,10 @@
     // Real `SetNumberFormatDigitOptions`' `signDisplay` handling: `-0`
     // counts as negative for `auto`/`always` (so `-0` renders `"-0"`)
     // but not for `negative`/`exceptZero` (which treat it as zero).
-    _signFor(number, exact = null) {
+    _signFor(number, exact = null, roundedNonzero = null) {
       const negative = exact === null ? number < 0 || Object.is(number, -0) : exact.negative;
-      const nonzero = exact === null ? number !== 0 : exact.nonzero;
+      const nonzero = roundedNonzero === null
+        ? (exact === null ? number !== 0 : exact.nonzero) : roundedNonzero;
       switch (this._signDisplay) {
         case 'never': return '';
         case 'always': return negative ? '-' : '+';
@@ -1117,7 +1118,8 @@
       const exact = this._exactScientificDigits(original);
       if (exact !== null) {
         const render = digits => this._renderDigits(digits, false);
-        return `${render(exact.mantissa)}E${exact.exponent < 0n ? '-' : ''}${render(String(exact.exponent < 0n ? -exact.exponent : exact.exponent))}`;
+        return { text: `${render(exact.mantissa)}E${exact.exponent < 0n ? '-' : ''}${render(String(exact.exponent < 0n ? -exact.exponent : exact.exponent))}`,
+          nonzero: exact.nonzero };
       }
       const magnitude = Math.abs(number);
       const minFrac = this._minimumFractionDigits === undefined ? 0 : this._minimumFractionDigits;
@@ -1145,7 +1147,8 @@
       const render = digits => this._useRealLocaleData
         ? String(__thaw_intl_number_format(this.locale, digits, false))
         : digits;
-      return `${render(mantissaText)}E${exponent < 0 ? '-' : ''}${render(String(Math.abs(exponent)))}`;
+      return { text: `${render(mantissaText)}E${exponent < 0 ? '-' : ''}${render(String(Math.abs(exponent)))}`,
+        nonzero: /[1-9]/.test(mantissaText) };
     }
 
     _exactScientificDigits(value) {
@@ -1180,7 +1183,7 @@
         if (rounded === null) return null;
       }
       return { mantissa: rounded.fracPart ? `${rounded.intPart}.${rounded.fracPart}` : rounded.intPart,
-        exponent, negative: signed === '-', nonzero: significant !== '' };
+        exponent, negative: signed === '-', nonzero: rounded.nonzero };
     }
 
     _exactNotationDigits(value) {
@@ -1283,7 +1286,7 @@
         significantDigits -= 1;
       }
       if (!this._significant) fracPart = fracPart.padEnd(this._minimumFractionDigits, '0');
-      return { intPart, fracPart, negative: match[1] === '-', nonzero: /[1-9]/.test(`${match[2] || '0'}${fraction}`) };
+      return { intPart, fracPart, negative: match[1] === '-', nonzero: /[1-9]/.test(digits) };
     }
 
     _standardDigits(number, original) {
@@ -1346,14 +1349,13 @@
       const groupDigits = this._useGrouping === false
         ? false
         : this._useGrouping === 'min2' ? intPart.length > 4 : true;
-      return { intPart, fracPart, groupDigits };
+      return { intPart, fracPart, groupDigits, nonzero: /[1-9]/.test(intPart + fracPart) };
     }
 
     format(value) {
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
       const exact = this._exactNotationDigits(value);
-      const sign = this._signFor(number, exact);
       if (this._notation === 'compact' && typeof __thaw_intl_compact_number === 'function') {
         // The compact pattern itself chooses the mantissa's precision, so
         // the raw number is passed through rather than `intl.js`'s own
@@ -1365,9 +1367,13 @@
           this._compactDisplay === 'long'));
       }
       if (this._notation !== 'standard') {
-        return `${sign}${this._formatScientific(number, value)}`;
+        const scientific = this._formatScientific(number, value);
+        return `${this._signFor(number, exact,
+          Number.isFinite(number) || exact !== null ? scientific.nonzero : null)}${scientific.text}`;
       }
-      const { intPart, fracPart, groupDigits } = this._standardDigits(number, value);
+      const { intPart, fracPart, groupDigits, nonzero } = this._standardDigits(number, value);
+      const sign = this._signFor(number, exact,
+        Number.isFinite(number) || exact !== null ? nonzero : null);
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
       const signedDigits = `${sign}${digits}`;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
@@ -1569,8 +1575,7 @@
       return parts;
     }
 
-    _scientificParts(number, original) {
-      const text = this._formatScientific(number, original);
+    _scientificParts(text) {
       const separatorIndex = text.indexOf('E');
       const mantissa = text.slice(0, separatorIndex);
       const exponent = text.slice(separatorIndex + 1);
@@ -1679,7 +1684,12 @@
         parts.push(...this._affixParts(full.slice(index + marker.length)));
         return parts;
       }
-      const sign = this._signFor(number, exact);
+      const scientific = this._notation === 'scientific' || this._notation === 'engineering'
+        ? this._formatScientific(number, input) : null;
+      const standardDigits = this._notation === 'standard'
+        ? this._standardDigits(number, input) : null;
+      const sign = this._signFor(number, exact,
+        scientific ? scientific.nonzero : standardDigits ? standardDigits.nonzero : null);
       if (this._notation === 'compact') {
         const parts = [];
         let text = full;
@@ -1693,10 +1703,10 @@
       if (this._notation === 'scientific' || this._notation === 'engineering') {
         const parts = [];
         if (sign) parts.push({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign });
-        parts.push(...this._scientificParts(number, input));
+        parts.push(...this._scientificParts(scientific.text));
         return parts;
       }
-      const { intPart, fracPart, groupDigits } = this._standardDigits(number, input);
+      const { intPart, fracPart, groupDigits } = standardDigits;
       const numeric = this._numericParts(intPart, fracPart, groupDigits);
       const core = numeric.map(part => part.value).join('');
       const index = full.indexOf(core);
