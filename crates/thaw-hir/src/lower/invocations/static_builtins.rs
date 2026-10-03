@@ -44,6 +44,75 @@ fn contains_js_value(ty: &HirType) -> bool {
 }
 
 impl<'a> FnLowerer<'a> {
+    // A fixed layout can contain a hidden native marker or an ordinary user
+    // field with exactly the same name. Query the bound receiver before each
+    // read, then append only visible fields to a runtime-length array.
+    fn lower_visible_fixed_object_sequence(
+        &mut self,
+        value: HirExpr,
+        fields: &[(Symbol, HirType)],
+        entries: bool,
+    ) -> Result<HirExpr, String> {
+        let ordered = ecmascript_field_order(fields)
+            .into_iter()
+            .map(|index| {
+                let name = fields[index].0.clone();
+                let ty = Self::fixed_object_property_read_type(fields, &name)?;
+                Ok((name, ty))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut types = Vec::new();
+        for (_, ty) in &ordered {
+            if !types.contains(ty) { types.push(ty.clone()); }
+        }
+        let value_type = match types.as_slice() {
+            [] => HirType::Json,
+            [only] => only.clone(),
+            _ => HirType::Union(types),
+        };
+        let element_type = if entries {
+            HirType::Tuple(vec![HirType::Str, value_type.clone()])
+        } else {
+            value_type.clone()
+        };
+        let array_type = HirType::Array(Box::new(element_type.clone()));
+        let object_type = HirType::Object(fields.to_vec());
+        let receiver_name = format!("__thaw_visible_object_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), object_type.clone());
+        let result_name = format!("__thaw_visible_fields_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(result_name.clone(), array_type.clone());
+        let receiver = HirExpr::Var(receiver_name.clone());
+        let mut statements = vec![HirStmt::Let(
+            result_name.clone(), array_type, HirExpr::ArrayLit(Vec::new()),
+        )];
+        for (field, _) in ordered {
+            let hidden = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                vec![receiver.clone(), HirExpr::Lit(HirLit::Str(field.clone()))],
+            );
+            let read = self.lower_fixed_object_property_read(receiver.clone(), fields, &field)?;
+            let read = self.coerce_to_declared(&value_type, read)?;
+            let item = if entries {
+                self.coerce_to_declared(
+                    &element_type,
+                    HirExpr::ArrayLit(vec![HirExpr::Lit(HirLit::Str(field)), read]),
+                )?
+            } else { read };
+            let append = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                vec![HirExpr::Var(result_name.clone()), item],
+            );
+            statements.push(HirStmt::If(hidden, Vec::new(), vec![HirStmt::Expr(append)]));
+        }
+        statements.push(HirStmt::Return(Some(HirExpr::Var(result_name))));
+        self.wrap_call_argument_bindings(
+            HirExpr::Block(statements),
+            &[(receiver_name, object_type, value)],
+        )
+    }
+
     /// `Math.min(...values)`/`Math.max(...values)` for a runtime-length
     /// `number[]` spread source: folds pairwise through
     /// `__thaw_math_min`/`__thaw_math_max` in a runtime loop, seeded with
@@ -3231,6 +3300,10 @@ impl<'a> FnLowerer<'a> {
                                 "`Object.values` currently requires a fixed object, got {ty:?}"
                             ));
                         };
+                        if fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
+                            let values = self.lower_visible_fixed_object_sequence(value, fields, false)?;
+                            return self.wrap_call_argument_bindings(values, &bindings);
+                        }
                         let field_names = ecmascript_field_order(fields)
                             .into_iter()
                             .map(|index| fields[index].0.clone())
@@ -3359,6 +3432,10 @@ impl<'a> FnLowerer<'a> {
                                 "`Object.entries` currently requires a fixed object, got {ty:?}"
                             ));
                         };
+                        if fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
+                            let entries = self.lower_visible_fixed_object_sequence(value, fields, true)?;
+                            return self.wrap_call_argument_bindings(entries, &bindings);
+                        }
                         let entry_fields = ecmascript_field_order(fields)
                             .into_iter()
                             .map(|index| {
