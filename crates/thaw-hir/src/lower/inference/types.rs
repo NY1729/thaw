@@ -490,6 +490,16 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
 
+                    "__thaw_assert_class_identity" => {
+                        let [object, HirExpr::Lit(HirLit::Str(_))] = args.as_slice() else {
+                            return Err("class identity assertion expects an object and a literal class name".into());
+                        };
+                        let ty = self.infer_expr_type(object)?;
+                        if !matches!(ty, HirType::Object(_)) {
+                            return Err("class identity assertion requires a fixed object".into());
+                        }
+                        return Ok(ty);
+                    }
                     "__thaw_object_has_class_identity" => {
                         let [object, HirExpr::Lit(HirLit::Str(_))] = args.as_slice() else {
                             return Err("class identity query expects an object and a literal class name".into());

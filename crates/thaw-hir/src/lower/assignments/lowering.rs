@@ -460,59 +460,56 @@ impl<'a> FnLowerer<'a> {
         }
         if assign.op == AssignOp::Assign {
             if let AssignTarget::Simple(SimpleAssignTarget::SuperProp(member)) = &assign.left {
-                let (_, _, base_name) = self
+                let (_, base_type, base_name) = self
                     .super_initializer
                     .clone()
                     .ok_or("`super` property assignment is only valid in a derived class")?;
                 let property = super_property_name(&member.prop)?;
-                let symbol = class_setter_symbol(&base_name, &property, self.class_static_context);
-                let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
-                    format!("base class `{base_name}` has no setter `{property}`")
-                })?;
+                let owner = if self.class_static_context {
+                    base_name
+                } else {
+                    self.class_super_instance_accessor_owner(&base_type, &property)
+                        .ok_or_else(|| format!("base class `{base_name}` has no accessor `{property}`"))?
+                };
+                let symbol = class_setter_symbol(&owner, &property, self.class_static_context);
+                let signature = self.signatures.get(&symbol).cloned()
+                    .filter(|signature| self.class_static_context || signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                    .ok_or_else(|| format!("base class `{owner}` has no setter `{property}`"))?;
                 let rhs = self.lower_expr(&assign.right)?;
                 let value_index = usize::from(!self.class_static_context);
                 let rhs = self.coerce_to_declared(&signature.params[value_index], rhs)?;
-                let mut args = if self.class_static_context {
-                    Vec::new()
-                } else {
-                    vec![HirExpr::Var(self.resolve_binding("this"))]
-                };
-                args.push(rhs);
-                return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                if self.class_static_context {
+                    return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![rhs]));
+                }
+                return self.call_class_instance_setter(
+                    &owner, symbol, HirExpr::Var(self.resolve_binding("this")), rhs,
+                );
             }
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
                 if let (Expr::Ident(receiver), Some(property)) =
                     (member.obj.as_ref(), member_property_name(&member.prop))
                 {
                     let static_symbol = class_setter_symbol(receiver.sym.as_ref(), &property, true);
-                    let (symbol, receiver_argument) =
-                        if self.signatures.contains_key(&static_symbol) {
-                            (Some(static_symbol), None)
-                        } else {
-                            let binding = self.resolve_binding(receiver.sym.as_ref());
-                            let instance_symbol = self.scope.get(&binding).and_then(|ty| {
-                                class_name_from_type(ty).map(|class_name| {
-                                    class_setter_symbol(class_name, &property, false)
-                                })
-                            });
-                            match instance_symbol {
-                                Some(symbol) if self.signatures.contains_key(&symbol) => {
-                                    (Some(symbol), Some(HirExpr::Var(binding)))
-                                }
-                                _ => (None, None),
-                            }
-                        };
-                    if let Some(symbol) = symbol {
-                        let signature = self.signatures[&symbol].clone();
-                        let value_index = usize::from(receiver_argument.is_some());
+                    if let Some(signature) = self.signatures.get(&static_symbol).cloned() {
                         let rhs = self.lower_expr(&assign.right)?;
-                        let rhs = self.coerce_to_declared(&signature.params[value_index], rhs)?;
-                        let mut args = Vec::with_capacity(value_index + 1);
-                        if let Some(receiver) = receiver_argument {
-                            args.push(receiver);
+                        let rhs = self.coerce_to_declared(&signature.params[0], rhs)?;
+                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(static_symbol)), vec![rhs]));
+                    }
+                    let binding = self.resolve_binding(receiver.sym.as_ref());
+                    if let Some(owner) = self.scope.get(&binding)
+                        .and_then(|ty| self.class_instance_accessor_owner(ty, &property))
+                    {
+                        let symbol = class_setter_symbol(&owner, &property, false);
+                        if let Some(signature) = self.signatures.get(&symbol).cloned()
+                            .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                        {
+                            let rhs = self.lower_expr(&assign.right)?;
+                            let rhs = self.coerce_to_declared(&signature.params[1], rhs)?;
+                            return self.call_class_instance_setter(
+                                &owner, symbol, HirExpr::Var(binding), rhs,
+                            );
                         }
-                        args.push(rhs);
-                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                        return Err(format!("cannot assign to readonly instance accessor `{owner}.{property}`"));
                     }
                 }
                 if let (Expr::This(_), Some(property)) =
@@ -531,20 +528,20 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                     let binding = self.resolve_binding("this");
-                    let symbol = self.scope.get(&binding).and_then(|ty| {
-                        class_name_from_type(ty)
-                            .map(|class_name| class_setter_symbol(class_name, &property, false))
-                    });
-                    if let Some(symbol) =
-                        symbol.filter(|symbol| self.signatures.contains_key(symbol))
+                    if let Some(owner) = self.scope.get(&binding)
+                        .and_then(|ty| self.class_instance_accessor_owner(ty, &property))
                     {
-                        let signature = self.signatures[&symbol].clone();
-                        let rhs = self.lower_expr(&assign.right)?;
-                        let rhs = self.coerce_to_declared(&signature.params[1], rhs)?;
-                        return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var(symbol)),
-                            vec![HirExpr::Var(binding), rhs],
-                        ));
+                        let symbol = class_setter_symbol(&owner, &property, false);
+                        if let Some(signature) = self.signatures.get(&symbol).cloned()
+                            .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                        {
+                            let rhs = self.lower_expr(&assign.right)?;
+                            let rhs = self.coerce_to_declared(&signature.params[1], rhs)?;
+                            return self.call_class_instance_setter(
+                                &owner, symbol, HirExpr::Var(binding), rhs,
+                            );
+                        }
+                        return Err(format!("cannot assign to readonly instance accessor `{owner}.{property}`"));
                     }
                 }
             }

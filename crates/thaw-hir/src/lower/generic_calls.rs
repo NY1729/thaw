@@ -519,6 +519,7 @@ impl<'a> FnLowerer<'a> {
             uses_this: false,
             is_extern: false,
             source_range: (arrow.span.lo.0, arrow.span.hi.0),
+            accessor_owner: None,
             generic_type_params,
             generic_type_constraints: type_params
                 .params
@@ -685,6 +686,7 @@ impl<'a> FnLowerer<'a> {
             uses_this: false,
             is_extern: false,
             source_range: (interface.span.lo.0, interface.span.hi.0),
+            accessor_owner: None,
             generic_type_params,
             generic_type_constraints: type_params
                 .params
@@ -811,6 +813,7 @@ impl<'a> FnLowerer<'a> {
             uses_this: false,
             is_extern: false,
             source_range,
+            accessor_owner: None,
             generic_type_params,
             generic_type_constraints: type_params
                 .params

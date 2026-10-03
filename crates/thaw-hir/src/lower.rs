@@ -115,6 +115,8 @@ struct FnSignature {
     /// `HirExpr::FfiCall`, not `HirExpr::Call`.
     is_extern: bool,
     source_range: (u32, u32),
+    /// Original class declaring an accessor; inherited signature clones keep this owner.
+    accessor_owner: Option<Symbol>,
     generic_type_params: Vec<Symbol>,
     generic_type_constraints: Vec<Option<Box<TsType>>>,
     generic_type_defaults: Vec<Option<Box<TsType>>>,

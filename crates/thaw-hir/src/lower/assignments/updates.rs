@@ -72,6 +72,122 @@ impl<'a> FnLowerer<'a> {
             }
         }
         if let Expr::Member(member) = update.arg.as_ref() {
+            if let Some(property) = member_property_name(&member.prop) {
+                let instance_receiver = match member.obj.as_ref() {
+                    Expr::This(_) => !self.class_static_context,
+                    Expr::Ident(identifier) => self.scope
+                        .get(&self.resolve_binding(identifier.sym.as_ref()))
+                        .and_then(class_name_from_type).is_some(),
+                    Expr::New(_) | Expr::Call(_) => true,
+                    _ => false,
+                };
+                if instance_receiver {
+                    let receiver = self.lower_member_receiver(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &property) {
+                        let getter = class_getter_symbol(&owner, &property, false);
+                        let setter = class_setter_symbol(&owner, &property, false);
+                        let own_getter = self.signatures.get(&getter)
+                            .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()));
+                        let own_setter = self.signatures.get(&setter)
+                            .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()));
+                        let getter_signature = own_getter.ok_or_else(||
+                            format!("cannot update write-only instance accessor `{owner}.{property}`"))?;
+                        if getter_signature.ret != HirType::F64 {
+                            return Err(format!("cannot apply ++/-- to non-number instance accessor `{owner}.{property}`"));
+                        }
+                        if own_setter.is_none() {
+                            return Err(format!("cannot update readonly instance accessor `{owner}.{property}`"));
+                        }
+                        if own_setter.and_then(|signature| signature.params.get(1)) != Some(&HirType::F64) {
+                            return Err(format!("cannot update instance accessor `{owner}.{property}` with non-number setter"));
+                        }
+                        let receiver_name = format!("__thaw_instance_update_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let old_name = format!("__thaw_instance_update_old_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let updated_name = format!("__thaw_instance_update_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                        self.scope.insert(old_name.clone(), HirType::F64);
+                        self.scope.insert(updated_name.clone(), HirType::F64);
+                        let current = HirExpr::Call(Box::new(HirExpr::Var(getter)), vec![
+                            self.assert_class_accessor_receiver(HirExpr::Var(receiver_name.clone()), &owner),
+                        ]);
+                        let old = HirExpr::Var(old_name.clone());
+                        let updated = HirExpr::BinOp(
+                            match update.op { UpdateOp::PlusPlus => BinOp::Add, UpdateOp::MinusMinus => BinOp::Sub },
+                            Box::new(old.clone()), Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        );
+                        let result = HirExpr::Block(vec![
+                            HirStmt::Expr(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![
+                                self.assert_class_accessor_receiver(HirExpr::Var(receiver_name.clone()), &owner),
+                                HirExpr::Var(updated_name.clone()),
+                            ])),
+                            HirStmt::Return(Some(if update.prefix { HirExpr::Var(updated_name.clone()) } else { old })),
+                        ]);
+                        return self.wrap_call_argument_bindings(result, &[
+                            (receiver_name, receiver_type, receiver),
+                            (old_name, HirType::F64, current),
+                            (updated_name, HirType::F64, updated),
+                        ]);
+                    }
+                }
+            }
+        }
+        if let Expr::SuperProp(member) = update.arg.as_ref() {
+            let (_, base_type, base_name) = self.super_initializer.clone()
+                .ok_or("`super` update is only valid in a derived class")?;
+            let property = super_property_name(&member.prop)?;
+            let owner = if self.class_static_context { base_name } else {
+                self.class_super_instance_accessor_owner(&base_type, &property)
+                    .ok_or_else(|| format!("base class `{base_name}` has no accessor `{property}`"))?
+            };
+            let getter = class_getter_symbol(&owner, &property, self.class_static_context);
+            let setter = class_setter_symbol(&owner, &property, self.class_static_context);
+            let getter_signature = self.signatures.get(&getter)
+                .filter(|signature| self.class_static_context || signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                .ok_or_else(|| format!("cannot update write-only super accessor `{owner}.{property}`"))?;
+            if getter_signature.ret != HirType::F64 {
+                return Err(format!("cannot apply ++/-- to non-number super accessor `{owner}.{property}`"));
+            }
+            let setter_signature = self.signatures.get(&setter)
+                .filter(|signature| self.class_static_context || signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                .ok_or_else(|| format!("cannot update readonly super accessor `{owner}.{property}`"))?;
+            let value_index = usize::from(!self.class_static_context);
+            if setter_signature.params.get(value_index) != Some(&HirType::F64) {
+                return Err(format!("cannot update super accessor `{owner}.{property}` with non-number setter"));
+            }
+            let receiver = HirExpr::Var(self.resolve_binding("this"));
+            let getter_args = if self.class_static_context { Vec::new() } else {
+                vec![self.assert_class_accessor_receiver(receiver.clone(), &owner)]
+            };
+            let old_name = format!("__thaw_super_update_old_{}", self.next_binding);
+            self.next_binding += 1;
+            let updated_name = format!("__thaw_super_update_value_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(old_name.clone(), HirType::F64);
+            self.scope.insert(updated_name.clone(), HirType::F64);
+            let old = HirExpr::Var(old_name.clone());
+            let updated = HirExpr::BinOp(
+                match update.op { UpdateOp::PlusPlus => BinOp::Add, UpdateOp::MinusMinus => BinOp::Sub },
+                Box::new(old.clone()), Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+            );
+            let setter_args = if self.class_static_context {
+                vec![HirExpr::Var(updated_name.clone())]
+            } else {
+                vec![self.assert_class_accessor_receiver(receiver, &owner), HirExpr::Var(updated_name.clone())]
+            };
+            let result = HirExpr::Block(vec![
+                HirStmt::Expr(HirExpr::Call(Box::new(HirExpr::Var(setter)), setter_args)),
+                HirStmt::Return(Some(if update.prefix { HirExpr::Var(updated_name.clone()) } else { old })),
+            ]);
+            return self.wrap_call_argument_bindings(result, &[
+                (old_name, HirType::F64, HirExpr::Call(Box::new(HirExpr::Var(getter)), getter_args)),
+                (updated_name, HirType::F64, updated),
+            ]);
+        }
+        if let Expr::Member(member) = update.arg.as_ref() {
             if member_property_name(&member.prop).as_deref() == Some("length") {
                 let array = self.lower_expr(&member.obj)?;
                 let array_type = self.infer_expr_type(&array)?;
