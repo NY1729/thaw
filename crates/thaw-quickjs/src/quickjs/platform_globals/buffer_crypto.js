@@ -251,6 +251,11 @@
   // (real Node's own default `format: 'pem'`) -- `format: 'der'`/`jwk`
   // output are not supported, matching this shim's existing PEM-only
   // *output* scope (DER *input* is supported, see above).
+  const rejectEncryptedPrivateKeyOutput = encoding => {
+    if (encoding && (encoding.cipher !== undefined || encoding.passphrase !== undefined)) {
+      throw new TypeError('Encrypted private key output is not supported');
+    }
+  };
   class KeyObject {
     constructor(type, material, asymmetricInfo) {
       this.type = type;
@@ -264,7 +269,8 @@
           : {};
       }
     }
-    export() {
+    export(options) {
+      if (this.type === 'private') rejectEncryptedPrivateKeyOutput(options);
       return this.type === 'secret' ? Buffer.from(this._material) : this._material;
     }
   }
@@ -585,12 +591,15 @@
       : type === 'ec' ? options.namedCurve
       : '';
     const publicExponent = type === 'rsa' && options.publicExponent != null ? String(options.publicExponent) : '';
-    const privateType = (options.privateKeyEncoding && options.privateKeyEncoding.type) || '';
-    const publicType = (options.publicKeyEncoding && options.publicKeyEncoding.type) || '';
+    const privateEncoding = options.privateKeyEncoding;
+    const publicEncoding = options.publicKeyEncoding;
+    rejectEncryptedPrivateKeyOutput(privateEncoding);
+    const privateType = (privateEncoding && privateEncoding.type) || '';
+    const publicType = (publicEncoding && publicEncoding.type) || '';
     const generated = JSON.parse(__thaw_crypto_generate_key_pair_json(type, arg || '', publicExponent, privateType, publicType));
     return {
-      publicKey: encodeGeneratedKeyHalf(generated.publicPem, false, options.publicKeyEncoding),
-      privateKey: encodeGeneratedKeyHalf(generated.privatePem, true, options.privateKeyEncoding)
+      publicKey: encodeGeneratedKeyHalf(generated.publicPem, false, publicEncoding),
+      privateKey: encodeGeneratedKeyHalf(generated.privatePem, true, privateEncoding)
     };
   };
   const generateKeyPair = (type, options, callback) => {
