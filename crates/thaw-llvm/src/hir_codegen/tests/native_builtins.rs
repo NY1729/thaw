@@ -10470,3 +10470,21 @@ fn decoded_js_function_argument_marshaling_failure_keeps_original_error() {
     "#;
     assert_eq!(compile_and_run(source, "typed_function_marshal_failure"), "true\n4 1\n");
 }
+
+#[test]
+fn console_native_object_getter_failure_keeps_exception_and_next_log() {
+    let source = r#"
+        interface Box { value: number; }
+        let reads = 0;
+        const bad: Box = {
+            get value(): number { reads++; throw new Error("console getter failed"); },
+        };
+        const good: Box = { value: 4 };
+        function main(): void {
+            try { console.log(bad); console.log("missed getter"); }
+            catch (error) { console.log((error as Error).message === "console getter failed", reads); }
+            console.log(good);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{\"value\":4}\n");
+}
