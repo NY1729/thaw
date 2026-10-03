@@ -242,6 +242,51 @@ impl rquickjs::loader::Loader for BundleModuleLoader {
     }
 }
 
+// These functions and their WeakMap belong to this QuickJS runtime. Keeping
+// them in userdata releases both before JS_FreeRuntime, unlike a separate TLS.
+struct NativeCallbackIdentityBridge<'js> {
+    register: Function<'js>,
+    same: Function<'js>,
+}
+
+unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeCallbackIdentityBridge<'js> {
+    type Changed<'to> = NativeCallbackIdentityBridge<'to>;
+}
+
+fn same_native_callback<'js>(ctx: Ctx<'js>, left: Value<'js>, right: Value<'js>) -> bool {
+    let Some(bridge) = ctx.userdata::<NativeCallbackIdentityBridge<'js>>() else {
+        return false;
+    };
+    let same = bridge.same.clone();
+    drop(bridge);
+    same.call((left, right)).unwrap_or(false)
+}
+
+fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    // Capture invocation machinery as well as methods: Function.prototype.call
+    // and WeakMap.prototype methods are user-mutable after initialization.
+    let pair: Array = ctx.eval(r#"(function() {
+        const map = new WeakMap();
+        const apply = Reflect.apply;
+        const set = WeakMap.prototype.set;
+        const get = WeakMap.prototype.get;
+        const has = WeakMap.prototype.has;
+        return [
+            (wrapper, token) => apply(set, map, [wrapper, token]),
+            (left, right) => apply(has, map, [left]) &&
+                apply(has, map, [right]) &&
+                apply(get, map, [left]) === apply(get, map, [right]),
+        ];
+    })()"#)?;
+    let register: Function = pair.get(0)?;
+    let same: Function = pair.get(1)?;
+    ctx.store_userdata(NativeCallbackIdentityBridge { register, same })
+        .expect("native callback identity bridge userdata is already borrowed");
+    ctx.globals().prop("__thaw_same_native_callback",
+        Function::new(ctx.clone(), same_native_callback)?)?;
+    Ok(())
+}
+
 fn ensure_context() {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -310,6 +355,8 @@ fn ensure_context() {
                         .expect("failed to serialize host exec arguments"),
                     )
                     .expect("failed to install host exec arguments");
+                install_native_callback_identity_bridge(&ctx)
+                    .expect("failed to install native callback identity bridge");
                 install_napi_bridge(&ctx).expect("failed to install N-API bridge");
                 ctx.globals().set("__thaw_url_parse", Function::new(ctx.clone(), host_url_parse)
                     .expect("failed to create URL parser")).expect("failed to install URL parser");
