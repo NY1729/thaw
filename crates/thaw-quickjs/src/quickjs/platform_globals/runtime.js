@@ -488,7 +488,7 @@
   let stdinPending = [];
   const drainStdin = () => {
     if (stdinPaused) return;
-    while (stdinPending.length) {
+    while (stdinPending.length && !stdinPaused) {
       const event = stdinPending.shift();
       if (event.type === 'data') {
         const value = Buffer.from(event.value, 'hex');
