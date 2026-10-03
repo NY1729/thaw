@@ -387,6 +387,10 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
             HirExpr::PromiseThen(source, callback, _, _, _, _)
             | HirExpr::PromiseFinally(source, callback, _, _) =>
                 expr_has_call(source, name) || expr_has_call(callback, name),
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) =>
+                expr_has_call(source, name)
+                    || fulfilled.as_ref().is_some_and(|callback| expr_has_call(callback, name))
+                    || expr_has_call(rejected, name),
             HirExpr::ThrowValue(error, fallback) =>
                 expr_has_call(error, name) || expr_has_call(fallback, name),
             HirExpr::Block(body) => stmts(body, name),
@@ -886,6 +890,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirExpr::PromiseNew(_, _, _, _)
                         | HirExpr::PromiseNewMixed(_, _, _)
                         | HirExpr::PromiseThen(_, _, _, _, _, _)
+                        | HirExpr::PromiseThenBoth(_, _, _, _, _, _, _)
                         | HirExpr::PromiseFinally(_, _, _, _)
                         | HirExpr::PromiseAll(_, _)
                         | HirExpr::PromiseAllArray(_, _)

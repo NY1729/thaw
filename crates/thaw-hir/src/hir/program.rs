@@ -131,6 +131,13 @@ pub fn set_ffi_error_abi(
                 visit_expr(source, symbol, abi, found);
                 visit_expr(callback, symbol, abi, found);
             }
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+                visit_expr(source, symbol, abi, found);
+                if let Some(fulfilled) = fulfilled {
+                    visit_expr(fulfilled, symbol, abi, found);
+                }
+                visit_expr(rejected, symbol, abi, found);
+            }
             HirExpr::PromiseFinally(source, callback, _, _) => {
                 visit_expr(source, symbol, abi, found);
                 visit_expr(callback, symbol, abi, found);
@@ -359,6 +366,13 @@ pub fn set_ffi_ownership(
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
                 update_expr(source, symbol, returns, errors, found);
                 update_expr(callback, symbol, returns, errors, found);
+            }
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+                update_expr(source, symbol, returns, errors, found);
+                if let Some(fulfilled) = fulfilled {
+                    update_expr(fulfilled, symbol, returns, errors, found);
+                }
+                update_expr(rejected, symbol, returns, errors, found);
             }
             HirExpr::PromiseFinally(source, callback, _, _) => {
                 update_expr(source, symbol, returns, errors, found);
@@ -777,6 +791,13 @@ pub fn set_ffi_string_abi(
                     aggregate_return_abi,
                     found,
                 );
+            }
+            HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+                update_expr(source, symbol, params, returns, calling_convention, aggregate_return_abi, found);
+                if let Some(fulfilled) = fulfilled {
+                    update_expr(fulfilled, symbol, params, returns, calling_convention, aggregate_return_abi, found);
+                }
+                update_expr(rejected, symbol, params, returns, calling_convention, aggregate_return_abi, found);
             }
             HirExpr::PromiseFinally(source, callback, _, _) => {
                 update_expr(

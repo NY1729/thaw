@@ -468,6 +468,36 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let source = self.compile_expr(source)?.into_pointer_value();
         let closure = self.compile_expr(callback)?.into_pointer_value();
+        let adapter = self.compile_promise_chain_adapter(input, output, on_rejected, flatten)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_chain").unwrap(),
+                &[
+                    source.into(),
+                    adapter.as_global_value().as_pointer_value().into(),
+                    closure.into(),
+                    self.context
+                        .i8_type()
+                        .const_int(u64::from(on_rejected), false)
+                        .into(),
+                ],
+                "promise_chain",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_promise_chain returned no value".to_string())
+    }
+
+    /// Emits the selected settlement adapter without subscribing a source.
+    /// Both-handler `.then` uses this twice, then makes one native chain.
+    fn compile_promise_chain_adapter(
+        &mut self,
+        input: &HirType,
+        output: &HirType,
+        on_rejected: bool,
+        flatten: bool,
+    ) -> Result<FunctionValue<'ctx>, String> {
         let adapter_name = format!("__thaw_promise_chain_{}", self.next_lambda);
         self.next_lambda += 1;
         let ptr = self.context.ptr_type(AddressSpace::default());
@@ -627,24 +657,50 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         self.builder.build_return(None).map_err(|e| e.to_string())?;
         self.builder.position_at_end(return_block);
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_promise_chain").unwrap(),
-                &[
-                    source.into(),
-                    adapter.as_global_value().as_pointer_value().into(),
-                    closure.into(),
-                    self.context
-                        .i8_type()
-                        .const_int(u64::from(on_rejected), false)
-                        .into(),
-                ],
-                "promise_chain",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| "thaw_promise_chain returned no value".to_string())
+        Ok(adapter)
+    }
+
+    fn compile_promise_then_both(
+        &mut self,
+        source: &HirExpr,
+        fulfilled: Option<&HirExpr>,
+        rejected: &HirExpr,
+        input: &HirType,
+        output: &HirType,
+        flatten_fulfilled: bool,
+        flatten_rejected: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // These source-visible expressions run once, in member-call order,
+        // before either adapter subscribes to the original promise.
+        let source = self.compile_expr(source)?.into_pointer_value();
+        let fulfilled_closure = fulfilled
+            .map(|callback| self.compile_expr(callback).map(BasicValueEnum::into_pointer_value))
+            .transpose()?;
+        let rejected_closure = self.compile_expr(rejected)?.into_pointer_value();
+        let fulfilled_adapter = if fulfilled_closure.is_some() {
+            Some(self.compile_promise_chain_adapter(input, output, false, flatten_fulfilled)?)
+        } else {
+            None
+        };
+        let rejected_adapter =
+            self.compile_promise_chain_adapter(input, output, true, flatten_rejected)?;
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let fulfilled_code = fulfilled_adapter
+            .map(|adapter| adapter.as_global_value().as_pointer_value())
+            .unwrap_or(ptr.const_null());
+        let fulfilled_context = fulfilled_closure.unwrap_or(ptr.const_null());
+        self.builder.build_call(
+            self.module.get_function("thaw_promise_chain_both").unwrap(),
+            &[
+                source.into(),
+                fulfilled_code.into(),
+                fulfilled_context.into(),
+                rejected_adapter.as_global_value().as_pointer_value().into(),
+                rejected_closure.into(),
+            ],
+            "promise_chain_both",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or_else(|| "thaw_promise_chain_both returned no value".to_string())
     }
 
     fn compile_promise_finally(

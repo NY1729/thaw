@@ -9193,8 +9193,7 @@ fn compiles_math_sum_precise_and_date_year() {
     );
 }
 
-/// `Promise.prototype.then(onFulfilled, onRejected)` (desugared to
-/// `then(...).catch(...)`).
+/// Both `Promise.prototype.then` handlers observe the original settlement.
 #[test]
 fn compiles_promise_then_two_arg() {
     let source = r#"
@@ -9212,6 +9211,79 @@ fn compiles_promise_then_two_arg() {
     assert_eq!(
         compile_and_run(source, "promise_then_two_arg"),
         "11\n42\n"
+    );
+}
+
+#[test]
+fn promise_then_two_handlers_do_not_catch_fulfillment_failure() {
+    let source = r#"
+        let rejectedCalls = 0;
+        let order = "";
+        function source(): Promise<number> {
+            order += "S";
+            return Promise.resolve(1);
+        }
+        function fulfilled(): (value: number) => number {
+            order += "F";
+            return (value: number): number => value + 1;
+        }
+        function rejected(): (reason: string) => number {
+            order += "R";
+            return (reason: string): number => { rejectedCalls++; return 42; };
+        }
+        async function main(): Promise<void> {
+            console.log(await source().then(fulfilled(), rejected()), order);
+            try {
+                await Promise.resolve(2).then((value: number): number => {
+                    throw new Error("fulfillment");
+                }, rejected());
+            } catch (error) { console.log("fulfillment-rejected"); }
+            console.log(rejectedCalls);
+            try {
+                await Promise.resolve(3).then(
+                    (value: number): Promise<number> => Promise.reject<number>("adopted"),
+                    rejected()
+                );
+            } catch (error) { console.log("adopted-rejected"); }
+            console.log(rejectedCalls);
+            console.log(await Promise.reject<number>("source").then(
+                (value: number): number => value + 1,
+                rejected()
+            ));
+            console.log(await Promise.reject<number>("source").then(undefined, rejected()));
+            console.log(rejectedCalls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_then_two_handler_failure_routing"),
+        "2 SFR\nfulfillment-rejected\n0\nadopted-rejected\n0\n42\n42\n2\n"
+    );
+}
+
+#[test]
+fn promise_handlers_preserve_callable_optional_rest_and_zero_arg_abi() {
+    let source = r#"
+        const onReject: (reason: string) => number = (reason: string): number => 7;
+        const optionalReject: (reason?: string) => number =
+            (reason?: string): number => reason === "source" ? 8 : 0;
+        const restReject: (...reasons: string[]) => number =
+            (...reasons: string[]): number => reasons.length;
+        function namedRest(...reasons: string[]): number { return reasons.length + 10; }
+        const ignored: () => number = (): number => 9;
+        async function main(): Promise<void> {
+            console.log(await Promise.reject<number>("source").then(
+                (value: number): number => value + 1, onReject));
+            console.log(await Promise.reject<number>("source").then(undefined, optionalReject));
+            console.log(await Promise.reject<number>("source").then(undefined, restReject));
+            console.log(await Promise.reject<number>("source").then(undefined, namedRest));
+            console.log(await Promise.resolve(1).then(ignored, onReject));
+            console.log(await Promise.reject<number>("source").catch(optionalReject));
+            console.log(await Promise.resolve(3).finally(ignored));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_callable_handler_shapes"),
+        "7\n8\n1\n11\n9\n8\n3\n"
     );
 }
 

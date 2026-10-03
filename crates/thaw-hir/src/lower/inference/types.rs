@@ -2514,6 +2514,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::PromiseThen(_, _, _, output, _, _) => {
                 Ok(HirType::Promise(Box::new(output.clone())))
             }
+            HirExpr::PromiseThenBoth(_, _, _, _, output, _, _) => {
+                Ok(HirType::Promise(Box::new(output.clone())))
+            }
             HirExpr::PromiseFinally(_, _, input, _) => {
                 Ok(HirType::Promise(Box::new(input.clone())))
             }

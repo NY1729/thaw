@@ -40,6 +40,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirExpr::PromiseNew(_, resolved, _, _)
                     | HirExpr::PromiseNewMixed(_, resolved, _) => resolved.clone(),
                     HirExpr::PromiseThen(_, _, _, output, _, _) => output.clone(),
+                    HirExpr::PromiseThenBoth(_, _, _, _, output, _, _) => output.clone(),
                     HirExpr::PromiseFinally(_, _, input, _) => input.clone(),
                     HirExpr::PromiseAll(_, element) | HirExpr::PromiseAllArray(_, element) => {
                         HirType::Array(Box::new(element.clone()))
