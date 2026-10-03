@@ -9,6 +9,40 @@ fn call(func_name: &str, args_json: &str) -> String {
         .into_owned()
 }
 
+#[test]
+fn host_query_callable_slot_does_not_collide_with_number_conversion() {
+    assert_eq!(load(r#"
+        globalThis.hostQueryNumber = { valueOf() { return 17; } };
+        globalThis.hostQueryCallable = new Proxy(function () {}, {});
+        globalThis.hostQueryOriginal = globalThis.__thaw_json_host_query;
+        globalThis.__thaw_json_host_query = () => 'function';
+    "#), 1);
+    let number = thaw_js_get_global(c"hostQueryNumber".as_ptr());
+    let callable = thaw_js_get_global(c"hostQueryCallable".as_ptr());
+    let kind = thaw_js_host_query_result(number, 14);
+    let callable_kind = thaw_js_host_query_result(callable, 14);
+    assert_eq!(load(r#"
+        globalThis.__thaw_json_host_query = globalThis.hostQueryOriginal;
+        delete globalThis.hostQueryOriginal;
+    "#), 1);
+    let coerced = thaw_js_host_query_result(number, 16);
+    assert!(kind.error.is_null() && coerced.error.is_null() && callable_kind.error.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(kind.value) }.to_bytes(), b"0");
+    assert_eq!(unsafe { CStr::from_ptr(coerced.value) }.to_bytes(), b"17");
+    assert_eq!(unsafe { CStr::from_ptr(callable_kind.value) }.to_bytes(), b"1");
+    unsafe {
+        thaw_arena::destroy_string(kind.value.cast_mut());
+        thaw_arena::destroy_string(coerced.value.cast_mut());
+        thaw_arena::destroy_string(callable_kind.value.cast_mut());
+    }
+    assert_eq!(thaw_js_release_handle(number), 1);
+    assert_eq!(thaw_js_release_handle(callable), 1);
+    assert_eq!(load(r#"
+        delete globalThis.hostQueryNumber;
+        delete globalThis.hostQueryCallable;
+    "#), 1);
+}
+
 fn load(source: &str) -> u8 {
     let source = CString::new(source).unwrap();
     thaw_js_load(source.as_ptr())
@@ -6297,42 +6331,6 @@ fn native_json_graph_replacer_preserves_holder_date_alias_and_wrappers() {
         r#"[true,true,true,true,true,"{\"left\":\"1970-01-01T00:00:00.000Z\",\"right\":\"1970-01-01T00:00:00.000Z\",\"__proto__\":7}"]"#);
 }
 
-
-#[test]
-fn graph_replacer_uses_its_holder_without_reading_callable_call_property() {
-    assert_eq!(load(r#"
-      function inspectGraphReplacerCallProperty() {
-        const value = { item: 3 };
-        let callReads = 0;
-        function replacer(key, item) {
-          if (key === 'item' && this !== value) throw new Error('wrong holder');
-          return item;
-        }
-        Object.defineProperty(replacer, 'call', {
-          get() { callReads++; throw new Error('replacer.call was read'); }
-        });
-        const output = __thaw_json_stringify_replacer(value, null, replacer);
-        return [output, callReads];
-      }
-    "#), 1);
-    assert_eq!(call("inspectGraphReplacerCallProperty", "[]"),
-        r#"["{\"item\":3}",0]"#);
-}
-
-#[test]
-fn tagged_error_reconstruction_reads_versioned_and_legacy_ancestry_names() {
-    assert_eq!(load(r#"
-      function inspectAncestryNames() {
-        const versioned = __thaw_error_from_tagged(
-          '\u0001\u001eLeaf\u001fBase$Name\u001fError\u0001failure');
-        const legacy = __thaw_error_from_tagged('\u0001Leaf$Base$Error\u0001failure');
-        return [versioned.name, versioned.message, legacy.name, legacy.message];
-      }
-    "#), 1);
-    assert_eq!(call("inspectAncestryNames", "[]"),
-        r#"["Leaf","failure","Leaf","failure"]"#);
-}
-
 #[test]
 fn live_json_graph_encoding_does_not_read_replacer_children() {
     assert_eq!(load(r#"
@@ -6353,6 +6351,32 @@ fn live_json_graph_encoding_does_not_read_replacer_children() {
 }
 
 #[test]
+fn graph_array_symbol_property_roundtrips_order_flags_and_cycle() {
+    assert_eq!(load(r#"
+      function inspectGraphArrayOwnKeys() {
+        const key = Symbol('extra');
+        const array = [7, ,];
+        Object.defineProperty(array, '0', { value: 7, enumerable: true,
+          writable: false, configurable: true });
+        Object.defineProperty(array, key, { value: array, enumerable: false,
+          writable: false, configurable: false });
+        array.named = 'saved';
+        const graph = JSON.parse(__thaw_json_graph_encode_js([array], 0, false));
+        const restored = __thaw_json_graph_decode(graph)[0];
+        const own = Reflect.ownKeys(restored);
+        const index = Object.getOwnPropertyDescriptor(restored, '0');
+        const symbol = Object.getOwnPropertyDescriptor(restored, key);
+        return [graph.nodes[1].p.length, restored.length, 1 in restored,
+          own.map(item => typeof item === 'symbol' ? 'symbol' : item).join(','),
+          index.writable, index.configurable, symbol.value === restored,
+          symbol.enumerable, symbol.configurable, restored.named];
+      }
+    "#), 1);
+    assert_eq!(call("inspectGraphArrayOwnKeys", "[]"),
+        "[4,2,false,\"0,length,named,symbol\",false,true,true,false,false,\"saved\"]");
+}
+
+#[test]
 fn live_host_number_query_preserves_negative_zero_and_non_finite_values() {
     assert_eq!(load(r#"
       function inspectLiveHostNumbers() {
@@ -6362,6 +6386,56 @@ fn live_host_number_query_preserves_negative_zero_and_non_finite_values() {
       }
     "#), 1);
     assert_eq!(call("inspectLiveHostNumbers", "[]"), r#"["-0","NaN","Infinity"]"#);
+}
+
+// Unrun: paired native metadata is never trusted merely because its hdl is
+// live. A forged nfn node must fail before exposing an ordinary JS function,
+// and the graph decoder still returns the transferred hdl lease.
+#[test]
+fn paired_native_function_graph_rejects_unproven_handle_and_releases_lease() {
+    assert_eq!(load("globalThis.pairedOrdinary = function() { return 1; };"), 1);
+    let handle = thaw_js_get_global(c"pairedOrdinary".as_ptr());
+    assert_ne!(handle, 0);
+    assert_eq!(thaw_js_retain_handle(handle), 1);
+    let source = format!(r#"
+      function rejectForgedNativePair() {{
+        const graph = JSON.stringify({{
+          root: {{r: 0}}, nodes: [{{nfn: '1', hdl: {handle}}}],
+          leases: [{handle}], napiLeases: []
+        }});
+        try {{ __thaw_json_graph_decode_owned(graph); return false; }}
+        catch (error) {{ return error.message === 'Mismatched native Function graph node'; }}
+      }}
+    "#);
+    assert_eq!(load(&source), 1);
+    assert_eq!(call("rejectForgedNativePair", "[]"), "true");
+    assert_eq!(thaw_js_release_handle(handle), 1);
+    assert_eq!(thaw_js_release_handle(handle), 0);
+}
+
+// Unrun: a live JavaScript Symbol handle is not proof that an unrelated
+// native Symbol ID belongs to it. The transferred lease is released even
+// when the paired token is rejected before any graph object is populated.
+#[test]
+fn paired_native_symbol_graph_rejects_unproven_handle_and_releases_lease() {
+    assert_eq!(load("globalThis.pairedOrdinarySymbol = Symbol('ordinary');"), 1);
+    let handle = thaw_js_get_global(c"pairedOrdinarySymbol".as_ptr());
+    assert_ne!(handle, 0);
+    assert_eq!(thaw_js_retain_handle(handle), 1);
+    let source = format!(r#"
+      function rejectForgedNativeSymbolPair() {{
+        const graph = JSON.stringify({{
+          root: {{nsy: '1', hdl: {handle}}}, nodes: [],
+          leases: [{handle}], napiLeases: []
+        }});
+        try {{ __thaw_json_graph_decode_owned(graph); return false; }}
+        catch (error) {{ return error.message === 'Mismatched native Symbol graph token'; }}
+      }}
+    "#);
+    assert_eq!(load(&source), 1);
+    assert_eq!(call("rejectForgedNativeSymbolPair", "[]"), "true");
+    assert_eq!(thaw_js_release_handle(handle), 1);
+    assert_eq!(thaw_js_release_handle(handle), 0);
 }
 
 #[test]
@@ -6993,70 +7067,6 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
 }
 
 #[test]
-fn typed_callback_origin_registration_returns_the_original_js_function() {
-    std::thread::spawn(|| {
-        unsafe extern "C" {
-            fn thaw_json_register_callback_origin(closure: *const u8, handle: u64) -> u8;
-        }
-        unsafe extern "C" fn callback(
-            _context: *const c_void, _arguments: *const c_char,
-        ) -> *const c_char { c"null".as_ptr() }
-        assert_eq!(load("globalThis.__thaw_origin_test = function () { return 42; }"), 1);
-        let original = with_context(|ctx| {
-            let value: Value = ctx.globals().get("__thaw_origin_test").unwrap();
-            retain_value(&ctx, value).unwrap()
-        });
-        let closure = thaw_arena::thaw_arena_alloc(24, 8);
-        assert!(!closure.is_null());
-        assert_eq!(unsafe { thaw_json_register_callback_origin(closure, original) }, 1);
-        let restored = thaw_js_register_native_callback_graph(
-            callback as *const c_void, closure.cast(), 0, 0, 0,
-            std::ptr::null(), 0,
-        );
-        assert!(restored.error.is_null());
-        with_context(|ctx| {
-            let strict: Function = ctx.globals().get("__thaw_strict_equal_dynamic").unwrap();
-            let left = value_for_handle(&ctx, original).unwrap();
-            let right = value_for_handle(&ctx, restored.value).unwrap();
-            assert!(strict.call::<_, bool>((left, right, 3.0, 3.0)).unwrap());
-        });
-        assert_eq!(thaw_js_release_handle(restored.value), 1);
-        with_context(|ctx| assert!(value_for_handle(&ctx, original).is_ok()));
-    }).join().unwrap();
-}
-
-#[test]
-fn callback_origin_type_check_ignores_mutable_host_query_global() {
-    std::thread::spawn(|| {
-        assert_eq!(load(r#"
-            globalThis.__thaw_origin_object = {};
-            globalThis.__thaw_origin_callable = new Proxy(function () {}, {});
-            globalThis.__thaw_json_host_query = () => '1';
-        "#), 1);
-        let (object, callable) = with_context(|ctx| {
-            let object: Value = ctx.globals().get("__thaw_origin_object").unwrap();
-            let callable: Value = ctx.globals().get("__thaw_origin_callable").unwrap();
-            (retain_value(&ctx, object).unwrap(), retain_value(&ctx, callable).unwrap())
-        });
-        let spoofed = thaw_js_host_query_result(object, 0);
-        assert!(spoofed.error.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(spoofed.value) }.to_string_lossy(), "1");
-        unsafe { thaw_arena::destroy_string(spoofed.value.cast_mut()) };
-        let rejected = thaw_js_host_query_result(object, 14);
-        let accepted = thaw_js_host_query_result(callable, 14);
-        assert!(rejected.error.is_null() && accepted.error.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(rejected.value) }.to_string_lossy(), "0");
-        assert_eq!(unsafe { CStr::from_ptr(accepted.value) }.to_string_lossy(), "1");
-        unsafe {
-            thaw_arena::destroy_string(rejected.value.cast_mut());
-            thaw_arena::destroy_string(accepted.value.cast_mut());
-        }
-        assert_eq!(thaw_js_release_handle(object), 1);
-        assert_eq!(thaw_js_release_handle(callable), 1);
-    }).join().unwrap();
-}
-
-#[test]
 fn result_error_abi_keeps_embedded_nul_in_throw_rejection_and_getter() {
     assert_eq!(load(r#"
         function throwNulResult() {
@@ -7098,6 +7108,109 @@ fn result_error_abi_keeps_embedded_nul_in_throw_rejection_and_getter() {
     assert_eq!(thaw_js_release_handle(handle), 1);
 }
 
+#[test]
+fn graph_replacer_uses_its_holder_without_reading_callable_call_property() {
+    assert_eq!(load(r#"
+      function inspectGraphReplacerCallProperty() {
+        const value = { item: 3 };
+        let callReads = 0;
+        function replacer(key, item) {
+          if (key === 'item' && this !== value) throw new Error('wrong holder');
+          return item;
+        }
+        Object.defineProperty(replacer, 'call', {
+          get() { callReads++; throw new Error('replacer.call was read'); }
+        });
+        const output = __thaw_json_stringify_replacer(value, null, replacer);
+        return [output, callReads];
+      }
+    "#), 1);
+    assert_eq!(call("inspectGraphReplacerCallProperty", "[]"),
+        r#"["{\"item\":3}",0]"#);
+}
+
+
+#[test]
+fn tagged_error_reconstruction_reads_versioned_and_legacy_ancestry_names() {
+    assert_eq!(load(r#"
+      function inspectAncestryNames() {
+        const versioned = __thaw_error_from_tagged(
+          '\u0001\u001eLeaf\u001fBase$Name\u001fError\u0001failure');
+        const legacy = __thaw_error_from_tagged('\u0001Leaf$Base$Error\u0001failure');
+        return [versioned.name, versioned.message, legacy.name, legacy.message];
+      }
+    "#), 1);
+    assert_eq!(call("inspectAncestryNames", "[]"),
+        r#"["Leaf","failure","Leaf","failure"]"#);
+}
+
+
+#[test]
+fn typed_callback_origin_registration_returns_the_original_js_function() {
+    std::thread::spawn(|| {
+        unsafe extern "C" {
+            fn thaw_json_register_callback_origin(closure: *const u8, handle: u64) -> u8;
+        }
+        unsafe extern "C" fn callback(
+            _context: *const c_void, _arguments: *const c_char,
+        ) -> *const c_char { c"null".as_ptr() }
+        assert_eq!(load("globalThis.__thaw_origin_test = function () { return 42; }"), 1);
+        let original = with_context(|ctx| {
+            let value: Value = ctx.globals().get("__thaw_origin_test").unwrap();
+            retain_value(&ctx, value).unwrap()
+        });
+        let closure = thaw_arena::thaw_arena_alloc(24, 8);
+        assert!(!closure.is_null());
+        assert_eq!(unsafe { thaw_json_register_callback_origin(closure, original) }, 1);
+        let restored = thaw_js_register_native_callback_graph(
+            callback as *const c_void, closure.cast(), 0, 0, 0,
+            std::ptr::null(), 0,
+        );
+        assert!(restored.error.is_null());
+        with_context(|ctx| {
+            let strict: Function = ctx.globals().get("__thaw_strict_equal_dynamic").unwrap();
+            let left = value_for_handle(&ctx, original).unwrap();
+            let right = value_for_handle(&ctx, restored.value).unwrap();
+            assert!(strict.call::<_, bool>((left, right, 3.0, 3.0)).unwrap());
+        });
+        assert_eq!(thaw_js_release_handle(restored.value), 1);
+        with_context(|ctx| assert!(value_for_handle(&ctx, original).is_ok()));
+    }).join().unwrap();
+}
+
+
+#[test]
+fn callback_origin_type_check_ignores_mutable_host_query_global() {
+    std::thread::spawn(|| {
+        assert_eq!(load(r#"
+            globalThis.__thaw_origin_object = {};
+            globalThis.__thaw_origin_callable = new Proxy(function () {}, {});
+            globalThis.__thaw_json_host_query = () => '1';
+        "#), 1);
+        let (object, callable) = with_context(|ctx| {
+            let object: Value = ctx.globals().get("__thaw_origin_object").unwrap();
+            let callable: Value = ctx.globals().get("__thaw_origin_callable").unwrap();
+            (retain_value(&ctx, object).unwrap(), retain_value(&ctx, callable).unwrap())
+        });
+        let spoofed = thaw_js_host_query_result(object, 0);
+        assert!(spoofed.error.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(spoofed.value) }.to_string_lossy(), "1");
+        unsafe { thaw_arena::destroy_string(spoofed.value.cast_mut()) };
+        let rejected = thaw_js_host_query_result(object, 14);
+        let accepted = thaw_js_host_query_result(callable, 14);
+        assert!(rejected.error.is_null() && accepted.error.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(rejected.value) }.to_string_lossy(), "0");
+        assert_eq!(unsafe { CStr::from_ptr(accepted.value) }.to_string_lossy(), "1");
+        unsafe {
+            thaw_arena::destroy_string(rejected.value.cast_mut());
+            thaw_arena::destroy_string(accepted.value.cast_mut());
+        }
+        assert_eq!(thaw_js_release_handle(object), 1);
+        assert_eq!(thaw_js_release_handle(callable), 1);
+    }).join().unwrap();
+}
+
+
 #[cfg(feature = "intl")]
 #[test]
 fn intl_datetime_resolved_hour_cycle_matches_locale_and_midnight() {
@@ -7123,4 +7236,56 @@ fn intl_datetime_resolved_hour_cycle_matches_locale_and_midnight() {
         ["h12", true, "12"], ["h24", false, "24"]
     ]).to_string());
     assert_eq!(call("localizedMidnight", "[]"), serde_json::json!(["h24", "٢٤"]).to_string());
+}
+
+// Unrun: the live-key predicate must use its bootstrap parser and Reflect
+// intrinsics even after a script replaces the public JSON/Object/Reflect API.
+#[test]
+fn live_host_key_predicate_uses_captured_intrinsics() {
+    assert_eq!(load(r#"
+        globalThis.nativeKeyTarget = Object.create({ inherited: 1 });
+        nativeKeyTarget.own = 2;
+        globalThis.nativeKeySymbol = Symbol('live');
+        nativeKeyTarget[nativeKeySymbol] = 3;
+        globalThis.savedKeyIntrinsics = [JSON.parse, Reflect.has,
+            Reflect.deleteProperty, Object.hasOwn];
+        JSON.parse = () => 'wrong';
+        Reflect.has = () => false;
+        Reflect.deleteProperty = () => false;
+        Object.hasOwn = () => false;
+        try {
+            Object.defineProperty(globalThis, '__thaw_json_host_key_predicate',
+                { value: () => false });
+        } catch (_) {}
+    "#), 1);
+    let object = thaw_js_get_global(c"nativeKeyTarget".as_ptr());
+    assert_ne!(object, 0);
+    for (key, operation, expected) in [
+        (c"\"inherited\"".as_ptr(), 0, 1),
+        (c"\"inherited\"".as_ptr(), 1, 0),
+        (c"\"own\"".as_ptr(), 1, 1),
+        (c"\"own\"".as_ptr(), 3, 1),
+        (c"\"own\"".as_ptr(), 2, 1),
+        (c"\"own\"".as_ptr(), 1, 0),
+    ] {
+        let result = thaw_js_property_predicate_json_key_result(object, key, operation);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, expected);
+    }
+    let symbol = thaw_js_get_global(c"nativeKeySymbol".as_ptr());
+    assert_ne!(symbol, 0);
+    for (operation, expected) in [(1, 1), (2, 1), (1, 0)] {
+        let result = thaw_js_property_predicate_key_handle_result(object, symbol, operation);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, expected);
+    }
+    assert_eq!(load(r#"
+        [JSON.parse, Reflect.has, Reflect.deleteProperty, Object.hasOwn] =
+            savedKeyIntrinsics;
+        delete globalThis.savedKeyIntrinsics;
+        delete globalThis.nativeKeyTarget;
+        delete globalThis.nativeKeySymbol;
+    "#), 1);
+    assert_eq!(thaw_js_release_handle(symbol), 1);
+    assert_eq!(thaw_js_release_handle(object), 1);
 }
