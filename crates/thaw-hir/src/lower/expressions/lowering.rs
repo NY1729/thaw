@@ -3446,9 +3446,10 @@ impl<'a> FnLowerer<'a> {
                             Some(message) => self.coerce_primitive_to_string(message.clone())?,
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
+                        let marker = "__thaw_class_identity_\u{1e}SuppressedError\u{1f}Error";
                         let result = HirExpr::ObjectLit(vec![
                             (
-                                "__thaw_class_identity_\u{1e}SuppressedError\u{1f}Error".to_string(),
+                                marker.to_string(),
                                 HirExpr::Lit(HirLit::Bool(true)),
                             ),
                             ("message".to_string(), message),
@@ -3459,6 +3460,10 @@ impl<'a> FnLowerer<'a> {
                             ("error".to_string(), error),
                             ("suppressed".to_string(), suppressed),
                         ]);
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_hide_marker".to_string())),
+                            vec![result, HirExpr::Lit(HirLit::Str(marker.to_string()))],
+                        );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if class.sym == *"AggregateError" {
@@ -3523,9 +3528,10 @@ impl<'a> FnLowerer<'a> {
                             }
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
+                        let marker = "__thaw_class_identity_\u{1e}AggregateError\u{1f}Error";
                         let mut fields = vec![
                             (
-                                "__thaw_class_identity_\u{1e}AggregateError\u{1f}Error".to_string(),
+                                marker.to_string(),
                                 HirExpr::Lit(HirLit::Bool(true)),
                             ),
                             ("message".to_string(), message),
@@ -3549,7 +3555,13 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                         return self.wrap_call_argument_bindings(
-                            HirExpr::ObjectLit(fields),
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_hide_marker".to_string())),
+                                vec![
+                                    HirExpr::ObjectLit(fields),
+                                    HirExpr::Lit(HirLit::Str(marker.to_string())),
+                                ],
+                            ),
                             &bindings,
                         );
                     }

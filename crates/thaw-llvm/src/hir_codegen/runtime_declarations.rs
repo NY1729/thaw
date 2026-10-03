@@ -1607,7 +1607,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
-        for name in ["thaw_object_set_class_identity", "thaw_object_has_class_identity"] {
+        for name in [
+            "thaw_object_set_class_identity",
+            "thaw_object_has_class_identity",
+            "thaw_object_hide_marker",
+            "thaw_object_marker_hidden",
+        ] {
             self.module.add_function(
                 name,
                 self.context
