@@ -1592,6 +1592,7 @@ impl<'a> FnLowerer<'a> {
                         }
                     };
                     let mut iteration_disposals = Vec::new();
+                    let mut iteration_using_flags = Vec::new();
                     let item_stmts = match &for_of.left {
                         ForHead::VarDecl(decl) => {
                             let [declarator] = decl.decls.as_slice() else {
@@ -1776,11 +1777,17 @@ impl<'a> FnLowerer<'a> {
                                 .entry(source_name.clone())
                                 .or_default()
                                 .push(item_name.clone());
-                            iteration_disposals.push(self.lower_using_disposal(
+                            let flag = self.bind_local("__thaw_using_acquired", HirType::Bool);
+                            iteration_using_flags.push(HirStmt::Let(flag.clone(), HirType::Bool,
+                                HirExpr::Lit(HirLit::Bool(false))));
+                            let disposal = self.lower_using_disposal(
                                 &source_name,
                                 using_decl.is_await,
-                            )?);
-                            vec![HirStmt::Let(item_name, item_ty, item_value())]
+                            )?;
+                            iteration_disposals.push(Self::guard_using_disposal(flag.clone(), disposal));
+                            vec![HirStmt::Let(item_name, item_ty, item_value()),
+                                HirStmt::Expr(HirExpr::Assign(flag,
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true)))))]
                         }
                     };
                     let resume_generator = |control| -> Result<HirExpr, String> {
@@ -1845,7 +1852,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     body.extend(item_stmts);
                     body.extend(self.lower_loop_body(&for_of.body)?);
-                    body = self.lower_using_scope(body, iteration_disposals)?;
+                    body = self.lower_using_scope(body, iteration_disposals, iteration_using_flags)?;
                     if generator_producer.is_none() {
                         let update = HirExpr::Assign(
                             index_name.clone(),
