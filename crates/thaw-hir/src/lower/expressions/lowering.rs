@@ -3077,7 +3077,7 @@ impl<'a> FnLowerer<'a> {
             Expr::Member(member) => self.lower_member_read(member),
 
             Expr::SuperProp(member) => {
-                let (_, _, base_name) = self
+                let (_, base_type, base_name) = self
                     .super_initializer
                     .clone()
                     .ok_or("`super` property access is only valid in a derived class")?;
@@ -3088,22 +3088,25 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirExpr::Var(storage));
                     }
                 }
-                let symbol = class_getter_symbol(
-                    &base_name,
-                    &property,
-                    self.class_static_context,
-                );
-                if !self.signatures.contains_key(&symbol) {
-                    return Err(format!(
-                        "base class `{base_name}` has no getter `{property}`"
-                    ));
+                let owner = if self.class_static_context {
+                    base_name
+                } else {
+                    self.class_super_instance_accessor_owner(&base_type, &property)
+                        .ok_or_else(|| format!("base class `{base_name}` has no accessor `{property}`"))?
+                };
+                let symbol = class_getter_symbol(&owner, &property, self.class_static_context);
+                if !self.signatures.get(&symbol).is_some_and(|signature|
+                    self.class_static_context || signature.accessor_owner.as_deref() == Some(owner.as_str())) {
+                    return Err(format!("base class `{owner}` has no getter `{property}`"));
                 }
                 Ok(HirExpr::Call(
                     Box::new(HirExpr::Var(symbol)),
                     if self.class_static_context {
                         Vec::new()
                     } else {
-                        vec![HirExpr::Var(self.resolve_binding("this"))]
+                        vec![self.assert_class_accessor_receiver(
+                            HirExpr::Var(self.resolve_binding("this")), &owner,
+                        )]
                     },
                 ))
             }

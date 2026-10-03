@@ -134,16 +134,15 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         ty: &HirType,
     ) -> Result<HirExpr, String> {
-        if let HirType::Object(fields) = ty {
+        if let HirType::Object(_) = ty {
             if ty != &date_object_type() && ty != &regex_object_type() {
-                if let Some(class_name) = class_name_from_type(&HirType::Object(fields.clone())) {
-                    let symbol = class_getter_symbol(
-                        class_name,
-                        &well_known_symbol_key("toStringTag"),
-                        false,
-                    );
-                    if self.signatures.contains_key(&symbol) {
-                        let tag = HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![value]);
+                let tag_property = well_known_symbol_key("toStringTag");
+                if let Some(owner) = self.class_instance_accessor_owner(ty, &tag_property) {
+                    let symbol = class_getter_symbol(&owner, &tag_property, false);
+                    if self.signatures.get(&symbol).is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str())) {
+                        let tag = HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![
+                            self.assert_class_accessor_receiver(value, &owner),
+                        ]);
                         return Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                             vec![

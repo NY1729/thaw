@@ -1,4 +1,18 @@
 #[test]
+fn rejects_unreadable_or_non_numeric_instance_accessor_updates() {
+    for (source, fragment) in [
+        ("class Box { get value(): number { return 1; } } function main(): void { ++new Box().value; }", "readonly instance accessor"),
+        ("class Box { get value(): string { return 'x'; } set value(next: string) {} } function main(): void { ++new Box().value; }", "non-number instance accessor"),
+        ("class Box { set value(next: number) {} } function main(): void { ++new Box().value; }", "write-only instance accessor"),
+        ("class Base { get value(): number { return 1; } set value(next: number) {} } class Derived extends Base { get value(): number { return 2; } } function main(): void { ++new Derived().value; }", "readonly instance accessor"),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains(fragment), "{error}");
+    }
+}
+
+#[test]
 fn keeps_top_level_default_temporaries_private_when_exporting() {
     let module = thaw_parser::parse_typescript(
         "export const { value = 42 }: { value: number | undefined } = { value: undefined };",

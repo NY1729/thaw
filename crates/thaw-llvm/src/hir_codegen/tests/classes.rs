@@ -1,4 +1,149 @@
 #[test]
+fn native_instance_accessor_update_orders_receiver_getter_setter_and_result() {
+    let source = r#"
+        let order = "";
+        let stored = 3;
+        let gets = 0;
+        let sets = 0;
+        let receivers = 0;
+        class Box {
+            get value(): number { gets++; order += "G"; return stored; }
+            set value(next: number) { sets++; order += "S"; stored = next * 10; }
+            lower(): number { return --this.value; }
+        }
+        function make(): Box { receivers++; order += "R"; return new Box(); }
+        function main(): void {
+            console.log(++make().value, receivers, gets, sets, order, stored);
+            order = "";
+            const box = new Box();
+            console.log(box["value"]--, gets, sets, order, stored);
+            order = "";
+            console.log(box.lower(), gets, sets, order, stored);
+            Object.freeze(box);
+            order = "";
+            console.log(++box.value, gets, sets, order, stored);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_instance_accessor_update"),
+        "4 1 1 1 RGS 40\n40 2 2 GS 390\n389 3 3 GS 3890\n3891 4 4 GS 38910\n");
+}
+
+#[test]
+fn inherited_and_super_instance_accessor_updates_use_the_nearest_descriptor() {
+    let source = r#"
+        let order = "";
+        class Base {
+            stored: number;
+            constructor() { this.stored = 2; }
+            get value(): number { order += "G"; return this.stored; }
+            set value(next: number) { order += "S"; this.stored = next; }
+        }
+        class Derived extends Base {
+            constructor() { super(); }
+            step(): number { return ++super.value; }
+            stepPost(): number { return super.value--; }
+        }
+        function main(): void {
+            const derived = new Derived();
+            console.log(derived.value++, derived.stored, order);
+            order = "";
+            console.log(derived.step(), derived.stored, order);
+            order = "";
+            console.log(derived.stepPost(), derived.stored, order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "inherited_super_accessor_update"),
+        "2 3 GS\n4 4 GS\n4 3 GS\n");
+}
+
+#[test]
+fn super_accessor_ignores_an_instance_field_with_the_same_name() {
+    let source = r#"
+        class Grand {
+            stored: number;
+            constructor() { this.stored = 2; }
+            get value(): number { return this.stored; }
+            set value(next: number) { this.stored = next; }
+        }
+        class Base extends Grand {
+            value: number;
+            constructor() { super(); this.value = 100; }
+        }
+        class Derived extends Base {
+            constructor() { super(); }
+            step(): number { return ++super.value; }
+            setBase(): number { super.value = 7; return super.value; }
+        }
+        function main(): void {
+            const derived = new Derived();
+            console.log(derived.value++, derived.value, derived.stored);
+            console.log(derived.step(), derived.value, derived.stored);
+            console.log(derived.setBase(), derived.value, derived.stored);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "super_accessor_shadowed_field"),
+        "100 101 2\n3 101 3\n7 101 7\n");
+}
+
+#[test]
+fn throwing_class_accessor_setter_prevents_update_result() {
+    let source = r#"
+        let order = "";
+        class Box {
+            get value(): number { order += "G"; return 1; }
+            set value(next: number) { order += "S"; throw new Error("blocked"); }
+        }
+        function main(): void {
+            try { const result = ++new Box().value; console.log(result); }
+            catch (error) { console.log(order); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "throwing_class_accessor_update"), "GS\n");
+}
+
+#[test]
+fn copied_class_marker_cannot_dispatch_symbol_tag_getter() {
+    let source = r#"
+        let called = 0;
+        class Tagged {
+            get [Symbol.toStringTag](): string { called++; return "Tagged"; }
+        }
+        function main(): void {
+            const fake = { ["__thaw_class_identity_\u001eTagged"]: true } as Tagged;
+            try { console.log(Object.prototype.toString.call(fake)); }
+            catch (error) { console.log("rejected", called); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "copied_marker_tag_guard"), "rejected 0\n");
+}
+
+#[test]
+fn copied_class_marker_cannot_dispatch_instance_accessors() {
+    let source = r#"
+        let order = "";
+        class Box {
+            get value(): number { order += "G"; return 1; }
+            set value(next: number) { order += "S"; }
+        }
+        function rhs(): number { order += "R"; return 2; }
+        function main(): void {
+            const fake = { ["__thaw_class_identity_\u001eBox"]: true } as Box;
+            try { fake.value = rhs(); console.log("unexpected"); }
+            catch (error) { console.log(order); }
+            order = "";
+            try { ++fake.value; console.log("unexpected"); }
+            catch (error) { console.log(order); }
+            const ordinary = { ["__thaw_class_identity_\u001eBox"]: true, value: 5 };
+            console.log(++ordinary.value, ordinary.value);
+            order = "";
+            ordinary.value = rhs();
+            console.log(ordinary.value, order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "copied_marker_accessor_guard"), "R\n\n6 6\n2 R\n");
+}
+
+#[test]
 fn native_instanceof_checks_allocated_identity_not_marker_layout() {
     let source = r#"
         class Base {}
