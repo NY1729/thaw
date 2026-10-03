@@ -92,6 +92,42 @@ impl<'ctx> HirCompiler<'ctx> {
                 ).map_err(|error| error.to_string())?;
                 return Ok(object.into());
             }
+            "__thaw_object_order_begin" => {
+                let [object] = args else {
+                    return Err("object order initialization expects one object".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_order_begin").unwrap(),
+                    &[object.into()], "object_order_begin",
+                ).map_err(|error| error.to_string())?;
+                return Ok(object.into());
+            }
+            "__thaw_object_order_seed" => {
+                let [object, key] = args else {
+                    return Err("object order insertion expects object and key".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_order_seed").unwrap(),
+                    &[object.into(), key.into()], "object_order_seed",
+                ).map_err(|error| error.to_string())?;
+                return Ok(object.into());
+            }
+            "__thaw_object_order_rank" => {
+                let [object, key, rank] = args else {
+                    return Err("object order rank expects object, key, and fallback".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                let rank = self.compile_expr(rank)?.into_int_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_order_rank").unwrap(),
+                    &[object.into(), key.into(), rank.into()], "object_order_rank",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("object order rank returned no value".into());
+            }
             "__thaw_object_has_accessor" => {
                 let [object, property, setter] = args else {
                     return Err(

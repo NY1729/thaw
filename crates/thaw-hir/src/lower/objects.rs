@@ -25,6 +25,163 @@ fn callback_signature(ty: &HirType, supplied: usize) -> Option<(Vec<HirType>, Hi
 }
 
 impl<'a> FnLowerer<'a> {
+    /// Visit the fixed fields present when enumeration began in effective
+    /// own-key order. Actions remain lazy so an earlier getter can change a
+    /// later field's live descriptor before it is read.
+    fn lower_ordered_fixed_field_statements(
+        &mut self,
+        receiver: HirExpr,
+        fields: &[(Symbol, HirType)],
+        actions: Vec<(usize, Vec<HirStmt>)>,
+    ) -> Result<Vec<HirStmt>, String> {
+        if !matches!(receiver, HirExpr::Var(_)) {
+            return Err("fixed own-key dispatch requires a bound receiver".into());
+        }
+        let ordered = ecmascript_field_order(fields);
+        if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
+            // Only compiler markers can change visibility or insertion rank.
+            // Even after rest removes a marker, other keys keep static relative
+            // order, so ordinary fixed layouts stay on the linear path.
+            let mut static_actions = actions.into_iter().map(|(index, body)| {
+                let rank = ordered.iter().position(|&candidate| candidate == index)
+                    .ok_or_else(|| format!("field {} is not an own enumerable field", fields[index].0))?;
+                Ok((rank, body))
+            }).collect::<Result<Vec<_>, String>>()?;
+            static_actions.sort_by_key(|(rank, _)| *rank);
+            return Ok(static_actions.into_iter().flat_map(|(_, body)| body).collect());
+        }
+        // ponytail: this finite marker-layout path emits quadratic rank
+        // comparisons; use a runtime sorted dispatch only if real layouts
+        // grow enough for generated-code size to matter.
+        let mut ranked = Vec::with_capacity(actions.len());
+        let mut statements = Vec::new();
+        for (index, body) in actions {
+            let static_rank = ordered.iter().position(|&candidate| candidate == index)
+                .ok_or_else(|| format!("field {} is not an own enumerable field", fields[index].0))?;
+            let static_rank = i64::try_from(static_rank)
+                .map_err(|_| "fixed object has too many fields for own-key ordering".to_string())?;
+            let field = fields[index].0.clone();
+            let rank_name = format!("__thaw_field_rank_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(rank_name.clone(), HirType::I64);
+            let key = HirExpr::Lit(HirLit::Str(field.clone()));
+            let hidden = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                vec![receiver.clone(), key.clone()],
+            );
+            let rank = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_order_rank".into())),
+                vec![receiver.clone(), key, HirExpr::Lit(HirLit::I64(static_rank))],
+            );
+            statements.push(HirStmt::Let(rank_name.clone(), HirType::I64,
+                HirExpr::Conditional(Box::new(hidden),
+                    Box::new(HirExpr::Lit(HirLit::I64(i64::MAX))),
+                    Box::new(rank), HirType::I64)));
+            ranked.push((rank_name, field, body));
+        }
+        for _ in 0..ranked.len() {
+            let min_name = format!("__thaw_field_min_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(min_name.clone(), HirType::I64);
+            statements.push(HirStmt::Let(min_name.clone(), HirType::I64,
+                HirExpr::Lit(HirLit::I64(i64::MAX))));
+            for (rank_name, _, _) in &ranked {
+                statements.push(HirStmt::If(
+                    HirExpr::BinOp(BinOp::Lt,
+                        Box::new(HirExpr::Var(rank_name.clone())),
+                        Box::new(HirExpr::Var(min_name.clone()))),
+                    vec![HirStmt::Expr(HirExpr::Assign(min_name.clone(),
+                        Box::new(HirExpr::Var(rank_name.clone()))))],
+                    Vec::new(),
+                ));
+            }
+            let mut dispatch = Vec::new();
+            for (rank_name, field, body) in &ranked {
+                let chosen = HirExpr::BinOp(BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(rank_name.clone())),
+                    Box::new(HirExpr::Var(min_name.clone())));
+                let live_hidden = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                    vec![receiver.clone(), HirExpr::Lit(HirLit::Str(field.clone()))],
+                );
+                let mut on_chosen = vec![HirStmt::If(live_hidden, Vec::new(), body.clone())];
+                on_chosen.push(HirStmt::Expr(HirExpr::Assign(rank_name.clone(),
+                    Box::new(HirExpr::Lit(HirLit::I64(i64::MAX))))));
+                dispatch.push(HirStmt::If(chosen, on_chosen, Vec::new()));
+            }
+            statements.push(HirStmt::If(
+                HirExpr::BinOp(BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(min_name)),
+                    Box::new(HirExpr::Lit(HirLit::I64(i64::MAX)))),
+                Vec::new(), dispatch,
+            ));
+        }
+        Ok(statements)
+    }
+
+    /// Copy selected own fields into a fresh fixed layout without treating
+    /// every zeroed physical slot as a property. Used by all fixed rest paths.
+    fn lower_fixed_object_rest_copy(
+        &mut self,
+        source: HirExpr,
+        fields: &[(Symbol, HirType)],
+        omitted: &[Symbol],
+    ) -> Result<(HirExpr, HirType), String> {
+        let included = ecmascript_field_order(fields).into_iter()
+            .filter(|&index| !omitted.contains(&fields[index].0))
+            .collect::<Vec<_>>();
+        let result_fields = included.iter().map(|&index| {
+            let name = fields[index].0.clone();
+            Ok((name.clone(), Self::fixed_object_property_read_type(fields, &name)?))
+        }).collect::<Result<Vec<_>, String>>()?;
+        let result_type = HirType::Object(result_fields.clone());
+        let source_type = HirType::Object(fields.to_vec());
+        let source_name = format!("__thaw_rest_source_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), source_type.clone());
+        let result_name = format!("__thaw_rest_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(result_name.clone(), result_type.clone());
+        let receiver = HirExpr::Var(source_name.clone());
+        let result = HirExpr::Var(result_name.clone());
+        let mut body = vec![HirStmt::Let(result_name, result_type.clone(),
+            HirExpr::ObjectAlloc(result_type.clone()))];
+        body.push(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_order_begin".into())),
+            vec![result.clone()],
+        )));
+        for (name, _) in &result_fields {
+            if name.starts_with("__thaw_class_identity_\u{1e}") {
+                body.push(HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_hide_marker".into())),
+                    vec![result.clone(), HirExpr::Lit(HirLit::Str(name.clone()))],
+                )));
+            }
+        }
+        let mut actions = Vec::new();
+        for index in included {
+            let name = fields[index].0.clone();
+            let read = self.lower_fixed_object_property_read(receiver.clone(), fields, &name)?;
+            let field_type = result_fields.iter().find(|(field, _)| field == &name)
+                .expect("included field belongs to the result layout").1.clone();
+            let read = self.coerce_to_declared(&field_type, read)?;
+            let write = HirStmt::Expr(HirExpr::PropAssign(
+                Box::new(result.clone()), result_type.clone(), name.clone(), Box::new(read),
+            ));
+            let seed = HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_order_seed".into())),
+                vec![result.clone(), HirExpr::Lit(HirLit::Str(name))],
+            ));
+            actions.push((index, vec![write, seed]));
+        }
+        body.extend(self.lower_ordered_fixed_field_statements(receiver, fields, actions)?);
+        body.push(HirStmt::Return(Some(result)));
+        let value = self.wrap_call_argument_bindings(
+            HirExpr::Block(body), &[(source_name, source_type, source)],
+        )?;
+        Ok((value, result_type))
+    }
+
     fn static_object_property_name(&self, property: &PropName) -> Option<String> {
         literal_property_name(property).or_else(|| match property {
             PropName::Computed(computed) => well_known_symbol_from_expr(&computed.expr)
@@ -662,6 +819,265 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// Marker-capable fixed spreads must copy each source's own-key snapshot
+    /// before evaluating the following literal property or spread operand.
+    fn lower_marker_ordered_object_lit(
+        &mut self,
+        obj_lit: &SwcObjectLit,
+        expected_fields: Option<&[(Symbol, HirType)]>,
+    ) -> Result<HirExpr, String> {
+        enum Step {
+            Spread(Symbol, HirType, HirExpr),
+            Field(Symbol, HirExpr),
+        }
+        let mut steps = Vec::new();
+        let mut fields: Vec<(Symbol, HirExpr)> = Vec::new();
+        let mut field_types: Vec<(Symbol, HirType)> = Vec::new();
+        for property in &obj_lit.props {
+            let additions = match property {
+                PropOrSpread::Spread(spread) => {
+                    let source = self.lower_expr(&spread.expr)?;
+                    let source_type = self.infer_expr_type(&source)?;
+                    let HirType::Object(source_fields) = &source_type else {
+                        return Err(format!(
+                            "cannot spread a value of type {source_type:?} into an object literal"
+                        ));
+                    };
+                    let source_name = format!("__thaw_ordered_spread_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(source_name.clone(), source_type.clone());
+                    let additions = ecmascript_field_order(source_fields).into_iter()
+                        .map(|index| {
+                            let name = &source_fields[index].0;
+                            Ok((name.clone(), self.lower_fixed_object_property_read(
+                                HirExpr::Var(source_name.clone()), source_fields, name,
+                            )?))
+                        }).collect::<Result<Vec<_>, String>>()?;
+                    steps.push(Step::Spread(source_name, source_type, source));
+                    additions
+                }
+                PropOrSpread::Prop(prop) => {
+                    let additions = match prop.as_ref() {
+                        Prop::KeyValue(KeyValueProp { key, value }) => {
+                            let name = self.static_object_property_name(key)
+                                .ok_or_else(|| "unsupported object literal key".to_string())?;
+                            let expected = expected_fields.and_then(|fields| fields.iter()
+                                .find_map(|(field, ty)| (field == &name).then_some(ty)));
+                            vec![(name, self.lower_object_lit_field_value(value, expected)?)]
+                        }
+                        Prop::Shorthand(ident) => vec![(
+                            ident.sym.to_string(), self.lower_expr(&Expr::Ident(ident.clone()))?,
+                        )],
+                        property => self.lower_object_callable_property(
+                            property, &fields, expected_fields,
+                        )?.ok_or_else(|| "only data properties are supported in object literals".to_string())?,
+                    };
+                    if let Some(expected) = expected_fields.filter(|fields| !fields.is_empty()) {
+                        if let Some((name, _)) = additions.iter().find(|(name, _)| {
+                            !name.starts_with("__thaw_")
+                                && !expected.iter().any(|(field, _)| field == name)
+                        }) {
+                            return Err(format!(
+                                "object literal property `{name}` is not present in the declared type"
+                            ));
+                        }
+                    }
+                    for (name, value) in &additions {
+                        steps.push(Step::Field(name.clone(), value.clone()));
+                    }
+                    additions
+                }
+            };
+            for (name, value) in additions {
+                let ty = self.infer_expr_type(&value)?;
+                if !is_hidden_accessor_field(&name)
+                    && (matches!(property, PropOrSpread::Spread(_))
+                        || matches!(property, PropOrSpread::Prop(prop)
+                            if matches!(prop.as_ref(), Prop::KeyValue(_) | Prop::Shorthand(_) | Prop::Method(_))))
+                {
+                    fields.retain(|(field, _)| {
+                        field != &format!("__thaw_getter_{name}")
+                            && field != &format!("__thaw_setter_{name}")
+                    });
+                    field_types.retain(|(field, _)| {
+                        field != &format!("__thaw_getter_{name}")
+                            && field != &format!("__thaw_setter_{name}")
+                    });
+                }
+                if let Some((_, existing)) = fields.iter_mut().find(|(field, _)| field == &name) {
+                    *existing = value.clone();
+                } else {
+                    fields.push((name.clone(), value.clone()));
+                }
+                if let Some((_, existing)) = field_types.iter_mut().find(|(field, _)| field == &name) {
+                    if name.starts_with("__thaw_class_identity_\u{1e}") && *existing != ty {
+                        let mut members = match existing {
+                            HirType::Union(members) => members.clone(),
+                            previous => vec![previous.clone()],
+                        };
+                        if !members.contains(&ty) { members.push(ty.clone()); }
+                        *existing = HirType::Union(members);
+                    } else if !name.starts_with("__thaw_class_identity_\u{1e}") {
+                        *existing = ty.clone();
+                    }
+                } else {
+                    field_types.push((name, ty));
+                }
+            }
+        }
+        let result_type = HirType::Object(field_types.clone());
+        let result_name = format!("__thaw_ordered_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(result_name.clone(), result_type.clone());
+        let result = HirExpr::Var(result_name.clone());
+        let mut body = vec![HirStmt::Let(result_name, result_type.clone(),
+            HirExpr::ObjectAlloc(result_type.clone()))];
+        body.push(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_order_begin".into())), vec![result.clone()],
+        )));
+        for (name, _) in &field_types {
+            if name.starts_with("__thaw_class_identity_\u{1e}") {
+                body.push(HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_hide_marker".into())),
+                    vec![result.clone(), HirExpr::Lit(HirLit::Str(name.clone()))],
+                )));
+            }
+        }
+        // An overwritten value still runs at its original position and
+        // creates its key there, but need not fit the final physical slot's
+        // type. Marker spreads are conditional, so their earlier values
+        // remain live until a definite later writer replaces them.
+        let mut last_definite = HashMap::new();
+        let mut last_hidden = HashMap::new();
+        for (position, step) in steps.iter().enumerate() {
+            match step {
+                Step::Spread(_, HirType::Object(fields), _) => {
+                    for index in ecmascript_field_order(fields) {
+                        let name = &fields[index].0;
+                        if !name.starts_with("__thaw_class_identity_\u{1e}") {
+                            last_definite.insert(name.clone(), position);
+                        }
+                    }
+                }
+                Step::Field(name, _) if is_hidden_accessor_field(name) => {
+                    last_hidden.insert(name.clone(), position);
+                }
+                Step::Field(name, _)
+                    if !name.starts_with("__thaw_class_identity_\u{1e}") =>
+                {
+                    last_definite.insert(name.clone(), position);
+                }
+                _ => {}
+            }
+        }
+        let mut deferred_accessors = Vec::new();
+        for (position, step) in steps.into_iter().enumerate() {
+            match step {
+                Step::Spread(name, ty, source) => {
+                    let HirType::Object(source_fields) = &ty else { unreachable!() };
+                    body.push(HirStmt::Let(name.clone(), ty.clone(), source));
+                    let receiver = HirExpr::Var(name);
+                    let mut actions = Vec::new();
+                    for index in ecmascript_field_order(source_fields) {
+                        let field = source_fields[index].0.clone();
+                        let read = self.lower_fixed_object_property_read(
+                            receiver.clone(), source_fields, &field,
+                        )?;
+                        let write = if last_definite.get(&field).is_some_and(|&last| last != position) {
+                            HirStmt::Expr(read)
+                        } else {
+                            let target = field_types.iter().find(|(name, _)| name == &field)
+                                .expect("spread field belongs to the result").1.clone();
+                            let read = self.coerce_to_declared(&target, read)?;
+                            HirStmt::Expr(HirExpr::PropAssign(
+                                Box::new(result.clone()), result_type.clone(), field.clone(),
+                                Box::new(read),
+                            ))
+                        };
+                        let seed = HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_order_seed".into())),
+                            vec![result.clone(), HirExpr::Lit(HirLit::Str(field))],
+                        ));
+                        actions.push((index, vec![write, seed]));
+                    }
+                    body.extend(self.lower_ordered_fixed_field_statements(
+                        receiver, source_fields, actions,
+                    )?);
+                }
+                Step::Field(name, value) => {
+                    if is_hidden_accessor_field(&name) {
+                        if last_hidden.get(&name) != Some(&position)
+                            || !field_types.iter().any(|(field, _)| field == &name)
+                        {
+                            body.push(HirStmt::Expr(value));
+                        } else {
+                            let field_type = field_types.iter().find(|(field, _)| field == &name)
+                                .expect("retained accessor field has a type").1.clone();
+                            let temporary = format!("__thaw_deferred_accessor_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(temporary.clone(), field_type.clone());
+                            body.push(HirStmt::Let(temporary.clone(), field_type, value));
+                            deferred_accessors.push((name, temporary));
+                        }
+                        continue;
+                    }
+                    if last_definite.get(&name).is_some_and(|&last| last != position) {
+                        body.push(HirStmt::Expr(value));
+                        body.push(HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_order_seed".into())),
+                            vec![result.clone(), HirExpr::Lit(HirLit::Str(name))],
+                        )));
+                        continue;
+                    }
+                    let target = field_types.iter().find(|(field, _)| field == &name)
+                        .expect("literal field belongs to the result").1.clone();
+                    let value = self.coerce_to_declared(&target, value)?;
+                    body.push(HirStmt::Expr(HirExpr::PropAssign(
+                        Box::new(result.clone()), result_type.clone(), name.clone(),
+                        Box::new(value),
+                    )));
+                    if !is_hidden_accessor_field(&name) {
+                        body.push(HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_order_seed".into())),
+                            vec![result.clone(), HirExpr::Lit(HirLit::Str(name))],
+                        )));
+                    }
+                }
+            }
+        }
+        // Defining a literal accessor does not invoke it. Install the
+        // already-created closures after data creation so an earlier setter
+        // cannot intercept a later own data property definition.
+        for (name, temporary) in deferred_accessors {
+            body.push(HirStmt::Expr(HirExpr::PropAssign(
+                Box::new(result.clone()), result_type.clone(), name,
+                Box::new(HirExpr::Var(temporary)),
+            )));
+        }
+        body.push(HirStmt::Return(Some(result)));
+        let block = HirExpr::Block(body);
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&block, &mut referenced);
+        let captures = referenced.into_iter()
+            .filter_map(|name| self.scope.get(&name).cloned()
+                .map(|ty| HirParam { name, ty }))
+            .collect();
+        let suspends = contains_await(&block);
+        let lambda_return = if suspends {
+            HirType::Promise(Box::new(result_type.clone()))
+        } else {
+            result_type.clone()
+        };
+        let call = HirExpr::Call(Box::new(HirExpr::Lambda(
+            captures, Vec::new(), lambda_return, Box::new(block),
+        )), Vec::new());
+        Ok(if suspends {
+            HirExpr::AwaitPromise(Box::new(call), result_type)
+        } else {
+            call
+        })
+    }
+
     fn lower_object_lit(
         &mut self,
         obj_lit: &SwcObjectLit,
@@ -707,15 +1123,19 @@ impl<'a> FnLowerer<'a> {
                 self.lower_computed_dictionary_lit(obj_lit)
             };
         }
+        let mut marker_spread = false;
         if expected_fields.is_none() {
             let mut dynamic_spread = None;
             for property in &obj_lit.props {
                 if let PropOrSpread::Spread(spread) = property {
                     let source = self.lower_expr(&spread.expr)?;
                     let source_type = self.infer_expr_type(&source)?;
-                    if !matches!(source_type, HirType::Object(_)) {
-                        dynamic_spread = Some(());
-                        break;
+                    match source_type {
+                        HirType::Object(fields) => {
+                            marker_spread |= fields.iter().any(|(name, _)|
+                                name.starts_with("__thaw_class_identity_\u{1e}"));
+                        }
+                        _ => { dynamic_spread = Some(()); break; }
                     }
                 }
             }
@@ -726,6 +1146,19 @@ impl<'a> FnLowerer<'a> {
                     self.lower_dynamic_spread_object_lit(obj_lit)
                 };
             }
+        } else {
+            for property in &obj_lit.props {
+                if let PropOrSpread::Spread(spread) = property {
+                    let source = self.lower_expr(&spread.expr)?;
+                    if let HirType::Object(fields) = self.infer_expr_type(&source)? {
+                        marker_spread |= fields.iter().any(|(name, _)|
+                            name.starts_with("__thaw_class_identity_\u{1e}"));
+                    }
+                }
+            }
+        }
+        if marker_spread {
+            return self.lower_marker_ordered_object_lit(obj_lit, expected_fields);
         }
         struct AwaitFinder(bool);
         impl Visit for AwaitFinder {
@@ -2693,15 +3126,14 @@ impl<'a> FnLowerer<'a> {
         let source_name = format!("__thaw_json_replacer_object_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(source_name.clone(), source_type.clone());
-        let mut snapshot = Vec::new();
+        let source = HirExpr::Var(source_name.clone());
+        let mut selected = Vec::new();
         for key in keys {
             if !fields.iter().any(|(name, _)| name == key) {
                 continue;
             }
             let read = self.lower_fixed_object_property_read(
-                HirExpr::Var(source_name.clone()),
-                fields,
-                key,
+                source.clone(), fields, key,
             )?;
             let read_type = Self::fixed_object_property_read_type(fields, key)?;
             let read = if let HirType::Object(nested) = &read_type {
@@ -2709,10 +3141,48 @@ impl<'a> FnLowerer<'a> {
             } else {
                 read
             };
-            snapshot.push((key.clone(), read));
+            let read_type = self.infer_expr_type(&read)?;
+            selected.push((key.clone(), read_type, read));
         }
+        let result_type = HirType::Object(selected.iter()
+            .map(|(name, ty, _)| (name.clone(), ty.clone())).collect());
+        let result_name = format!("__thaw_json_replacer_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(result_name.clone(), result_type.clone());
+        let result = HirExpr::Var(result_name.clone());
+        let mut body = vec![HirStmt::Let(result_name, result_type.clone(),
+            HirExpr::ObjectAlloc(result_type.clone()))];
+        body.push(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_order_begin".into())), vec![result.clone()],
+        )));
+        for (name, _, _) in &selected {
+            if name.starts_with("__thaw_class_identity_\u{1e}") {
+                body.push(HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_hide_marker".into())),
+                    vec![result.clone(), HirExpr::Lit(HirLit::Str(name.clone()))],
+                )));
+            }
+        }
+        for (name, _, read) in selected {
+            let key = HirExpr::Lit(HirLit::Str(name.clone()));
+            let hidden = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                vec![source.clone(), key.clone()],
+            );
+            body.push(HirStmt::If(hidden, Vec::new(), vec![
+                HirStmt::Expr(HirExpr::PropAssign(
+                    Box::new(result.clone()), result_type.clone(), name,
+                    Box::new(read),
+                )),
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_order_seed".into())),
+                    vec![result.clone(), key],
+                )),
+            ]));
+        }
+        body.push(HirStmt::Return(Some(result)));
         self.wrap_call_argument_bindings(
-            HirExpr::ObjectLit(snapshot),
+            HirExpr::Block(body),
             &[(source_name, source_type, value)],
         )
     }
@@ -2978,9 +3448,16 @@ impl<'a> FnLowerer<'a> {
         let source_name = format!("__thaw_dynamic_accessor_object_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(source_name.clone(), source_type.clone());
-        let mut keys = Vec::new();
-        let mut readable = Vec::new();
-        let mut getters = Vec::new();
+        let keys_name = format!("__thaw_dynamic_keys_{}", self.next_binding);
+        self.next_binding += 1;
+        let readable_name = format!("__thaw_dynamic_readable_{}", self.next_binding);
+        self.next_binding += 1;
+        let getters_name = format!("__thaw_dynamic_getters_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(keys_name.clone(), HirType::Array(Box::new(HirType::Str)));
+        self.scope.insert(readable_name.clone(), HirType::Array(Box::new(HirType::Bool)));
+        self.scope.insert(getters_name.clone(), HirType::Array(Box::new(HirType::JsValue)));
+        let mut actions = Vec::new();
         for index in ecmascript_field_order(fields) {
             let name = &fields[index].0;
             let has_getter = fields
@@ -3011,20 +3488,38 @@ impl<'a> FnLowerer<'a> {
                 read_type,
                 Box::new(read),
             );
-            keys.push(HirExpr::Lit(HirLit::Str(name.clone())));
-            readable.push(HirExpr::Lit(HirLit::Bool(!setter_only)));
-            getters.push(HirExpr::Call(
+            let getter = HirExpr::Call(
                 Box::new(HirExpr::Var("registerNativeCallback".into())),
                 vec![callback],
+            );
+            let append = |array: &str, value| HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                vec![HirExpr::Var(array.to_string()), value],
             ));
+            actions.push((index, vec![
+                append(&keys_name, HirExpr::Lit(HirLit::Str(name.clone()))),
+                append(&readable_name, HirExpr::Lit(HirLit::Bool(!setter_only))),
+                append(&getters_name, getter),
+            ]));
         }
+        let mut body = vec![
+            HirStmt::Let(keys_name.clone(), HirType::Array(Box::new(HirType::Str)),
+                HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(readable_name.clone(), HirType::Array(Box::new(HirType::Bool)),
+                HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(getters_name.clone(), HirType::Array(Box::new(HirType::JsValue)),
+                HirExpr::ArrayLit(Vec::new())),
+        ];
+        body.extend(self.lower_ordered_fixed_field_statements(
+            HirExpr::Var(source_name.clone()), fields, actions,
+        )?);
         let keys = self.coerce_to_declared(
             &HirType::Json,
-            HirExpr::ArrayLit(keys),
+            HirExpr::Var(keys_name),
         )?;
         let readable = self.coerce_to_declared(
             &HirType::Json,
-            HirExpr::ArrayLit(readable),
+            HirExpr::Var(readable_name),
         )?;
         let arguments = self.coerce_to_declared(
             &HirType::Json,
@@ -3040,10 +3535,13 @@ impl<'a> FnLowerer<'a> {
                     ))],
                 ),
                 arguments,
-                HirExpr::ArrayLit(getters),
+                HirExpr::Var(getters_name),
             ],
         );
-        self.wrap_call_argument_bindings(result, &[(source_name, source_type, value)])
+        body.push(HirStmt::Return(Some(result)));
+        self.wrap_call_argument_bindings(
+            HirExpr::Block(body), &[(source_name, source_type, value)],
+        )
     }
 
     fn lower_native_accessor_definition(

@@ -1623,6 +1623,24 @@ impl<'ctx> HirCompiler<'ctx> {
             );
         }
         self.module.add_function(
+            "thaw_object_order_begin",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_order_seed",
+            self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_order_rank",
+            self.context.i64_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_object_set_accessor",
             self.context.bool_type().fn_type(
                 &[
