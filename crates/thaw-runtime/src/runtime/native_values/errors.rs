@@ -11,7 +11,7 @@
 ///
 /// A user class extending `Error`/etc. (see `lower/module/classes.rs`) tags
 /// with its *full* identity chain instead of just its own name (e.g.
-/// `Sub$MyError$Error` for `class Sub extends MyError extends Error`, see
+/// `Sub\u{1f}MyError\u{1f}Error` for `class Sub extends MyError extends Error`, see
 /// `lower/expressions/coercions.rs`'s `coerce_primitive_to_string`), so
 /// `instanceof` on an intermediate ancestor still matches; `.name` only ever
 /// reports the first (most-derived) segment, matching how real JavaScript's
@@ -119,6 +119,17 @@ fn split_error_tag(message: &str) -> (&str, &str) {
     (std::str::from_utf8(name).unwrap(), std::str::from_utf8(body).unwrap())
 }
 
+// Native class errors carry a versioned ancestry chain. Legacy tagged
+// errors from older/external bridges still use '$'; the explicit version
+// prefix keeps a legal class name containing '$' unambiguous.
+fn error_ancestry(chain: &str) -> std::str::Split<'_, char> {
+    if let Some(versioned) = chain.strip_prefix('\u{1e}') {
+        versioned.split('\u{1f}')
+    } else {
+        chain.split('$')
+    }
+}
+
 /// The runtime `.name` override embedded after the message, if any --
 /// see `ERROR_NAME_OVERRIDE_MARKER`.
 fn split_error_name_override(message: &str) -> Option<&str> {
@@ -137,7 +148,7 @@ fn resolved_error_name(message: &str) -> String {
         return name.to_string();
     }
     let (chain, _) = split_error_tag(message);
-    chain.split('$').next().unwrap_or(chain).to_string()
+    error_ancestry(chain).next().unwrap_or(chain).to_string()
 }
 
 fn split_error_cause(message: &str) -> Option<&str> {
@@ -402,7 +413,7 @@ pub unsafe extern "C" fn thaw_error_stack(message: *const c_char) -> *const c_ch
 
 /// Whether `message`'s tagged identity chain includes `class_name`. Untagged
 /// values are primitive throws, not Error instances. A multi-level chain
-/// (`Sub$MyError$Error`) matches any ancestor's name, not just the most-derived
+/// (`Sub\u{1f}MyError\u{1f}Error`) matches any ancestor's name, not just the most-derived
 /// one.
 ///
 /// # Safety
@@ -421,7 +432,7 @@ pub unsafe extern "C" fn thaw_error_is_instance(
         return false;
     }
     let (chain, _) = split_error_tag(&text);
-    class_name == "Error" || chain.split('$').any(|name| name == class_name)
+    class_name == "Error" || error_ancestry(chain).any(|name| name == class_name)
 }
 
 /// `Error.isError(value)` for a caught/tagged error string: true when the
@@ -573,13 +584,23 @@ mod error_native_tests {
 
     #[test]
     fn a_multi_level_identity_chain_matches_any_ancestor_but_names_only_the_leaf() {
-        let tagged = "\u{1}Sub$MyError$Error\u{1}deep failure";
+        let tagged = "\u{1}\u{1e}Sub\u{1f}MyError\u{1f}Error\u{1}deep failure";
         assert_eq!(call_name(tagged), "Sub");
         assert_eq!(call_message(tagged), "deep failure");
         assert!(call_is_instance(tagged, "Sub"));
         assert!(call_is_instance(tagged, "MyError"));
         assert!(call_is_instance(tagged, "Error"));
         assert!(!call_is_instance(tagged, "TypeError"));
+    }
+
+    #[test]
+    fn dollar_sign_in_versioned_error_class_name_is_not_an_ancestor_separator() {
+        let tagged = "\u{1}\u{1e}Leaf\u{1f}Base$Name\u{1f}Error\u{1}failure";
+        assert_eq!(call_name(tagged), "Leaf");
+        assert!(call_is_instance(tagged, "Base$Name"));
+        assert!(!call_is_instance(tagged, "Base"));
+        let legacy = "\u{1}Leaf$Base$Error\u{1}failure";
+        assert!(call_is_instance(legacy, "Base"));
     }
 
     #[test]
@@ -613,12 +634,12 @@ mod error_native_tests {
         // the *static*, compile-time-derived identity chain (which
         // `instanceof` still uses unchanged -- an override never
         // affects `thaw_error_is_instance`).
-        let tagged = "\u{1}MyError$Error\u{1}oops\u{4}MyError";
+        let tagged = "\u{1}\u{1e}MyError\u{1f}Error\u{1}oops\u{4}MyError";
         assert_eq!(call_name(tagged), "MyError");
         assert_eq!(call_message(tagged), "oops");
         assert_eq!(call_stack(tagged), "MyError: oops");
         assert_eq!(call_to_string(tagged), "MyError: oops");
-        let empty_name = "\u{1}MyError\u{1f}Error\u{1}oops\u{4}";
+        let empty_name = "\u{1}\u{1e}MyError\u{1f}Error\u{1}oops\u{4}";
         assert_eq!(call_name(empty_name), "");
         assert_eq!(call_message(empty_name), "oops");
         assert_eq!(call_to_string(empty_name), "oops");
@@ -629,7 +650,7 @@ mod error_native_tests {
 
         // No override present -- falls back to the identity chain's
         // most-derived segment, exactly like before this marker existed.
-        let unoverridden = "\u{1}MyError$Error\u{1}oops";
+        let unoverridden = "\u{1}\u{1e}MyError\u{1f}Error\u{1}oops";
         assert_eq!(call_name(unoverridden), "MyError");
         assert_eq!(call_stack(unoverridden), "MyError: oops");
     }
