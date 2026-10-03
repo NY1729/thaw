@@ -642,7 +642,50 @@
       // Only when the opt-in backend is compiled in; otherwise the ICU4X
       // path below degrades narrow to short.
       let parts = null;
+      let fractionHandled = false;
+      const periodFractionOnly = !hasDateFields && !this._hour && !this._minute && !this._second &&
+        this._dayPeriod !== undefined && this._fractionalSecondDigits !== undefined;
+      if (periodFractionOnly && typeof __thaw_intl_datetime_narrow_icu4c !== 'function' &&
+          typeof __thaw_intl_datetime_skeleton_parts === 'function') {
+        // Bh is the curated locale's flexible-period/hour pattern. Use its
+        // field order and interfield whitespace, but never show its hour or
+        // hour-unit suffix (Uhr, 時, 시, etc.) as fractional seconds.
+        const probe = { ...options, hour: 'numeric', hour12: true, hourCycle: 'h12' };
+        const template = JSON.parse(__thaw_intl_datetime_skeleton_parts(
+          this.locale, JSON.stringify(probe), JSON.stringify(zoned)));
+        const hour = template.findIndex(part => part.type === 'hour');
+        const period = template.findIndex(part => part.type === 'dayPeriod');
+        const fields = template.filter(part => part.type !== 'literal');
+        const first = Math.min(hour, period);
+        const last = Math.max(hour, period);
+        const middle = template.slice(first + 1, last);
+        const suffix = template.slice(last + 1);
+        const between = middle.map(part => part.value).join('');
+        const after = suffix.map(part => part.value).join('');
+        // Exactly the nine Bh shapes in the generated curated CLDR table.
+        // Unknown hour-unit literals must not be copied or silently erased.
+        // ponytail: if curated Bh expands, use a native B+fraction pattern
+        // rather than growing this literal list indefinitely.
+        const knownShape = hour < period
+          ? after === '' && [' ', ' Uhr ', ' giờ ', ' ч. '].includes(between)
+          : (between === ' ' && (after === '' || after === '시')) ||
+            (between === '' && (after === '時' || after === '时'));
+        if (hour >= 0 && period >= 0 && fields.length === 2 && first === 0 &&
+            middle.every(part => part.type === 'literal') &&
+            suffix.every(part => part.type === 'literal') && knownShape) {
+          const boundary = hour < period ? between.match(/\s+$/u) : between.match(/^\s+/u);
+          const fraction = intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits);
+          const rendered = [...fraction].map(digit => String(__thaw_intl_number_format(this.locale, digit, false))).join('');
+          const fractional = { type: 'fractionalSecond', value: rendered };
+          const literal = boundary ? [{ type: 'literal', value: boundary[0] }] : [];
+          parts = hour < period
+            ? [fractional, ...literal, template[period]]
+            : [template[period], ...literal, fractional];
+          fractionHandled = true;
+        }
+      }
       if (
+        parts === null &&
         (this._month === 'narrow' || this._weekday === 'narrow' || this._dayPeriod !== undefined) &&
         typeof __thaw_intl_datetime_narrow_icu4c === 'function'
       ) {
@@ -726,7 +769,7 @@
           if (part.type === 'hour' && /^0+$/.test(part.value)) part.value = '24';
         }
       }
-      if (this._fractionalSecondDigits !== undefined) {
+      if (this._fractionalSecondDigits !== undefined && !fractionHandled) {
         const fraction = intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits);
         const render = text => this._useRealLocaleData
           ? String(__thaw_intl_number_format(this.locale, text, false))
