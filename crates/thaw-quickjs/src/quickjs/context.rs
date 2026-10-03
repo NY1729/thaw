@@ -193,11 +193,28 @@ struct NativeBundleSource<'js> {
     module: Option<rquickjs::Module<'js, rquickjs::module::Declared>>,
 }
 
+struct NativeBundleOpaqueEdge {
+    sequence: u64,
+    importer: String,
+    specifier: String,
+    target: String,
+    factory: String,
+    asynchronous: bool,
+}
+
+struct NativeBundleOriginModule {
+    sequence: u64,
+    owner: String,
+}
+
 struct NativeBundleOwner<'js> {
     next_sequence: Cell<u64>,
     sources: RefCell<HashMap<String, NativeBundleSource<'js>>>,
     markers: RefCell<HashMap<String, String>>,
     entries: RefCell<HashMap<String, rquickjs::Promise<'js>>>,
+    mixed_callbacks: RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
+    opaque_edges: RefCell<HashMap<String, NativeBundleOpaqueEdge>>,
+    origin_modules: RefCell<HashMap<String, NativeBundleOriginModule>>,
     then: Function<'js>,
 }
 
@@ -251,28 +268,132 @@ impl rquickjs::module::ModuleDef for NativeBundleLinkedMarker {
     }
 }
 
-fn read_native_bundle_export<'js>(ctx: Ctx<'js>, entry: String, key: String, name: String) -> rquickjs::Result<Value<'js>> {
+// A separate module per importer/specifier edge publishes the CJS value at
+// the engine's original dependency evaluation point. The underlying CJS cache
+// still runs a shared target factory only once.
+struct NativeBundleOpaqueShell;
+
+impl rquickjs::module::ModuleDef for NativeBundleOpaqueShell {
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+        let name: String = exports.module().name()?;
+        let (callback, importer, specifier, target, factory) = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let edges = owner.opaque_edges.borrow();
+            let edge = edges.get(&name)
+                .ok_or_else(|| native_bundle_error("unknown opaque import edge"))?;
+            let callback = owner.mixed_callbacks.borrow().get(&edge.sequence)
+                .map(|callbacks| callbacks.0.clone())
+                .ok_or_else(|| native_bundle_error("missing opaque import callback"))?;
+            (callback, edge.importer.clone(), edge.specifier.clone(),
+                edge.target.clone(), edge.factory.clone())
+        };
+        // Never hold owner or RefCell guards while the CJS factory executes.
+        let _: Value<'js> = callback.call((importer, specifier, target, factory, false))?;
+        Ok(())
+    }
+}
+
+// An asynchronous opaque edge has a JS module shell with top-level await.
+// Its only import is this private capability, bound to the edge by the
+// resolver. A synchronous opaque edge retains NativeBundleOpaqueShell.
+struct NativeBundleOpaqueLoad;
+
+impl rquickjs::module::ModuleDef for NativeBundleOpaqueLoad {
+    fn declare<'js>(decl: &rquickjs::module::Declarations<'js>) -> rquickjs::Result<()> {
+        decl.declare("load")?;
+        Ok(())
+    }
+
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+        let name: String = exports.module().name()?;
+        let shell = name.strip_suffix("/load")
+            .ok_or_else(|| native_bundle_error("invalid opaque load capability"))?;
+        let (callback, importer, specifier, target, factory) = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let edges = owner.opaque_edges.borrow();
+            let edge = edges.get(shell).filter(|edge| edge.asynchronous)
+                .ok_or_else(|| native_bundle_error("unknown asynchronous opaque edge"))?;
+            let callback = owner.mixed_callbacks.borrow().get(&edge.sequence)
+                .map(|callbacks| callbacks.0.clone())
+                .ok_or_else(|| native_bundle_error("missing opaque import callback"))?;
+            (callback, edge.importer.clone(), edge.specifier.clone(),
+                edge.target.clone(), edge.factory.clone())
+        };
+        let load = Function::new(ctx.clone(), move || -> rquickjs::Result<Value<'js>> {
+            callback.call((importer.clone(), specifier.clone(), target.clone(), factory.clone(), true))
+        })?;
+        exports.export("load", load)?;
+        Ok(())
+    }
+}
+
+struct NativeBundleOriginCapability;
+
+impl rquickjs::module::ModuleDef for NativeBundleOriginCapability {
+    fn declare<'js>(decl: &rquickjs::module::Declarations<'js>) -> rquickjs::Result<()> {
+        decl.declare("origin")?;
+        Ok(())
+    }
+
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+        let name: String = exports.module().name()?;
+        let (callback, raw_key) = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let origins = owner.origin_modules.borrow();
+            let record = origins.get(&name)
+                .ok_or_else(|| native_bundle_error("unknown origin capability"))?;
+            let callback = owner.mixed_callbacks.borrow().get(&record.sequence)
+                .map(|callbacks| callbacks.1.clone())
+                .ok_or_else(|| native_bundle_error("missing origin callback"))?;
+            (callback, record.owner.clone())
+        };
+        let origin: Value<'js> = callback.call((raw_key,))?;
+        exports.export("origin", origin)?;
+        Ok(())
+    }
+}
+
+fn read_native_bundle_export<'js>(ctx: Ctx<'js>, entry: String, key: String, name: rquickjs::function::Opt<String>) -> rquickjs::Result<Value<'js>> {
     let module = {
         let owner = ctx.userdata::<NativeBundleOwner<'js>>()
             .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
         let entry_source = owner.sources.borrow().get(&entry).map(|source| source.sequence)
             .ok_or_else(|| native_bundle_error("missing native entry"))?;
+        // Registry origin graphs use canonical raw keys. Keep the old fully
+        // minted form for existing host tests, but never trust its sequence:
+        // the source record below must belong to this bound entry.
+        let key = if key.starts_with("thaw-bundle:") { key }
+            else { format!("thaw-bundle:{entry_source}:{key}") };
         let sources = owner.sources.borrow();
         let source = sources.get(&key)
             .filter(|source| source.sequence == entry_source && source.linked)
             .ok_or_else(|| native_bundle_error("unlinked or foreign native source"))?;
         source.module.clone().ok_or_else(|| native_bundle_error("missing native module"))?
     };
-    // The marker runs after QuickJS has linked the complete graph. A namespace
-    // getter still enforces lexical TDZ for an initialized-later export.
-    module.namespace()?.get(name)
+    // The marker runs after QuickJS has linked this source. An omitted name
+    // returns its cached namespace; a named getter still enforces lexical TDZ.
+    let namespace = module.namespace()?;
+    match name.0 {
+        Some(name) => namespace.get(name),
+        None => Ok(namespace.into_value()),
+    }
 }
 
 fn native_bundle_error(message: &str) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("native bundle", "valid bundle", message)
 }
 
-fn register_native_bundle<'js>(ctx: Ctx<'js>, payload: String) -> rquickjs::Result<Function<'js>> {
+fn register_native_bundle<'js>(
+    ctx: Ctx<'js>, payload: String,
+    opaque_load: rquickjs::function::Opt<Function<'js>>,
+    origin_for: rquickjs::function::Opt<Function<'js>>,
+) -> rquickjs::Result<Function<'js>> {
+    if opaque_load.0.is_some() != origin_for.0.is_some() {
+        return Err(native_bundle_error("incomplete mixed bundle callbacks"));
+    }
     let data: serde_json::Value = serde_json::from_str(&payload)
         .map_err(|_| native_bundle_error("invalid JSON"))?;
     let main = data.get("main").and_then(serde_json::Value::as_str)
@@ -303,8 +424,60 @@ fn register_native_bundle<'js>(ctx: Ctx<'js>, payload: String) -> rquickjs::Resu
             return Err(native_bundle_error("duplicate module key"));
         }
     }
+    let mut opaque_keys = std::collections::HashSet::new();
+    if let Some(keys) = data.get("opaqueKeys") {
+        for value in keys.as_array().ok_or_else(|| native_bundle_error("invalid opaque keys"))? {
+            let key = value.as_str().ok_or_else(|| native_bundle_error("invalid opaque key"))?;
+            if key.contains('\0') || records.contains_key(key) || !opaque_keys.insert(key.to_owned()) {
+                return Err(native_bundle_error("duplicate or invalid opaque key"));
+            }
+        }
+    }
+    let mut shells = HashMap::<String, (String, String, String, String, bool)>::new();
+    if let Some(edges) = data.get("opaqueEdges") {
+        for value in edges.as_array().ok_or_else(|| native_bundle_error("invalid opaque edges"))? {
+            let field = |name| value.get(name).and_then(serde_json::Value::as_str)
+                .ok_or_else(|| native_bundle_error("invalid opaque edge"));
+            let key = field("key")?;
+            let importer = field("importer")?;
+            let specifier = field("specifier")?;
+            let target = field("target")?;
+            let factory = field("factory")?;
+            let asynchronous = value.get("asynchronous").and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| native_bundle_error("invalid opaque edge async flag"))?;
+            if [key, importer, specifier, target, factory].iter().any(|part| part.contains('\0'))
+                || records.contains_key(key) || !records.contains_key(importer)
+                || !opaque_keys.contains(target)
+                || shells.insert(key.to_owned(), (importer.to_owned(), specifier.to_owned(),
+                    target.to_owned(), factory.to_owned(), asynchronous)).is_some() {
+                return Err(native_bundle_error("invalid opaque edge target"));
+            }
+        }
+    }
+    let mut origin_modules = HashMap::<String, String>::new();
+    if let Some(origins) = data.get("origins") {
+        for value in origins.as_array().ok_or_else(|| native_bundle_error("invalid origins"))? {
+            let key = value.get("key").and_then(serde_json::Value::as_str)
+                .ok_or_else(|| native_bundle_error("invalid origin key"))?;
+            let owner = value.get("owner").and_then(serde_json::Value::as_str)
+                .ok_or_else(|| native_bundle_error("invalid origin owner"))?;
+            if key.contains('\0') || owner.contains('\0') || records.contains_key(key)
+                || shells.contains_key(key) || !records.contains_key(owner)
+                || origin_modules.insert(key.to_owned(), owner.to_owned()).is_some() {
+                return Err(native_bundle_error("invalid origin module"));
+            }
+        }
+    }
+    if (!shells.is_empty() || !origin_modules.is_empty()) && opaque_load.0.is_none() {
+        return Err(native_bundle_error("mixed bundle needs callbacks"));
+    }
+    if shells.iter().any(|(key, (importer, specifier, _, _, _))|
+        records.get(importer).and_then(|(_, imports)| imports.get(specifier)) != Some(key)) {
+        return Err(native_bundle_error("opaque edge does not match import map"));
+    }
     if !records.contains_key(main) || records.values().any(|(_, edges)|
-        edges.values().any(|target| !records.contains_key(target))) {
+        edges.values().any(|target| !records.contains_key(target)
+            && !shells.contains_key(target) && !origin_modules.contains_key(target))) {
         return Err(native_bundle_error("missing entry or import target"));
     }
     let owner = ctx.userdata::<NativeBundleOwner<'js>>()
@@ -331,10 +504,25 @@ fn register_native_bundle<'js>(ctx: Ctx<'js>, payload: String) -> rquickjs::Resu
         eval_native_entry(ctx, bound_token.clone())
     })?;
     let reader_entry = token.clone();
-    let reader = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, name: String| {
+    let reader = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, name: rquickjs::function::Opt<String>| {
         read_native_bundle_export(ctx, reader_entry.clone(), key, name)
     })?;
     evaluate.prop("readNative", reader)?;
+    let native_sequence = sequence;
+    let native_ready = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String| {
+        let token = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let token = format!("thaw-bundle:{native_sequence}:{key}");
+            let sources = owner.sources.borrow();
+            if !sources.get(&token).is_some_and(|source| source.sequence == native_sequence) {
+                return Err(native_bundle_error("foreign native bundle target"));
+            }
+            token
+        };
+        eval_native_entry(ctx, token)
+    })?;
+    evaluate.prop("evalNative", native_ready)?;
     let owner = ctx.userdata::<NativeBundleOwner<'js>>()
         .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
     {
@@ -347,7 +535,18 @@ fn register_native_bundle<'js>(ctx: Ctx<'js>, payload: String) -> rquickjs::Resu
             });
         }
     }
+    owner.opaque_edges.borrow_mut().extend(shells.into_iter().map(|(key, (importer, specifier, target, factory, asynchronous))| {
+        (format!("{prefix}{key}"), NativeBundleOpaqueEdge {
+            sequence, importer, specifier, target, factory, asynchronous,
+        })
+    }));
+    owner.origin_modules.borrow_mut().extend(origin_modules.into_iter().map(|(key, module_owner)| {
+        (format!("{prefix}{key}"), NativeBundleOriginModule { sequence, owner: module_owner })
+    }));
     owner.markers.borrow_mut().extend(marked);
+    if let (Some(load), Some(origin)) = (opaque_load.0, origin_for.0) {
+        owner.mixed_callbacks.borrow_mut().insert(sequence, (load, origin));
+    }
     Ok(evaluate)
 }
 
@@ -362,18 +561,18 @@ fn reject_native_entry_error<'js>(
 }
 
 fn eval_native_entry<'js>(ctx: Ctx<'js>, token: String) -> rquickjs::Result<rquickjs::Promise<'js>> {
-    let (source, intrinsic_then) = {
+    let (source, declared_module, intrinsic_then) = {
         let owner = ctx.userdata::<NativeBundleOwner<'js>>()
             .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
         if let Some(ready) = owner.entries.borrow().get(&token) {
             return Ok(ready.clone());
         }
-        let source = {
+        let (source, declared_module) = {
             let sources = owner.sources.borrow();
-            sources.get(&token).map(|record| record.source.clone())
+            sources.get(&token).map(|record| (record.source.clone(), record.module.clone()))
                 .ok_or_else(|| native_bundle_error("missing native entry source"))?
         };
-        (source, owner.then.clone())
+        (source, declared_module, owner.then.clone())
     };
     let (ready, resolve, reject) = rquickjs::Promise::new(&ctx)?;
     {
@@ -384,7 +583,11 @@ fn eval_native_entry<'js>(ctx: Ctx<'js>, token: String) -> rquickjs::Result<rqui
     // The ready promise is visible to reentrant entry calls before module
     // evaluation can run user code. Never hold userdata guards across JS calls.
     let setup = (|| -> rquickjs::Result<()> {
-        let declared = rquickjs::Module::declare(ctx.clone(), token.clone(), source)?;
+        let declared = if let Some(module) = declared_module {
+            module
+        } else {
+            rquickjs::Module::declare(ctx.clone(), token.clone(), source)?
+        };
         {
             let owner = ctx.userdata::<NativeBundleOwner<'js>>()
                 .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
@@ -436,12 +639,18 @@ impl rquickjs::loader::Resolver for BundleModuleResolver {
         if name.starts_with("thaw-linked:") {
             return Err(rquickjs::Error::new_resolving(base, name));
         }
+        if name == "__thaw_private_opaque_load"
+            && owner.opaque_edges.borrow().get(base).is_some_and(|edge| edge.asynchronous) {
+            return Ok(format!("{base}/load"));
+        }
         let parent = sources.get(base)
             .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
         let target = parent.imports.get(name)
             .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
         let resolved = format!("thaw-bundle:{}:{target}", parent.sequence);
-        if !sources.contains_key(&resolved) {
+        if !sources.contains_key(&resolved)
+            && !owner.opaque_edges.borrow().contains_key(&resolved)
+            && !owner.origin_modules.borrow().contains_key(&resolved) {
             return Err(rquickjs::Error::new_resolving(base, name));
         }
         Ok(resolved)
@@ -462,6 +671,27 @@ impl rquickjs::loader::Loader for BundleModuleLoader {
             if marker {
                 drop(owner);
                 return rquickjs::Module::declare_def::<NativeBundleLinkedMarker, _>(ctx.clone(), name);
+            }
+            let opaque_async = owner.opaque_edges.borrow().get(name).map(|edge| edge.asynchronous);
+            if let Some(asynchronous) = opaque_async {
+                drop(owner);
+                if asynchronous {
+                    let source = "import { load } from '__thaw_private_opaque_load'; await load(); export {};";
+                    return rquickjs::Module::declare(ctx.clone(), name, source);
+                }
+                return rquickjs::Module::declare_def::<NativeBundleOpaqueShell, _>(ctx.clone(), name);
+            }
+            if let Some(shell) = name.strip_suffix("/load") {
+                let load_capability = owner.opaque_edges.borrow().get(shell)
+                    .is_some_and(|edge| edge.asynchronous);
+                if load_capability {
+                    drop(owner);
+                    return rquickjs::Module::declare_def::<NativeBundleOpaqueLoad, _>(ctx.clone(), name);
+                }
+            }
+            if owner.origin_modules.borrow().contains_key(name) {
+                drop(owner);
+                return rquickjs::Module::declare_def::<NativeBundleOriginCapability, _>(ctx.clone(), name);
             }
             let sources = owner.sources.borrow();
             sources.get(name).map(|record| record.source.clone())
@@ -541,6 +771,9 @@ fn ensure_context() {
                     sources: RefCell::new(HashMap::new()),
                     markers: RefCell::new(HashMap::new()),
                     entries: RefCell::new(HashMap::new()),
+                    mixed_callbacks: RefCell::new(HashMap::new()),
+                    opaque_edges: RefCell::new(HashMap::new()),
+                    origin_modules: RefCell::new(HashMap::new()),
                     then: intrinsic_then,
                 }).expect("native bundle owner userdata is already borrowed");
                 ctx.globals().prop("__thaw_register_native_bundle",

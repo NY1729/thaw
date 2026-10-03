@@ -59,7 +59,19 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
     }
     return names;
   }
-  function resolve(key, name, visited, allowMissing, sourceKey, spec) {
+  function retainedNativeEdge(key) {
+    return typeof __thaw_bundle_native_keys !== 'undefined'
+      && own.call(__thaw_bundle_native_keys, key)
+      && !own.call(__thaw_bundle_mixed_keys, key);
+  }
+  function retainedNamespaceAnchor(key, name, targetKey, anchor) {
+    if (!retainedNativeEdge(targetKey)) return null;
+    // A rewritten mixed edge strips the importer's native export, but a
+    // following pure-native edge retains the current module's own alias.
+    return anchor || (typeof __thaw_bundle_native_keys !== 'undefined'
+      && own.call(__thaw_bundle_native_keys, key) ? { key: key, name: name } : null);
+  }
+  function resolve(key, name, visited, allowMissing, sourceKey, spec, anchor) {
     var visit = key + '\u0000' + name;
     if (visited.indexOf(visit) >= 0) return null;
     var graph = graphOf(key);
@@ -79,19 +91,23 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
       var source = targetOf(key, indirect[0]);
       if (!source) return null;
       if (indirect[1] === null) {
-        return { kind: 'namespace', key: source.key, binding: '*namespace*' };
+        return { kind: 'namespace', key: source.key, binding: '*namespace*', sourceKey: key,
+          spec: indirect[0], name: name,
+          anchor: retainedNamespaceAnchor(key, name, source.key, anchor) };
       }
       if (indirect[2] && !graphOf(source.key)) {
         return { kind: 'cjs-default', key: source.key, sourceKey: key, spec: indirect[0] };
       }
-      return resolve(source.key, indirect[1], next, true, key, indirect[0]);
+      return resolve(source.key, indirect[1], next, true, key, indirect[0],
+        retainedNamespaceAnchor(key, name, source.key, anchor));
     }
     if (name === 'default') return null;
     var found = null;
     for (var index = 0; index < graph.stars.length; index++) {
       var star = targetOf(key, graph.stars[index]);
       if (!star) continue;
-      var candidate = resolve(star.key, name, next, false, key, graph.stars[index]);
+      var candidate = resolve(star.key, name, next, false, key, graph.stars[index],
+        retainedNamespaceAnchor(key, name, star.key, anchor));
       if (candidate === ambiguous) return ambiguous;
       if (!candidate) continue;
       if (found && !sameBinding(found, candidate)) return ambiguous;
@@ -111,6 +127,21 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
       if (!edges || !own.call(edges, resolution.spec)) throw new ReferenceError("Cannot access '" + (resolution.name || 'default') + "' before initialization");
       var value = valueOf(null, resolution.sourceKey, resolution.spec);
       return resolution.kind === 'cjs' ? value[resolution.name] : value && value.__esModule ? value.default : value;
+    }
+    if (typeof __thaw_native_entry !== 'undefined' && __thaw_native_entry) {
+      if (resolution.kind === 'namespace') {
+        if (graphOf(resolution.key)) return __thaw_bundle_mixed_keys[resolution.key]
+          ? __thaw_bundle_facade_for(resolution.key)
+          : resolution.anchor
+            ? __thaw_native_entry.readNative(resolution.anchor.key, resolution.anchor.name)
+            : __thaw_native_entry.readNative(resolution.key);
+        var edge = __thaw_bundle_edges[resolution.sourceKey];
+        if (!edge || !own.call(edge, resolution.spec)) throw new ReferenceError('Import is not initialized');
+        return edge[resolution.spec];
+      }
+      // `binding` is the local declaration used for diamond identity;
+      // native namespaces expose the exported alias in `name` instead.
+      return __thaw_native_entry.readNative(resolution.key, resolution.name);
     }
     var source = __thaw_bundle_require(resolution.key, factoryOf(resolution.key));
     return resolution.kind === 'namespace' ? source : source[resolution.name];
@@ -141,6 +172,28 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
     return true;
   }
   return {
+    validateStatic: function(spec, name) {
+      var target = targetOf(ownerKey, spec);
+      if (!target) throw new SyntaxError('Cannot resolve import ' + spec);
+      // CommonJS default is the established synthetic default interop. All
+      // other requested names in this route have a statically known graph.
+      if (name === 'default' && !graphOf(target.key)) return;
+      var resolution = resolve(target.key, name, [], false, ownerKey, spec);
+      if (!resolution || resolution === ambiguous)
+        throw new SyntaxError('Missing or ambiguous export ' + name);
+    },
+    validateDynamic: function(spec) {
+      var target = targetOf(ownerKey, spec);
+      if (target) __thaw_validate_native_link(target.key);
+    },
+    completeDynamic: function(spec, promise) {
+      var origin = this;
+      return __thaw_native_apply(__thaw_native_then, promise,
+        [function(namespace) { return origin.selectDynamic(spec, namespace); }]);
+    },
+    rejectDynamic: function(error) {
+      return __thaw_native_apply(__thaw_native_reject, __thaw_native_promise, [error]);
+    },
     edge: function(spec, value) {
       var edges = __thaw_bundle_edges[ownerKey];
       if (!edges) edges = __thaw_bundle_edges[ownerKey] = Object.create(null);
@@ -176,7 +229,8 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
             for (var n = 0; n < names.length; n++) {
               var name = names[n];
               if (own.call(graph.local, name) || own.call(graph.indirect, name) || (name !== '__esModule' && own.call(exports, name))) continue;
-              var resolution = resolve(ownerKey, name, [], false, null, null);
+              var resolution = resolve(ownerKey, name, [], false, null, null,
+                { key: ownerKey, name: name });
               if (resolution && resolution !== ambiguous) bindings.push([name, resolution]);
             }
           } while (before !== __thaw_bundle_edge_version && linksReady(ownerKey, []));
@@ -197,13 +251,85 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
       var target = targetOf(ownerKey, spec);
       return target && graphOf(target.key) ? value.default : value && value.__esModule ? value.default : value;
     },
+    readImport: function(spec, name) {
+      var target = targetOf(ownerKey, spec);
+      if (!target) throw new Error('Cannot resolve import ' + spec);
+      var resolution = resolve(target.key, name, [], true, ownerKey, spec,
+        typeof __thaw_bundle_native_keys !== 'undefined' && own.call(__thaw_bundle_native_keys, target.key)
+          ? { key: target.key, name: name } : null);
+      if (!resolution || resolution === ambiguous) throw new SyntaxError('Missing or ambiguous export ' + name);
+      return read(resolution);
+    },
+    readDefault: function(spec) {
+      var target = targetOf(ownerKey, spec);
+      if (!target) throw new Error('Cannot resolve import ' + spec);
+      if (!graphOf(target.key)) {
+        var edges = __thaw_bundle_edges[ownerKey];
+        if (!edges || !own.call(edges, spec)) throw new ReferenceError('Import is not initialized');
+        return this.defaultImport(spec, edges[spec]);
+      }
+      var resolution = resolve(target.key, 'default', [], true, ownerKey, spec,
+        typeof __thaw_bundle_native_keys !== 'undefined' && own.call(__thaw_bundle_native_keys, target.key)
+          ? { key: target.key, name: 'default' } : null);
+      if (!resolution || resolution === ambiguous) throw new SyntaxError('Missing or ambiguous default export');
+      return read(resolution);
+    },
+    namespaceImport: function(spec) {
+      var target = targetOf(ownerKey, spec);
+      if (!target) throw new Error('Cannot resolve import ' + spec);
+      if (!graphOf(target.key)) {
+        var edges = __thaw_bundle_edges[ownerKey];
+        if (!edges || !own.call(edges, spec)) throw new ReferenceError('Import is not initialized');
+        // Keep the legacy CJS namespace-import object; only ESM targets
+        // select the tracked facade.
+        return edges[spec];
+      }
+      return typeof __thaw_native_entry === 'undefined' || !__thaw_native_entry || __thaw_bundle_mixed_keys[target.key]
+        ? __thaw_bundle_facade_for(target.key) : __thaw_native_entry.readNative(target.key);
+    },
+    selectDynamic: function(spec, namespace) {
+      var target = targetOf(ownerKey, spec);
+      if (!target) return namespace;
+      // The private shell's namespace contains no CJS exports. The existing
+      // bundle contract returns that target's cached CommonJS value instead.
+      if (!graphOf(target.key)) return this.namespaceImport(spec);
+      return __thaw_bundle_mixed_keys[target.key]
+        ? __thaw_bundle_facade_for(target.key) : namespace;
+    },
     names: function(spec, value) {
       var target = targetOf(ownerKey, spec);
       return target && graphOf(target.key) ? namesOf(target.key, [], ownerKey, spec) : (value == null ? [] : Object.keys(value).filter(function(name) { return name !== '__esModule'; }));
     },
-    resolve: function(name) { var found = resolve(ownerKey, name, [], false, null, null); return found === ambiguous ? null : found; },
+    resolve: function(name) { var found = resolve(ownerKey, name, [], false, null, null,
+      { key: ownerKey, name: name }); return found === ambiguous ? null : found; },
     read: read
   };
+}
+"#;
+
+const MIXED_FACADE_RUNTIME: &str = r#"var __thaw_bundle_facades = Object.create(null);
+function __thaw_bundle_facade_for(key) {
+  if (Object.prototype.hasOwnProperty.call(__thaw_bundle_facades, key)) return __thaw_bundle_facades[key];
+  var graph = __thaw_bundle_export_graphs[key];
+  if (!graph) throw new TypeError('Opaque target has no ESM facade');
+  var exports = {};
+  __thaw_bundle_facades[key] = exports;
+  Object.defineProperty(exports, '__esModule', { value: true });
+  var origin = __thaw_bundle_origin_for(key);
+  var names = Object.keys(graph.local).concat(Object.keys(graph.indirect));
+  for (var index = 0; index < names.length; index++) {
+    var name = names[index];
+    if (Object.prototype.hasOwnProperty.call(exports, name)) continue;
+    Object.defineProperty(exports, name, { enumerable: true, get: function(name) {
+      return function() {
+        var resolution = origin.resolve(name);
+        if (!resolution) throw new SyntaxError('Missing or ambiguous export ' + name);
+        return origin.read(resolution);
+      };
+    }(name) });
+  }
+  origin.track(exports);
+  return exports;
 }
 "#;
 
@@ -229,7 +355,18 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
 /// has overwritten the globals -- would silently resolve against the
 /// wrong package's module map. The IIFE's closures keep each package's
 /// module system private to itself regardless of what loads after it.
+struct MixedBundleRender {
+    native_keys: std::collections::BTreeSet<String>,
+    mixed_keys: std::collections::BTreeSet<String>,
+    registration: serde_json::Value,
+    static_link_checks: std::collections::BTreeMap<String, Vec<(String, String, String)>>,
+}
+
 fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
+    render_bundle_mode(main_key, modules, None)
+}
+
+fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&MixedBundleRender>) -> String {
     let mut out = String::from("module.exports = (function(require) {\n");
 
     out.push_str("var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\n");
@@ -242,6 +379,13 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     out.push_str("var __thaw_bundle_edge_version = 0;\n");
     out.push_str("var __thaw_bundle_factories = {\n");
     for module in modules {
+        if mixed.is_some_and(|route| route.native_keys.contains(&module.key)) {
+            out.push_str(&format!(
+                "{}: function() {{ throw new TypeError('Native ESM must be loaded by its registered entry'); }},\n",
+                js_string_literal(&module.key),
+            ));
+            continue;
+        }
         let asynchronous = if module.async_module { "async " } else { "" };
         if let Some(origin) = &module.origin_parameter {
             out.push_str(&format!(
@@ -296,6 +440,9 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
 
     let export_graphs = modules.iter().filter_map(|module| {
         module.export_graph.as_ref().map(|graph| (module.key.clone(), graph.clone()))
+            .or_else(|| mixed.filter(|route| route.native_keys.contains(&module.key)).map(|_| {
+                (module.key.clone(), serde_json::json!({ "local": {}, "indirect": {}, "stars": [] }))
+            }))
     }).collect::<serde_json::Map<String, serde_json::Value>>();
     let export_graph_json = serde_json::Value::Object(export_graphs).to_string();
     out.push_str(&format!("var __thaw_bundle_export_graphs = JSON.parse({});\n", js_string_literal(&export_graph_json)));
@@ -305,6 +452,39 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     out.push_str(&format!("var __thaw_bundle_commonjs_contexts = JSON.parse({});\n",
         js_string_literal(&serde_json::Value::Object(commonjs_contexts).to_string())));
     out.push_str(STAR_ORIGIN_RUNTIME);
+    if let Some(route) = mixed {
+        out.push_str(MIXED_FACADE_RUNTIME);
+        let native_keys = route.native_keys.iter().map(|key| (key.clone(), serde_json::Value::Bool(true)))
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        out.push_str(&format!("var __thaw_bundle_native_keys = JSON.parse({});\n",
+            js_string_literal(&serde_json::Value::Object(native_keys).to_string())));
+        // A lazy dynamic-only native module is validated when that entry
+        // starts, not while the unrelated main entry is being registered.
+        let checks = serde_json::to_string(&route.static_link_checks)
+            .expect("static native link checks are serializable");
+        out.push_str(&format!("var __thaw_native_link_checks = JSON.parse({});\n",
+            js_string_literal(&checks)));
+        out.push_str("function __thaw_validate_native_link(key) { var checks = __thaw_native_link_checks[key] || []; for (var i = 0; i < checks.length; i++) { var check = checks[i]; __thaw_bundle_origin_for(check[0]).validateStatic(check[1], check[2]); } }\n");
+        let mixed_keys = route.mixed_keys.iter().map(|key| (key.clone(), serde_json::Value::Bool(true)))
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        out.push_str(&format!("var __thaw_bundle_mixed_keys = JSON.parse({});\n",
+            js_string_literal(&serde_json::Value::Object(mixed_keys).to_string())));
+        out.push_str("var __thaw_native_promise = Promise, __thaw_native_then = Promise.prototype.then, __thaw_native_reject = Promise.reject, __thaw_native_apply = Reflect.apply;\n");
+        out.push_str(&format!(
+            "var __thaw_native_registered = globalThis.__thaw_register_native_bundle({}, \
+             function(importer, spec, target, factory, asynchronous) {{ \
+               var value = __thaw_bundle_require(target, factory); \
+               if (asynchronous) return __thaw_native_apply(__thaw_native_then, __thaw_bundle_cache[target].ready, [function(finalValue) {{ __thaw_bundle_origin_for(importer).edge(spec, finalValue); return finalValue; }}]); \
+               __thaw_bundle_origin_for(importer).edge(spec, value); return value; \
+             }}, \
+             function(key) {{ return __thaw_bundle_origin_for(key); }});\n",
+            js_string_literal(&route.registration.to_string()),
+        ));
+        out.push_str(&format!("var __thaw_native_entry = function() {{ __thaw_validate_native_link({}); return __thaw_native_registered(); }};\n",
+            js_string_literal(main_key)));
+        out.push_str("__thaw_native_entry.evalNative = function(key) { __thaw_validate_native_link(key); return __thaw_native_registered.evalNative(key); };\n");
+        out.push_str("__thaw_native_entry.readNative = function(key, name) { return __thaw_native_registered.readNative(key, name); };\n");
+    }
 
     out.push_str(
         "function __thaw_bundle_target(map, spec) {\n\
@@ -391,7 +571,10 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20if (workerModule !== undefined && (spec === 'worker_threads' || spec === 'node:worker_threads')) return Promise.resolve(workerModule);\n\
          \x20\x20\x20\x20return Promise.resolve().then(function() {\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
-         \x20\x20\x20\x20\x20\x20if (target) { __thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready; }\n\
+         \x20\x20\x20\x20\x20\x20if (target) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (typeof __thaw_bundle_native_keys !== 'undefined' && Object.prototype.hasOwnProperty.call(__thaw_bundle_native_keys, target.factory)) return __thaw_native_apply(__thaw_native_then, __thaw_native_entry.evalNative(target.key), [function(namespace) { return __thaw_bundle_mixed_keys[target.factory] ? __thaw_bundle_facade_for(target.key) : namespace; }]);\n\
+         \x20\x20\x20\x20\x20\x20\x20__thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready;\n\
+         \x20\x20\x20\x20\x20\x20}\n\
          \x20\x20\x20\x20\x20\x20if (__thaw_bundle_import_missing(known, spec)) throw new Error('Cannot resolve import ' + spec);\n\
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
          \x20\x20\x20\x20});\n\
@@ -517,14 +700,22 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
         );
     }
 
-    out.push_str(&format!(
+    if mixed.is_some() {
+        out.push_str(&format!(
+            "var __thaw_bundle_entry_key = {};\n\
+             var __thaw_bundle_entry = __thaw_bundle_facade_for(__thaw_bundle_entry_key);\n\
+             globalThis.__thaw_module_ready = __thaw_native_apply(__thaw_native_then, __thaw_native_entry(), [function() {{ module.exports = __thaw_bundle_entry; __thaw_bundle_exports[__thaw_bundle_entry_key] = __thaw_bundle_entry; return __thaw_bundle_entry; }}]);\n\
+             return __thaw_bundle_entry;\n",
+            js_string_literal(main_key),
+        ));
+    } else { out.push_str(&format!(
         "var __thaw_bundle_entry_key = {};\n\
          var __thaw_bundle_entry = __thaw_bundle_require(__thaw_bundle_entry_key);\n\
          __thaw_bundle_exports[__thaw_bundle_entry_key] = __thaw_bundle_entry;\n\
          globalThis.__thaw_module_ready = __thaw_bundle_cache[__thaw_bundle_entry_key].ready;\n\
          return __thaw_bundle_entry;\n",
         js_string_literal(main_key)
-    ));
+    )); }
     out.push_str("})(globalThis.require);\n");
 
     out
