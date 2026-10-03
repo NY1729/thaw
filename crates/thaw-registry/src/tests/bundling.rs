@@ -1643,3 +1643,70 @@ fn native_esm_private_entry_reentry_and_intrinsic_then() {
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true,\"undefined\",\"undefined\"]");
     }).join().unwrap();
 }
+
+#[test]
+fn native_esm_private_linked_read_is_owner_scoped_and_live() {
+    // Unrun: each source's first private marker runs after linking, before
+    // that source body. A cyclic peer can read hoisted exports but not TDZ.
+    std::thread::spawn(|| {
+        use std::ffi::{CStr, CString};
+        let script = r#"
+          globalThis.entryA = __thaw_register_native_bundle(JSON.stringify({
+            main: 'a', modules: [
+              { key: 'a', imports: { './b': 'b', './unused': 'unused' }, source:
+                'import "./b"; export function available() { return 7; } export const late = 9; export function loadUnused() { return import("./unused"); }' },
+              { key: 'b', imports: { './a': 'a' }, source:
+                'import "./a"; globalThis.nativeHoisted = globalThis.entryA.readNative("thaw-bundle:1:a", "available")(); try { globalThis.entryA.readNative("thaw-bundle:1:a", "late"); } catch (e) { globalThis.nativeTdz = e instanceof ReferenceError; } export const peer = 3;' },
+              { key: 'unused', imports: {}, source: 'export const hidden = 4;' }
+            ]
+          }));
+          globalThis.beforeNative = (() => {
+            try { entryA.readNative('thaw-bundle:1:a', 'available'); return false; }
+            catch (_) { return true; }
+          })();
+          globalThis.entryB = __thaw_register_native_bundle(JSON.stringify({
+            main: 'other', modules: [{ key: 'other', imports: {}, source: 'export const value = 8;' }]
+          }));
+          globalThis.readyA = entryA();
+          globalThis.readyB = entryB();
+          globalThis.__thaw_module_ready = Promise.all([readyA, readyB]);
+          globalThis.privateLinkedResult = function() {
+            let unused, foreign;
+            try { entryA.readNative('thaw-bundle:1:unused', 'hidden'); unused = false; }
+            catch (_) { unused = true; }
+            try { entryA.readNative('thaw-bundle:2:other', 'value'); foreign = false; }
+            catch (_) { foreign = true; }
+            const descriptor = Object.getOwnPropertyDescriptor(entryA, 'readNative');
+            return [beforeNative, nativeHoisted, nativeTdz, entryA.readNative('thaw-bundle:1:a', 'late'),
+              entryA.readNative('thaw-bundle:1:b', 'peer'), unused,
+              entryB.readNative('thaw-bundle:2:other', 'value') === 8, foreign,
+              descriptor.enumerable === false && descriptor.writable === false,
+              entryA() === readyA];
+          };
+        "#;
+        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+        let result = thaw_quickjs::thaw_js_call(c"privateLinkedResult".as_ptr(), c"[]".as_ptr());
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,7,true,9,3,true,true,true,true,true]");
+    }).join().unwrap();
+}
+
+#[test]
+fn native_esm_failed_link_never_marks_source_linked() {
+    std::thread::spawn(|| {
+        use std::ffi::{CStr, CString};
+        let script = r#"
+          globalThis.failedEntry = __thaw_register_native_bundle(JSON.stringify({
+            main: 'bad', modules: [{ key: 'bad', imports: {}, source:
+              'import "./unmapped"; export const value = 1;' }]
+          }));
+          failedEntry().catch(() => {});
+          globalThis.failedRead = function() {
+            try { failedEntry.readNative('thaw-bundle:1:bad', 'value'); return false; }
+            catch (_) { return true; }
+          };
+        "#;
+        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+        let result = thaw_quickjs::thaw_js_call(c"failedRead".as_ptr(), c"[]".as_ptr());
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
+    }).join().unwrap();
+}
