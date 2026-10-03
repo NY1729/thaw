@@ -125,6 +125,67 @@ fn exported_callback_exception_is_consumed_before_the_next_call() {
     });
 }
 
+
+#[test]
+fn napi_result_error_preserves_embedded_nul_through_owned_and_legacy_paths() {
+    unsafe extern "C" fn throws_nul(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+        let env = env_mut(env).unwrap();
+        let error = alloc_error(env, "TypeError", "left\0right".into(), None);
+        env.exception = Some(error);
+        ptr::null_mut()
+    }
+    let mut env = Box::new(Env::new());
+    let env_ptr: NapiEnv = &mut *env;
+    let function = Function {
+        callback: throws_nul,
+        data: ptr::null_mut(),
+        properties: HashMap::new(),
+        _thaw_bridge: None,
+    };
+    let value = env.alloc(Value::Function(function.clone()));
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.functions.insert("nul-result-test::throw".into(), function);
+        host.exports.insert("nul-result-test::throw".into(), (env_ptr as usize, value));
+        host.module_envs.push(env);
+    });
+    unsafe {
+        let result = thaw_napi_call_result(c"nul-result-test::throw".as_ptr(), c"[]".as_ptr());
+        assert!(result.value.is_null());
+        let bytes = thaw_arena::NativeStr::from_ptr(result.error).to_bytes().to_vec();
+        let frame = thaw_arena::error_wire::parse_tagged(&bytes).unwrap();
+        assert_eq!(frame.chain, b"TypeError");
+        assert_eq!(frame.display, b"left\0right");
+        thaw_arena::destroy_string(result.error);
+        let legacy = thaw_napi_call(c"nul-result-test::throw".as_ptr(), c"[]".as_ptr());
+        let json = CStr::from_ptr(legacy).to_str().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let framed = parsed["__thaw_error__"].as_str().unwrap();
+        let frame = thaw_arena::error_wire::parse_tagged(framed.as_bytes()).unwrap();
+        assert_eq!(frame.display, b"left\0right");
+        drop(CString::from_raw(legacy.cast_mut()));
+        assert!((*env_ptr).exception.is_none());
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.functions.remove("nul-result-test::throw");
+        host.exports.remove("nul-result-test::throw");
+        host.module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+    });
+}
+
+#[test]
+fn napi_result_error_helpers_keep_owned_nul_bytes() {
+    let text = text_result(Err("text\0error".into()));
+    let handle = handle_error("handle\0error");
+    unsafe {
+        assert_eq!(thaw_arena::NativeStr::from_ptr(text.error).to_bytes(), b"text\0error");
+        assert_eq!(thaw_arena::NativeStr::from_ptr(handle.error).to_bytes(), b"handle\0error");
+        thaw_arena::destroy_string(text.error);
+        thaw_arena::destroy_string(handle.error);
+    }
+}
+
 #[test]
 fn nested_export_getter_preserves_its_exception() {
     unsafe extern "C" fn throwing_getter(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
