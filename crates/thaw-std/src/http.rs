@@ -1025,10 +1025,17 @@ unsafe extern "C" fn response_set_header(
     name: *const c_char,
     value: *const c_char,
 ) -> bool {
-    request_context(environment)
+    let context = request_context(environment);
+    if context.headers_sent || context.state.ended {
+        return false;
+    }
+    let name = string_from_ptr(name);
+    let value = string_from_ptr(value);
+    context
         .state
         .headers
-        .push((string_from_ptr(name), string_from_ptr(value)));
+        .retain(|(existing, _)| !existing.eq_ignore_ascii_case(&name));
+    context.state.headers.push((name, value));
     true
 }
 
@@ -2592,6 +2599,40 @@ mod tests {
             body: b"ok".to_vec(),
         }, false);
         assert_eq!(response, b"HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    }
+
+    #[test]
+    fn response_set_header_replaces_case_insensitively_before_headers_are_sent() {
+        let mut context = RequestContext::new("GET", "/", &[], &[], std::ptr::null_mut());
+        let closure = context.response.set_header;
+        let set = |name: &str, value: &str| {
+            let name = CString::new(name).unwrap();
+            let value = CString::new(value).unwrap();
+            unsafe { response_set_header(closure.cast(), name.as_ptr(), value.as_ptr()) }
+        };
+        assert!(set("X-Trace", "old"));
+        assert!(set("X-Keep", "kept"));
+        assert!(set("x-tRaCe", "new"));
+        assert_eq!(
+            context.state.headers,
+            vec![("X-Keep".into(), "kept".into()), ("x-tRaCe".into(), "new".into())]
+        );
+        let buffered = render_response(ResponseSpec {
+            status: 200,
+            headers: context.state.headers.clone(),
+            body: Vec::new(),
+        }, false);
+        assert_eq!(buffered, b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let streamed = render_streaming_head(200, &context.state.headers, false);
+        assert_eq!(streamed, b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+        context.headers_sent = true;
+        assert!(!set("X-TRACE", "too late"));
+        assert_eq!(context.state.headers.len(), 2);
+        assert_eq!(context.state.headers[1].1, "new");
+        context.headers_sent = false;
+        context.state.ended = true;
+        assert!(!set("X-TRACE", "after end"));
+        assert_eq!(context.state.headers[1].1, "new");
     }
 
     #[test]
