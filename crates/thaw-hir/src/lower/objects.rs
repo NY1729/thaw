@@ -641,6 +641,7 @@ impl<'a> FnLowerer<'a> {
     fn lower_dynamic_accessor_object_lit(
         &mut self,
         obj_lit: &SwcObjectLit,
+        live_json: bool,
     ) -> Result<HirExpr, String> {
         let mut bindings = Vec::new();
         let mut kinds = Vec::new();
@@ -768,7 +769,11 @@ impl<'a> FnLowerer<'a> {
             }
             if let Some(callback) = callback {
                 callbacks.push(HirExpr::Call(
-                    Box::new(HirExpr::Var("registerNativeCallback".into())),
+                    Box::new(HirExpr::Var(if live_json {
+                        "registerNativeCallbackGraph".into()
+                    } else {
+                        "registerNativeCallback".into()
+                    })),
                     vec![callback],
                 ));
             }
@@ -780,20 +785,95 @@ impl<'a> FnLowerer<'a> {
             &HirType::Json,
             HirExpr::ArrayLit(vec![kinds, keys, values]),
         )?;
-        let result = HirExpr::Call(
-            Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
-            vec![
-                HirExpr::Call(
-                    Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str(
-                        "__thaw_object_from_operations".into(),
-                    ))],
+        if live_json {
+            // Bind the ordinary property values and encode the metadata before
+            // acquiring native callback handles. The consuming call below owns
+            // all handles once it starts, including its builder handle.
+            let args_name = format!("__thaw_dynamic_object_args_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(args_name.clone(), HirType::Json);
+            let builder_name = format!("__thaw_dynamic_object_builder_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(builder_name.clone(), HirType::JsValue);
+            let callback_type = HirType::Array(Box::new(HirType::JsValue));
+            let callbacks_name = format!("__thaw_dynamic_object_callbacks_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(callbacks_name.clone(), callback_type.clone());
+            let mut body = vec![
+                HirStmt::Let(args_name.clone(), HirType::Json, arguments),
+                HirStmt::Let(
+                    callbacks_name.clone(),
+                    callback_type,
+                    HirExpr::ArrayLit(Vec::new()),
                 ),
-                arguments,
-                HirExpr::ArrayLit(callbacks),
-            ],
-        );
-        self.wrap_call_argument_bindings(result, &bindings)
+                HirStmt::Let(
+                    builder_name.clone(),
+                    HirType::JsValue,
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str(
+                            "__thaw_object_from_operations".into(),
+                        ))],
+                    ),
+                ),
+            ];
+            let acquisition = callbacks
+                .into_iter()
+                .map(|callback| {
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![HirExpr::Var(callbacks_name.clone()), callback],
+                    ))
+                })
+                .collect();
+            let failure_name = format!("__thaw_dynamic_object_failure_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(failure_name.clone(), HirType::Str);
+            body.push(HirStmt::Try(
+                acquisition,
+                failure_name.clone(),
+                vec![
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_release_native_projection_callbacks".into())),
+                        vec![HirExpr::Var(callbacks_name.clone())],
+                    )),
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("releaseDynamicValue".into())),
+                        vec![HirExpr::Var(builder_name.clone())],
+                    )),
+                    HirStmt::Throw(HirExpr::Var(failure_name)),
+                ],
+                None,
+            ));
+            let built = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_build_native_object_wrapper".into())),
+                vec![
+                    HirExpr::Var(builder_name),
+                    HirExpr::Var(args_name),
+                    HirExpr::Var(callbacks_name),
+                ],
+            );
+            body.push(HirStmt::Return(Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_host_from_dynamic".into())),
+                vec![built],
+            ))));
+            self.wrap_call_argument_bindings(HirExpr::Block(body), &bindings)
+        } else {
+            let result = HirExpr::Call(
+                Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+                vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str(
+                            "__thaw_object_from_operations".into(),
+                        ))],
+                    ),
+                    arguments,
+                    HirExpr::ArrayLit(callbacks),
+                ],
+            );
+            self.wrap_call_argument_bindings(result, &bindings)
+        }
     }
 
     /// Lowers an object literal's own `key: value` field value -- almost
@@ -1157,7 +1237,7 @@ impl<'a> FnLowerer<'a> {
             });
         if has_dynamic_computed_key {
             if has_callable {
-                return self.lower_dynamic_accessor_object_lit(obj_lit);
+                return self.lower_dynamic_accessor_object_lit(obj_lit, false);
             }
             return if obj_lit
                 .props
@@ -1187,7 +1267,7 @@ impl<'a> FnLowerer<'a> {
             }
             if dynamic_spread.is_some() {
                 return if has_callable {
-                    self.lower_dynamic_accessor_object_lit(obj_lit)
+                    self.lower_dynamic_accessor_object_lit(obj_lit, false)
                 } else {
                     self.lower_dynamic_spread_object_lit(obj_lit)
                 };

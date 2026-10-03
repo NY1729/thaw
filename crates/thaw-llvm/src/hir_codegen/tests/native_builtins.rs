@@ -10383,18 +10383,87 @@ fn native_object_method_receiver_mutations_use_original_prefix_storage() {
 }
 
 #[test]
-fn live_json_date_selected_getter_precedes_argument_and_preserves_this() {
+fn live_json_date_member_get_precedes_arguments_and_preserves_selected_this() {
     let source = r#"
-        let effects = 0;
-        function argument(): number { effects++; return 7; }
+        function argument(): number {
+            loadScript("phase = phase * 10 + 2; Object.defineProperty(d, 'getTime', { configurable: true, value: () => -1 })");
+            return 7;
+        }
         function main(): void {
-            loadScript("globalThis.d = new Date(0); globalThis.selected = 0; Object.defineProperty(d, 'getTime', { get() { selected++; return function(value) { return this === d ? value : -1; }; } });");
+            loadScript("globalThis.phase = 0; globalThis.d = new Date(0); Object.defineProperty(d, 'getTime', { configurable: true, get() { phase = phase * 10 + 1; return function(value) { phase = phase * 10 + 3; return this === d ? value : -2; }; } });");
             const date: any = getDynamicValue("d");
             console.log(date.getTime(argument()));
-            console.log(Number(getDynamicValue("selected")), effects);
+            console.log(Number(getDynamicValue("phase")));
+            loadScript("phase = 0; Object.defineProperty(d, 'setTime', { configurable: true, get() { phase = phase * 10 + 1; return 17; } });");
+            try { date.setTime(argument()); } catch (error) { console.log(error instanceof TypeError); }
+            console.log(Number(getDynamicValue("phase")));
+            loadScript("Object.defineProperty(d, 'setTime', { configurable: true, value: function(value) { return { custom: value, correctThis: this === d }; } })");
+            const returned: any = date.setTime(9);
+            console.log(returned.custom, returned.correctThis);
+            loadScript("globalThis.realTime = Date.prototype.getTime.call(d)");
+            console.log(Number(getDynamicValue("realTime")));
+            // A native Json Date still uses its timestamp implementation.
+            const native: any = new Date(0);
+            console.log(native.setTime(2000), native.getTime());
         }
     "#;
-    assert_eq!(compile_and_run(source, "live_json_date_selected_member_clean"), "7\n1 1\n");
+    assert_eq!(
+        compile_and_run(source, "live_json_date_selected_member_order"),
+        "7\n123\ntrue\n12\n9 true\n0\n2000 2000\n"
+    );
+}
+
+#[test]
+fn dynamic_primitive_method_keeps_original_this_after_property_selection() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.primitive = 'xy'; globalThis.calls = 0; String.prototype.originalThis = function(value) { 'use strict'; calls++; return typeof this + ':' + this + ':' + value; };");
+            const primitive: JsValue = getDynamicValue("primitive");
+            console.log(primitive.originalThis(3));
+            console.log(Number(getDynamicValue("calls")));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "dynamic_primitive_selected_method_this"), "string:xy:3\n1\n");
+}
+#[test]
+fn selected_dynamic_method_getter_failure_skips_arguments_and_released_receiver_fails_after_arguments() {
+    let source = r#"
+        let effects = 0;
+        function argument(): number { effects++; return 1; }
+        function main(): void {
+            loadScript("globalThis.selected = { get invoke() { throw new TypeError('getter'); } }; globalThis.primitiveReceiver = 'abc'");
+            const selected: JsValue = getDynamicValue("selected");
+            try { selected.invoke(argument()); } catch (error) { console.log(error instanceof TypeError); }
+            console.log(effects);
+            const receiver: JsValue = getDynamicValue("primitiveReceiver");
+            function releaseDuringArguments(): number {
+                releaseDynamicValue(receiver);
+                return 1;
+            }
+            console.log(receiver.slice(releaseDuringArguments()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "selected_dynamic_method_failure_order"),
+        "true\n0\nbc\n"
+    );
+}
+
+#[test]
+fn native_any_object_method_mutates_shared_live_receiver_and_alias() {
+    let source = r#"
+        function main(): void {
+            const ordinary: any = {
+                value: 7,
+                getTime(): number { this.value++; return this.value; }
+            };
+            const alias: any = ordinary;
+            console.log(ordinary.getTime(), ordinary.value, alias.value);
+            alias.value = 20;
+            console.log(ordinary.getTime(), alias.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_any_object_live_method_alias"), "8 8 8\n21 21\n");
 }
 
 #[test]
