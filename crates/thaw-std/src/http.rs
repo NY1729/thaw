@@ -469,12 +469,6 @@ struct RequestContext {
     /// what `getHeader` looks up. Empty for the one-shot helpers (which
     /// never parse a real request head at all).
     _headers: Vec<(String, String)>,
-    /// `getHeader`'s cached result -- a single reusable slot (like
-    /// `_body_string`/`_body_hex`), overwritten on every call. Safe
-    /// because a handler always finishes using one call's returned
-    /// pointer (copies it into a native string, compares it, etc.)
-    /// before making the next one; nothing here holds it across a call.
-    _header_return: Option<CString>,
     // Backing storage the `IncomingMessage` pointers borrow from; never
     // read through directly (hence the underscores), just kept alive.
     _method: CString,
@@ -554,7 +548,6 @@ impl RequestContext {
             request_end_listeners: Vec::new(),
             body_events_delivered: false,
             _headers: headers.to_vec(),
-            _header_return: None,
             set_header: NativeClosure {
                 code: response_set_header as *const c_void,
                 context: std::ptr::null_mut(),
@@ -749,11 +742,7 @@ unsafe extern "C" fn request_get_header(
         .iter()
         .find(|(header_name, _)| *header_name == key)
         .map_or("", |(_, value)| value.as_str());
-    context._header_return = Some(CString::new(value).unwrap_or_default());
-    context
-        ._header_return
-        .as_ref()
-        .map_or(std::ptr::null(), |value| value.as_ptr())
+    thaw_arena::arena_string(value.as_bytes())
 }
 
 /// Number of bytes each element occupies in the native `Array(F64)`
@@ -3037,6 +3026,30 @@ mod tests {
         let response = client.join().unwrap();
         assert!(response.ends_with("hello123|hello123|"), "{response}");
         assert!(unsafe { &*state }.closed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn request_get_header_return_survives_another_lookup_and_context_drop() {
+        let (first, second, missing) = {
+            let context = RequestContext::new(
+                "GET", "/", &[],
+                &[("x-first".into(), "alpha".into()), ("x-second".into(), "beta".into())],
+                std::ptr::null_mut(),
+            );
+            let closure = context.request.get_header;
+            let get = |name: &str| {
+                let name = CString::new(name).unwrap();
+                unsafe { request_get_header(closure.cast(), name.as_ptr()) }
+            };
+            let first = get("X-FIRST");
+            let second = get("x-second");
+            let missing = get("MISSING");
+            assert_eq!(unsafe { CStr::from_ptr(first) }.to_bytes(), b"alpha");
+            (first, second, missing)
+        };
+        assert_eq!(unsafe { CStr::from_ptr(first) }.to_bytes(), b"alpha");
+        assert_eq!(unsafe { CStr::from_ptr(second) }.to_bytes(), b"beta");
+        assert_eq!(unsafe { CStr::from_ptr(missing) }.to_bytes(), b"");
     }
 
     /// Reads exactly one HTTP response (status line + headers + a body
