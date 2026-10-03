@@ -4313,6 +4313,16 @@ impl<'a> FnLowerer<'a> {
                 return self.lower_promise_callback(expr, &params, Some(&ret));
             }
         }
+        if let (Expr::Object(object), Some(HirType::Json)) = (expr, expected) {
+            // A method/accessor-bearing `any` literal needs one live storage
+            // identity for its receiver, property writes and aliases. Reuse
+            // the dynamic object builder's actual JS `this` representation.
+            if object.props.iter().any(|property| matches!(property,
+                swc_ecma_ast::PropOrSpread::Prop(property) if matches!(property.as_ref(),
+                    swc_ecma_ast::Prop::Method(_) | swc_ecma_ast::Prop::Getter(_) | swc_ecma_ast::Prop::Setter(_)))) {
+                return self.lower_dynamic_accessor_object_lit(object, true);
+            }
+        }
         if let (Expr::Object(object), Some(expected)) = (expr, expected) {
             let fields = match expected {
                 HirType::Object(fields) => Some(fields.as_slice()),

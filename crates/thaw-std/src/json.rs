@@ -337,6 +337,37 @@ fn host_value_from_borrowed_handle(handle: u64) -> Option<Value> {
     Some(Value::Host(Rc::new(lease)))
 }
 
+/// Convert a retained JS object into the existing live Json Host lease.
+/// The caller keeps ownership of `handle` and releases it after this call;
+/// `host_value_from_borrowed_handle` retains an independent reference.
+#[no_mangle]
+pub extern "C" fn thaw_json_host_from_borrowed_handle(handle: u64) -> *mut Value {
+    match host_value_from_borrowed_handle(handle) {
+        Some(Value::Host(lease)) => {
+            let kind = host_query(&lease, 0);
+            let is_live_object = match kind.as_deref() {
+                Some("function") => true,
+                Some("object") => host_query(&lease, 7).as_deref() == Some("0"),
+                _ => false,
+            };
+            if is_live_object {
+                leak(Value::Host(lease))
+            } else {
+                set_host_error("Live JSON object builder returned a nonobject".into());
+                std::ptr::null_mut()
+            }
+        }
+        Some(_) => {
+            set_host_error("Live JSON object builder returned a nonobject".into());
+            std::ptr::null_mut()
+        }
+        None => {
+            set_host_error("Unable to retain live JSON object".into());
+            std::ptr::null_mut()
+        }
+    }
+}
+
 fn host_key_json(key: &[u8]) -> CString {
     let mut encoded = Vec::new();
     write_json_string(key, &mut encoded);

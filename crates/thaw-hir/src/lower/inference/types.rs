@@ -2086,6 +2086,13 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
                     "__thaw_json_typeof" => return Ok(HirType::Str),
+                    "__thaw_json_host_from_dynamic" => {
+                        let [value] = args.as_slice() else {
+                            return Err("live JSON host conversion expects one handle".into());
+                        };
+                        self.expect_type(&HirType::JsValue, value, "live JSON host handle")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_borrowed_handle_id" => {
                         let [value] = args.as_slice() else {
                             return Err("borrowed JSON handle probe expects one operand".into());
