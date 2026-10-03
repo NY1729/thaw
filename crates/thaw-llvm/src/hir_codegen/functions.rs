@@ -70,9 +70,9 @@ impl<'ctx> HirCompiler<'ctx> {
             // to an arena-allocated buffer of contiguous `f64` fields (see
             // `compile_object_lit`). Unlike arrays there's no length
             // header -- field count/order is static, part of the type.
-            // Every field is one word (8 bytes on this target) regardless
-            // of its own type: `f64`/`bool`/pointer values (Str/Array/
-            // Object/Json) are all word-sized, so a field can be any type
+            // Scalar and pointer fields use one word; nested tagged fields
+            // use the checked arena stride derived from their LLVM value
+            // size. A field can be any type
             // `basic_type` itself accepts -- including another `Object`,
             // recursively. This call validates each field is representable
             // at all (erroring on e.g. `Promise`); it doesn't need to

@@ -14,7 +14,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[
                     self.context
                         .i64_type()
-                        .const_int(object_storage_bytes(fields), false)
+                        .const_int(object_storage_bytes(fields)?, false)
                         .into(),
                     self.context.i64_type().const_int(8, false).into(),
                 ],
@@ -64,7 +64,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let offset = self
                 .context
                 .i64_type()
-                .const_int(object_field_offset(fields, index), false);
+                .const_int(object_field_offset(fields, index)?, false);
             let pointer = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "result_field")
@@ -465,19 +465,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_array_length returned no value")?
             .into_int_value();
-        let element_bytes = i64_type.const_int(array_element_storage_bytes(element), false);
-        let payload_size = self
-            .builder
-            .build_int_mul(length, element_bytes, "json_array_payload_size")
-            .map_err(|error| error.to_string())?;
-        let allocation_size = self
-            .builder
-            .build_int_add(
-                payload_size,
-                i64_type.const_int(ARRAY_HEADER_BYTES, false),
-                "json_array_allocation_size",
-            )
-            .map_err(|error| error.to_string())?;
+        let allocation_size = self.checked_array_allocation_size(
+            length, array_element_storage_bytes(element)?, "json_native_array")?;
         let array = self
             .builder
             .build_call(
@@ -485,7 +474,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[
                     allocation_size.into(),
                     i64_type
-                        .const_int(array_element_storage_bytes(element).min(8), false)
+                        .const_int((array_element_storage_bytes(element)?).min(8), false)
                         .into(),
                 ],
                 "json_native_array",
@@ -627,12 +616,8 @@ impl<'ctx> HirCompiler<'ctx> {
         elements: &[HirType],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let element_bytes = elements
-            .iter()
-            .map(array_element_storage_bytes)
-            .max()
-            .unwrap_or(ARRAY_ELEM_BYTES);
-        let size = ARRAY_HEADER_BYTES + element_bytes * elements.len() as u64;
+        let element_bytes = tuple_element_storage_bytes(elements)?;
+        let size = checked_array_offset(element_bytes, elements.len())?;
         let tuple = self
             .builder
             .build_call(
@@ -707,7 +692,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 other => return Err(format!("unsupported JSON tuple element {other:?}")),
             };
             let offset = i64_type.const_int(
-                ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                checked_array_offset(element_bytes, index)?,
                 false,
             );
             let pointer = unsafe {

@@ -347,12 +347,8 @@ impl<'ctx> HirCompiler<'ctx> {
         aggregate_abi: FfiAggregateAbi,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let element_bytes = elements
-            .iter()
-            .map(array_element_storage_bytes)
-            .max()
-            .unwrap_or(ARRAY_ELEM_BYTES);
-        let size = ARRAY_HEADER_BYTES + element_bytes * elements.len() as u64;
+        let element_bytes = tuple_element_storage_bytes(elements)?;
+        let size = checked_array_offset(element_bytes, elements.len())?;
         let tuple = self
             .builder
             .build_call(
@@ -401,7 +397,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 _ => value,
             };
             let offset = i64_type.const_int(
-                ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                checked_array_offset(element_bytes, index)?,
                 false,
             );
             let pointer = unsafe {
@@ -665,7 +661,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         arena_alloc,
                         &[
                             i64_type
-                                .const_int(object_storage_bytes(fields), false)
+                                .const_int(object_storage_bytes(fields)?, false)
                                 .into(),
                             i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
                         ],
@@ -806,7 +802,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             .build_in_bounds_gep(
                                 self.context.i8_type(),
                                 result,
-                                &[i64_type.const_int(object_field_offset(fields, index), false)],
+                                &[i64_type.const_int(object_field_offset(fields, index)?, false)],
                                 "ffi_object_field",
                             )
                             .map_err(|error| error.to_string())?
@@ -1071,14 +1067,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 let handle = value.into_pointer_value();
                 let base = self.compile_array_data(handle)?;
                 let i64_type = self.context.i64_type();
-                let element_bytes = elements
-                    .iter()
-                    .map(array_element_storage_bytes)
-                    .max()
-                    .unwrap_or(ARRAY_ELEM_BYTES);
+                let element_bytes = tuple_element_storage_bytes(elements)?;
                 for (index, element) in elements.iter().enumerate() {
                     let offset = i64_type.const_int(
-                        ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                        checked_array_offset(element_bytes, index)?,
                         false,
                     );
                     let pointer = unsafe {
@@ -1114,7 +1106,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             .build_in_bounds_gep(
                                 self.context.i8_type(),
                                 base,
-                                &[i64_type.const_int(object_field_offset(fields, index), false)],
+                                &[i64_type.const_int(object_field_offset(fields, index)?, false)],
                                 "ffi_object_field_pointer",
                             )
                             .map_err(|error| error.to_string())?
@@ -1276,7 +1268,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 &[self
                                     .context
                                     .i64_type()
-                                    .const_int(object_field_offset(fields, index), false)],
+                                    .const_int(object_field_offset(fields, index)?, false)],
                                 "ffi_aggregate_vararg_field",
                             )
                             .map_err(|error| error.to_string())?

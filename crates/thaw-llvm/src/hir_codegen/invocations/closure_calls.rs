@@ -289,7 +289,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?;
             arguments.push(value.into());
-            offset += object_field_storage_bytes(ty);
+            offset = checked_storage_add(offset, object_field_storage_bytes(ty)?)?;
         }
         arguments.extend(
             code.get_param_iter()
@@ -331,10 +331,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .iter()
             .map(|value| self.compile_expr(value))
             .collect::<Result<Vec<_>, _>>()?;
-        let payload_bytes = params[..bound.len()]
-            .iter()
-            .map(object_field_storage_bytes)
-            .sum::<u64>();
+        let payload_bytes = params[..bound.len()].iter().try_fold(0, |total, ty| {
+            checked_storage_add(total, object_field_storage_bytes(ty)?)
+        })?;
         let closure = self
             .builder
             .build_call(
@@ -387,7 +386,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(argument_slot, value)
                 .map_err(|error| error.to_string())?;
-            offset += object_field_storage_bytes(ty);
+            offset = checked_storage_add(offset, object_field_storage_bytes(ty)?)?;
         }
         Ok(closure.into())
     }

@@ -84,39 +84,103 @@ const PENDING_EXCEPTION_BOOL_SYMBOL: &str = "__thaw_pending_exception_bool";
 const ARRAY_HEADER_BYTES: u64 = 8;
 /// Phase 1 arrays only ever hold `f64` elements (see module doc).
 const ARRAY_ELEM_BYTES: u64 = 8;
-/// Minimum storage/alignment unit for native object fields. Tagged optional
-/// fields occupy two units; field count/order/layout remain static type data.
+/// Minimum storage/alignment unit for native object fields. Tagged fields
+/// occupy at least two units and wider nested values use checked strides.
 const OBJECT_FIELD_BYTES: u64 = 8;
 const ASYNC_FRAME_BYTES: u64 = 24;
 const ASYNC_SLOT_BYTES: u64 = 16;
 
-fn object_field_storage_bytes(ty: &HirType) -> u64 {
-    if matches!(
-        ty,
-        HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_)
-    ) {
-        ASYNC_SLOT_BYTES
-    } else {
-        OBJECT_FIELD_BYTES
+fn checked_storage_add(left: u64, right: u64) -> Result<u64, String> {
+    left.checked_add(right).filter(|size| *size <= isize::MAX as u64)
+        .ok_or_else(|| "arena layout size overflow".to_string())
+}
+
+fn checked_storage_mul(left: u64, right: u64) -> Result<u64, String> {
+    left.checked_mul(right).filter(|size| *size <= isize::MAX as u64)
+        .ok_or_else(|| "arena layout size overflow".to_string())
+}
+
+fn checked_array_offset(stride: u64, index: usize) -> Result<u64, String> {
+    checked_storage_add(ARRAY_HEADER_BYTES, checked_storage_mul(stride, index as u64)?)
+}
+
+fn align_storage(size: u64, align: u64) -> Result<u64, String> {
+    checked_storage_add(size, align - 1).map(|value| value & !(align - 1))
+}
+
+// Match the nonpacked 64-bit LLVM types in HirCompiler::basic_type. The
+// recursive raw width is distinct from the legacy 8/16-byte arena stride.
+fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
+    match ty {
+        HirType::Bool | HirType::Undefined | HirType::Null => Ok((1, 1)),
+        HirType::Void => Ok((4, 4)),
+        HirType::F64 | HirType::I64 | HirType::Str | HirType::Symbol
+        | HirType::StrLiteral(_) | HirType::Json | HirType::Dictionary(_)
+        | HirType::JsValue | HirType::Promise(_) | HirType::Array(_)
+        | HirType::Bytes | HirType::Map(_, _) | HirType::WeakMap(_, _)
+        | HirType::Set(_) | HirType::WeakSet(_) | HirType::Tuple(_)
+        | HirType::Object(_) | HirType::Function(_, _)
+        | HirType::CallableFunction(..) => Ok((8, 8)),
+        HirType::Union(members) if !members.is_empty() => Ok((16, 8)),
+        HirType::Optional(payload) | HirType::Nullable(payload)
+        | HirType::Nullish(payload) => {
+            let (payload_size, payload_align) = raw_value_layout(payload)?;
+            let start = align_storage(1, payload_align)?;
+            let size = checked_storage_add(start, payload_size)?;
+            Ok((align_storage(size, payload_align)?, payload_align))
+        }
+        _ => Err(format!("unsupported arena field type {ty:?}")),
     }
 }
 
-fn array_element_storage_bytes(ty: &HirType) -> u64 {
-    if matches!(
-        ty,
-        HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_)
-    ) {
-        ASYNC_SLOT_BYTES
-    } else {
-        ARRAY_ELEM_BYTES
+// Validate compiled literal values against the same nonpacked layout. HIR
+// inference can be absent for synthetic expressions, so their actual LLVM
+// struct width must still participate in the arena stride.
+fn compiled_value_layout(ty: BasicTypeEnum<'_>) -> Result<(u64, u64), String> {
+    match ty {
+        BasicTypeEnum::IntType(integer) => {
+            let bytes = ((integer.get_bit_width() as u64 + 7) / 8).max(1);
+            Ok((bytes, bytes.min(8)))
+        }
+        BasicTypeEnum::FloatType(_) | BasicTypeEnum::PointerType(_) => Ok((8, 8)),
+        BasicTypeEnum::StructType(structure) if !structure.is_packed() => {
+            let mut offset = 0;
+            let mut alignment = 1;
+            for field in structure.get_field_types() {
+                let (size, align) = compiled_value_layout(field)?;
+                alignment = alignment.max(align);
+                offset = checked_storage_add(align_storage(offset, align)?, size)?;
+            }
+            Ok((align_storage(offset, alignment)?, alignment))
+        }
+        _ => Err("unsupported compiled arena value type".into()),
     }
 }
 
-fn object_field_offset(fields: &[(String, HirType)], index: usize) -> u64 {
-    fields[..index]
-        .iter()
-        .map(|(_, ty)| object_field_storage_bytes(ty))
-        .sum()
+fn arena_storage_bytes(ty: &HirType) -> Result<u64, String> {
+    let legacy = if matches!(ty, HirType::Optional(_) | HirType::Nullable(_)
+        | HirType::Nullish(_) | HirType::Union(_)) { 16 } else { 8 };
+    Ok(legacy.max(align_storage(raw_value_layout(ty)?.0, 8)?))
+}
+
+fn object_field_storage_bytes(ty: &HirType) -> Result<u64, String> {
+    arena_storage_bytes(ty)
+}
+
+fn array_element_storage_bytes(ty: &HirType) -> Result<u64, String> {
+    arena_storage_bytes(ty)
+}
+
+fn tuple_element_storage_bytes(elements: &[HirType]) -> Result<u64, String> {
+    elements.iter().try_fold(ARRAY_ELEM_BYTES, |max_width, element| {
+        Ok::<_, String>(max_width.max(array_element_storage_bytes(element)?))
+    })
+}
+
+fn object_field_offset(fields: &[(String, HirType)], index: usize) -> Result<u64, String> {
+    fields[..index].iter().try_fold(0, |offset, (_, ty)| {
+        checked_storage_add(offset, object_field_storage_bytes(ty)?)
+    })
 }
 
 fn is_hidden_accessor_field(name: &str) -> bool {
@@ -143,11 +207,8 @@ fn object_array_index_key(name: &str) -> Option<u32> {
     (index != u32::MAX && index.to_string() == name).then_some(index)
 }
 
-fn object_storage_bytes(fields: &[(String, HirType)]) -> u64 {
-    fields
-        .iter()
-        .map(|(_, ty)| object_field_storage_bytes(ty))
-        .sum()
+fn object_storage_bytes(fields: &[(String, HirType)]) -> Result<u64, String> {
+    object_field_offset(fields, fields.len())
 }
 const ASYNC_COMPLETION_OFFSET: u64 = 0;
 const ASYNC_STATE_OFFSET: u64 = 8;

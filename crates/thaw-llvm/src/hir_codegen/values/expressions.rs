@@ -370,9 +370,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 let index = self.compile_expr(idx)?.into_float_value();
                 let val = self.compile_expr(value)?;
                 let width = match self.expr_hir_type(arr) {
-                    Some(HirType::Array(element)) => array_element_storage_bytes(&element),
-                    Some(HirType::Tuple(elements)) => elements.iter()
-                        .map(array_element_storage_bytes).max().unwrap_or(ARRAY_ELEM_BYTES),
+                    Some(HirType::Array(element)) => array_element_storage_bytes(&element)?,
+                    Some(HirType::Tuple(elements)) => tuple_element_storage_bytes(&elements)?,
                     _ => ARRAY_ELEM_BYTES,
                 };
                 let elem_ptr = self.builder.build_call(
@@ -736,7 +735,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         &[self
                             .context
                             .i64_type()
-                            .const_int(object_field_offset(fields, index), false)],
+                            .const_int(object_field_offset(fields, index)?, false)],
                         "dynamic_property_field",
                     )
                     .map_err(|error| error.to_string())?
