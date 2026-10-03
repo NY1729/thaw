@@ -464,7 +464,7 @@ fn rewrite_static_worker_urls_named(
             .chain(worker_source.bytes())
             .map(|byte| format!("%{byte:02X}"))
             .collect::<String>();
-        let replacement = serde_json::to_string(&format!("data:text/javascript,{encoded}"))
+        let encoded_tail = serde_json::to_string(&format!("%0A{encoded}"))
             .expect("Worker data URL is serializable");
         let lo = source_map
             .lookup_byte_offset(thaw_parser::common::BytePos(lo))
@@ -478,8 +478,12 @@ fn rewrite_static_worker_urls_named(
             continue;
         }
         output.push_str(&source[cursor..lo]);
-        output.push_str("(globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require, globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source, ");
-        output.push_str(&replacement);
+        // The URL carries this package instance's complete resolver snapshot.
+        // A saved URL must not use a later bundle's shared Worker helpers.
+        // ponytail: Each URL duplicates the bundle source; use a registry only if
+        // measured Worker URL size or memory becomes a problem.
+        output.push_str("(\"data:text/javascript;thaw-bundle,\" + encodeURIComponent(\"globalThis.__thaw_worker_bundle_source = \" + JSON.stringify(__thaw_worker_bundle_source) + \";\\n\" + __thaw_worker_bundle_source) + ");
+        output.push_str(&encoded_tail);
         output.push(')');
         cursor = hi;
         if !worker_requires.contains(&relative) {
