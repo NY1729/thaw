@@ -8,3 +8,4 @@ license = "MIT OR Apache-2.0"
 
 [patch.crates-io]
 regress = { path = "vendor/regress" }
+rquickjs-sys = { path = "vendor/rquickjs-sys" }

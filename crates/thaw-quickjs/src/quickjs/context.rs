@@ -755,6 +755,27 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
     Ok(())
 }
 
+extern "C" {
+    fn JS_GetAsyncContext(ctx: *mut rquickjs::qjs::JSContext) -> rquickjs::qjs::JSValue;
+    fn JS_SwapAsyncContext(ctx: *mut rquickjs::qjs::JSContext,
+                           next: rquickjs::qjs::JSValue) -> rquickjs::qjs::JSValue;
+}
+
+fn install_async_context_bootstrap<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+    let bridge = Object::new(ctx.clone())?;
+    bridge.set("get", Function::new(ctx.clone(), |ctx: Ctx<'js>| -> Value<'js> {
+        // The C API returns an owned duplicate from this exact runtime.
+        unsafe { Value::from_raw(ctx.clone(), JS_GetAsyncContext(ctx.as_raw().as_ptr())) }
+    })?)?;
+    bridge.set("swap", Function::new(ctx.clone(), |ctx: Ctx<'js>, next: Value<'js>| -> Value<'js> {
+        // Swap duplicates `next` and transfers ownership of the previous slot.
+        unsafe { Value::from_raw(ctx.clone(), JS_SwapAsyncContext(ctx.as_raw().as_ptr(), next.as_raw())) }
+    })?)?;
+    // PLATFORM_GLOBALS captures these functions into its private IIFE. The
+    // temporary property is removed before any user bundle is evaluated.
+    ctx.globals().set("__thaw_async_context_bootstrap", bridge)
+}
+
 fn ensure_context() {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -2601,8 +2622,12 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_dns_lookup", dns_lookup_function)
                     .expect("failed to install JavaScript DNS lookup source");
-                ctx.eval::<(), _>(PLATFORM_GLOBALS)
-                    .expect("failed to install JavaScript platform globals");
+                install_async_context_bootstrap(&ctx)
+                    .expect("failed to install async context bootstrap");
+                let platform_result = ctx.eval::<(), _>(PLATFORM_GLOBALS);
+                ctx.globals().remove("__thaw_async_context_bootstrap")
+                    .expect("failed to remove async context bootstrap");
+                platform_result.expect("failed to install JavaScript platform globals");
             });
             (runtime, context)
         });
