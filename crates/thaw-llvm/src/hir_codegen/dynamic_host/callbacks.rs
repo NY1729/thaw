@@ -50,6 +50,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_load(self.context.i64_type(), handle_slot, "js_callback_handle")
             .map_err(|error| error.to_string())?;
+        self.compile_register_js_callback_host_operations()?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_begin").unwrap(),
+            &[], "begin_js_callback_argument_scope",
+        ).map_err(|error| error.to_string())?;
         let arguments = self
             .builder
             .build_call(
@@ -61,12 +66,26 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_array_new did not return callback arguments")?;
-        for (index, ty) in params.iter().enumerate() {
-            let value = adapter
-                .get_nth_param((index + 1) as u32)
-                .ok_or("JS callback adapter is missing an argument")?;
-            self.compile_json_array_push_native(arguments, value, ty)?;
-        }
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
+            &[arguments.into()], "own_js_callback_arguments",
+        ).map_err(|error| error.to_string())?;
+        let marshal_failed = self.context.append_basic_block(adapter, "js_callback_marshal_failed");
+        self.catch_stack.push(marshal_failed);
+        let marshalled = (|| -> Result<(), String> {
+            for (index, ty) in params.iter().enumerate() {
+                let value = adapter.get_nth_param((index + 1) as u32)
+                    .ok_or("JS callback adapter is missing an argument")?;
+                self.compile_json_array_push_native(arguments, value, ty)?;
+            }
+            Ok(())
+        })();
+        self.catch_stack.pop();
+        marshalled?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
+            &[self.context.i8_type().const_zero().into()], "finish_js_callback_argument_scope",
+        ).map_err(|error| error.to_string())?;
         let arguments_json = self
             .builder
             .build_call(
@@ -122,6 +141,13 @@ impl<'ctx> HirCompiler<'ctx> {
         if *ret == HirType::Void {
             self.builder
                 .build_call(
+                    self.module.get_function("thaw_json_discard_graph_wire").unwrap(),
+                    &[value.into()],
+                    "discard_js_callback_void_graph",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
                     self.module.get_function("thaw_cstring_destroy").unwrap(),
                     &[value.into()],
                     "destroy_js_callback_result_string",
@@ -138,10 +164,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_return(Some(&decoded))
                 .map_err(|error| error.to_string())?;
         }
+        self.builder.position_at_end(marshal_failed);
+        self.compile_discard_typed_decode_scope()?;
+        self.build_default_return()?;
         self.catch_stack = outer_catch_stack;
         self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(parent);
-        let this_adapter = self.compile_ignored_this_adapter(
+        let this_adapter = self.compile_js_callback_this_adapter(
             adapter,
             params,
             ret,
@@ -190,6 +219,216 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
         Ok(closure.into())
+    }
+
+    fn compile_register_js_callback_host_operations(&mut self) -> Result<(), String> {
+        let operations = [
+            "thaw_js_retain_handle", "thaw_js_release_handle",
+            "thaw_js_get_property_json_key_result", "thaw_js_host_query_result",
+            "thaw_js_host_date_set_result", "thaw_js_set_property_graph_result",
+            "thaw_js_property_predicate_json_key_result", "thaw_js_host_enumerate_result",
+        ].iter().map(|name| self.module.get_function(name).unwrap()
+            .as_global_value().as_pointer_value().into())
+            .collect::<Vec<BasicMetadataValueEnum<'ctx>>>();
+        self.builder.build_call(self.module.get_function("thaw_json_register_host_operations").unwrap(),
+            &operations, "register_js_callback_host_operations")
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    // Only the this-aware entry changes: a plain extracted call still uses
+    // the ordinary entry above, which invokes a JS function without this.
+    fn compile_js_callback_this_adapter(
+        &mut self,
+        ordinary: FunctionValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, String> {
+        let adapter = self.module.add_function(
+            name, self.this_entry_function_type(params, ret)?, Some(Linkage::Internal),
+        );
+        let parent = self.builder.get_insert_block()
+            .ok_or("JS callback this adapter needs an insertion block")?;
+        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
+        let outer_async_completion = self.active_async_completion.take();
+        let entry = self.context.append_basic_block(adapter, "entry");
+        let legacy = self.context.append_basic_block(adapter, "legacy_receiver");
+        let graph = self.context.append_basic_block(adapter, "graph_receiver");
+        self.builder.position_at_end(entry);
+        let receiver = adapter.get_nth_param(1)
+            .ok_or("JS callback this adapter is missing its receiver")?
+            .into_struct_value();
+        let kind = self.builder.build_extract_value(receiver, 0, "js_callback_this_kind")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let word = self.builder.build_extract_value(receiver, 1, "js_callback_this_word")
+            .map_err(|error| error.to_string())?.into_int_value();
+        // Native Symbol and aggregate pointers have no reconstructible JS
+        // identity in the canonical two-word receiver ABI. Keep their old
+        // ignored-this call rather than turning accepted calls into errors.
+        let symbol = self.builder.build_int_compare(IntPredicate::EQ, kind,
+            self.context.i8_type().const_int(6, false), "js_callback_symbol_this")
+            .map_err(|error| error.to_string())?;
+        let aggregate = self.builder.build_int_compare(IntPredicate::EQ, kind,
+            self.context.i8_type().const_int(9, false), "js_callback_aggregate_this")
+            .map_err(|error| error.to_string())?;
+        let legacy_kind = self.builder.build_or(symbol, aggregate, "js_callback_legacy_this")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(legacy_kind, legacy, graph)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(legacy);
+        let mut legacy_args = vec![BasicMetadataValueEnum::from(
+            adapter.get_first_param().ok_or("JS callback this adapter has no environment")?,
+        )];
+        legacy_args.extend(adapter.get_param_iter().skip(2).map(BasicMetadataValueEnum::from));
+        let legacy_result = self.builder.build_call(ordinary, &legacy_args, "js_callback_legacy_call")
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void {
+            self.builder.build_return(None).map_err(|error| error.to_string())?;
+        } else {
+            let value = legacy_result.try_as_basic_value().basic()
+                .ok_or("JS callback legacy call returned no value")?;
+            self.builder.build_return(Some(&value)).map_err(|error| error.to_string())?;
+        }
+
+        self.builder.position_at_end(graph);
+        let live = self.builder.build_int_compare(IntPredicate::EQ, kind,
+            self.context.i8_type().const_int(8, false), "js_callback_live_this")
+            .map_err(|error| error.to_string())?;
+        let live_block = self.context.append_basic_block(adapter, "live_this");
+        let value_block = self.context.append_basic_block(adapter, "value_this");
+        let join = self.context.append_basic_block(adapter, "this_json_ready");
+        self.builder.build_conditional_branch(live, live_block, value_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(live_block);
+        let live_json = self.compile_dynamic_value_placeholder_unchecked(word.into())?
+            .into_pointer_value();
+        self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+        let live_end = self.builder.get_insert_block().unwrap();
+
+        self.builder.position_at_end(value_block);
+        let value_json = self.compile_non_arrow_json_value(adapter, kind, word)?;
+        self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+        let value_end = self.builder.get_insert_block().unwrap();
+
+        self.builder.position_at_end(join);
+        let receiver_json = self.builder.build_phi(
+            self.context.ptr_type(AddressSpace::default()), "js_callback_receiver_json",
+        ).map_err(|error| error.to_string())?;
+        receiver_json.add_incoming(&[
+            (&live_json, live_end), (&value_json, value_end),
+        ]);
+        let receiver_json = receiver_json.as_basic_value();
+        self.compile_register_js_callback_host_operations()?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_begin").unwrap(),
+            &[], "begin_js_callback_this_argument_scope",
+        ).map_err(|error| error.to_string())?;
+        let arguments = self.builder.build_call(
+            self.module.get_function("thaw_json_array_new").unwrap(), &[],
+            "js_callback_this_arguments",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("thaw_json_array_new did not return callback arguments")?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
+            &[arguments.into()], "own_js_callback_this_arguments",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_json_array_push_json").unwrap(),
+            &[arguments.into(), receiver_json.into()], "push_js_callback_this")
+            .map_err(|error| error.to_string())?;
+        // The array cloned the receiver. A tag-7 Json is borrowed from the
+        // caller; all scalar/handle-wrapper roots here were just created.
+        let borrowed = self.builder.build_int_compare(IntPredicate::EQ, kind,
+            self.context.i8_type().const_int(7, false), "js_callback_borrowed_this")
+            .map_err(|error| error.to_string())?;
+        let keep = self.context.append_basic_block(adapter, "keep_borrowed_this");
+        let destroy = self.context.append_basic_block(adapter, "destroy_owned_this");
+        self.builder.build_conditional_branch(borrowed, keep, destroy)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(destroy);
+        self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+            &[receiver_json.into()], "destroy_js_callback_this")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(keep).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(keep);
+        let marshal_failed = self.context.append_basic_block(adapter, "js_callback_this_marshal_failed");
+        self.catch_stack.push(marshal_failed);
+        let marshalled = (|| -> Result<(), String> {
+            for (index, ty) in params.iter().enumerate() {
+                let value = adapter.get_nth_param((index + 2) as u32)
+                    .ok_or("JS callback this adapter is missing an argument")?;
+                self.compile_json_array_push_native(arguments, value, ty)?;
+            }
+            Ok(())
+        })();
+        self.catch_stack.pop();
+        marshalled?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
+            &[self.context.i8_type().const_zero().into()], "finish_js_callback_this_argument_scope",
+        ).map_err(|error| error.to_string())?;
+        let arguments_json = self.builder.build_call(
+            self.module.get_function("thaw_json_graph_encode").unwrap(),
+            &[arguments.into()], "js_callback_this_arguments_json",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("thaw_json_graph_encode returned no callback arguments")?;
+        let arguments_json = self.compile_check_json_stringify_error_with_cleanup(
+            arguments_json, &[arguments],
+        )?;
+        let environment = adapter.get_first_param()
+            .ok_or("JS callback this adapter has no environment")?.into_pointer_value();
+        let handle_slot = unsafe { self.builder.build_in_bounds_gep(
+            self.context.i8_type(), environment,
+            &[self.context.i64_type().const_int(CLOSURE_CAPTURE_BASE, false)],
+            "js_callback_this_handle_slot",
+        ) }.map_err(|error| error.to_string())?;
+        let handle = self.builder.build_load(self.context.i64_type(), handle_slot,
+            "js_callback_this_handle").map_err(|error| error.to_string())?;
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_call_handle_with_this_graph_wire_result").unwrap(),
+            &[handle.into(), arguments_json.into()], "js_callback_this_result",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("JS callback this call returned no result")?.into_struct_value();
+        let error = self.builder.build_extract_value(result, 1, "js_callback_this_error")
+            .map_err(|error| error.to_string())?;
+        let value = self.builder.build_extract_value(result, 0, "js_callback_this_value")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[arguments_json.into()], "destroy_js_callback_this_arguments_string")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+            &[arguments.into()], "destroy_js_callback_this_arguments")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        if *ret == HirType::Void {
+            self.builder.build_call(self.module.get_function("thaw_json_discard_graph_wire").unwrap(),
+                &[value.into()], "discard_js_callback_this_void_graph")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[value.into()], "destroy_js_callback_this_result_string")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_return(None).map_err(|error| error.to_string())?;
+        } else {
+            let result_json = self.compile_decode_quickjs_graph(value.into())?;
+            let decoded = self.compile_typed_dynamic_result(result_json, ret)?;
+            self.builder.build_return(Some(&decoded)).map_err(|error| error.to_string())?;
+        }
+        self.builder.position_at_end(marshal_failed);
+        self.compile_discard_typed_decode_scope()?;
+        self.build_default_return()?;
+        self.catch_stack = outer_catch_stack;
+        self.active_async_completion = outer_async_completion;
+        self.builder.position_at_end(parent);
+        Ok(adapter)
     }
 
     fn compile_jit_argument_slots(
