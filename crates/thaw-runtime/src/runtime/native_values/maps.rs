@@ -15,16 +15,17 @@
 // mutates in place, so every reference to a `Map`/`Set` value keeps
 // observing the same growing table.
 //
-// Entries live in an append-only, insertion-ordered array;
+// Entries live in an insertion-ordered array with stable insertion ordinals;
 // buckets are a separate open-addressed (linear probing) index from hash
 // to entry position. Growth preserves tombstoned positions and rebuilds
 // the bucket index from each surviving entry's already-computed hash. Stable
-// positions let live Map/Set iterators keep a simple cursor through mutations.
+// ordinals let live Map/Set iterators keep their cursor through compaction.
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MapEntry {
     state: u64,
+    ordinal: u64,
     hash: u64,
     key: u64,
     value: u64,
@@ -38,12 +39,16 @@ const BUCKET_EMPTY: i64 = -1;
 const BUCKET_TOMBSTONE: i64 = -2;
 
 const INITIAL_BUCKETS: u64 = 16;
+// ponytail: the existing f64 iterator ABI limits exact ordinals; use an
+// integer cursor ABI if more than 2^53 insertions per map must be supported.
+const MAX_INSERTION_ORDINAL: u64 = (1 << 53) - 1;
 
 #[repr(C)]
 struct MapHeader {
     entries: *mut MapEntry,
     entries_len: u64,
     entries_cap: u64,
+    next_ordinal: u64,
     live: u64,
     buckets: *mut i64,
     buckets_len: u64,
@@ -178,6 +183,7 @@ fn arena_alloc_entries(capacity: u64) -> *mut MapEntry {
         unsafe {
             entries.add(index as usize).write(MapEntry {
                 state: ENTRY_EMPTY,
+                ordinal: 0,
                 hash: 0,
                 key: 0,
                 value: 0,
@@ -271,11 +277,42 @@ fn grow(header: &mut MapHeader) -> bool {
     true
 }
 
+// Compact in place so churn does not allocate successive arena buffers.
+// Iterator cursors use insertion ordinals, independent of physical positions.
+fn compact_entries(header: &mut MapHeader) {
+    for index in 0..header.buckets_len {
+        unsafe { header.buckets.add(index as usize).write(BUCKET_EMPTY) };
+    }
+    let mut destination = 0;
+    let mask = header.buckets_len - 1;
+    for index in 0..header.entries_len {
+        let entry = unsafe { *header.entries.add(index as usize) };
+        if entry.state != ENTRY_LIVE { continue; }
+        unsafe { header.entries.add(destination as usize).write(entry) };
+        let mut bucket = entry.hash & mask;
+        while unsafe { *header.buckets.add(bucket as usize) } != BUCKET_EMPTY {
+            bucket = (bucket + 1) & mask;
+        }
+        unsafe { header.buckets.add(bucket as usize).write(destination as i64) };
+        destination += 1;
+    }
+    for index in destination..header.entries_len {
+        unsafe { header.entries.add(index as usize).write(MapEntry {
+            state: ENTRY_EMPTY, ordinal: 0, hash: 0, key: 0, value: 0,
+        }) };
+    }
+    header.entries_len = destination;
+}
+
 fn ensure_capacity_for_insert(header: &mut MapHeader) -> bool {
     let needs_growth = header.buckets_len == 0
         || header.entries_len >= header.entries_cap
         || header.entries_len * 10 >= header.buckets_len * 7;
-    if needs_growth {
+    if needs_growth && header.buckets_len != 0 && header.live <= header.entries_len / 2 {
+        compact_entries(header);
+    }
+    if header.buckets_len == 0 || header.entries_len >= header.entries_cap
+        || header.entries_len * 10 >= header.buckets_len * 7 {
         grow(header)
     } else {
         true
@@ -300,7 +337,7 @@ unsafe fn map_has<K: KeyKind>(map: *const u8, key: u64) -> bool {
 }
 
 /// Inserts or updates `key`. Returns `false` only on arena allocation
-/// failure during growth.
+/// failure during growth or exhaustion of the exact iterator cursor.
 unsafe fn map_set<K: KeyKind>(map: *mut u8, key: u64, value: u64) -> bool {
     if map.is_null() {
         return false;
@@ -314,7 +351,7 @@ unsafe fn map_set<K: KeyKind>(map: *mut u8, key: u64, value: u64) -> bool {
             return true;
         }
     }
-    if !ensure_capacity_for_insert(header) {
+    if header.next_ordinal >= MAX_INSERTION_ORDINAL || !ensure_capacity_for_insert(header) {
         return false;
     }
     let (bucket_index, _) = unsafe { find_bucket::<K>(header, key, hash) };
@@ -322,6 +359,7 @@ unsafe fn map_set<K: KeyKind>(map: *mut u8, key: u64, value: u64) -> bool {
     unsafe {
         header.entries.add(entry_index as usize).write(MapEntry {
             state: ENTRY_LIVE,
+            ordinal: header.next_ordinal,
             hash,
             key,
             value,
@@ -329,6 +367,7 @@ unsafe fn map_set<K: KeyKind>(map: *mut u8, key: u64, value: u64) -> bool {
         header.buckets.add(bucket_index).write(entry_index as i64);
     }
     header.entries_len += 1;
+    header.next_ordinal += 1;
     header.live += 1;
     true
 }
@@ -375,6 +414,7 @@ pub unsafe extern "C" fn thaw_map_new() -> *mut u8 {
             entries: std::ptr::null_mut(),
             entries_len: 0,
             entries_cap: 0,
+            next_ordinal: 0,
             live: 0,
             buckets: std::ptr::null_mut(),
             buckets_len: 0,
@@ -514,7 +554,7 @@ fn arena_pair(first: u64, second: u64) -> u64 {
 }
 
 #[no_mangle]
-/// Returns `[nextCursor, value]` for the next live entry at or after `cursor`,
+/// Returns `[nextCursor, value]` for the next live insertion ordinal at or after `cursor`,
 /// or an empty native array when iteration is complete. `mode` selects keys,
 /// values, Map entries, or Set entries (`0..=3`).
 ///
@@ -536,9 +576,12 @@ pub unsafe extern "C" fn thaw_map_iterator_next(
         return empty();
     }
     let header = unsafe { &*map.cast::<MapHeader>() };
-    let start = cursor.max(0.0) as u64;
-    for index in start..header.entries_len {
-        let entry = unsafe { *header.entries.add(index as usize) };
+    if header.entries_len == 0 { return empty(); }
+    let ordinal = cursor.max(0.0) as u64;
+    let entries = unsafe { std::slice::from_raw_parts(header.entries, header.entries_len as usize) };
+    let start = entries.partition_point(|entry| entry.ordinal < ordinal);
+    for index in start..entries.len() {
+        let entry = entries[index];
         if entry.state != ENTRY_LIVE {
             continue;
         }
@@ -558,7 +601,7 @@ pub unsafe extern "C" fn thaw_map_iterator_next(
             output
                 .add(8)
                 .cast::<u64>()
-                .write_unaligned(((index + 1) as f64).to_bits());
+                .write_unaligned(((entry.ordinal + 1) as f64).to_bits());
             output.add(16).cast::<u64>().write_unaligned(value);
         }
         return output;
@@ -626,7 +669,7 @@ macro_rules! key_kind_functions {
         }
 
         #[no_mangle]
-        /// Returns `0` only on arena allocation failure during growth.
+        /// Returns `0` on allocation failure or exhaustion of the exact iterator cursor.
         ///
         /// # Safety
         /// `map` must be a pointer returned by `thaw_map_new`; a string
@@ -773,6 +816,37 @@ mod map_native_tests {
             assert!(map_set::<NumKey>(map, canonical_num_key(3.0), 789));
             assert_eq!(header_of(map).entries_len, 3);
             assert_eq!(map_get::<NumKey>(map, canonical_num_key(3.0)), Some(789));
+        }
+    }
+
+    #[test]
+    fn churn_reuses_storage_and_preserves_live_iterator_order() {
+        let map = unsafe { thaw_map_new() };
+        unsafe {
+            assert!(map_set::<NumKey>(map, canonical_num_key(1.0), 1));
+            assert!(map_set::<NumKey>(map, canonical_num_key(2.0), 2));
+            let first = thaw_map_iterator_next(map, 0.0, 0.0);
+            let cursor = first.add(8).cast::<f64>().read_unaligned();
+            let storage = header_of(map).entries;
+            let capacity = header_of(map).entries_cap;
+            assert!(map_delete::<NumKey>(map, canonical_num_key(1.0)));
+            for _ in 0..1000 {
+                assert!(map_set::<NumKey>(map, canonical_num_key(3.0), 3));
+                assert!(map_delete::<NumKey>(map, canonical_num_key(3.0)));
+            }
+            assert_eq!(header_of(map).entries, storage);
+            assert_eq!(header_of(map).entries_cap, capacity);
+            assert!(map_set::<NumKey>(map, canonical_num_key(4.0), 4));
+            let second = thaw_map_iterator_next(map, cursor, 0.0);
+            assert_eq!(second.add(16).cast::<u64>().read_unaligned(), canonical_num_key(2.0));
+            let cursor = second.add(8).cast::<f64>().read_unaligned();
+            let last = thaw_map_iterator_next(map, cursor, 0.0);
+            assert_eq!(last.add(16).cast::<u64>().read_unaligned(), canonical_num_key(4.0));
+            let cursor = last.add(8).cast::<f64>().read_unaligned();
+            thaw_map_clear(map);
+            assert!(map_set::<NumKey>(map, canonical_num_key(5.0), 5));
+            let added = thaw_map_iterator_next(map, cursor, 0.0);
+            assert_eq!(added.add(16).cast::<u64>().read_unaligned(), canonical_num_key(5.0));
         }
     }
 
