@@ -1516,6 +1516,105 @@ fn retain_dynamic_value_for_js<'js>(ctx: Ctx<'js>, value: Value<'js>) -> u64 {
     retain_value(&ctx, value).unwrap_or(0)
 }
 
+fn release_dynamic_value_for_js(ctx: Ctx<'_>, handle: u64) -> u8 {
+    // The graph decoder can call this from ordinary JS, outside a native
+    // callback. Reuse its current Ctx when the exported release reenters.
+    let _active = ActiveNapiContext::enter(&ctx);
+    thaw_js_release_handle(handle)
+}
+
+fn install_graph_handle_functions(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    ctx.globals().set("__thaw_retain_dynamic_value",
+        Function::new(ctx.clone(), retain_dynamic_value_for_js)?)?;
+    ctx.globals().set("__thaw_release_dynamic_value",
+        Function::new(ctx.clone(), release_dynamic_value_for_js)?)?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn graph_codec_roundtrip_retains_identity_and_releases_live_lease() {
+    let valid: bool = with_context(|ctx| ctx.eval(r#"(() => {
+      const source = { own: { __thaw_js_handle_id__: 19 }, big: 123n };
+      source.self = source;
+      source.map = new Map([[source, source.own]]);
+      source.date = new Date(1234);
+      const result = __thaw_json_graph_decode_owned(
+        __thaw_json_graph_encode_js(source));
+      if (result.self !== result || result.map.get(result) !== result.own
+        || result.own.__thaw_js_handle_id__ !== 19 || result.big !== 123n
+        || result.date.getTime() !== 1234) return false;
+      const symbol = Symbol('live');
+      const graph = JSON.parse(__thaw_json_graph_encode_js([symbol], 0, true));
+      const handle = graph.leases[0];
+      const values = __thaw_json_graph_decode_owned(JSON.stringify(graph));
+      if (values[0] !== symbol || __thaw_value_handle_live[handle - 1] !== false)
+        return false;
+      const liveArray = [1];
+      const arrayGraph = JSON.parse(__thaw_json_graph_encode_js([liveArray], 0, true));
+      const arrayHandle = arrayGraph.leases[0];
+      const liveResult = __thaw_json_graph_decode_owned(JSON.stringify(arrayGraph));
+      if (liveResult[0] !== liveArray
+        || __thaw_value_handle_live[arrayHandle - 1] !== false) return false;
+      const invalid = JSON.parse(__thaw_json_graph_encode_js([liveArray], 0, true));
+      const invalidHandle = invalid.leases[0];
+      invalid.root = { r: 999 };
+      let failed = false;
+      try { __thaw_json_graph_decode_owned(JSON.stringify(invalid)); }
+      catch (error) { failed = error instanceof TypeError; }
+      return failed && __thaw_value_handle_live[invalidHandle - 1] === false;
+    })()"#).expect("graph codec source check"));
+    assert!(valid);
+}
+
+#[cfg(test)]
+#[test]
+fn graph_codec_uses_bootstrap_intrinsics_after_global_replacement() {
+    let valid: bool = with_context(|ctx| ctx.eval(r#"(() => {
+      const source = { date: new Date(11), map: new Map([['x', 2]]),
+        set: new Set([3]), regexp: /a/g, big: 123n, bytes: Buffer.from([4]) };
+      const saved = {
+        Date: globalThis.Date, Map: globalThis.Map, Set: globalThis.Set,
+        RegExp: globalThis.RegExp, BigInt: globalThis.BigInt,
+        parse: JSON.parse, stringify: JSON.stringify, keys: Object.keys,
+        from: Buffer.from, mapSet: Map.prototype.set,
+        setAdd: Set.prototype.add, regexpTest: RegExp.prototype.test,
+        retain: globalThis.__thaw_retain_dynamic_value,
+        release: globalThis.__thaw_release_dynamic_value,
+      };
+      try {
+        const fail = () => { throw new Error('replaced intrinsic'); };
+        globalThis.Date = globalThis.Map = globalThis.Set = globalThis.RegExp = fail;
+        globalThis.BigInt = fail;
+        JSON.parse = JSON.stringify = Object.keys = Buffer.from = fail;
+        saved.Map.prototype.set = fail; saved.Set.prototype.add = fail;
+        saved.RegExp.prototype.test = fail;
+        globalThis.__thaw_retain_dynamic_value = fail;
+        globalThis.__thaw_release_dynamic_value = fail;
+        const graph = __thaw_json_graph_encode_js(source);
+        const result = __thaw_json_graph_decode_owned(graph);
+        const symbol = Symbol('live');
+        const live = __thaw_json_graph_decode_owned(
+          __thaw_json_graph_encode_js([symbol], 0, true));
+        return result.date.getTime() === 11 && result.map.get('x') === 2
+          && result.set.has(3) && result.big === 123n
+          && saved.regexpTest.call(result.regexp, 'a')
+          && result.bytes[0] === 4 && live[0] === symbol;
+      } finally {
+        globalThis.Date = saved.Date; globalThis.Map = saved.Map;
+        globalThis.Set = saved.Set; globalThis.RegExp = saved.RegExp;
+        globalThis.BigInt = saved.BigInt; JSON.parse = saved.parse;
+        JSON.stringify = saved.stringify; Object.keys = saved.keys;
+        Buffer.from = saved.from; saved.Map.prototype.set = saved.mapSet;
+        saved.Set.prototype.add = saved.setAdd;
+        saved.RegExp.prototype.test = saved.regexpTest;
+        globalThis.__thaw_retain_dynamic_value = saved.retain;
+        globalThis.__thaw_release_dynamic_value = saved.release;
+      }
+    })()"#).expect("graph codec captured intrinsic source check"));
+    assert!(valid);
+}
+
 unsafe fn take_owned_string(value: *const c_char) -> String {
     if value.is_null() {
         String::new()
@@ -1665,11 +1764,7 @@ pub extern "C" fn thaw_js_register_native_callback(
         // all. Reinstalled on every call rather than checked for
         // idempotently first: cheap, and simpler than threading a "is it
         // already there" check through this same function.
-        let retain = Function::new(ctx.clone(), retain_dynamic_value_for_js)
-            .map_err(|error| error.to_string())?;
-        ctx.globals()
-            .set("__thaw_retain_dynamic_value", retain)
-            .map_err(|error| error.to_string())?;
+        install_graph_handle_functions(&ctx).map_err(|error| error.to_string())?;
         // Marks exactly the argument positions `compile_register_native_
         // callback` (thaw-llvm) declared `JsValue`-typed -- real example:
         // zod's `.superRefine((val, ctx: JsValue) => { ctx.addIssue(...);

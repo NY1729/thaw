@@ -2622,6 +2622,8 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_dns_lookup", dns_lookup_function)
                     .expect("failed to install JavaScript DNS lookup source");
+                install_graph_handle_functions(&ctx)
+                    .expect("failed to install graph handle functions");
                 install_async_context_bootstrap(&ctx)
                     .expect("failed to install async context bootstrap");
                 let platform_result = ctx.eval::<(), _>(PLATFORM_GLOBALS);
