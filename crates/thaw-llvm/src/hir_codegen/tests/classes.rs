@@ -3029,3 +3029,56 @@ fn non_arrow_nested_receiver_wrappers_use_leaf_envelope() {
     assert_eq!(compile_and_run(source, "non_arrow_nested_receivers"),
         "undefined number string\nundefined number\nundefined object number\nundefined object string\n");
 }
+
+#[test]
+fn prefix_property_updates_bind_receiver_and_key_once() {
+    let source = r#"
+        let receiverCalls = 0;
+        const left = { value: 4 };
+        const right = { value: 40 };
+        function pick(): { value: number } {
+            receiverCalls++;
+            return receiverCalls === 1 ? left : right;
+        }
+        let dictionaryCalls = 0;
+        let keyCalls = 0;
+        let order = "";
+        const first: Record<string, number> = { value: 7 };
+        const second: Record<string, number> = { value: 70 };
+        function pickDictionary(): Record<string, number> {
+            dictionaryCalls++;
+            order += "R";
+            return dictionaryCalls === 1 ? first : second;
+        }
+        function pickKey(): string {
+            keyCalls++;
+            order += "K";
+            return "value";
+        }
+        let getterCalls = 0;
+        let setterCalls = 0;
+        let stored = 3;
+        interface Box { value: number; }
+        const box: Box = {
+            get value(): number { getterCalls++; order += "G"; return stored; },
+            set value(next: number) { setterCalls++; order += "S"; stored = next * 10; },
+        };
+        let boxCalls = 0;
+        function pickBox(): Box { boxCalls++; order += "B"; return box; }
+        function main(): void {
+            console.log(++pick().value, receiverCalls, left.value, right.value);
+            console.log(++pickDictionary()[pickKey()], dictionaryCalls, keyCalls, order, first.value, second.value);
+            order = "";
+            console.log(++pickBox().value, boxCalls, getterCalls, setterCalls, order, stored);
+            console.log(--left["value"], left.value);
+            console.log(left.value++, left.value);
+            const frozen = Object.freeze({ value: 9 });
+            try { ++frozen.value; console.log("unexpected"); }
+            catch (error) { console.log(error instanceof TypeError, frozen.value); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "prefix_property_target_once"),
+        "5 1 5 40\n8 1 1 RK 8 70\n4 1 1 1 BGS 40\n4 4\n4 5\ntrue 9\n"
+    );
+}
