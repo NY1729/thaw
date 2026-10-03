@@ -274,6 +274,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_host_from_borrowed_handle",
+            i8_ptr.fn_type(&[i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_cstring_destroy",
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
@@ -1669,6 +1674,35 @@ impl<'ctx> HirCompiler<'ctx> {
             );
         }
         self.module.add_function(
+            "thaw_object_property_flags",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_set_property_flags",
+            self.context.bool_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i8_type().into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_arena_contains_allocation",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_register_projector",
+            self.context.bool_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_projector",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_object_copy_state",
             self.context
                 .bool_type()
@@ -2481,6 +2515,30 @@ impl<'ctx> HirCompiler<'ctx> {
             .context
             .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false);
         self.module.add_function(
+            "thaw_js_intern_native_object",
+            handle_result_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_register_native_method_callback_graph",
+            handle_result_type.fn_type(&[
+                i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into(),
+                self.context.i64_type().into(), self.context.i8_type().into(),
+                i8_ptr.into(), self.context.i8_type().into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_lookup_native_object",
+            handle_result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_native_object_pointer",
+            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_call_selected_method_graph_result",
             result_type.fn_type(&[self.context.i64_type().into(), self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
@@ -2615,6 +2673,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_release_native_handle_array",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_construct_handle_result",
             handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
             Some(Linkage::External),
@@ -2623,6 +2686,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ("thaw_js_call_handle_handle_graph_args_result", "thaw_js_call_handle_handle_result"),
             ("thaw_js_call_method_handle_graph_args_result", "thaw_js_call_method_handle_result"),
             ("thaw_js_call_handle_mixed_handle_graph_args_result", "thaw_js_call_handle_mixed_handle_result"),
+            ("thaw_js_call_handle_mixed_handle_graph_args_consuming_result", "thaw_js_call_handle_mixed_handle_result"),
             ("thaw_js_construct_handle_graph_args_result", "thaw_js_construct_handle_result"),
             ("thaw_js_call_graph_result", "thaw_js_call_result"),
             ("thaw_js_set_property_json_graph_result", "thaw_js_set_property_json_result"),

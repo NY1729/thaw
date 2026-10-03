@@ -846,6 +846,12 @@ impl rquickjs::loader::Loader for BundleModuleLoader {
 struct NativeCallbackIdentityBridge<'js> {
     register: Function<'js>,
     same: Function<'js>,
+    intern_object: Function<'js>,
+    object_pointer: Function<'js>,
+    object_lookup: Function<'js>,
+    method_lookup: Function<'js>,
+    method_intern: Function<'js>,
+    define_callback_length: Function<'js>,
 }
 
 unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeCallbackIdentityBridge<'js> {
@@ -867,19 +873,89 @@ fn install_native_callback_identity_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()
     let pair: Array = ctx.eval(r#"(function() {
         const map = new WeakMap();
         const apply = Reflect.apply;
+        const objectConstructor = Object;
+        const defineProperty = Object.defineProperty;
         const set = WeakMap.prototype.set;
         const get = WeakMap.prototype.get;
         const has = WeakMap.prototype.has;
+        const objectOwners = new WeakMap();
+        const objectCache = new Map();
+        const methodCache = new Map();
+        const mapGet = Map.prototype.get;
+        const mapSet = Map.prototype.set;
+        const mapDelete = Map.prototype.delete;
+        const WeakReference = WeakRef;
+        const weakDeref = WeakRef.prototype.deref;
+        const Finalizer = FinalizationRegistry;
+        const finalizerRegister = FinalizationRegistry.prototype.register;
+        const stringStartsWith = String.prototype.startsWith;
+        const finalized = new Finalizer(({pointer, weak}) => {
+            if (apply(mapGet, objectCache, [pointer]) === weak)
+                apply(mapDelete, objectCache, [pointer]);
+        });
+        const methodFinalized = new Finalizer(({token, weak}) => {
+            if (apply(mapGet, methodCache, [token]) === weak)
+                apply(mapDelete, methodCache, [token]);
+        });
         return [
             (wrapper, token) => apply(set, map, [wrapper, token]),
             (left, right) => apply(has, map, [left]) &&
                 apply(has, map, [right]) &&
                 apply(get, map, [left]) === apply(get, map, [right]),
+            (pointer, layout, proposed, guardian) => {
+                const cached = apply(mapGet, objectCache, [pointer]);
+                const existing = cached && apply(weakDeref, cached, []);
+                if (existing) {
+                    if (apply(get, objectOwners, [existing]).layout !== layout)
+                        throw new TypeError('native object layout changed while its wrapper is live');
+                    return existing;
+                }
+                const weak = new WeakReference(proposed);
+                apply(set, objectOwners, [proposed, {pointer, layout, guardian}]);
+                apply(mapSet, objectCache, [pointer, weak]);
+                apply(finalizerRegister, finalized, [proposed, {pointer, weak}]);
+                return proposed;
+            },
+            (wrapper, expected) => {
+                const owner = apply(get, objectOwners, [wrapper]);
+                return owner && apply(stringStartsWith, owner.layout, [expected])
+                    ? owner.pointer : '';
+            },
+            (pointer, expected) => {
+                const weak = apply(mapGet, objectCache, [pointer]);
+                const existing = weak && apply(weakDeref, weak, []);
+                const owner = existing && apply(get, objectOwners, [existing]);
+                return owner && apply(stringStartsWith, owner.layout, [expected])
+                    ? existing : undefined;
+            },
+            token => {
+                const weak = apply(mapGet, methodCache, [token]);
+                return weak && apply(weakDeref, weak, []);
+            },
+            (token, proposed) => {
+                const weak = apply(mapGet, methodCache, [token]);
+                const existing = weak && apply(weakDeref, weak, []);
+                if (existing) return existing;
+                const next = new WeakReference(proposed);
+                apply(mapSet, methodCache, [token, next]);
+                apply(finalizerRegister, methodFinalized, [proposed, {token, weak: next}]);
+                return proposed;
+            },
+            (callback, length) => apply(defineProperty, objectConstructor, [callback, 'length', {value: length}]),
         ];
     })()"#)?;
     let register: Function = pair.get(0)?;
     let same: Function = pair.get(1)?;
-    ctx.store_userdata(NativeCallbackIdentityBridge { register, same })
+    let intern_object: Function = pair.get(2)?;
+    let object_pointer: Function = pair.get(3)?;
+    let object_lookup: Function = pair.get(4)?;
+    let method_lookup: Function = pair.get(5)?;
+    let method_intern: Function = pair.get(6)?;
+    let define_callback_length: Function = pair.get(7)?;
+    ctx.store_userdata(NativeCallbackIdentityBridge {
+        register, same, intern_object, object_pointer, object_lookup,
+        method_lookup, method_intern, define_callback_length,
+    })
         .expect("native callback identity bridge userdata is already borrowed");
     ctx.globals().prop("__thaw_same_native_callback",
         Function::new(ctx.clone(), same_native_callback)?)?;

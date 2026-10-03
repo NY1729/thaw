@@ -118,6 +118,23 @@ pub fn was_reclaimed(pointer: usize) -> bool {
     })
 }
 
+/// A foreign FFI pointer cannot be kept alive by an ArenaRoot. Check that a
+/// prospective live-object owner still belongs to a tracked allocation
+/// before attaching a retained JS wrapper or callback to it.
+pub fn contains_allocation(pointer: usize) -> bool {
+    if pointer == 0 || !is_tracing() { return false; }
+    ALLOCATIONS.with(|allocations| {
+        let allocations = allocations.borrow();
+        allocations.range(..=pointer).next_back()
+            .is_some_and(|(&start, &(size, _))| pointer - start < size)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_arena_contains_allocation(pointer: *const u8) -> u8 {
+    u8::from(contains_allocation(pointer as usize))
+}
+
 /// Registers thread-local side-table cleanup after each arena reset.
 /// The hook receives whether tracing preserved reachable allocations; when
 /// true, it may use `was_reclaimed` to discard only dead identities.

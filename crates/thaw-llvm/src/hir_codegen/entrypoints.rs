@@ -15,6 +15,26 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(quickjs_failure, self.context.i32_type().const_zero())
             .unwrap();
+        // Live native-object projections can retain arena allocations from
+        // ordinary `main` through a QuickJS wrapper. Enable tracking before
+        // module initialization creates any such object, and keep native
+        // globals and pending exceptions rooted across arena resets.
+        if self.projects_native_objects {
+            let pointer = self.context.ptr_type(AddressSpace::default());
+            let enable = self.module.add_function("thaw_arena_enable_tracing",
+                self.context.void_type().fn_type(&[], false), Some(Linkage::External));
+            self.builder.build_call(enable, &[], "enable_native_object_tracing").unwrap();
+            let register = self.module.add_function("thaw_arena_register_root",
+                self.context.void_type().fn_type(&[pointer.into()], false),
+                Some(Linkage::External));
+            for (slot, ty, _) in self.global_variables.values().cloned().collect::<Vec<_>>() {
+                self.register_arena_root_slots(register, slot, ty).unwrap();
+            }
+            for slot in &self.module_exception_roots {
+                self.builder.build_call(register, &[(*slot).into()],
+                    "register_native_object_exception_root").unwrap();
+            }
+        }
         // Module initialization can fail after loading an addon. Every exit
         // must have the process reporters installed before reaching cleanup.
         self.configure_unhandled_rejection_reporter();

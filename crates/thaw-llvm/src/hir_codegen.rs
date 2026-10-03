@@ -291,6 +291,9 @@ pub struct HirCompiler<'ctx> {
     uses_napi: bool,
     uses_quickjs: bool,
     uses_quickjs_handles: bool,
+    /// Compile full-layout native projection adapters only in modules whose
+    /// completed HIR actually crosses a fixed object into QuickJS.
+    projects_native_objects: bool,
     /// True while compiling a QuickJS-backed dynamic call's own JSON-shaped
     /// arguments (set/restored around that one argument-marshaling loop in
     /// `compile_typed_dynamic_call`, so a nested dynamic call compiled
@@ -300,6 +303,107 @@ pub struct HirCompiler<'ctx> {
     /// handle has no meaning and should be rejected instead (console.log
     /// formatting, a `Dictionary` literal, an N-API call).
     compiling_quickjs_dynamic_arguments: bool,
+}
+
+// Inspect completed HIR, including nested closures and module initializers,
+// before deciding whether native allocations need a deferred JS projection.
+// This is deliberately a call-site check: ordinary native objects never pull
+// the QuickJS adapter into modules that do not project an object to JS.
+fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
+    fn stmts(body: &[HirStmt], name: &str) -> bool {
+        body.iter().any(|stmt| match stmt {
+            HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => expr_has_call(expr, name),
+            HirStmt::Return(Some(expr)) => expr_has_call(expr, name),
+            HirStmt::If(test, yes, no) => expr_has_call(test, name) || stmts(yes, name) || stmts(no, name),
+            HirStmt::While(test, body) => expr_has_call(test, name) || stmts(body, name),
+            HirStmt::Try(body, _, catch, _) => stmts(body, name) || stmts(catch, name),
+            HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue
+            | HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_) => false,
+        })
+    }
+
+    fn expr_has_call(expr: &HirExpr, name: &str) -> bool {
+        match expr {
+            HirExpr::Call(callee, args) => {
+                if matches!(callee.as_ref(), HirExpr::Var(target)
+                    if target == "__thaw_register_native_object_projector") {
+                    // The deferred factory itself contains a projection, but
+                    // never runs in a native-only program. Inspect only the
+                    // owner expression at this registration site.
+                    return args.first().is_some_and(|owner| expr_has_call(owner, name));
+                }
+                matches!(callee.as_ref(), HirExpr::Var(target) if target == name)
+                    || expr_has_call(callee, name) || args.iter().any(|arg| expr_has_call(arg, name))
+            }
+            HirExpr::BinOp(_, left, right) | HirExpr::EvalThen(left, right)
+            | HirExpr::UnionMemberIsEqual(left, right, _, _)
+            | HirExpr::UnionIsEqual(left, right, _)
+            | HirExpr::Index(left, right) | HirExpr::TypedIndex(left, right, _)
+            | HirExpr::ArraySetLen(left, right, _)
+            | HirExpr::DynamicPropAccess(left, right, _, _)
+            | HirExpr::JsonKey(left, right) | HirExpr::JsonDelete(left, right)
+            | HirExpr::JsonIndex(left, right) =>
+                expr_has_call(left, name) || expr_has_call(right, name),
+            HirExpr::JsonSet(object, key, value, _, _)
+            | HirExpr::JsonIndexSet(object, key, value)
+            | HirExpr::IndexAssign(object, key, value) =>
+                expr_has_call(object, name) || expr_has_call(key, name) || expr_has_call(value, name),
+            HirExpr::Conditional(test, yes, no, _) =>
+                expr_has_call(test, name) || expr_has_call(yes, name) || expr_has_call(no, name),
+            HirExpr::FunctionCallWithThis(callee, receiver, args, _, _)
+            | HirExpr::FunctionBindThis(callee, receiver, args, _, _) =>
+                expr_has_call(callee, name) || expr_has_call(receiver, name)
+                    || args.iter().any(|arg| expr_has_call(arg, name)),
+            HirExpr::DynamicCall(_, args) | HirExpr::FfiCall(_, args)
+            | HirExpr::ArrayLit(args) | HirExpr::ArrayConcat(args, _)
+            | HirExpr::PromiseAll(args, _) | HirExpr::PromiseAllTuple(args, _)
+            | HirExpr::PromiseRace(args, _) | HirExpr::PromiseAny(args, _)
+            | HirExpr::PromiseAllSettled(args, _) => args.iter().any(|arg| expr_has_call(arg, name)),
+            HirExpr::Await(inner) | HirExpr::AwaitPromise(inner, _)
+            | HirExpr::PromiseAllArray(inner, _) | HirExpr::PromiseRaceArray(inner, _)
+            | HirExpr::PromiseAnyArray(inner, _) | HirExpr::PromiseAllSettledArray(inner, _)
+            | HirExpr::Assign(_, inner) | HirExpr::ArrayAlloc(inner, _)
+            | HirExpr::ArrayLen(inner) | HirExpr::EnumReverseLookup(inner, _)
+            | HirExpr::JsonAsNumber(inner) | HirExpr::JsonAsString(inner)
+            | HirExpr::JsonAsBool(inner) | HirExpr::JsonAsNative(inner, _)
+            | HirExpr::JsValueAsJson(inner) | HirExpr::OptionalSome(inner, _)
+            | HirExpr::OptionalIsNone(inner, _) | HirExpr::OptionalValue(inner, _)
+            | HirExpr::NullableSome(inner, _) | HirExpr::NullableIsNone(inner, _)
+            | HirExpr::NullableValue(inner, _) | HirExpr::NullishSome(inner, _)
+            | HirExpr::NullishIsNull(inner, _) | HirExpr::NullishIsUndefined(inner, _)
+            | HirExpr::NullishIsNone(inner, _) | HirExpr::NullishValue(inner, _)
+            | HirExpr::UnionInject(inner, _, _) | HirExpr::UnionTag(inner, _)
+            | HirExpr::UnionValue(inner, _, _) | HirExpr::RecursiveClosure(_, _, inner)
+            | HirExpr::TypedClosure(_, inner) | HirExpr::NonArrowFunction(inner)
+            | HirExpr::PromiseNew(inner, _, _, _) | HirExpr::PromiseNewMixed(inner, _, _)
+            | HirExpr::PropAccess(inner, _, _) | HirExpr::JsonGet(inner, _) => expr_has_call(inner, name),
+            HirExpr::Lambda(_, _, _, body) => expr_has_call(body, name),
+            HirExpr::PromiseThen(source, callback, _, _, _, _)
+            | HirExpr::PromiseFinally(source, callback, _, _) =>
+                expr_has_call(source, name) || expr_has_call(callback, name),
+            HirExpr::ThrowValue(error, fallback) =>
+                expr_has_call(error, name) || expr_has_call(fallback, name),
+            HirExpr::Block(body) => stmts(body, name),
+            HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) =>
+                fields.iter().any(|(_, value)| expr_has_call(value, name)),
+            HirExpr::PropAssign(object, _, _, value) =>
+                expr_has_call(object, name) || expr_has_call(value, name),
+            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::OptionalNone(_)
+            | HirExpr::NullableNone(_) | HirExpr::NullishNull(_)
+            | HirExpr::NullishUndefined(_) | HirExpr::EnvVar(_)
+            | HirExpr::ObjectAlloc(_) | HirExpr::ClassAlloc(_)
+            | HirExpr::FunctionRef(..) | HirExpr::MethodRef(..)
+            | HirExpr::PostfixUpdate(_, _) => false,
+        }
+    }
+
+    program.globals.iter().any(|global| expr_has_call(&global.init, name))
+        || program.initializers.iter().any(|step| match step {
+            HirInitStep::StoreGlobal(_, expr) => expr_has_call(expr, name),
+            HirInitStep::Statement(stmt) => stmts(std::slice::from_ref(stmt), name),
+            HirInitStep::ExecutionBoundary(_) | HirInitStep::ModuleBoundary { .. } => false,
+        })
+        || program.functions.iter().any(|function| stmts(&function.body, name))
 }
 
 impl<'ctx> HirCompiler<'ctx> {
@@ -330,11 +434,13 @@ impl<'ctx> HirCompiler<'ctx> {
             uses_napi: false,
             uses_quickjs: false,
             uses_quickjs_handles: false,
+            projects_native_objects: false,
             compiling_quickjs_dynamic_arguments: false,
         }
     }
 
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
+        self.projects_native_objects = hir_contains_named_call(program, "__thaw_build_native_object_wrapper");
         self.declare_runtime_builtins();
         self.declare_exception_state();
         self.declare_globals(program)?;

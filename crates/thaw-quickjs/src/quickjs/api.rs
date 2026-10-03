@@ -1350,6 +1350,97 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
     Ok(index as u64 + 1)
 }
 
+/// Consumes a candidate JS-object handle and returns one retained canonical
+/// wrapper. The private identity map owns a guardian callback holding an
+/// ArenaRoot; its pointer cache holds only a WeakRef to the wrapper.
+#[no_mangle]
+pub extern "C" fn thaw_js_intern_native_object(
+    pointer: *const c_void,
+    layout: *const c_char,
+    candidate_handle: u64,
+) -> ThawHandleResult {
+    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+        if pointer.is_null() || layout.is_null() {
+            return Err("native object identity requires pointer and layout".into());
+        }
+        if !thaw_arena::contains_allocation(pointer as usize) {
+            return Err("live native object requires arena-owned storage".into());
+        }
+        let candidate = object_for_handle(&ctx, candidate_handle)?;
+        let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
+            .ok_or("native object identity bridge is unavailable")?;
+        let intern = bridge.intern_object.clone();
+        drop(bridge);
+        let root = thaw_arena::ArenaRoot::new(pointer as usize);
+        let guardian = Function::new(ctx.clone(), move || {
+            let _keep_alive = &root;
+        }).map_err(|error| error.to_string())?;
+        let canonical: Value = intern.call((
+            format!("{:x}", pointer as usize), to_str(layout), candidate, guardian,
+        )).map_err(|error| error.to_string())?;
+        retain_value(&ctx, canonical)
+    });
+    let _ = thaw_js_release_handle(candidate_handle);
+    match result {
+        Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
+        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+    }
+}
+
+/// Returns a retained cached wrapper when this pointer has already been
+/// projected with a compatible layout. A miss returns zero without creating
+/// any callbacks or transferring ownership.
+#[no_mangle]
+pub extern "C" fn thaw_js_lookup_native_object(
+    pointer: *const c_void,
+    layout: *const c_char,
+) -> ThawHandleResult {
+    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+        if pointer.is_null() || layout.is_null() {
+            return Err("native object lookup requires pointer and layout".into());
+        }
+        let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
+            .ok_or("native object identity bridge is unavailable")?;
+        let lookup = bridge.object_lookup.clone();
+        drop(bridge);
+        let cached: Value = lookup.call((format!("{:x}", pointer as usize), to_str(layout)))
+            .map_err(|error| error.to_string())?;
+        if cached.is_undefined() { Ok(0) } else { retain_value(&ctx, cached) }
+    });
+    match result {
+        Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
+        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+    }
+}
+
+/// Returns zero for a non-native or layout-incompatible receiver. No user
+/// property can forge the private WeakMap membership used by this query.
+#[no_mangle]
+pub extern "C" fn thaw_js_native_object_pointer(
+    handle: u64,
+    expected_layout: *const c_char,
+) -> ThawHandleResult {
+    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+        if expected_layout.is_null() {
+            return Err("native object receiver requires a layout".into());
+        }
+        let value = value_for_handle(&ctx, handle)?;
+        let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
+            .ok_or("native object identity bridge is unavailable")?;
+        let pointer_of = bridge.object_pointer.clone();
+        drop(bridge);
+        let pointer: String = pointer_of.call((value, to_str(expected_layout)))
+            .map_err(|error| error.to_string())?;
+        if pointer.is_empty() { return Ok(0); }
+        u64::from_str_radix(&pointer, 16)
+            .map_err(|_| "invalid native object pointer token".into())
+    });
+    match result {
+        Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
+        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+    }
+}
+
 /// Calls a live, retained function *value* (as opposed to a call by global
 /// name, `invoke_impl`, or by method name, `invoke_method`) -- used
 /// whenever the call's own *result* is itself a `JsValue`/handle rather
@@ -1532,6 +1623,40 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_handle_graph_args_result(
     thaw_js_call_handle_mixed_handle_impl(handle, args_json, handles, true)
 }
 
+/// The native-object projection builder installs its callbacks on the
+/// returned JS object. Drop their temporary registry references after the
+/// builder call, including when that call throws. The JS object itself keeps
+/// the functions and their ArenaRoot captures alive for its own lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_js_call_handle_mixed_handle_graph_args_consuming_result(
+    handle: u64, args_json: *const c_char, handles: *const u8,
+) -> ThawHandleResult {
+    // A getter invoked by the builder can re-enter compiled code. Snapshot
+    // the exact acquired IDs before that call; never release a mutated
+    // native array read back after user code has run.
+    let acquired = unsafe { native_handle_slice(handles) }
+        .map(|values| values.to_vec());
+    let result = thaw_js_call_handle_mixed_handle_impl(handle, args_json, handles, true);
+    if let Ok(values) = acquired {
+        for value in values {
+            let _ = thaw_js_release_handle(value);
+        }
+    }
+    let _ = thaw_js_release_handle(handle);
+    result
+}
+
+/// Dispose callback registration references if the builder's argument graph
+/// cannot be encoded, before the consuming builder ABI is reached.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_js_release_native_handle_array(handles: *const u8) {
+    if let Ok(values) = unsafe { native_handle_slice(handles) } {
+        for value in values.to_vec() {
+            let _ = thaw_js_release_handle(value);
+        }
+    }
+}
+
 unsafe fn thaw_js_call_handle_mixed_handle_impl(
     handle: u64, args_json: *const c_char, handles: *const u8, graph_args: bool,
 ) -> ThawHandleResult {
@@ -1614,7 +1739,7 @@ fn thaw_js_construct_handle_impl(handle: u64, args_json: *const c_char, graph_ar
 /// caller-frees-nothing convention (mirrors `thaw_js_call`'s own return),
 /// so `to_str` below copies it out immediately and nothing is freed here.
 type NativeCallbackAdapter = unsafe extern "C" fn(*const c_void, *const c_char) -> *const c_char;
-type NativeCallbackKey = (usize, u64, u64, u8, usize, u8, bool);
+type NativeCallbackKey = (usize, u64, u64, u8, usize, u8, bool, bool);
 
 thread_local! {
     static NATIVE_CALLBACK_HANDLES: RefCell<HashMap<NativeCallbackKey, u64>> =
@@ -1769,7 +1894,7 @@ pub extern "C" fn thaw_js_register_native_callback(
     finish: *const c_void,
     has_rest: u8,
 ) -> ThawHandleResult {
-    register_native_callback(adapter, closure, jsvalue_param_mask, param_count, void_result, finish, has_rest, false)
+    register_native_callback(adapter, closure, jsvalue_param_mask, param_count, void_result, finish, has_rest, false, false)
 }
 
 #[no_mangle]
@@ -1782,7 +1907,22 @@ pub extern "C" fn thaw_js_register_native_callback_graph(
     finish: *const c_void,
     has_rest: u8,
 ) -> ThawHandleResult {
-    register_native_callback(adapter, closure, jsvalue_param_mask, param_count, void_result, finish, has_rest, true)
+    register_native_callback(adapter, closure, jsvalue_param_mask, param_count, void_result, finish, has_rest, true, false)
+}
+
+/// An object-literal method keeps its native closure identity while its
+/// explicit leading receiver parameter is supplied from call-time `this`.
+#[no_mangle]
+pub extern "C" fn thaw_js_register_native_method_callback_graph(
+    adapter: *const c_void,
+    closure: *const c_void,
+    jsvalue_param_mask: u64,
+    param_count: u64,
+    void_result: u8,
+    finish: *const c_void,
+    has_rest: u8,
+) -> ThawHandleResult {
+    register_native_callback(adapter, closure, jsvalue_param_mask, param_count, void_result, finish, has_rest, true, true)
 }
 
 fn register_native_callback(
@@ -1794,6 +1934,7 @@ fn register_native_callback(
     finish: *const c_void,
     has_rest: u8,
     graph_mode: bool,
+    method_mode: bool,
 ) -> ThawHandleResult {
     let adapter = adapter as usize;
     let closure = closure as usize;
@@ -1808,15 +1949,40 @@ fn register_native_callback(
             finish,
             has_rest,
             graph_mode,
+            method_mode,
         );
-        if let Some(handle) = NATIVE_CALLBACK_HANDLES.with(|handles| {
-            handles
-                .borrow()
-                .get(&cache_key)
-                .copied()
-                .filter(|handle| value_for_handle(&ctx, *handle).is_ok())
-        }) {
-            return Ok(handle);
+        // The generated adapter fixes the full native parameter/return and
+        // receiver-layout ABI. Arity and JsValue mask alone cannot
+        // distinguish two typed views of one closure pointer.
+        let method_token = format!(
+            "{identity:x}:{adapter:x}:{jsvalue_param_mask}:{param_count}:{void_result}:{finish:x}:{has_rest}:{graph_mode}:{method_mode}"
+        );
+        if method_mode {
+            let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
+                .ok_or("native callback identity bridge is unavailable")?;
+            let lookup = bridge.method_lookup.clone();
+            drop(bridge);
+            let cached: Value = lookup.call((method_token.clone(),))
+                .map_err(|error| error.to_string())?;
+            if !cached.is_undefined() {
+                return retain_value(&ctx, cached);
+            }
+        }
+        // Method identity is keyed by the complete generated adapter ABI in
+        // the private weak cache above. The legacy strong callback cache omits
+        // that adapter and does not grant a new reference on a hit.
+        if !method_mode {
+            if let Some(handle) = NATIVE_CALLBACK_HANDLES.with(|handles| {
+                handles
+                    .borrow()
+                    .get(&cache_key)
+                    .copied()
+                    .filter(|handle| value_for_handle(&ctx, *handle).is_ok())
+            }) {
+                // Every registration result is an independently owned
+                // reference, even when the wrapper identity is cached.
+                return retain_value(&ctx, value_for_handle(&ctx, handle)?);
+            }
         }
         // The Rust-backed half stays a plain `String -> String` closure --
         // no `Value<'js>` anywhere in its own signature -- deliberately:
@@ -1949,21 +2115,24 @@ fn register_native_callback(
         // shape is exactly what `compile_json_value_to_native`'s `Json`
         // case passes through and what the `Json`-callee dynamic-call path
         // recovers via `JsonAsNative`, so the function stays callable.
+        let visible_param_count = param_count - u64::from(method_mode);
         let wrapper_source = format!(
             "(function() {{ \
              var raw = globalThis['{raw_name}']; \
              delete globalThis['{raw_name}']; \
+             var poll = globalThis['{poll_name}']; \
+             if ({method_mode}) delete globalThis['{poll_name}']; \
              var mask = {jsvalue_param_mask}; \
              var callback = function() {{ \
              var args = {has_rest} \
-             ? Array.prototype.slice.call(arguments, 0, {param_count} - 1).concat([Array.prototype.slice.call(arguments, {param_count} - 1)]) \
-             : Array.prototype.slice.call(arguments, 0, {param_count}); \
+             ? Array.prototype.slice.call(arguments, 0, {visible_param_count} - 1).concat([Array.prototype.slice.call(arguments, {visible_param_count} - 1)]) \
+             : Array.prototype.slice.call(arguments, 0, {visible_param_count}); \
              for (var i = 0; i < args.length; i++) {{ \
              if (!{graph_mode} && (mask & (1 << i)) !== 0) {{ \
              args[i] = {{ __thaw_js_handle_id__: globalThis.__thaw_retain_dynamic_value(args[i]) }}; \
              }} \
              }} \
-             var result = raw({graph_mode} ? globalThis.__thaw_json_graph_encode_js([this].concat(args), mask << 1, true) : JSON.stringify(args, function(key, value) {{ \
+             var result = raw({graph_mode} ? globalThis.__thaw_json_graph_encode_js([this].concat(args), {method_mode} ? mask : mask << 1, true) : JSON.stringify(args, function(key, value) {{ \
              if (typeof value === 'function') return {{ __thaw_js_handle_id__: globalThis.__thaw_retain_dynamic_value(value) }}; \
              if (value === undefined) return {{ $__thaw_napi_undefined$: true }}; \
              return globalThis.__thaw_json_binary_replacer.call(this, key, value); \
@@ -1975,7 +2144,7 @@ fn register_native_callback(
              if (result.slice(0, 8) !== 'promise:') return {graph_mode} ? globalThis.__thaw_json_graph_decode_owned(result) : JSON.parse(result, globalThis.__thaw_json_date_reviver); \
              return new Promise(function(resolve, reject) {{ \
              function check() {{ \
-             var settled = globalThis['{poll_name}'](result); \
+             var settled = ({method_mode} ? poll : globalThis['{poll_name}'])(result); \
              if (!settled) return setTimeout(check, 0); \
              if (settled.slice(0, 6) === 'error:') return reject(globalThis.__thaw_error_from_tagged(settled.slice(6))); \
              if ({void_result}) return resolve(undefined); \
@@ -1984,25 +2153,42 @@ fn register_native_callback(
              check(); \
              }}); \
              }}; \
-             Object.defineProperty(callback, 'length', {{ value: {param_count} }}); \
              return callback; \
              }})()"
         );
         let wrapper: Value = ctx
             .eval(wrapper_source.as_str())
             .map_err(|error| error.to_string())?;
+        let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
+            .ok_or("native callback identity bridge is unavailable")?;
+        let define_length = bridge.define_callback_length.clone();
+        drop(bridge);
+        define_length.call::<_, ()>((wrapper.clone(), visible_param_count))
+            .map_err(|error| error.to_string())?;
+        let wrapper = if method_mode {
+            let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
+                .ok_or("native callback identity bridge is unavailable")?;
+            let intern = bridge.method_intern.clone();
+            drop(bridge);
+            intern.call::<_, Value>((method_token.clone(), wrapper))
+                .map_err(|error| error.to_string())?
+        } else { wrapper };
         if closure != 0 {
             let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
                 .ok_or("native callback identity bridge is unavailable")?;
             let register = bridge.register.clone();
             drop(bridge);
-            register.call::<_, ()>((wrapper.clone(), format!("{closure:x}")))
+            register.call::<_, ()>((wrapper.clone(), if method_mode {
+                method_token
+            } else { format!("{closure:x}") }))
                 .map_err(|error| error.to_string())?;
         }
         let handle = retain_value(&ctx, wrapper)?;
-        NATIVE_CALLBACK_HANDLES.with(|handles| {
-            handles.borrow_mut().insert(cache_key, handle);
-        });
+        if !method_mode {
+            NATIVE_CALLBACK_HANDLES.with(|handles| {
+                handles.borrow_mut().insert(cache_key, handle);
+            });
+        }
         Ok(handle)
     });
     match result {

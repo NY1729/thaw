@@ -595,26 +595,32 @@ impl<'ctx> HirCompiler<'ctx> {
                     ))?;
                 }
 
-                // `Object.freeze` blocks every plain data-field write (see
-                // `thaw_object_state`'s query 2, `thaw-runtime/src/
-                // runtime/native_values/objects.rs`); a dynamically
-                // registered setter (above) is left alone -- freezing a
-                // getter/setter pair isn't this probe's concern here.
+                // A plain data write observes both the object's integrity
+                // state and the descriptor attributes shared with live JS
+                // projections. The registered setter path above remains an
+                // accessor invocation even when Object.freeze was applied.
                 self.builder.position_at_end(check_frozen);
-                let frozen = self
-                    .builder
-                    .build_call(
-                        self.module.get_function("thaw_object_state").unwrap(),
-                        &[object.into(), self.context.i8_type().const_int(2, false).into()],
-                        "object_write_is_frozen",
-                    )
+                let property = self.compile_expr(&HirExpr::Lit(HirLit::Str(field.clone())))?
+                    .into_pointer_value();
+                let flags = self.builder.build_call(
+                    self.module.get_function("thaw_object_property_flags").unwrap(),
+                    &[object.into(), property.into()], "object_write_property_flags",
+                )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("thaw_object_state returned no value")?
+                    .ok_or("thaw_object_property_flags returned no value")?
                     .into_int_value();
+                let writable = self.builder.build_and(
+                    flags, self.context.i8_type().const_int(1, false),
+                    "object_write_writable_bit",
+                ).map_err(|error| error.to_string())?;
+                let readonly = self.builder.build_int_compare(
+                    IntPredicate::EQ, writable, self.context.i8_type().const_zero(),
+                    "object_write_is_readonly",
+                ).map_err(|error| error.to_string())?;
                 self.builder
-                    .build_conditional_branch(frozen, frozen_blocked, store_field)
+                    .build_conditional_branch(readonly, frozen_blocked, store_field)
                     .map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(frozen_blocked);

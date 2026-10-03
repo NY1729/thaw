@@ -267,3 +267,22 @@ pub struct HirParam {
     pub name: Symbol,
     pub ty: HirType,
 }
+
+/// Unambiguous private runtime descriptor for an ordered native object layout.
+/// A complete expected descriptor is a byte prefix of a wider allocation's
+/// descriptor only when every preceding field name and HIR type matches.
+pub fn native_object_layout_token(fields: &[(Symbol, HirType)]) -> String {
+    // The token passes through a static C string ABI. Hex encoding avoids a
+    // user property name containing NUL truncating the trusted layout test.
+    let mut token = String::new();
+    for (name, ty) in fields {
+        let type_name = format!("{ty:?}");
+        for part in [name.as_bytes(), type_name.as_bytes()] {
+            token.push_str(&format!("{}:", part.len()));
+            for byte in part {
+                token.push_str(&format!("{byte:02x}"));
+            }
+        }
+    }
+    token
+}

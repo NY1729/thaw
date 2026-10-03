@@ -256,7 +256,10 @@ impl<'a> FnLowerer<'a> {
                     .iter()
                     .any(|(name, _)| is_hidden_accessor_field(name))
                 {
-                    return Ok(HirType::Object(expected.to_vec()));
+                    let mut receiver = expected.to_vec();
+                    receiver.push(("__thaw_object_method_receiver".into(),
+                        if prefix_only { HirType::Bool } else { HirType::Undefined }));
+                    return Ok(HirType::Object(receiver));
                 }
             }
             Ok(HirType::Object(
@@ -3265,6 +3268,18 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(source_name.clone(), target_type.clone());
         let source = HirExpr::Var(source_name.clone());
+        let flags_name = format!("__thaw_descriptor_static_flags_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(flags_name.clone(), HirType::F64);
+        let attribute = |bit: u8| HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::BinOp(
+                BinOp::BitAnd,
+                Box::new(HirExpr::Var(flags_name.clone())),
+                Box::new(HirExpr::Lit(HirLit::F64(bit as f64))),
+            )),
+            Box::new(HirExpr::Lit(HirLit::F64(bit as f64))),
+        );
         let getter = format!("__thaw_getter_{property}");
         let setter = format!("__thaw_setter_{property}");
         let mut accessor = |hidden: String| -> Result<Option<HirExpr>, String> {
@@ -3323,30 +3338,42 @@ impl<'a> FnLowerer<'a> {
                     "set".into(),
                     setter.unwrap_or(HirExpr::Lit(HirLit::Undefined)),
                 ),
-                ("enumerable".into(), HirExpr::Lit(HirLit::Bool(true))),
-                ("configurable".into(), HirExpr::Lit(HirLit::Bool(true))),
+                ("enumerable".into(), attribute(2)),
+                ("configurable".into(), attribute(4)),
             ]);
             return self.wrap_call_argument_bindings(
                 descriptor,
-                &[(source_name, target_type.clone(), target)],
+                &[
+                    (source_name, target_type.clone(), target),
+                    (flags_name, HirType::F64, HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_object_property_flags".into())),
+                        vec![source.clone(), HirExpr::Lit(HirLit::Str(property.into()))],
+                    )),
+                ],
             );
         }
         let descriptor = HirExpr::ObjectLit(vec![
             (
                 "value".into(),
                 HirExpr::PropAccess(
-                    Box::new(source),
+                    Box::new(source.clone()),
                     target_type.clone(),
                     property.into(),
                 ),
             ),
-            ("writable".into(), HirExpr::Lit(HirLit::Bool(true))),
-            ("enumerable".into(), HirExpr::Lit(HirLit::Bool(true))),
-            ("configurable".into(), HirExpr::Lit(HirLit::Bool(true))),
+            ("writable".into(), attribute(1)),
+            ("enumerable".into(), attribute(2)),
+            ("configurable".into(), attribute(4)),
         ]);
         self.wrap_call_argument_bindings(
             descriptor,
-            &[(source_name, target_type.clone(), target)],
+            &[
+                (source_name, target_type.clone(), target),
+                (flags_name, HirType::F64, HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_property_flags".into())),
+                    vec![source, HirExpr::Lit(HirLit::Str(property.into()))],
+                )),
+            ],
         )
     }
 
@@ -3368,9 +3395,12 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let setter_name = format!("__thaw_descriptor_has_setter_{}", self.next_binding);
         self.next_binding += 1;
+        let flags_name = format!("__thaw_descriptor_flags_{}", self.next_binding);
+        self.next_binding += 1;
         self.scope.insert(source_name.clone(), target_type.clone());
         self.scope.insert(getter_name.clone(), HirType::Bool);
         self.scope.insert(setter_name.clone(), HirType::Bool);
+        self.scope.insert(flags_name.clone(), HirType::F64);
         let source = HirExpr::Var(source_name.clone());
         let key = HirExpr::Lit(HirLit::Str(property.into()));
         let has_accessor = |setter| {
@@ -3424,6 +3454,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::ArrayLit(vec![
                 HirExpr::Var(getter_name.clone()),
                 HirExpr::Var(setter_name.clone()),
+                HirExpr::Var(flags_name.clone()),
             ]),
         )?;
         let accessor_descriptor = HirExpr::Call(
@@ -3456,7 +3487,9 @@ impl<'a> FnLowerer<'a> {
                 property.into(),
             ),
         )?;
-        let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![value]))?;
+        let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![
+            value, HirExpr::Var(flags_name.clone()),
+        ]))?;
         let data_descriptor = HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicValueHandle".into())),
             vec![
@@ -3484,6 +3517,10 @@ impl<'a> FnLowerer<'a> {
                 (source_name, target_type.clone(), target),
                 (getter_name, HirType::Bool, has_accessor(false)),
                 (setter_name, HirType::Bool, has_accessor(true)),
+                (flags_name, HirType::F64, HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_property_flags".into())),
+                    vec![source, key],
+                )),
             ],
         )
     }
@@ -3495,10 +3532,36 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    /// An unsafe prefix receiver may enumerate or return its synthetic
+    /// marker. Keep that layout on the established snapshot path until a
+    /// full concrete receiver shape can be recovered at allocation time.
+    fn fixed_object_supports_live_projection(ty: &HirType) -> bool {
+        match ty {
+            HirType::Object(fields) => !fields.iter().any(|(name, _)|
+                    name.starts_with("__thaw_class_identity_\u{1e}"))
+                && fields.iter()
+                    .filter(|(name, _)| !is_hidden_accessor_field(name))
+                    .all(|(_, field)| Self::fixed_object_supports_live_projection(field)),
+            HirType::Function(params, _)
+            | HirType::CallableFunction(params, _, _, _) =>
+                !matches!(params.first(), Some(HirType::Object(receiver))
+                    if receiver.last().is_some_and(|(name, marker)|
+                        name == "__thaw_object_method_receiver"
+                            && *marker != HirType::Bool)),
+            HirType::Optional(inner) | HirType::Nullable(inner)
+            | HirType::Nullish(inner) | HirType::Array(inner) =>
+                Self::fixed_object_supports_live_projection(inner),
+            HirType::Union(members) | HirType::Tuple(members) =>
+                members.iter().all(Self::fixed_object_supports_live_projection),
+            _ => true,
+        }
+    }
+
     fn lower_fixed_object_as_dynamic_accessor_object(
         &mut self,
         value: HirExpr,
         fields: &[(Symbol, HirType)],
+        factory_body: bool,
     ) -> Result<HirExpr, String> {
         let source_type = HirType::Object(fields.to_vec());
         let source_name = format!("__thaw_dynamic_accessor_object_{}", self.next_binding);
@@ -3508,66 +3571,156 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let readable_name = format!("__thaw_dynamic_readable_{}", self.next_binding);
         self.next_binding += 1;
-        let getters_name = format!("__thaw_dynamic_getters_{}", self.next_binding);
+        let writable_name = format!("__thaw_dynamic_writable_{}", self.next_binding);
+        self.next_binding += 1;
+        let accessor_name = format!("__thaw_dynamic_accessor_{}", self.next_binding);
+        self.next_binding += 1;
+        let callbacks_name = format!("__thaw_dynamic_callbacks_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(keys_name.clone(), HirType::Array(Box::new(HirType::Str)));
         self.scope.insert(readable_name.clone(), HirType::Array(Box::new(HirType::Bool)));
-        self.scope.insert(getters_name.clone(), HirType::Array(Box::new(HirType::JsValue)));
-        let mut actions = Vec::new();
+        self.scope.insert(writable_name.clone(), HirType::Array(Box::new(HirType::Bool)));
+        self.scope.insert(accessor_name.clone(), HirType::Array(Box::new(HirType::Bool)));
+        self.scope.insert(callbacks_name.clone(), HirType::Array(Box::new(HirType::JsValue)));
+        let mut metadata_actions = Vec::new();
+        let mut callback_actions = Vec::new();
         for index in ecmascript_field_order(fields) {
             let name = &fields[index].0;
             let has_getter = fields
                 .iter()
                 .any(|(field, _)| field == &format!("__thaw_getter_{name}"));
-            let setter_only = !has_getter
-                && fields
-                    .iter()
-                    .any(|(field, _)| field == &format!("__thaw_setter_{name}"));
-            let mut read = self.lower_fixed_object_property_read(
-                HirExpr::Var(source_name.clone()),
-                fields,
-                name,
-            )?;
-            let mut read_type = Self::fixed_object_property_read_type(fields, name)?;
-            if let HirType::Object(nested) = &read_type {
-                if Self::fixed_object_contains_accessor(nested) {
-                    read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested)?;
-                    read_type = HirType::JsValue;
+            let has_setter = fields
+                .iter()
+                .any(|(field, _)| field == &format!("__thaw_setter_{name}"));
+            let setter_only = !has_getter && has_setter;
+            let writable = !has_getter || has_setter;
+            let absent_callback = || HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+            );
+            let getter = if setter_only {
+                absent_callback()
+            } else {
+                let mut read = self.lower_fixed_object_property_read(
+                    HirExpr::Var("__thaw_this".into()), fields, name,
+                )?;
+                let mut read_type = Self::fixed_object_property_read_type(fields, name)?;
+                if let HirType::Object(nested) = &read_type {
+                    if Self::fixed_object_supports_live_projection(&read_type) {
+                        // Preserve nested native storage identity when its
+                        // receiver layout is safe to expose as a live host.
+                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false)?;
+                        read_type = HirType::JsValue;
+                    }
                 }
-            }
-            let callback = HirExpr::Lambda(
-                vec![HirParam {
-                    name: source_name.clone(),
-                    ty: source_type.clone(),
-                }],
-                Vec::new(),
-                read_type,
-                Box::new(read),
-            );
-            let getter = HirExpr::Call(
-                Box::new(HirExpr::Var("registerNativeCallback".into())),
-                vec![callback],
-            );
+                let callback = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: "__thaw_this".into(), ty: source_type.clone(),
+                    }],
+                    read_type, Box::new(read),
+                );
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_register_native_method_callback_graph".into())),
+                    vec![callback],
+                )
+            };
+            let setter = if writable {
+                // PropAssign's LLVM path uses the visible field slot type,
+                // then honors the registered setter and integrity guards.
+                let field_type = fields.iter().find(|(field, _)| field == name)
+                    .map(|(_, ty)| ty.clone())
+                    .ok_or_else(|| format!("object has no field `{name}`"))?;
+                let value_name = format!("__thaw_dynamic_write_{}", self.next_binding);
+                self.next_binding += 1;
+                let callback = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![
+                        HirParam { name: "__thaw_this".into(), ty: source_type.clone() },
+                        HirParam { name: value_name.clone(), ty: field_type },
+                    ],
+                    HirType::Void,
+                    Box::new(HirExpr::Block(vec![
+                        HirStmt::Expr(HirExpr::PropAssign(
+                            Box::new(HirExpr::Var("__thaw_this".into())),
+                            source_type.clone(), name.clone(),
+                            Box::new(HirExpr::Var(value_name)),
+                        )),
+                        HirStmt::Return(None),
+                    ])),
+                );
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_register_native_method_callback_graph".into())),
+                    vec![callback],
+                )
+            } else { absent_callback() };
             let append = |array: &str, value| HirStmt::Expr(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_array_push".into())),
                 vec![HirExpr::Var(array.to_string()), value],
             ));
-            actions.push((index, vec![
+            metadata_actions.push((index, vec![
                 append(&keys_name, HirExpr::Lit(HirLit::Str(name.clone()))),
                 append(&readable_name, HirExpr::Lit(HirLit::Bool(!setter_only))),
-                append(&getters_name, getter),
+                append(&writable_name, HirExpr::Lit(HirLit::Bool(writable))),
+                append(&accessor_name, HirExpr::Lit(HirLit::Bool(has_getter || has_setter))),
+            ]));
+            callback_actions.push((index, vec![
+                append(&callbacks_name, getter),
+                append(&callbacks_name, setter),
             ]));
         }
-        let mut body = vec![
+        let cached_name = format!("__thaw_cached_native_object_{}", self.next_binding);
+        self.next_binding += 1;
+        let cached_type = HirType::Optional(Box::new(HirType::JsValue));
+        self.scope.insert(cached_name.clone(), cached_type.clone());
+        let layout = crate::native_object_layout_token(fields);
+        let mut body = Vec::new();
+        if !factory_body {
+            body.extend([
+            HirStmt::Let(cached_name.clone(), cached_type,
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_lookup_native_object".into())),
+                    vec![HirExpr::Var(source_name.clone()),
+                        HirExpr::Lit(HirLit::Str(layout.clone()))])),
+            HirStmt::If(
+                HirExpr::OptionalIsNone(Box::new(HirExpr::Var(cached_name.clone())), HirType::JsValue),
+                Vec::new(),
+                vec![HirStmt::Return(Some(HirExpr::OptionalValue(
+                    Box::new(HirExpr::Var(cached_name)), HirType::JsValue)))],
+            ),
+            ]);
+            let projector_name = format!("__thaw_full_native_projector_{}", self.next_binding);
+            self.next_binding += 1;
+            let projector_type = HirType::Function(Vec::new(), Box::new(HirType::JsValue));
+            self.scope.insert(projector_name.clone(), HirType::Optional(Box::new(projector_type.clone())));
+            body.extend([
+                HirStmt::Let(projector_name.clone(), HirType::Optional(Box::new(projector_type.clone())),
+                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_lookup_native_projector".into())),
+                        vec![HirExpr::Var(source_name.clone()),
+                            HirExpr::Lit(HirLit::Str(layout.clone()))])),
+                HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(HirExpr::Var(projector_name.clone())), projector_type.clone()),
+                    Vec::new(),
+                    vec![HirStmt::Return(Some(HirExpr::Call(
+                        Box::new(HirExpr::OptionalValue(Box::new(HirExpr::Var(projector_name)), projector_type)),
+                        Vec::new(),
+                    )))],
+                ),
+            ]);
+        }
+        body.extend([
             HirStmt::Let(keys_name.clone(), HirType::Array(Box::new(HirType::Str)),
                 HirExpr::ArrayLit(Vec::new())),
             HirStmt::Let(readable_name.clone(), HirType::Array(Box::new(HirType::Bool)),
                 HirExpr::ArrayLit(Vec::new())),
-            HirStmt::Let(getters_name.clone(), HirType::Array(Box::new(HirType::JsValue)),
+            HirStmt::Let(writable_name.clone(), HirType::Array(Box::new(HirType::Bool)),
                 HirExpr::ArrayLit(Vec::new())),
-        ];
+            HirStmt::Let(accessor_name.clone(), HirType::Array(Box::new(HirType::Bool)),
+                HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(callbacks_name.clone(), HirType::Array(Box::new(HirType::JsValue)),
+                HirExpr::ArrayLit(Vec::new())),
+        ]);
         body.extend(self.lower_ordered_fixed_field_statements(
-            HirExpr::Var(source_name.clone()), fields, actions,
+            HirExpr::Var(source_name.clone()), fields, metadata_actions,
         )?);
         let keys = self.coerce_to_declared(
             &HirType::Json,
@@ -3577,21 +3730,133 @@ impl<'a> FnLowerer<'a> {
             &HirType::Json,
             HirExpr::Var(readable_name),
         )?;
+        let writable = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::Var(writable_name),
+        )?;
+        let accessors = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::Var(accessor_name),
+        )?;
         let arguments = self.coerce_to_declared(
             &HirType::Json,
-            HirExpr::ArrayLit(vec![keys, readable]),
+            HirExpr::ArrayLit(vec![keys, readable, writable, accessors]),
         )?;
+        let args_name = format!("__thaw_native_projection_args_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(args_name.clone(), HirType::Json);
+        body.push(HirStmt::Let(args_name.clone(), HirType::Json, arguments));
+        let builder_name = format!("__thaw_native_projection_builder_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(builder_name.clone(), HirType::JsValue);
+        body.push(HirStmt::Let(builder_name.clone(), HirType::JsValue,
+            HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str(
+                    "__thaw_object_with_native_getters".into(),
+                ))])));
+        // A borrowed foreign FFI object has no arena owner to retain. Fail
+        // before registering the first callback that could capture its pointer.
+        body.push(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_require_native_owner".into())),
+            vec![HirExpr::Var(source_name.clone())],
+        )));
+        // Resolve the builder and encode plain metadata before acquiring any
+        // temporary native callback handles. From this point to the builder
+        // ABI, a later callback registration can still fail after earlier
+        // handles were acquired. Guard that acquisition interval separately;
+        // the builder ABI consumes the complete array on both outcomes.
+        let callback_start = body.len();
+        body.extend(self.lower_ordered_fixed_field_statements(
+            HirExpr::Var(source_name.clone()), fields, callback_actions,
+        )?);
+        // These callbacks read the same pointer-keyed integrity state used by
+        // direct native Object/Reflect operations. The JS wrapper must never
+        // infer native extensibility from its own shadow target alone.
+        for query in 0..3 {
+            let state = HirExpr::Lambda(
+                vec![HirParam { name: source_name.clone(), ty: source_type.clone() }],
+                Vec::new(), HirType::Bool,
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_object_state".into())),
+                    vec![HirExpr::Var(source_name.clone()), HirExpr::Lit(HirLit::F64(query as f64))],
+                )),
+            );
+            body.push(HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                vec![HirExpr::Var(callbacks_name.clone()), HirExpr::Call(
+                    Box::new(HirExpr::Var("registerNativeCallbackGraph".into())), vec![state],
+                )],
+            )));
+        }
+        let operation_name = format!("__thaw_native_integrity_op_{}", self.next_binding);
+        self.next_binding += 1;
+        let state_update = HirExpr::Lambda(
+            vec![HirParam { name: source_name.clone(), ty: source_type.clone() }],
+            vec![HirParam { name: operation_name.clone(), ty: HirType::F64 }],
+            HirType::Bool,
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_set_state".into())),
+                vec![HirExpr::Var(source_name.clone()), HirExpr::Var(operation_name)],
+            )),
+        );
+        body.push(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_push".into())),
+            vec![HirExpr::Var(callbacks_name.clone()), HirExpr::Call(
+                Box::new(HirExpr::Var("registerNativeCallbackGraph".into())), vec![state_update],
+            )],
+        )));
+        let key_name = format!("__thaw_native_descriptor_key_{}", self.next_binding);
+        self.next_binding += 1;
+        let flags_name = format!("__thaw_native_descriptor_flags_{}", self.next_binding);
+        self.next_binding += 1;
+        let descriptor_callback = |set: bool| {
+            let mut params = vec![HirParam { name: key_name.clone(), ty: HirType::Str }];
+            let (name, ret) = if set {
+                params.push(HirParam { name: flags_name.clone(), ty: HirType::F64 });
+                ("__thaw_object_set_property_flags", HirType::Bool)
+            } else { ("__thaw_object_property_flags", HirType::F64) };
+            let mut arguments = vec![HirExpr::Var(source_name.clone()), HirExpr::Var(key_name.clone())];
+            if set { arguments.push(HirExpr::Var(flags_name.clone())); }
+            HirExpr::Lambda(
+                vec![HirParam { name: source_name.clone(), ty: source_type.clone() }],
+                params, ret,
+                Box::new(HirExpr::Call(Box::new(HirExpr::Var(name.into())), arguments)),
+            )
+        };
+        for set in [false, true] {
+            body.push(HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                vec![HirExpr::Var(callbacks_name.clone()), HirExpr::Call(
+                    Box::new(HirExpr::Var("registerNativeCallbackGraph".into())),
+                    vec![descriptor_callback(set)],
+                )],
+            )));
+        }
+        let callback_body = body.split_off(callback_start);
+        let failure_name = format!("__thaw_native_projection_failure_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(failure_name.clone(), HirType::Str);
+        body.push(HirStmt::Try(callback_body, failure_name.clone(), vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_release_native_projection_callbacks".into())),
+                vec![HirExpr::Var(callbacks_name.clone())],
+            )),
+            HirStmt::Throw(HirExpr::Var(failure_name)),
+        ], None));
         let result = HirExpr::Call(
-            Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+            Box::new(HirExpr::Var("__thaw_build_native_object_wrapper".into())),
             vec![
-                HirExpr::Call(
-                    Box::new(HirExpr::Var("getDynamicValue".into())),
-                    vec![HirExpr::Lit(HirLit::Str(
-                        "__thaw_object_with_native_getters".into(),
-                    ))],
-                ),
-                arguments,
-                HirExpr::Var(getters_name),
+                HirExpr::Var(builder_name),
+                HirExpr::Var(args_name),
+                HirExpr::Var(callbacks_name),
+            ],
+        );
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_intern_native_object".into())),
+            vec![
+                HirExpr::Var(source_name.clone()),
+                HirExpr::Lit(HirLit::Str(layout)),
+                result,
             ],
         );
         body.push(HirStmt::Return(Some(result)));

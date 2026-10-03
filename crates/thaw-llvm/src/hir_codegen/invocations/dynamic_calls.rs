@@ -34,6 +34,15 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamicMethodHandleRaw" => self.compile_call_dynamic_method_handle(args, true),
             "readDynamicValue" => self.compile_read_dynamic_value(args),
             "retainDynamicJson" => self.compile_retain_dynamic_json(args),
+            "__thaw_json_host_from_dynamic" => self.compile_host_json_from_dynamic(args),
+            "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
+            "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
+            "__thaw_register_native_object_projector" =>
+                self.compile_register_native_object_projector(args),
+            "__thaw_require_native_owner" => self.compile_require_native_owner(args),
+            "__thaw_release_native_projection_callbacks" =>
+                self.compile_release_native_projection_callbacks(args),
+            "__thaw_intern_native_object" => self.compile_intern_native_object(args),
             "resolveDynamicValue" => self.compile_dynamic_handle_operation(
                 "thaw_js_resolve_handle_handle_result",
                 args,
@@ -42,6 +51,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamicValueMixedNativeJson" => self.compile_call_dynamic_value_mixed_native_json(args),
             "callDynamicValueMixedHandle" => {
                 self.compile_call_dynamic_value_mixed_handle(args)
+            }
+            "__thaw_build_native_object_wrapper" => {
+                self.compile_build_native_object_wrapper(args)
             }
             "constructDynamicValue" => self.compile_construct_dynamic_value(args),
             "loadNativeAddon" => self.compile_load_native_addon(args),
@@ -55,6 +67,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "pollNativeAddonEvents" => self.compile_poll_native_addon_events(args),
             "registerNativeCallback" => self.compile_register_native_callback(args, false),
             "registerNativeCallbackGraph" => self.compile_register_native_callback(args, true),
+            "__thaw_register_native_method_callback_graph" => {
+                self.compile_register_native_method_callback_graph(args)
+            }
             _ => return None,
         })
     }
@@ -94,6 +109,29 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map(Into::into)
             .map_err(|error| error.to_string())
+    }
+
+    fn compile_host_json_from_dynamic(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source] = args else {
+            return Err("live JSON host conversion expects one handle".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let handle = self.compile_expr(source)?.into_int_value();
+        let json = self.builder.build_call(
+            self.module.get_function("thaw_json_host_from_borrowed_handle").unwrap(),
+            &[handle.into()], "live_json_host",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("live JSON host conversion returned no value")?;
+        // The Host lease retained its own reference. Discard the temporary
+        // handle even when the host conversion reported an error.
+        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            &[handle.into()], "release_live_json_builder_handle")
+            .map_err(|error| error.to_string())?;
+        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
     }
 
     fn compile_retain_dynamic_json(
@@ -256,5 +294,174 @@ impl<'ctx> HirCompiler<'ctx> {
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(self.context.bool_type().const_int(1, false).into())
+    }
+
+    fn compile_lookup_native_object(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source, HirExpr::Lit(HirLit::Str(layout))] = args else {
+            return Err("native object lookup expects object and static layout".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let source = self.compile_expr(source)?.into_pointer_value();
+        let layout = self.builder.build_global_string_ptr(layout, "cached_native_object_layout")
+            .map_err(|error| error.to_string())?;
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_lookup_native_object").unwrap(),
+            &[source.into(), layout.as_pointer_value().into()], "lookup_native_object",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native object lookup returned no result")?.into_struct_value();
+        let handle = self.builder.build_extract_value(result, 0, "cached_native_object_handle")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let error = self.builder.build_extract_value(result, 1, "cached_native_object_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        let present = self.builder.build_int_compare(IntPredicate::NE, handle,
+            self.context.i64_type().const_zero(), "cached_native_object_present")
+            .map_err(|error| error.to_string())?;
+        let ty = self.basic_type(&HirType::Optional(Box::new(HirType::JsValue)))?
+            .into_struct_type();
+        let tagged = self.builder.build_insert_value(ty.get_undef(), present, 0,
+            "cached_native_object_tag")
+            .map_err(|error| error.to_string())?.into_struct_value();
+        self.builder.build_insert_value(tagged, handle, 1, "cached_native_object_value")
+            .map(Into::into).map_err(|error| error.to_string())
+    }
+
+    fn compile_require_native_owner(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [owner] = args else {
+            return Err("native owner check expects one object".into());
+        };
+        let owner = self.compile_expr(owner)?.into_pointer_value();
+        let valid = self.builder.build_call(
+            self.module.get_function("thaw_arena_contains_allocation").unwrap(),
+            &[owner.into()], "native_owner_allocation",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native owner check returned no value")?.into_int_value();
+        let missing = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ, valid, self.context.i8_type().const_zero(),
+            "native_owner_missing",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let error_block = self.context.append_basic_block(function, "native_owner_error");
+        let continuation = self.context.append_basic_block(function, "native_owner_ready");
+        self.builder.build_conditional_branch(missing, error_block, continuation)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(error_block);
+        self.compile_throw_builtin_error("TypeError", "Live native object requires arena-owned storage")?;
+        self.builder.position_at_end(continuation);
+        Ok(self.context.i8_type().const_zero().into())
+    }
+
+    fn compile_register_native_object_projector(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [owner, HirExpr::Lit(HirLit::Str(layout)), factory] = args else {
+            return Err("native projector registration expects owner, layout, and factory".into());
+        };
+        let owner = self.compile_expr(owner)?.into_pointer_value();
+        if !self.projects_native_objects {
+            // The full typed factory is never emitted into native-only
+            // programs, even though HIR records an erasure site.
+            return Ok(self.context.bool_type().const_int(1, false).into());
+        }
+        let layout = self.builder.build_global_string_ptr(layout, "native_projector_layout")
+            .map_err(|error| error.to_string())?;
+        let factory = self.compile_expr(factory)?.into_pointer_value();
+        let accepted = self.builder.build_call(
+            self.module.get_function("thaw_object_register_projector").unwrap(),
+            &[owner.into(), layout.as_pointer_value().into(), factory.into()],
+            "register_native_projector",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native projector registration returned no value")?.into_int_value();
+        let failed = self.builder.build_not(accepted, "native_projector_failed")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let error_block = self.context.append_basic_block(function, "native_projector_error");
+        let continuation = self.context.append_basic_block(function, "native_projector_ready");
+        self.builder.build_conditional_branch(failed, error_block, continuation)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(error_block);
+        self.compile_throw_builtin_error("TypeError", "Incompatible native object projection")?;
+        self.builder.position_at_end(continuation);
+        Ok(accepted.into())
+    }
+
+    fn compile_release_native_projection_callbacks(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [callbacks] = args else {
+            return Err("native projection cleanup expects its callback array".into());
+        };
+        let callbacks = self.compile_expr(callbacks)?.into_pointer_value();
+        let callbacks = self.compile_array_data(callbacks)?;
+        self.builder.build_call(
+            self.module.get_function("thaw_js_release_native_handle_array").unwrap(),
+            &[callbacks.into()], "release_unbuilt_native_projection",
+        ).map_err(|error| error.to_string())?;
+        Ok(self.context.i8_type().const_zero().into())
+    }
+
+    fn compile_lookup_native_projector(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [owner, HirExpr::Lit(HirLit::Str(layout))] = args else {
+            return Err("native projector lookup expects owner and static layout".into());
+        };
+        let owner = self.compile_expr(owner)?.into_pointer_value();
+        let layout = self.builder.build_global_string_ptr(layout, "native_projector_query")
+            .map_err(|error| error.to_string())?;
+        let projector = self.builder.build_call(
+            self.module.get_function("thaw_object_projector").unwrap(),
+            &[owner.into(), layout.as_pointer_value().into()], "lookup_native_projector",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native projector lookup returned no value")?.into_pointer_value();
+        let present = self.builder.build_is_not_null(projector, "native_projector_present")
+            .map_err(|error| error.to_string())?;
+        let ty = self.basic_type(&HirType::Optional(Box::new(HirType::Function(
+            Vec::new(), Box::new(HirType::JsValue)))))?.into_struct_type();
+        let tagged = self.builder.build_insert_value(ty.get_undef(), present, 0,
+            "native_projector_tag").map_err(|error| error.to_string())?.into_struct_value();
+        self.builder.build_insert_value(tagged, projector, 1, "native_projector_value")
+            .map(Into::into).map_err(|error| error.to_string())
+    }
+
+    fn compile_intern_native_object(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source, HirExpr::Lit(HirLit::Str(layout)), candidate] = args else {
+            return Err("native object interning expects object, static layout, and wrapper".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let source = self.compile_expr(source)?.into_pointer_value();
+        let layout = self.builder.build_global_string_ptr(layout, "native_object_layout")
+            .map_err(|error| error.to_string())?;
+        let candidate = self.compile_expr(candidate)?.into_int_value();
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_intern_native_object").unwrap(),
+            &[source.into(), layout.as_pointer_value().into(), candidate.into()],
+            "intern_native_object",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native object interning returned no value")?.into_struct_value();
+        let handle = self.builder.build_extract_value(result, 0, "interned_native_object_handle")
+            .map_err(|error| error.to_string())?;
+        let error = self.builder.build_extract_value(result, 1, "interned_native_object_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        Ok(handle)
     }
 }
