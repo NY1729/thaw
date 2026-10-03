@@ -46,10 +46,32 @@ fn bytes_encoding_preserves_native_units_and_stops_at_invalid_hex() {
     assert_eq!(unsafe { read_byte_array(thaw_bytes_from_string(c"1a7".as_ptr(), c"hex".as_ptr())) }.unwrap(), [0x1a]);
     assert_eq!(unsafe { read_byte_array(thaw_bytes_from_string(c"1ag123".as_ptr(), c"hex".as_ptr())) }.unwrap(), [0x1a]);
     let output = unsafe { write_byte_array(&[0, 0, 0]) };
-    assert_eq!(unsafe { thaw_bytes_set_from_string(output, c"1ag123".as_ptr(), c"hex".as_ptr()) }, 1.0);
+    let set_result = unsafe { thaw_bytes_set_from_string(output, c"1ag123".as_ptr(), c"hex".as_ptr()) };
+    assert_eq!(unsafe { set_result.cast::<f64>().read_unaligned() }, 2.0);
+    assert_eq!(unsafe { set_result.add(8).cast::<f64>().read_unaligned() }, 1.0);
     assert_eq!(unsafe { read_byte_array(output) }.unwrap(), [0x1a, 0, 0]);
     let ascii = unsafe { thaw_bytes_to_string(unsafe { write_byte_array(&[0xc1]) }, c"ascii".as_ptr()) };
     assert_eq!(unsafe { CStr::from_ptr(ascii) }.to_bytes(), b"A");
+}
+
+#[test]
+fn bytes_set_from_base64_reports_committed_source_units() {
+    let one = unsafe { write_byte_array(&[0]) };
+    let short = unsafe { thaw_bytes_set_from_string(one, c"YQ".as_ptr(), c"base64".as_ptr()) };
+    assert_eq!(unsafe { short.cast::<f64>().read_unaligned() }, 2.0);
+    assert_eq!(unsafe { short.add(8).cast::<f64>().read_unaligned() }, 1.0);
+    assert_eq!(unsafe { read_byte_array(one) }.unwrap(), [b'a']);
+
+    let three = unsafe { write_byte_array(&[0, 0, 0]) };
+    let stopped = unsafe { thaw_bytes_set_from_string(three, c"YWJj ".as_ptr(), c"base64".as_ptr()) };
+    assert_eq!(unsafe { stopped.cast::<f64>().read_unaligned() }, 4.0);
+    assert_eq!(unsafe { stopped.add(8).cast::<f64>().read_unaligned() }, 3.0);
+    assert_eq!(unsafe { read_byte_array(three) }.unwrap(), b"abc");
+
+    let four = unsafe { write_byte_array(&[0, 0, 0, 0]) };
+    let complete = unsafe { thaw_bytes_set_from_string(four, c"YWJj ".as_ptr(), c"base64".as_ptr()) };
+    assert_eq!(unsafe { complete.cast::<f64>().read_unaligned() }, 5.0);
+    assert_eq!(unsafe { complete.add(8).cast::<f64>().read_unaligned() }, 3.0);
 }
 
 #[test]

@@ -178,12 +178,89 @@ pub unsafe extern "C" fn thaw_bytes_from_string(
     unsafe { write_byte_array(&bytes) }
 }
 
+/// Decode the default base64 alphabet only as far as the destination can
+/// hold complete chunks. Positions are UTF-16 code-unit offsets in `text`.
+fn decode_set_from_base64(text: &[u16], max_length: usize) -> (usize, Vec<u8>) {
+    if max_length == 0 {
+        return (0, Vec::new());
+    }
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4];
+    let mut chunk_length = 0;
+    let mut index = 0;
+    let mut read = 0;
+    while index < text.len() {
+        // The five ASCII whitespace code units in SkipAsciiWhitespace.
+        if matches!(text[index], 0x09 | 0x0a | 0x0c | 0x0d | 0x20) {
+            index += 1;
+            continue;
+        }
+        if text[index] == u16::from(b'=') && (chunk_length == 2 || chunk_length == 3) {
+            let mut tail = index + 1;
+            while tail < text.len() && matches!(text[tail], 0x09 | 0x0a | 0x0c | 0x0d | 0x20) {
+                tail += 1;
+            }
+            if chunk_length == 2 && tail < text.len() && text[tail] == u16::from(b'=') {
+                tail += 1;
+            }
+            while tail < text.len() && matches!(text[tail], 0x09 | 0x0a | 0x0c | 0x0d | 0x20) {
+                tail += 1;
+            }
+            if tail == text.len() {
+                let n = (u32::from(chunk[0]) << 18)
+                    | (u32::from(chunk[1]) << 12)
+                    | (u32::from(chunk[2]) << 6);
+                bytes.push((n >> 16) as u8);
+                if chunk_length == 3 {
+                    bytes.push((n >> 8) as u8);
+                }
+                return (text.len(), bytes);
+            }
+        }
+        let Some(value) = u8::try_from(text[index]).ok().and_then(base64_decode_value) else {
+            // ponytail: Add setFrom SyntaxError/options validation with a separate decoder contract;
+            // the generic Buffer decoder remains permissive.
+            index += 1;
+            continue;
+        };
+        index += 1;
+        let remaining = max_length - bytes.len();
+        if (remaining == 1 && chunk_length == 2)
+            || (remaining == 2 && chunk_length == 3)
+        {
+            return (read, bytes);
+        }
+        chunk[chunk_length] = value;
+        chunk_length += 1;
+        if chunk_length == 4 {
+            let n = (u32::from(chunk[0]) << 18)
+                | (u32::from(chunk[1]) << 12)
+                | (u32::from(chunk[2]) << 6)
+                | u32::from(chunk[3]);
+            bytes.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+            chunk_length = 0;
+            read = index;
+            if bytes.len() == max_length {
+                return (read, bytes);
+            }
+        }
+    }
+    if chunk_length >= 2 {
+        let n = (u32::from(chunk[0]) << 18)
+            | (u32::from(chunk[1]) << 12)
+            | (u32::from(chunk[2]) << 6);
+        bytes.push((n >> 16) as u8);
+        if chunk_length == 3 {
+            bytes.push((n >> 8) as u8);
+        }
+    }
+    (text.len(), bytes)
+}
+
 #[no_mangle]
 /// `Uint8Array.prototype.setFromHex`/`setFromBase64`: decode `text` and
 /// write its bytes into `array` from offset 0, up to the array's length.
-/// Returns the number of bytes written (the HIR reports `read` as the
-/// source length and `written` as this count, matching a fully valid
-/// input).
+/// Returns an arena object with adjacent `read` and `written` f64 fields.
 ///
 /// # Safety
 ///
@@ -193,24 +270,41 @@ pub unsafe extern "C" fn thaw_bytes_set_from_string(
     array: *mut u8,
     text: *const c_char,
     encoding: *const c_char,
-) -> f64 {
-    if array.is_null() || text.is_null() {
-        return 0.0;
+) -> *mut u8 {
+    let result = thaw_arena::thaw_arena_alloc(16, 8);
+    if result.is_null() {
+        return result;
     }
-    let decoded = decode_string(unsafe { CStr::from_ptr(text) }.to_bytes(), &encoding_str(encoding));
-    let Some(length) = (unsafe { native_array_length(array) }) else {
-        return 0.0;
+    let (read, decoded) = if array.is_null() || text.is_null() {
+        (0, Vec::new())
+    } else if let Some(length) = unsafe { native_array_length(array) } {
+        let source = unsafe { CStr::from_ptr(text) }.to_bytes();
+        match encoding_str(encoding).as_str() {
+            "base64" => decode_set_from_base64(&wtf8_decode_utf16(source), length),
+            "hex" => {
+                let mut decoded = decode_string(source, "hex");
+                decoded.truncate(length);
+                (decoded.len() * 2, decoded)
+            }
+            other => {
+                let mut decoded = decode_string(source, other);
+                decoded.truncate(length);
+                (decoded.len(), decoded)
+            }
+        }
+    } else {
+        (0, Vec::new())
     };
-    let written = decoded.len().min(length);
-    for (index, byte) in decoded.iter().take(written).enumerate() {
+    for (index, byte) in decoded.iter().enumerate() {
         unsafe {
-            array
-                .add(8 + index * 8)
-                .cast::<f64>()
-                .write_unaligned(f64::from(*byte));
+            array.add(8 + index * 8).cast::<f64>().write_unaligned(f64::from(*byte));
         }
     }
-    written as f64
+    unsafe {
+        result.cast::<f64>().write_unaligned(read as f64);
+        result.add(8).cast::<f64>().write_unaligned(decoded.len() as f64);
+    }
+    result
 }
 
 #[no_mangle]
