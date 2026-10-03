@@ -1909,6 +1909,58 @@ fn compiles_and_runs_getters_on_a_non_identifier_receiver() {
 }
 
 #[test]
+fn static_accessor_prefix_returns_computed_value_before_setter_normalization() {
+    let source = r#"
+        let stored = 0;
+        let reads = 0;
+        let writes = 0;
+        let order = "";
+        function reset(value: number): void {
+            stored = value;
+            reads = 0;
+            writes = 0;
+            order = "";
+        }
+        class Counter {
+            static get value(): number {
+                reads++;
+                order += "G";
+                return stored;
+            }
+            static set value(next: number) {
+                writes++;
+                order += "S";
+                stored = next * 10;
+            }
+            static incrementViaThis(): number { return ++this.value; }
+            static decrementViaThis(): number { return --this.value; }
+        }
+        function main(): void {
+            reset(4);
+            const incremented: number = ++Counter.value;
+            console.log(incremented, stored, reads, writes, order);
+            reset(4);
+            const decremented: number = --Counter.value;
+            console.log(decremented, stored, reads, writes, order);
+            reset(4);
+            const oldIncrement: number = Counter.value++;
+            console.log(oldIncrement, stored, reads, writes, order);
+            reset(4);
+            const oldDecrement: number = Counter.value--;
+            console.log(oldDecrement, stored, reads, writes, order);
+            reset(2);
+            console.log(Counter.incrementViaThis(), stored, reads, writes, order);
+            reset(2);
+            console.log(Counter.decrementViaThis(), stored, reads, writes, order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "static_accessor_prefix_result"),
+        "5 50 1 1 GS\n3 30 1 1 GS\n4 50 1 1 GS\n4 30 1 1 GS\n3 30 1 1 GS\n1 10 1 1 GS\n"
+    );
+}
+
+#[test]
 fn compiles_and_runs_native_class_setters() {
     let source = r#"
         let version: number = 0;

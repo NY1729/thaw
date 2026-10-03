@@ -38,22 +38,36 @@ impl<'a> FnLowerer<'a> {
                         UpdateOp::MinusMinus => BinOp::Sub,
                     };
                     let current = HirExpr::Call(Box::new(HirExpr::Var(getter)), Vec::new());
-                    let one = HirExpr::Lit(HirLit::F64(1.0));
-                    if update.prefix {
-                        let updated = HirExpr::BinOp(operator, Box::new(current), Box::new(one));
-                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![updated]));
-                    }
                     let old_name = format!("__thaw_static_update_old_{}", self.next_binding);
                     self.next_binding += 1;
+                    let updated_name = format!("__thaw_static_update_value_{}", self.next_binding);
+                    self.next_binding += 1;
                     self.scope.insert(old_name.clone(), HirType::F64);
+                    self.scope.insert(updated_name.clone(), HirType::F64);
                     let old = HirExpr::Var(old_name.clone());
-                    let updated = HirExpr::BinOp(operator, Box::new(old.clone()), Box::new(one));
+                    let updated = HirExpr::BinOp(
+                        operator,
+                        Box::new(old.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    );
                     let result = HirExpr::Block(vec![
-                        HirStmt::Expr(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![updated])),
-                        HirStmt::Return(Some(old)),
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(setter)),
+                            vec![HirExpr::Var(updated_name.clone())],
+                        )),
+                        HirStmt::Return(Some(if update.prefix {
+                            HirExpr::Var(updated_name.clone())
+                        } else {
+                            old
+                        })),
                     ]);
-                    return self
-                        .wrap_call_argument_bindings(result, &[(old_name, HirType::F64, current)]);
+                    return self.wrap_call_argument_bindings(
+                        result,
+                        &[
+                            (old_name, HirType::F64, current),
+                            (updated_name, HirType::F64, updated),
+                        ],
+                    );
                 }
             }
         }
