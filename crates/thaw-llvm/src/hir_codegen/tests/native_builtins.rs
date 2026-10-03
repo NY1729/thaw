@@ -10227,3 +10227,40 @@ fn date_constructor_native_bigint_symbol_wrappers_throw_after_one_evaluation() {
     assert_eq!(compile_and_run(source, "date_native_wrapper_type_errors"),
         "TypeError true 1\nTypeError true 2\nproducer 3\n1704067200000 1704067200500 5\nTypeError 6\nTypeError 7\ntrue 0 9\nTypeError 10\nTypeError 11\nTypeError true\nTypeError true\n13\n");
 }
+
+#[test]
+fn native_object_method_receiver_mutations_use_original_prefix_storage() {
+    let source = r#"
+        function main(): void {
+            const object = {
+                value: 1,
+                increment(): number { this.value++; return this.value; },
+                later: 9,
+            };
+            const same = object;
+            console.log(object.increment(), same.value);
+            console.log(object.increment?.(), same.value);
+
+            const primitive = {
+                count: 0,
+                [Symbol.toPrimitive](hint: string): number {
+                    this.count++;
+                    return this.count;
+                },
+            };
+            console.log(+primitive, primitive.count);
+            console.log(+primitive, primitive.count);
+
+            const escaped = {
+                value: 7,
+                self(): any { return this; },
+                later: 9,
+            };
+            console.log(JSON.stringify(escaped.self()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_object_method_receiver_live_prefix"),
+        "2 2\n3 3\n1 1\n2 2\n{\"value\":7}\n"
+    );
+}

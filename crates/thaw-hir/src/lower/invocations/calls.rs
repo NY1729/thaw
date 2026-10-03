@@ -836,28 +836,11 @@ impl<'a> FnLowerer<'a> {
                             let HirType::Object(receiver_fields) = &params[0] else {
                                 unreachable!()
                             };
-                            args.insert(
-                                0,
-                                HirExpr::ObjectLit(
-                                    receiver_fields
-                                        .iter()
-                                        .map(|(name, _)| {
-                                            if name == "__thaw_object_method_receiver" {
-                                                (name.clone(), HirExpr::Lit(HirLit::Undefined))
-                                            } else {
-                                                (
-                                                    name.clone(),
-                                                    HirExpr::PropAccess(
-                                                        Box::new(receiver.clone()),
-                                                        object_ty.clone(),
-                                                        name.clone(),
-                                                    ),
-                                                )
-                                            }
-                                        })
-                                        .collect(),
-                                ),
+                            let (this_arg, view_binding) = self.native_object_method_receiver(
+                                receiver.clone(), &object_ty, receiver_fields,
                             );
+                            if let Some(binding) = view_binding { bindings.insert(2, binding); }
+                            args.insert(0, this_arg);
                         }
                         if args.len() < params.len()
                             && (args.len()..params.len())
