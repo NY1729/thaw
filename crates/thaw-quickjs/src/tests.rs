@@ -1923,6 +1923,80 @@ fn crypto_generates_rsa_ec_and_ed25519_key_pairs_that_round_trip() {
     assert_eq!(call("asyncGeneration", "[]"), "[true,true]");
 }
 
+/// Encrypted private-key output is unsupported. Reject every supplied cipher
+/// or passphrase before native key generation or plaintext KeyObject export;
+/// keep ordinary unencrypted KeyObject, PEM, and DER paths available.
+#[test]
+fn crypto_rejects_encrypted_private_key_output_before_generation_or_export() {
+    assert_eq!(load(r#"
+      function encryptedPrivateOutputGuards() {
+        const cryptoModule = __thaw_crypto_module;
+        const originalGenerate = __thaw_crypto_generate_key_pair_json;
+        const originalQueue = queueMicrotask;
+        let nativeCalls = 0, queued, callbackCount = 0, callbackFailed = false;
+        const rejects = [];
+        try {
+          __thaw_crypto_generate_key_pair_json = () => { nativeCalls++; return JSON.stringify({ publicPem: 'PUBLIC', privatePem: 'PRIVATE' }); };
+          queueMicrotask = job => { queued = job; };
+          for (const privateKeyEncoding of [
+            { type: 'pkcs8', format: 'pem', cipher: 'aes-256-cbc', passphrase: 'secret' },
+            { type: 'pkcs8', format: 'pem', cipher: '' },
+            { type: 'pkcs8', format: 'der', passphrase: false },
+            { type: 'pkcs8', format: 'der', passphrase: null }
+          ]) {
+            try { cryptoModule.generateKeyPairSync('rsa', { modulusLength: 512, privateKeyEncoding }); rejects.push(false); }
+            catch (error) { rejects.push(error instanceof TypeError); }
+          }
+          cryptoModule.generateKeyPair('rsa', { modulusLength: 512,
+            privateKeyEncoding: { type: 'pkcs8', format: 'pem', passphrase: '' } },
+            (error, publicKey, privateKey) => {
+              callbackCount++;
+              callbackFailed = error instanceof TypeError && publicKey === undefined && privateKey === undefined;
+            });
+          queued();
+          let changingReads = 0;
+          try {
+            cryptoModule.generateKeyPairSync('rsa', { modulusLength: 512,
+              get privateKeyEncoding() {
+                changingReads++;
+                return changingReads === 1
+                  ? { type: 'pkcs8', format: 'pem', cipher: 'aes-256-cbc' }
+                  : { type: 'pkcs8', format: 'pem' };
+              }
+            });
+            rejects.push(false);
+          } catch (error) { rejects.push(error instanceof TypeError && changingReads === 1); }
+          let parentReads = 0;
+          const options = {
+            modulusLength: 512,
+            get privateKeyEncoding() { parentReads++; return { type: 'pkcs8', format: 'pem' }; },
+            publicKeyEncoding: { type: 'spki', format: 'pem' }
+          };
+          const ordinary = cryptoModule.generateKeyPairSync('rsa', options);
+          rejects.push(parentReads === 1 && ordinary.publicKey === 'PUBLIC' && ordinary.privateKey === 'PRIVATE');
+        } finally {
+          __thaw_crypto_generate_key_pair_json = originalGenerate;
+          queueMicrotask = originalQueue;
+        }
+        const generated = cryptoModule.generateKeyPairSync('ed25519');
+        const privateKey = generated.privateKey;
+        const unencrypted = privateKey.export();
+        let directRejected = false, passphraseRejected = false;
+        try { privateKey.export({ cipher: 'aes-256-cbc', passphrase: 'secret' }); }
+        catch (error) { directRejected = error instanceof TypeError; }
+        try { privateKey.export({ passphrase: null }); }
+        catch (error) { passphraseRejected = error instanceof TypeError; }
+        const publicUnaffected = generated.publicKey.export({ cipher: 'ignored' }) === generated.publicKey.export();
+        const secretUnaffected = cryptoModule.createSecretKey(Buffer.from('key')).export({ cipher: 'ignored' }).toString() === 'key';
+        return [rejects, nativeCalls, callbackCount, callbackFailed, directRejected,
+          passphraseRejected, typeof unencrypted === 'string' && unencrypted.indexOf('-----BEGIN PRIVATE KEY-----') === 0,
+          publicUnaffected, secretUnaffected];
+      }
+    "#), 1);
+    assert_eq!(call("encryptedPrivateOutputGuards", "[]"),
+      "[[true,true,true,true,true,true],1,1,true,true,true,true,true,true]");
+}
+
 /// `generateKeyPairSync`'s `privateKeyEncoding`/`publicKeyEncoding`
 /// `type: 'pkcs1'` (RSA)/`'sec1'` (EC) -- the native format real
 /// OpenSSL itself produces (`-----BEGIN RSA PRIVATE KEY-----`/`-----
