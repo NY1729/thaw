@@ -133,6 +133,11 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_promise_resolve"
         };
         if reject {
+            // The reject closure's argument is declared HirType::Str. Record
+            // that producer-proven NativeStr before settlement, including
+            // computed strings and values converted by Promise.reject.
+            // Public runtime rejection pointers remain opaque.
+            self.mark_pending_native_text(payload)?;
             if !typed_rejection {
                 self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
                     self.context.ptr_type(AddressSpace::default()).const_null())
