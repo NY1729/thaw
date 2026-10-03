@@ -2773,10 +2773,23 @@ impl<'a> FnLowerer<'a> {
                     )),
                     // `Symbol("x").description` -- the description part of
                     // the symbol's own runtime representation.
-                    HirType::Symbol if prop.sym == *"description" => Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_symbol_description".to_string())),
-                        vec![obj],
-                    )),
+                    HirType::Symbol if prop.sym == *"description" => {
+                        let name = format!("__thaw_symbol_description_raw_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::Str);
+                        let raw = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_symbol_description".into())), vec![obj]);
+                        let result = HirExpr::Conditional(
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                                vec![HirExpr::Var(name.clone())])),
+                            Box::new(HirExpr::OptionalNone(HirType::Str)),
+                            Box::new(HirExpr::OptionalSome(
+                                Box::new(HirExpr::Var(name.clone())), HirType::Str)),
+                            HirType::Optional(Box::new(HirType::Str)),
+                        );
+                        self.wrap_call_argument_bindings(result, &[(name, HirType::Str, raw)])
+                    },
                     // Every string is a potential caught exception (there is
                     // no separate `Error` type -- see
                     // `lower/expressions/lowering.rs`'s `new Error(...)`

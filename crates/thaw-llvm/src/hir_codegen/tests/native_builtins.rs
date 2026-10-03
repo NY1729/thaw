@@ -10906,3 +10906,25 @@ fn native_projection_method_registration_retains_physical_receiver_hir_type() {
     }
     assert_eq!(registrations, 2, "one getter and one setter");
 }
+
+#[test]
+fn symbol_absent_description_is_distinct_from_empty_and_evaluates_once() {
+    let source = r#"
+        let reads = 0;
+        function description(): string | undefined { reads++; return undefined; }
+        function nothing(): void { reads++; }
+        function main(): void {
+            console.log(Symbol().description === undefined,
+                Symbol(undefined).description === undefined, Symbol('').description === '');
+            console.log(Symbol(description()).description === undefined, reads);
+            console.log(Symbol(nothing()).description === undefined, reads);
+            console.log(Symbol().toString(), Symbol(null).description);
+            const absent = Symbol();
+            const object: any = {};
+            object[absent] = 9;
+            console.log(object[absent], Symbol.for('').description === '');
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "symbol_absent_description"),
+        "true true true\ntrue 1\ntrue 2\nSymbol() null\n9 true\n");
+}

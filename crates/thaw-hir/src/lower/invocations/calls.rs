@@ -1488,9 +1488,27 @@ impl<'a> FnLowerer<'a> {
             let description = match call.args.first() {
                 Some(argument) => {
                     let value = self.lower_expr(&argument.expr)?;
-                    self.coerce_primitive_to_string(value)?
+                    let ty = self.infer_expr_type(&value)?;
+                    if matches!(ty, HirType::Undefined | HirType::Void) {
+                        HirExpr::EvalThen(Box::new(value), Box::new(HirExpr::OptionalNone(HirType::Str)))
+                    } else {
+                        let name = format!("__thaw_symbol_description_input_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        let bound = HirExpr::Var(name.clone());
+                        let absent = self.function_observable_absence(bound.clone(), &ty);
+                        let text = self.coerce_primitive_to_string(bound)?;
+                        let description = HirExpr::Conditional(
+                            Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                Box::new(absent), Box::new(HirExpr::Lit(HirLit::F64(1.0))))),
+                            Box::new(HirExpr::OptionalNone(HirType::Str)),
+                            Box::new(HirExpr::OptionalSome(Box::new(text), HirType::Str)),
+                            HirType::Optional(Box::new(HirType::Str)),
+                        );
+                        self.wrap_call_argument_bindings(description, &[(name, ty, value)])?
+                    }
                 }
-                None => HirExpr::Lit(HirLit::Str(String::new())),
+                None => HirExpr::OptionalNone(HirType::Str),
             };
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_symbol_new".into())),
