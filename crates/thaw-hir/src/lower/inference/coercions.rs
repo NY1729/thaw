@@ -960,8 +960,12 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             return match actual {
-                HirType::Null => Ok(HirExpr::NullishNull(payload.as_ref().clone())),
-                HirType::Undefined => Ok(HirExpr::NullishUndefined(payload.as_ref().clone())),
+                HirType::Null => Ok(absent_after(
+                    value, HirExpr::NullishNull(payload.as_ref().clone()),
+                )),
+                HirType::Undefined => Ok(absent_after(
+                    value, HirExpr::NullishUndefined(payload.as_ref().clone()),
+                )),
                 actual if actual == *declared => Ok(value),
                 _ => {
                     let value = self.coerce_to_declared(payload.as_ref(), value)?;
