@@ -192,6 +192,10 @@
     swap32() { if (this.length % 4) throw new RangeError('Buffer size must be a multiple of 32-bits'); for (let index = 0; index < this.length; index += 4) { [this[index], this[index + 3]] = [this[index + 3], this[index]]; [this[index + 1], this[index + 2]] = [this[index + 2], this[index + 1]]; } return this; }
     swap64() { if (this.length % 8) throw new RangeError('Buffer size must be a multiple of 64-bits'); for (let index = 0; index < this.length; index += 8) for (let offset = 0; offset < 4; offset++) [this[index + offset], this[index + 7 - offset]] = [this[index + 7 - offset], this[index + offset]]; return this; }
   };
+  // runtime.js declares these lexical slots before Buffer is installed.
+  // Capture the real Buffer methods before user scripts can replace them.
+  thawGraphBufferFrom = Buffer.from.bind(Buffer);
+  thawGraphBufferIsBuffer = Buffer.isBuffer.bind(Buffer);
   Buffer.poolSize = 8192;
   for (const name of Object.getOwnPropertyNames(Buffer)) {
     if (!['length', 'name', 'prototype'].includes(name)) {
