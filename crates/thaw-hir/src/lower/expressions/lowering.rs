@@ -1,4 +1,128 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_date_single_timestamp(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&value)?;
+        match ty.clone() {
+            HirType::Str | HirType::StrLiteral(_) => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_date_parse".into())),
+                vec![if matches!(ty, HirType::StrLiteral(_)) {
+                    HirExpr::TypedClosure(HirType::Str, Box::new(value))
+                } else { value }],
+            )),
+            HirType::Union(members) => {
+                if members.is_empty() { return Err("Date constructor has an empty union argument".into()); }
+                let name = format!("__thaw_date_union_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let mut result = None;
+                for (index, _) in members.iter().enumerate().rev() {
+                    let part = self.lower_date_single_timestamp(HirExpr::UnionValue(
+                        Box::new(HirExpr::Var(name.clone())), index, members.clone(),
+                    ))?;
+                    result = Some(match result {
+                        None => part,
+                        Some(rest) => HirExpr::Conditional(
+                            Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(Box::new(HirExpr::Var(name.clone())), members.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))))),
+                            Box::new(part), Box::new(rest), HirType::F64,
+                        ),
+                    });
+                }
+                self.wrap_call_argument_bindings(result.unwrap(), &[(name, ty, value)])
+            }
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                let name = format!("__thaw_date_absent_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let bound = HirExpr::Var(name.clone());
+                let element = payload.as_ref().clone();
+                let present = match &ty {
+                    HirType::Optional(_) => HirExpr::OptionalValue(Box::new(bound.clone()), element.clone()),
+                    HirType::Nullable(_) => HirExpr::NullableValue(Box::new(bound.clone()), element.clone()),
+                    HirType::Nullish(_) => HirExpr::NullishValue(Box::new(bound.clone()), element.clone()),
+                    _ => unreachable!(),
+                };
+                let present = self.lower_date_single_timestamp(present)?;
+                let result = match &ty {
+                    HirType::Optional(_) => HirExpr::Conditional(
+                        Box::new(HirExpr::OptionalIsNone(Box::new(bound), element)),
+                        Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))), Box::new(present), HirType::F64,
+                    ),
+                    HirType::Nullable(_) => HirExpr::Conditional(
+                        Box::new(HirExpr::NullableIsNone(Box::new(bound), element)),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))), Box::new(present), HirType::F64,
+                    ),
+                    HirType::Nullish(_) => HirExpr::Conditional(
+                        Box::new(HirExpr::NullishIsNull(Box::new(bound.clone()), element.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        Box::new(HirExpr::Conditional(
+                            Box::new(HirExpr::NullishIsUndefined(Box::new(bound), element)),
+                            Box::new(HirExpr::Lit(HirLit::F64(f64::NAN))), Box::new(present), HirType::F64,
+                        )), HirType::F64,
+                    ),
+                    _ => unreachable!(),
+                };
+                self.wrap_call_argument_bindings(result, &[(name, ty, value)])
+            }
+            HirType::JsValue => Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+                vec![
+                    HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str("__thaw_date_from_live_value".into()))]),
+                    value,
+                ],
+            )))),
+            HirType::Json => {
+                let name = format!("__thaw_date_json_arg_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), HirType::Json);
+                let bound = HirExpr::Var(name.clone());
+                let is_string = HirExpr::BinOp(BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![bound.clone()])),
+                    Box::new(HirExpr::Lit(HirLit::Str("string".into()))));
+                let parsed = HirExpr::Call(Box::new(HirExpr::Var("__thaw_date_parse".into())),
+                    vec![HirExpr::JsonAsString(Box::new(bound.clone()))]);
+                let clipped = HirExpr::Call(Box::new(HirExpr::Var("__thaw_date_time_clip".into())),
+                    vec![HirExpr::JsonAsNumber(Box::new(bound.clone()))]);
+                let plain = HirExpr::Conditional(Box::new(is_string), Box::new(parsed), Box::new(clipped), HirType::F64);
+                let handle_name = format!("__thaw_date_live_handle_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(handle_name.clone(), HirType::I64);
+                let handle = HirExpr::Var(handle_name.clone());
+                let live = HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+                    vec![
+                        HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str("__thaw_date_from_live_value".into()))]),
+                        HirExpr::TypedClosure(HirType::JsValue, Box::new(handle.clone())),
+                    ],
+                )));
+                let non_live = HirExpr::Conditional(
+                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_date_shape".into())), vec![bound.clone()])),
+                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_date_timestamp".into())), vec![bound.clone()])),
+                    Box::new(plain), HirType::F64,
+                );
+                let timestamp = self.wrap_call_argument_bindings(
+                    HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                            Box::new(handle), Box::new(HirExpr::Lit(HirLit::I64(0))))),
+                        Box::new(non_live), Box::new(live), HirType::F64,
+                    ),
+                    &[(handle_name, HirType::I64,
+                        HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())), vec![bound]))],
+                )?;
+                self.wrap_call_argument_bindings(timestamp, &[(name, HirType::Json, value)])
+            }
+            HirType::I64 | HirType::Symbol => Err(format!(
+                "Date constructor does not support native {:?} conversion", ty
+            )),
+            _ => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_date_time_clip".into())),
+                vec![self.coerce_primitive_to_number(value)?],
+            )),
+        }
+    }
+
     fn collect_generator_for_array_spread(
         &mut self,
         generator: HirExpr,
@@ -3429,86 +3553,7 @@ impl<'a> FnLowerer<'a> {
                             )
                         } else if let Some(argument) = args.first() {
                             let value = self.lower_expr(&argument.expr)?;
-                            let value_type = self.infer_expr_type(&value)?;
-                            if value_type == HirType::Str {
-                                HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_date_parse".to_string())),
-                                    vec![value],
-                                )
-                            } else if value_type == HirType::JsValue {
-                                HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
-                                    Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
-                                    vec![
-                                        HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                                            vec![HirExpr::Lit(HirLit::Str("__thaw_date_from_live_value".into()))]),
-                                        value,
-                                    ],
-                                )))
-                            } else if value_type == HirType::Json {
-                                let name = format!("__thaw_date_json_arg_{}", self.next_binding);
-                                self.next_binding += 1;
-                                self.scope.insert(name.clone(), HirType::Json);
-                                let bound = HirExpr::Var(name.clone());
-                                let is_string = HirExpr::BinOp(
-                                    BinOp::EqEqEq,
-                                    Box::new(HirExpr::Call(
-                                        Box::new(HirExpr::Var("__thaw_json_typeof".to_string())),
-                                        vec![bound.clone()],
-                                    )),
-                                    Box::new(HirExpr::Lit(HirLit::Str("string".to_string()))),
-                                );
-                                let parsed = HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_date_parse".to_string())),
-                                    vec![HirExpr::JsonAsString(Box::new(bound.clone()))],
-                                );
-                                let clipped = HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_date_time_clip".to_string())),
-                                    vec![HirExpr::JsonAsNumber(Box::new(bound.clone()))],
-                                );
-                                let plain = HirExpr::Conditional(
-                                    Box::new(is_string), Box::new(parsed), Box::new(clipped),
-                                    HirType::F64,
-                                );
-                                let handle_name = format!("__thaw_date_live_handle_{}", self.next_binding);
-                                self.next_binding += 1;
-                                self.scope.insert(handle_name.clone(), HirType::I64);
-                                let handle = HirExpr::Var(handle_name.clone());
-                                let live = HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
-                                    Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
-                                    vec![
-                                        HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
-                                            vec![HirExpr::Lit(HirLit::Str("__thaw_date_from_live_value".into()))]),
-                                        HirExpr::TypedClosure(HirType::JsValue, Box::new(handle.clone())),
-                                    ],
-                                )));
-                                // Probe a borrowed live handle first: a Host Date is copied by the
-                                // captured intrinsic. The shape probe on a non-Date Host can run a
-                                // Proxy getPrototypeOf trap before Date's own ToPrimitive.
-                                let non_live = HirExpr::Conditional(
-                                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_date_shape".into())),
-                                        vec![bound.clone()])),
-                                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_date_timestamp".into())),
-                                        vec![bound.clone()])),
-                                    Box::new(plain), HirType::F64,
-                                );
-                                let timestamp = self.wrap_call_argument_bindings(
-                                    HirExpr::Conditional(
-                                        Box::new(HirExpr::BinOp(BinOp::EqEqEq,
-                                            Box::new(handle), Box::new(HirExpr::Lit(HirLit::I64(0))))),
-                                        Box::new(non_live), Box::new(live), HirType::F64,
-                                    ),
-                                    &[(handle_name, HirType::I64,
-                                        HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())),
-                                            vec![bound]))],
-                                )?;
-                                self.wrap_call_argument_bindings(timestamp,
-                                    &[(name, HirType::Json, value)])?
-                            } else {
-                                HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_date_time_clip".to_string())),
-                                    vec![self.coerce_primitive_to_number(value)?],
-                                )
-                            }
+                            self.lower_date_single_timestamp(value)?
                         } else {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_date_now".to_string())),
