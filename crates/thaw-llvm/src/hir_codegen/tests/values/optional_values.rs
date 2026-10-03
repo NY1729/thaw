@@ -366,3 +366,18 @@ fn compiles_optional_calls_on_optional_properties() {
     );
 }
 
+
+#[test]
+fn nullish_absence_coercions_preserve_source_effects_once() {
+    let source = r#"
+        function missing(): undefined { console.log("missing"); return undefined; }
+        function nil(): null { console.log("nil"); return null; }
+        function main(): void {
+            const a: number | null | undefined = missing();
+            const b: number | null | undefined = nil();
+            console.log(a, b);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nullish_absence_effects"),
+        "missing\nnil\nundefined null\n");
+}
