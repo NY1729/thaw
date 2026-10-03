@@ -1984,3 +1984,43 @@ fn fs_filehandle_close_waits_for_preceding_async_iterable_writes() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn fs_write_stream_close_callback_waits_for_native_close() {
+    // Unrun regression: queued writes and finalization precede close callback.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_write_stream_close");
+    fs::write(dir.join("index.js"), r#"var fs = require('node:fs'); module.exports = async function(root) {
+        async function check(path, autoClose) {
+            var output = fs.createWriteStream(path, { autoClose: autoClose, highWaterMark: 1 }), endError;
+            output.on('error', function() {});
+            output.write('A');
+            output.end('B', function(error) { endError = error ? error.code : null; });
+            return await new Promise(function(resolve) { output.close(function(error) {
+                resolve([error ? error.code : null, fs.readFileSync(path, 'utf8'), output.fd === null, output.closed, endError]);
+            }); });
+        }
+        var normal = await check(root + '/normal', true);
+        var explicit = await check(root + '/explicit', false);
+        var failed = await new Promise(function(resolve) {
+            var output = fs.createWriteStream(root + '/missing/child', { autoClose: false });
+            output.on('error', function() {});
+            output.close(function(error) { resolve([error && error.code, output.closed]); });
+        });
+        return [normal, explicit, failed];
+    };"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_write_stream_close_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWriteStreamClose = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseFsWriteStreamClose").unwrap();
+    let arguments = CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap()).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[null,"AB",true,true,null],[null,"AB",true,true,null],["ENOENT",true]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
