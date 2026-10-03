@@ -1244,16 +1244,10 @@ macro_rules! jit_loop_expressions {
             return None;
         }
         let mut encoded = Vec::new();
-        // `new Map()` has no value kind of its own; use the kind inferred
-        // from its `.set(k, v)` calls (defaulting to a string-valued
-        // dictionary when the values are never inspected).
+        // A JIT dictionary cannot preserve Map key types or expose them
+        // through iteration, so the whole callable must use JS fallback.
         if matches!(initializer, Expr::New(new_expr) if is_untyped_map_constructor(new_expr)) {
-            let kind = context
-                .map_value_kinds
-                .get(name.sym.as_ref())
-                .copied()
-                .unwrap_or("ds");
-            encoded.push(format!("{kind}empty"));
+            return None;
         } else {
             encode_expression(initializer, parameters, locals, context, &mut encoded)?;
         }

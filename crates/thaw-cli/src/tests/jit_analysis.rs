@@ -738,14 +738,12 @@ fn recognizes_set_composition_for_jit() {
             .unwrap_or_else(|| panic!("{operation} should be JIT-specializable"));
         assert!(export.contains(token), "expected {token}: {export}");
     }
-    let export = jit_numeric_export(
+    assert!(jit_numeric_export(
         "function combine() { const x = new Set([1, 2]); const y = new Map(); y.set(2, 'two'); y.set(3, 'three'); const z = x.union(y); return z.has(3) ? 1 : 0; } module.exports = { combine };",
         "combine",
         true,
         &function,
-    )
-    .expect("Map should be accepted as a native Set-like value");
-    assert!(export.contains("setunion"), "expected Set-like union: {export}");
+    ).is_none(), "Map-backed Set-like values must use JS fallback");
 }
 
 #[test]
@@ -854,116 +852,47 @@ fn recognizes_set_from_iterable_for_jit() {
 }
 
 #[test]
-fn recognizes_map_get_set_for_jit() {
-    let function = thaw_bridge::DtsFunction {
-        param_field_constraints: Vec::new(),
-        name: "cache".into(),
-        generic: None,
-        params: vec![],
-        required_params: 0,
-        rest_param: None,
+fn map_construction_declines_jit_for_all_consumers() {
+    let number = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(), name: "run".into(), generic: None,
+        params: vec![], required_params: 0, rest_param: None,
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
     };
-    let export = jit_numeric_export(
-        "function cache() { const m = new Map(); m.set('a', 1); m.set('b', 2); return m.get('a') + (m.size === 2 ? 10 : 0); } module.exports = { cache };",
-        "cache",
-        false,
-        &function,
-    );
-    let export = export.expect("Map get/set/size should be JIT-specializable");
-    assert!(export.contains("dnempty"), "expected empty Map -> dnempty: {export}");
-    assert!(export.contains("dnget"), "expected Map.get -> dnget: {export}");
-    assert!(export.contains("dnset"), "expected Map.set -> dnset: {export}");
-    assert!(export.contains("dlen"), "expected Map.size -> dlen: {export}");
-}
-
-
-#[test]
-fn recognizes_map_keys_values_entries_for_jit() {
-    let function = thaw_bridge::DtsFunction {
-        param_field_constraints: Vec::new(),
-        name: "spread".into(),
-        generic: None,
-        params: vec![],
-        required_params: 0,
-        rest_param: None,
-        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
-    };
-    let export = jit_numeric_export(
-        "function spread() { const m = new Map(); m.set('a', 1); m.set('b', 2); const k = m.keys(); return k.join(','); } module.exports = { spread };",
-        "spread",
-        false,
-        &function,
-    );
-    let export = export.expect("Map.keys should be JIT-specializable");
-    assert!(export.contains("dkeys"), "expected Map.keys -> dkeys: {export}");
-    let values = jit_numeric_export(
-        "function spread() { const m = new Map(); m.set('a', 1); const v = m.values(); return v.join(','); } module.exports = { spread };",
-        "spread",
-        false,
-        &thaw_bridge::DtsFunction {
-            param_field_constraints: Vec::new(),
-            name: "spread".into(),
-            generic: None,
-            params: vec![],
-            required_params: 0,
-            rest_param: None,
-            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
-        },
-    );
-    let values = values.expect("Map.values should be JIT-specializable");
-    assert!(values.contains("dnvalues"), "expected Map.values -> dnvalues: {values}");
+    for body in [
+        "const m = new Map(); m.set('a', 1); m.set('b', 2); return m.get('a') + (m.size === 2 ? 10 : 0);",
+        "const m = new Map(); m.set(1, 10); m.set('1', 20); return m.get(1);",
+        "const m = new Map(); m.set(true, 10); m.set('true', 20); return m.size;",
+        "const m = new Map(); m.set(NaN, 1); m.set(-0, 2); return m.has(NaN) ? 1 : 0;",
+        "const m = new Map(); const alias = m; alias.set(1, 10); return m.get(1);",
+        "const m = new Map(); m.set(1, 10); let total = 0; for (const [key, value] of m) total += value; return total;",
+        "const m = new Map(); m.set(1, 10); let total = 0; m.forEach((value) => { total += value; }); return total;",
+        "if (true) { const m = new Map(); m.set(1, 10); return m.get(1); } return 0;",
+    ] {
+        let source = format!("function run() {{ {body} }} module.exports = {{ run }};");
+        assert!(jit_numeric_export(&source, "run", false, &number).is_none(), "{source}");
+    }
+    // Expression-position construction and an inlined helper must also
+    // decline the whole callable, not emit a partial dictionary program.
+    for source in [
+        "function run() { return (new Map()).size; } module.exports = { run };",
+        "function helper() { const m = new Map(); m.set(1, 10); return m.get(1); } function run() { return helper(); } module.exports = { run };",
+    ] {
+        assert!(jit_numeric_export(source, "run", false, &number).is_none(), "{source}");
+    }
 }
 
 #[test]
-fn recognizes_direct_map_entry_iteration_for_jit() {
+fn set_for_each_remains_jit_specializable() {
     let function = thaw_bridge::DtsFunction {
-        param_field_constraints: Vec::new(),
-        name: "entries".into(),
-        generic: None,
-        params: vec![],
-        required_params: 0,
-        rest_param: None,
+        param_field_constraints: Vec::new(), name: "total".into(), generic: None,
+        params: vec![], required_params: 0, rest_param: None,
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
     };
     let export = jit_numeric_export(
-        "function entries() { const m = new Map(); m.set('a', 1); m.set('b', 2); let total = 0; for (const [key, value] of m) total += value; return total; } module.exports = { entries };",
-        "entries",
-        false,
-        &function,
-    )
-    .expect("direct Map entry iteration should be JIT-specializable");
-    assert!(export.contains("dkeys"), "expected Map keys snapshot: {export}");
-    assert!(export.contains("dnget"), "expected Map value lookup: {export}");
-}
-
-#[test]
-fn recognizes_map_and_set_for_each_for_jit() {
-    let function = thaw_bridge::DtsFunction {
-        param_field_constraints: Vec::new(),
-        name: "total".into(),
-        generic: None,
-        params: vec![],
-        required_params: 0,
-        rest_param: None,
-        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
-    };
-    let map = jit_numeric_export(
-        "function total() { const m = new Map(); m.set('a', 1); m.set('b', 2); let result = 0; m.forEach((value, key, map) => { const doubled = value * 2; map.has(key); result += doubled; }); return result; } module.exports = { total };",
-        "total",
-        false,
-        &function,
-    )
-    .expect("Map.forEach should be JIT-specializable");
-    assert!(map.contains("dnget"), "expected Map value lookup: {map}");
-    let set = jit_numeric_export(
-        "function total() { const s = new Set(['a', 'b']); let result = 0; s.forEach((value, key, set) => { let length = 0; let extra = 1; length = value.length; set.has(key); result += length + extra; return value; }); return result; } module.exports = { total };",
-        "total",
-        false,
-        &function,
-    )
-    .expect("Set.forEach should be JIT-specializable");
-    assert!(set.contains("dkeys"), "expected Set keys snapshot: {set}");
+        "function total() { const s = new Set(['x', 'yz']); let result = 0; s.forEach((value, key, set) => { let length = 0; let extra = 1; length = value.length; set.has(key); result += length + extra; return value; }); return result; } module.exports = { total };",
+        "total", false, &function,
+    ).expect("Set.forEach should remain JIT-specializable");
+    assert!(export.contains("dkeys"), "expected Set keys snapshot: {export}");
 }
 
 #[test]
