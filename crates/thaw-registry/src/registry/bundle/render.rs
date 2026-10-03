@@ -19,23 +19,30 @@ fn render_native_esm_bundle(main_key: &str, modules: &[BundledModule]) -> String
     out
 }
 
-const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey) {
+const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_factory_of(key) {
+  if (Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, key)) return key;
+  var query = key.indexOf('?'), fragment = key.indexOf('#', 1);
+  var at = query < 0 ? fragment : (fragment < 0 ? query : Math.min(query, fragment));
+  return at < 0 ? key : key.slice(0, at);
+}
+function __thaw_bundle_origin_for(ownerKey) {
   var own = Object.prototype.hasOwnProperty;
   var ambiguous = {};
-  function factoryOf(key) {
-    if (own.call(__thaw_bundle_export_graphs, key)) return key;
-    var query = key.indexOf('?'), fragment = key.indexOf('#', 1);
-    var at = query < 0 ? fragment : (fragment < 0 ? query : Math.min(query, fragment));
-    return at < 0 ? key : key.slice(0, at);
-  }
-  function graphOf(key) { return __thaw_bundle_export_graphs[factoryOf(key)]; }
+  function graphOf(key) { return __thaw_bundle_export_graphs[__thaw_bundle_factory_of(key)]; }
   function targetOf(key, spec) {
-    return __thaw_bundle_target(__thaw_bundle_import_maps[factoryOf(key)] || {}, spec);
+    return __thaw_bundle_target(__thaw_bundle_import_maps[__thaw_bundle_factory_of(key)] || {}, spec);
   }
   var enumerable = Object.prototype.propertyIsEnumerable;
   function valueOf(target, sourceKey, spec) {
     var edges = __thaw_bundle_edges[sourceKey];
-    if (edges && own.call(edges, spec)) return edges[spec];
+    if (edges && own.call(edges, spec)) {
+      var edgeTarget = targetOf(sourceKey, spec);
+      // A CommonJS cycle initially exposes provisional exports. The cache
+      // remains authoritative if its factory later replaces module.exports.
+      if (edgeTarget && own.call(__thaw_bundle_cache, edgeTarget.key))
+        return __thaw_bundle_cache[edgeTarget.key].exports;
+      return edges[spec];
+    }
     // A cycle may reach this edge before its owner executes the loader.
     // Export discovery must never evaluate a dependency ahead of that owner.
     return undefined;
@@ -44,7 +51,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
     if (visited.indexOf(key) >= 0) return [];
     var graph = graphOf(key);
     if (!graph) {
-      var value = valueOf({ key: key, factory: factoryOf(key) }, sourceKey, spec);
+      var value = valueOf({ key: key, factory: __thaw_bundle_factory_of(key) }, sourceKey, spec);
       return value == null ? [] : Object.keys(value).filter(function(name) { return name !== '__esModule'; });
     }
     var next = visited.concat(key);
@@ -61,15 +68,15 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
   }
   function retainedNativeEdge(key) {
     return typeof __thaw_bundle_native_keys !== 'undefined'
-      && own.call(__thaw_bundle_native_keys, key)
-      && !own.call(__thaw_bundle_mixed_keys, key);
+      && own.call(__thaw_bundle_native_keys, __thaw_bundle_factory_of(key))
+      && !own.call(__thaw_bundle_mixed_keys, __thaw_bundle_factory_of(key));
   }
   function retainedNamespaceAnchor(key, name, targetKey, anchor) {
     if (!retainedNativeEdge(targetKey)) return null;
     // A rewritten mixed edge strips the importer's native export, but a
     // following pure-native edge retains the current module's own alias.
     return anchor || (typeof __thaw_bundle_native_keys !== 'undefined'
-      && own.call(__thaw_bundle_native_keys, key) ? { key: key, name: name } : null);
+      && own.call(__thaw_bundle_native_keys, __thaw_bundle_factory_of(key)) ? { key: key, name: name } : null);
   }
   function resolve(key, name, visited, allowMissing, sourceKey, spec, anchor) {
     var visit = key + '\u0000' + name;
@@ -79,7 +86,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
       // Star exports skip the CommonJS interop marker; explicit named
       // reexports still resolve it through allowMissing.
       if (name === '__esModule' && !allowMissing) return null;
-      var value = valueOf({ key: key, factory: factoryOf(key) }, sourceKey, spec);
+      var value = valueOf({ key: key, factory: __thaw_bundle_factory_of(key) }, sourceKey, spec);
       return (allowMissing || (value != null && enumerable.call(value, name))) ? { kind: 'cjs', key: key, sourceKey: sourceKey, spec: spec, name: name } : null;
     }
     var next = visited.concat(visit);
@@ -130,7 +137,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
     }
     if (typeof __thaw_native_entry !== 'undefined' && __thaw_native_entry) {
       if (resolution.kind === 'namespace') {
-        if (graphOf(resolution.key)) return __thaw_bundle_mixed_keys[resolution.key]
+        if (graphOf(resolution.key)) return __thaw_bundle_mixed_keys[__thaw_bundle_factory_of(resolution.key)]
           ? __thaw_bundle_facade_for(resolution.key)
           : resolution.anchor
             ? __thaw_native_entry.readNative(resolution.anchor.key, resolution.anchor.name)
@@ -143,7 +150,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
       // native namespaces expose the exported alias in `name` instead.
       return __thaw_native_entry.readNative(resolution.key, resolution.name);
     }
-    var source = __thaw_bundle_require(resolution.key, factoryOf(resolution.key));
+    var source = __thaw_bundle_require(resolution.key, __thaw_bundle_factory_of(resolution.key));
     return resolution.kind === 'namespace' ? source : source[resolution.name];
   }
   function linksReady(key, visited) {
@@ -255,7 +262,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
       var target = targetOf(ownerKey, spec);
       if (!target) throw new Error('Cannot resolve import ' + spec);
       var resolution = resolve(target.key, name, [], true, ownerKey, spec,
-        typeof __thaw_bundle_native_keys !== 'undefined' && own.call(__thaw_bundle_native_keys, target.key)
+        typeof __thaw_bundle_native_keys !== 'undefined' && own.call(__thaw_bundle_native_keys, __thaw_bundle_factory_of(target.key))
           ? { key: target.key, name: name } : null);
       if (!resolution || resolution === ambiguous) throw new SyntaxError('Missing or ambiguous export ' + name);
       return read(resolution);
@@ -269,7 +276,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
         return this.defaultImport(spec, edges[spec]);
       }
       var resolution = resolve(target.key, 'default', [], true, ownerKey, spec,
-        typeof __thaw_bundle_native_keys !== 'undefined' && own.call(__thaw_bundle_native_keys, target.key)
+        typeof __thaw_bundle_native_keys !== 'undefined' && own.call(__thaw_bundle_native_keys, __thaw_bundle_factory_of(target.key))
           ? { key: target.key, name: 'default' } : null);
       if (!resolution || resolution === ambiguous) throw new SyntaxError('Missing or ambiguous default export');
       return read(resolution);
@@ -284,7 +291,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
         // select the tracked facade.
         return edges[spec];
       }
-      return typeof __thaw_native_entry === 'undefined' || !__thaw_native_entry || __thaw_bundle_mixed_keys[target.key]
+      return typeof __thaw_native_entry === 'undefined' || !__thaw_native_entry || __thaw_bundle_mixed_keys[__thaw_bundle_factory_of(target.key)]
         ? __thaw_bundle_facade_for(target.key) : __thaw_native_entry.readNative(target.key);
     },
     selectDynamic: function(spec, namespace) {
@@ -293,7 +300,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
       // The private shell's namespace contains no CJS exports. The existing
       // bundle contract returns that target's cached CommonJS value instead.
       if (!graphOf(target.key)) return this.namespaceImport(spec);
-      return __thaw_bundle_mixed_keys[target.key]
+      return __thaw_bundle_mixed_keys[__thaw_bundle_factory_of(target.key)]
         ? __thaw_bundle_facade_for(target.key) : namespace;
     },
     names: function(spec, value) {
@@ -310,7 +317,7 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey)
 const MIXED_FACADE_RUNTIME: &str = r#"var __thaw_bundle_facades = Object.create(null);
 function __thaw_bundle_facade_for(key) {
   if (Object.prototype.hasOwnProperty.call(__thaw_bundle_facades, key)) return __thaw_bundle_facades[key];
-  var graph = __thaw_bundle_export_graphs[key];
+  var graph = __thaw_bundle_export_graphs[__thaw_bundle_factory_of(key)];
   if (!graph) throw new TypeError('Opaque target has no ESM facade');
   var exports = {};
   __thaw_bundle_facades[key] = exports;
@@ -374,6 +381,11 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
     out.push_str(NODE_BUILTIN_MODULES_JSON);
     out.push_str(");\n");
     out.push_str("var __thaw_bundle_cache = {};\n");
+    let async_keys = modules.iter().filter(|module| module.async_module)
+        .map(|module| (module.key.clone(), serde_json::Value::Bool(true)))
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    out.push_str(&format!("var __thaw_bundle_async_keys = JSON.parse({});\n",
+        js_string_literal(&serde_json::Value::Object(async_keys).to_string())));
     out.push_str("var __thaw_bundle_edges = Object.create(null);\n");
     out.push_str("var __thaw_bundle_star_linkers = Object.create(null);\n");
     out.push_str("var __thaw_bundle_edge_version = 0;\n");
@@ -473,7 +485,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
         out.push_str(&format!(
             "var __thaw_native_registered = globalThis.__thaw_register_native_bundle({}, \
              function(importer, spec, target, factory, asynchronous) {{ \
-               var value = __thaw_bundle_require(target, factory); \
+               var value = __thaw_bundle_require(target, factory, asynchronous); \
                if (asynchronous) return __thaw_native_apply(__thaw_native_then, __thaw_bundle_cache[target].ready, [function(finalValue) {{ __thaw_bundle_origin_for(importer).edge(spec, finalValue); return finalValue; }}]); \
                __thaw_bundle_origin_for(importer).edge(spec, value); return value; \
              }}, \
@@ -482,7 +494,8 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
         ));
         out.push_str(&format!("var __thaw_native_entry = function() {{ __thaw_validate_native_link({}); return __thaw_native_registered(); }};\n",
             js_string_literal(main_key)));
-        out.push_str("__thaw_native_entry.evalNative = function(key) { __thaw_validate_native_link(key); return __thaw_native_registered.evalNative(key); };\n");
+        out.push_str("__thaw_native_entry.evalNative = function(key, factoryKey) { factoryKey = factoryKey || key; __thaw_validate_native_link(factoryKey); return __thaw_native_registered.evalNative(key, factoryKey); };\n");
+        out.push_str("__thaw_native_entry.evalNativeSync = function(key, factoryKey) { factoryKey = factoryKey || key; __thaw_validate_native_link(factoryKey); return __thaw_native_registered.evalNativeSync(key, factoryKey); };\n");
         out.push_str("__thaw_native_entry.readNative = function(key, name) { return __thaw_native_registered.readNative(key, name); };\n");
     }
 
@@ -521,10 +534,20 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20error.code = 'MODULE_NOT_FOUND';\n\
          \x20\x20throw error;\n\
          }\n\
-         function __thaw_bundle_require(key, factoryKey) {\n\
-         \x20\x20if (String(factoryKey || key).endsWith('.node') && require.addon) return require.addon();\n\
+         function __thaw_bundle_async_error(factoryKey) {\n\
+         \x20\x20var error = new Error('Cannot synchronously require an async module: ' + factoryKey);\n\
+         \x20\x20error.code = 'ERR_REQUIRE_ASYNC_MODULE';\n\
+         \x20\x20return error;\n\
+         }\n\
+         function __thaw_bundle_require(key, factoryKey, allowAsync) {\n\
+         \x20\x20factoryKey = factoryKey || key;\n\
+         \x20\x20if (!allowAsync && Object.prototype.hasOwnProperty.call(__thaw_bundle_async_keys, factoryKey)) throw __thaw_bundle_async_error(factoryKey);\n\
+         \x20\x20if (String(factoryKey).endsWith('.node') && require.addon) return require.addon();\n\
+         \x20\x20if (typeof __thaw_bundle_native_keys !== 'undefined' && Object.prototype.hasOwnProperty.call(__thaw_bundle_native_keys, factoryKey)) {\n\
+         \x20\x20\x20\x20var namespace = __thaw_native_entry.evalNativeSync(key, factoryKey);\n\
+         \x20\x20\x20\x20return Object.prototype.hasOwnProperty.call(__thaw_bundle_mixed_keys, factoryKey) ? __thaw_bundle_facade_for(key) : namespace;\n\
+         \x20\x20}\n\
          \x20\x20if (!(key in __thaw_bundle_cache)) {\n\
-         \x20\x20\x20\x20factoryKey = factoryKey || key;\n\
          \x20\x20\x20\x20var mod = { exports: {}, filename: '/thaw_modules/' + (factoryKey || key) };\n\
          \x20\x20\x20\x20__thaw_bundle_cache[key] = mod;\n\
          \x20\x20\x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
@@ -553,7 +576,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20var keys = Object.keys(__thaw_bundle_require_maps);\n\
          \x20\x20var factoryKey = keys.indexOf(text) >= 0 ? text : keys.reduce(function(best, key) { return text.endsWith('/' + key) && (!best || key.length > best.length) ? key : best; }, null);\n\
          \x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
-         \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && typeof require.addon === 'function') return require.addon; spec = String(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return __thaw_bundle_exports[spec]; var target = __thaw_bundle_target(map, spec); if (!target && !factoryKey) { for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec); } if (target) return __thaw_bundle_require(target.key, target.factory); return require(spec); };\n\
+         \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && typeof require.addon === 'function') return require.addon; spec = String(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_async_keys, spec)) throw __thaw_bundle_async_error(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return __thaw_bundle_exports[spec]; var target = __thaw_bundle_target(map, spec); if (!target && !factoryKey) { for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec); } if (target) return __thaw_bundle_require(target.key, target.factory); return require(spec); };\n\
          \x20\x20created.addon = require.addon;\n\
          \x20\x20created.resolve = function(spec) { return __thaw_bundle_resolve(map, spec, keys, !factoryKey, true); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
@@ -572,8 +595,8 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20\x20\x20return Promise.resolve().then(function() {\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
          \x20\x20\x20\x20\x20\x20if (target) {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20if (typeof __thaw_bundle_native_keys !== 'undefined' && Object.prototype.hasOwnProperty.call(__thaw_bundle_native_keys, target.factory)) return __thaw_native_apply(__thaw_native_then, __thaw_native_entry.evalNative(target.key), [function(namespace) { return __thaw_bundle_mixed_keys[target.factory] ? __thaw_bundle_facade_for(target.key) : namespace; }]);\n\
-         \x20\x20\x20\x20\x20\x20\x20__thaw_bundle_require(target.key, target.factory); return __thaw_bundle_cache[target.key].ready;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (typeof __thaw_bundle_native_keys !== 'undefined' && Object.prototype.hasOwnProperty.call(__thaw_bundle_native_keys, target.factory)) return __thaw_native_apply(__thaw_native_then, __thaw_native_entry.evalNative(target.key, target.factory), [function(namespace) { return __thaw_bundle_mixed_keys[target.factory] ? __thaw_bundle_facade_for(target.key) : namespace; }]);\n\
+         \x20\x20\x20\x20\x20\x20\x20__thaw_bundle_require(target.key, target.factory, true); return __thaw_bundle_cache[target.key].ready;\n\
          \x20\x20\x20\x20\x20\x20}\n\
          \x20\x20\x20\x20\x20\x20if (__thaw_bundle_import_missing(known, spec)) throw new Error('Cannot resolve import ' + spec);\n\
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
@@ -592,14 +615,14 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          globalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\n\
          globalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\n\
          var __thaw_worker_bundle_source =\n\
-         \x20\x20'(function() {\\nvar __thaw_worker_bundle_source = globalThis.__thaw_worker_bundle_source;\\nvar require = function(name) { if (name === "worker_threads" || name === "node:worker_threads") return globalThis.__thaw_worker_module; if (String(name).endsWith(".node") && typeof require.addon === "function") return require.addon(); var error = new Error("Cannot find module " + name); error.code = "MODULE_NOT_FOUND"; throw error; };\\nrequire.addon = globalThis.require && globalThis.require.addon;\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_builtin_names = Object.freeze(' + JSON.stringify(__thaw_bundle_builtin_names) + ');\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
+         \x20\x20'(function() {\\nvar __thaw_worker_bundle_source = globalThis.__thaw_worker_bundle_source;\\nvar require = function(name) { if (name === "worker_threads" || name === "node:worker_threads") return globalThis.__thaw_worker_module; if (String(name).endsWith(".node") && typeof require.addon === "function") return require.addon(); var error = new Error("Cannot find module " + name); error.code = "MODULE_NOT_FOUND"; throw error; };\\nrequire.addon = globalThis.require && globalThis.require.addon;\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_builtin_names = Object.freeze(' + JSON.stringify(__thaw_bundle_builtin_names) + ');\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_async_keys = ' + JSON.stringify(__thaw_bundle_async_keys) + ';\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
          \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
          \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_import_maps = ' + JSON.stringify(__thaw_bundle_import_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_known_package_maps = ' + JSON.stringify(__thaw_bundle_known_package_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_export_graphs = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_export_graphs)) + ');\\n' +\n\
          \x20\x20'var __thaw_bundle_commonjs_contexts = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_commonjs_contexts)) + ');\\n' +\n\
-         \x20\x20__thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_resolve.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
+         \x20\x20__thaw_bundle_factory_of.toString() + '\\n' + __thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_resolve.toString() + '\\n' + __thaw_bundle_async_error.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
          \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\nglobalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\\nglobalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\\nglobalThis.__thaw_bundle_worker_origin = __thaw_bundle_origin_for;\\nglobalThis.__thaw_bundle_register_worker_main = __thaw_bundle_register_worker_main;\\n})();\\n';\n\
          globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source;\n",
     );
@@ -700,7 +723,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
         );
     }
 
-    if mixed.is_some() {
+    if mixed.is_some_and(|route| route.native_keys.contains(main_key)) {
         out.push_str(&format!(
             "var __thaw_bundle_entry_key = {};\n\
              var __thaw_bundle_entry = __thaw_bundle_facade_for(__thaw_bundle_entry_key);\n\
@@ -710,7 +733,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
         ));
     } else { out.push_str(&format!(
         "var __thaw_bundle_entry_key = {};\n\
-         var __thaw_bundle_entry = __thaw_bundle_require(__thaw_bundle_entry_key);\n\
+         var __thaw_bundle_entry = __thaw_bundle_require(__thaw_bundle_entry_key, undefined, true);\n\
          __thaw_bundle_exports[__thaw_bundle_entry_key] = __thaw_bundle_entry;\n\
          globalThis.__thaw_module_ready = __thaw_bundle_cache[__thaw_bundle_entry_key].ready;\n\
          return __thaw_bundle_entry;\n",
