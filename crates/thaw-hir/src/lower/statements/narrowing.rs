@@ -1083,7 +1083,9 @@ impl<'a> FnLowerer<'a> {
                     elements: elements.clone(),
                 }],
                 true,
-                true,
+                // Same-layout ordinary objects can fail the runtime identity
+                // check. Keep this member possible in the false branch.
+                false,
             )
         })
     }
