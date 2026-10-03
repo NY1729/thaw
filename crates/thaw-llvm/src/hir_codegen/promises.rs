@@ -894,6 +894,32 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| "thaw_sleep_ms did not return a promise".to_string())
     }
 
+    fn compile_promise_input_words(
+        &mut self, words: usize, name: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        if words == 0 { return Ok(pointer.const_null()); }
+        let bytes = words.checked_mul(8).ok_or("Promise input storage size overflow")?;
+        let i64_type = self.context.i64_type();
+        let storage = self.builder.build_call(
+            self.module.get_function("thaw_arena_alloc").unwrap(),
+            &[i64_type.const_int(bytes as u64, false).into(), i64_type.const_int(8, false).into()],
+            name,
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("Promise input allocation returned void")?.into_pointer_value();
+        let function = self.current_function();
+        let failed = self.context.append_basic_block(function, "promise_input_allocation_failed");
+        let ready = self.context.append_basic_block(function, "promise_input_allocation_ready");
+        let missing = self.builder.build_is_null(storage, "promise_input_missing")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(missing, failed, ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        self.compile_throw_builtin_error("Error", "Promise input allocation failed")?;
+        self.builder.position_at_end(ready);
+        Ok(storage)
+    }
+
     fn compile_promise_all(
         &mut self,
         args: &[HirExpr],
@@ -904,22 +930,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let promises = if args.is_empty() {
             ptr_type.const_null()
         } else {
-            let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
-            let storage = self
-                .builder
-                .build_call(
-                    arena_alloc,
-                    &[
-                        i64_type.const_int((args.len() * 8) as u64, false).into(),
-                        i64_type.const_int(8, false).into(),
-                    ],
-                    "promise_all_storage",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
-                .into_pointer_value();
+            let storage = self.compile_promise_input_words(args.len(), "promise_all_storage")?;
             for (index, arg) in args.iter().enumerate() {
                 let promise = self.compile_expr(arg)?.into_pointer_value();
                 let slot = unsafe {
@@ -1007,26 +1018,8 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i64_type = self.context.i64_type();
-        let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
-        let allocate_words = |compiler: &mut Self, words: usize, name: &str| {
-            compiler
-                .builder
-                .build_call(
-                    arena_alloc,
-                    &[
-                        i64_type.const_int((words * 8) as u64, false).into(),
-                        i64_type.const_int(8, false).into(),
-                    ],
-                    name,
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| format!("{name} allocation returned void"))
-                .map(|value| value.into_pointer_value())
-        };
-        let promises = allocate_words(self, args.len(), "promise_all_tuple_promises")?;
-        let sizes = allocate_words(self, elements.len(), "promise_all_tuple_sizes")?;
+        let promises = self.compile_promise_input_words(args.len(), "promise_all_tuple_promises")?;
+        let sizes = self.compile_promise_input_words(elements.len(), "promise_all_tuple_sizes")?;
         for (index, (arg, element)) in args.iter().zip(elements).enumerate() {
             let offset = i64_type.const_int(index as u64, false);
             let promise_slot = unsafe {
@@ -1076,22 +1069,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let promises = if args.is_empty() {
             ptr_type.const_null()
         } else {
-            let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
-            let storage = self
-                .builder
-                .build_call(
-                    arena_alloc,
-                    &[
-                        i64_type.const_int((args.len() * 8) as u64, false).into(),
-                        i64_type.const_int(8, false).into(),
-                    ],
-                    "promise_all_settled_storage",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or("Promise.allSettled storage allocation returned void")?
-                .into_pointer_value();
+            let storage = self.compile_promise_input_words(args.len(), "promise_all_settled_storage")?;
             for (index, arg) in args.iter().enumerate() {
                 let slot = unsafe {
                     self.builder
@@ -1188,22 +1166,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i64_type = self.context.i64_type();
-        let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
-        let storage = self
-            .builder
-            .build_call(
-                arena_alloc,
-                &[
-                    i64_type.const_int((args.len() * 8) as u64, false).into(),
-                    i64_type.const_int(8, false).into(),
-                ],
-                &format!("{label}_storage"),
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| format!("{label} storage allocation returned void"))?
-            .into_pointer_value();
+        let storage = self.compile_promise_input_words(args.len(), &format!("{label}_storage"))?;
         for (index, arg) in args.iter().enumerate() {
             let slot = unsafe {
                 self.builder
