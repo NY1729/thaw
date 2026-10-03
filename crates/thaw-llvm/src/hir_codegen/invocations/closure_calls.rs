@@ -1,4 +1,25 @@
 impl<'ctx> HirCompiler<'ctx> {
+    // A Function-typed value can carry JavaScript `undefined` as a null
+    // closure pointer. This guards local LLVM dereferences; HIR prebindings
+    // can still evaluate source operands before this check.
+    fn guard_callable_closure(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        message: &str,
+    ) -> Result<(), String> {
+        let absent = self.builder.build_is_null(closure, "callable_is_undefined")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let rejected = self.context.append_basic_block(function, "undefined_callable");
+        let accepted = self.context.append_basic_block(function, "present_callable");
+        self.builder.build_conditional_branch(absent, rejected, accepted)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(rejected);
+        self.compile_throw_type_error(message)?;
+        self.builder.position_at_end(accepted);
+        Ok(())
+    }
+
     fn compile_this_argument_word(
         &mut self,
         expression: &HirExpr,
@@ -152,6 +173,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ret: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let closure = self.compile_expr(callee)?.into_pointer_value();
+        self.guard_callable_closure(closure, "Cannot read a function property of undefined")?;
         let this_entry_slot = unsafe {
             self.builder
                 .build_in_bounds_gep(
@@ -326,6 +348,7 @@ impl<'ctx> HirCompiler<'ctx> {
         )?;
         self.builder.position_at_end(parent);
         let source = self.compile_expr(callee)?.into_pointer_value();
+        self.guard_callable_closure(source, "Cannot read properties of undefined (reading 'bind')")?;
         let this_word = self.compile_this_argument_word(this_arg)?;
         let bound_values = bound
             .iter()
@@ -401,6 +424,13 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let function_type = self.function_type(params, ret)?;
         let closure = self.compile_expr(callee)?.into_pointer_value();
+        let mut compiled_args = vec![BasicMetadataValueEnum::from(closure)];
+        compiled_args.extend(
+            args.iter()
+                .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        self.guard_callable_closure(closure, "Value is not a function")?;
         let function_pointer = self
             .builder
             .build_load(
@@ -410,12 +440,6 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let mut compiled_args = vec![BasicMetadataValueEnum::from(closure)];
-        compiled_args.extend(
-            args.iter()
-                .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
-                .collect::<Result<Vec<_>, _>>()?,
-        );
         let call = self
             .builder
             .build_indirect_call(
