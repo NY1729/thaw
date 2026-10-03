@@ -5083,6 +5083,51 @@ fn intl_flexible_day_period_combined_without_hour() {
     );
 }
 
+/// Sign display observes the rounded numeric magnitude, while auto/always
+/// retain the input's negative-zero sign.
+#[cfg(all(feature = "intl", not(feature = "icu4c")))]
+#[test]
+fn intl_rounded_zero_sign_matches_format_parts_and_ranges() {
+    assert_eq!(
+        load(r#"function intlRoundedZeroSign() {
+          const options = { maximumFractionDigits: 0, useGrouping: false };
+          const exceptZero = new Intl.NumberFormat('en-US', { ...options, signDisplay: 'exceptZero' });
+          const negative = new Intl.NumberFormat('en-US', { ...options, signDisplay: 'negative' });
+          const automatic = new Intl.NumberFormat('en-US', { ...options, signDisplay: 'auto' });
+          const always = new Intl.NumberFormat('en-US', { ...options, signDisplay: 'always' });
+          const scientific = new Intl.NumberFormat('en-US', { notation: 'scientific', maximumFractionDigits: 0,
+            signDisplay: 'negative' });
+          const percent = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 0,
+            signDisplay: 'exceptZero' });
+          const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD',
+            maximumFractionDigits: 2, signDisplay: 'negative' });
+          const renderedParts = (formatter, value) => formatter.formatToParts(value).map(part => part.value).join('');
+          return [
+            exceptZero.format(0.0001) === '0' && exceptZero.format(-0.0001) === '0',
+            exceptZero.format('0.0001') === '0' && exceptZero.format('-0.0001') === '0',
+            negative.format(-0.0001) === '0' && negative.format('-0.0001') === '0',
+            automatic.format(-0.0001) === '-0' && always.format(0.0001) === '+0' && always.format(-0.0001) === '-0',
+            renderedParts(exceptZero, -0.0001) === exceptZero.format(-0.0001) &&
+              !exceptZero.formatToParts(-0.0001).some(part => part.type === 'minusSign' || part.type === 'plusSign'),
+            renderedParts(negative, '-0.0001') === negative.format('-0.0001') &&
+              !negative.formatToParts('-0.0001').some(part => part.type === 'minusSign'),
+            scientific.format(-0) === '0E0' && renderedParts(scientific, -0) === '0E0',
+            percent.format(-0.000001) === '0%' && renderedParts(percent, -0.000001) === '0%',
+            currency.format(-0.0001) === '$0.00' && renderedParts(currency, -0.0001) === '$0.00',
+            exceptZero.formatRange('-0.0001', '0.0001') === '~0' &&
+              exceptZero.formatRangeToParts('-0.0001', '0.0001').map(part => part.value).join('') === '~0',
+            new Intl.NumberFormat('en-US', { signDisplay: 'exceptZero', maximumSignificantDigits: 3 })
+              .format('-1e-40000').startsWith('-'),
+          ];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("intlRoundedZeroSign", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true]"
+    );
+}
+
 #[cfg(all(feature = "intl", not(feature = "icu4c")))]
 #[test]
 fn intl_followup_flexible_day_period_without_icu4c() {
