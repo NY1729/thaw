@@ -1,6 +1,14 @@
 type EnumValues = HashMap<(Symbol, Symbol), HirLit>;
 type EnumReverseValues = HashMap<Symbol, Vec<(f64, Symbol)>>;
 
+fn enum_to_uint32(value: f64) -> u32 {
+    if !value.is_finite() || value == 0.0 {
+        0
+    } else {
+        value.trunc().rem_euclid(4_294_967_296.0) as u32
+    }
+}
+
 fn enum_member_name(id: &swc_ecma_ast::TsEnumMemberId) -> Symbol {
     match id {
         swc_ecma_ast::TsEnumMemberId::Ident(id) => id.sym.to_string(),
@@ -28,7 +36,7 @@ fn eval_enum_initializer(
             match unary.op {
                 UnaryOp::Plus => Ok(HirLit::F64(value)),
                 UnaryOp::Minus => Ok(HirLit::F64(-value)),
-                UnaryOp::Tilde => Ok(HirLit::F64((!(value as i32)) as f64)),
+                UnaryOp::Tilde => Ok(HirLit::F64((!(enum_to_uint32(value) as i32)) as f64)),
                 other => Err(format!(
                     "enum `{enum_name}` has unsupported unary initializer {other:?}"
                 )),
@@ -97,12 +105,12 @@ fn eval_enum_initializer(
                     f64::NAN
                 }
                 BinaryOp::Exp => left.powf(right),
-                BinaryOp::BitOr => ((left as i32) | (right as i32)) as f64,
-                BinaryOp::BitXor => ((left as i32) ^ (right as i32)) as f64,
-                BinaryOp::BitAnd => ((left as i32) & (right as i32)) as f64,
-                BinaryOp::LShift => ((left as i32) << ((right as u32) & 31)) as f64,
-                BinaryOp::RShift => ((left as i32) >> ((right as u32) & 31)) as f64,
-                BinaryOp::ZeroFillRShift => ((left as u32) >> ((right as u32) & 31)) as f64,
+                BinaryOp::BitOr => ((enum_to_uint32(left) as i32) | (enum_to_uint32(right) as i32)) as f64,
+                BinaryOp::BitXor => ((enum_to_uint32(left) as i32) ^ (enum_to_uint32(right) as i32)) as f64,
+                BinaryOp::BitAnd => ((enum_to_uint32(left) as i32) & (enum_to_uint32(right) as i32)) as f64,
+                BinaryOp::LShift => ((enum_to_uint32(left) as i32) << (enum_to_uint32(right) & 31)) as f64,
+                BinaryOp::RShift => ((enum_to_uint32(left) as i32) >> (enum_to_uint32(right) & 31)) as f64,
+                BinaryOp::ZeroFillRShift => (enum_to_uint32(left) >> (enum_to_uint32(right) & 31)) as f64,
                 other => {
                     return Err(format!(
                         "enum `{enum_name}` has unsupported binary initializer {other:?}"
