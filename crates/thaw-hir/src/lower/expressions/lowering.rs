@@ -113,9 +113,25 @@ impl<'a> FnLowerer<'a> {
                 )?;
                 self.wrap_call_argument_bindings(timestamp, &[(name, HirType::Json, value)])
             }
-            HirType::I64 | HirType::Symbol => Err(format!(
-                "Date constructor does not support native {:?} conversion", ty
-            )),
+            HirType::I64 | HirType::Symbol => {
+                let message = if ty == HirType::I64 {
+                    "Cannot convert a BigInt value to a number"
+                } else {
+                    "Cannot convert a Symbol value to a number"
+                };
+                let name = format!("__thaw_date_invalid_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                // The argument is evaluated before this body. Use the ordinary tagged
+                // throw statement so catch/async rejection keeps Error provenance.
+                let body = HirExpr::Block(vec![
+                    HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                        "\u{1}TypeError\u{1}{message}"
+                    )))),
+                    HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(f64::NAN)))),
+                ]);
+                self.wrap_call_argument_bindings(body, &[(name, ty, value)])
+            },
             _ => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_date_time_clip".into())),
                 vec![self.coerce_primitive_to_number(value)?],

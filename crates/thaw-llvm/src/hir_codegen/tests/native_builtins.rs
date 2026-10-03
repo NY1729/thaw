@@ -10171,3 +10171,58 @@ fn date_constructor_dispatches_static_string_and_absence_wrappers_once() {
     assert_eq!(compile_and_run(source, "date_static_wrapper_dispatch"),
         "1704067200000\n1704067200000 1704067200500 2\n1704067200000 true 4\n1704067200000 0 6\n1704067200000 0 true 9\n1704067200000\n1704067200000 1704067200000 11\n");
 }
+
+#[test]
+fn date_constructor_native_bigint_symbol_wrappers_throw_after_one_evaluation() {
+    let source = r#"
+        let calls = 0;
+        function big(): bigint { calls++; return 7n; }
+        function sym(): symbol { calls++; return Symbol("date"); }
+        function fail(): bigint { calls++; throw new Error("producer"); }
+        function maybeBig(which: number): string | bigint {
+            calls++; return which === 0 ? "2024-01-01T00:00:00.000Z" : 7n;
+        }
+        function maybeSymbol(which: number): number | symbol {
+            calls++; return which === 0 ? 1704067200500 : Symbol("date");
+        }
+        function optionalBig(present: boolean): bigint | undefined {
+            calls++; return present ? 7n : undefined;
+        }
+        function nullableSymbol(present: boolean): symbol | null {
+            calls++; return present ? Symbol("date") : null;
+        }
+        async function afterAwait(): Promise<void> {
+            await Promise.resolve(undefined);
+            try { new Date(big()); console.log("missed async"); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+        }
+        async function rejectAfterAwait(): Promise<void> {
+            await Promise.resolve(undefined);
+            new Date(sym());
+        }
+        async function main(): Promise<void> {
+            try { new Date(big()); console.log("missed bigint"); }
+            catch (error) { console.log(error.name, error instanceof TypeError, calls); }
+            try { new Date(sym()); console.log("missed symbol"); }
+            catch (error) { console.log(error.name, error instanceof TypeError, calls); }
+            try { new Date(fail()); console.log("missed producer"); }
+            catch (error) { console.log(error.message, calls); }
+            console.log(new Date(maybeBig(0)).getTime(), new Date(maybeSymbol(0)).getTime(), calls);
+            try { new Date(maybeBig(1)); console.log("missed union bigint"); }
+            catch (error) { console.log(error.name, calls); }
+            try { new Date(maybeSymbol(1)); console.log("missed union symbol"); }
+            catch (error) { console.log(error.name, calls); }
+            console.log(Number.isNaN(new Date(optionalBig(false)).getTime()), new Date(nullableSymbol(false)).getTime(), calls);
+            try { new Date(optionalBig(true)); console.log("missed optional bigint"); }
+            catch (error) { console.log(error.name, calls); }
+            try { new Date(nullableSymbol(true)); console.log("missed nullable symbol"); }
+            catch (error) { console.log(error.name, calls); }
+            await afterAwait();
+            try { await rejectAfterAwait(); console.log("missed outer await"); }
+            catch (error) { console.log(error.name, error instanceof TypeError); }
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "date_native_wrapper_type_errors"),
+        "TypeError true 1\nTypeError true 2\nproducer 3\n1704067200000 1704067200500 5\nTypeError 6\nTypeError 7\ntrue 0 9\nTypeError 10\nTypeError 11\nTypeError true\nTypeError true\n13\n");
+}
