@@ -1562,38 +1562,14 @@ impl<'a> FnLowerer<'a> {
                             )?;
                         }
                         ObjectPatProp::Rest(rest) => {
-                            let remaining = ecmascript_field_order(fields)
-                                .into_iter()
-                                .filter_map(|index| {
-                                    let (name, _) = &fields[index];
-                                    (!used.contains(name)).then(|| {
-                                        Ok((
-                                            name.clone(),
-                                            Self::fixed_object_property_read_type(fields, name)?,
-                                        ))
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, String>>()?;
-                            let rest_value = HirExpr::ObjectLit(
-                                remaining
-                                    .iter()
-                                    .map(|(name, _)| {
-                                        (
-                                            name.clone(),
-                                            self.lower_fixed_object_property_read(
-                                                value.clone(),
-                                                fields,
-                                                name,
-                                            )
-                                            .expect("rest field was taken from its source type"),
-                                        )
-                                    })
-                                    .collect(),
-                            );
+                            let omitted = used.iter().cloned().collect::<Vec<_>>();
+                            let (rest_value, rest_type) = self.lower_fixed_object_rest_copy(
+                                value.clone(), fields, &omitted,
+                            )?;
                             self.lower_assignment_pattern(
                                 &rest.arg,
                                 rest_value,
-                                &HirType::Object(remaining),
+                                &rest_type,
                                 statements,
                             )?;
                         }

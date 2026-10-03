@@ -500,24 +500,9 @@ impl<'a> FnLowerer<'a> {
                     _ => Err("object-rest field names must be string literals".to_string()),
                 })
                 .collect::<Result<HashSet<_>, _>>()?;
-            return Ok(HirExpr::ObjectLit(
-                ecmascript_field_order(fields)
-                    .into_iter()
-                    .filter(|index| !omitted.contains(&fields[*index].0))
-                    .map(|index| {
-                        let (name, _) = &fields[index];
-                        (
-                            name.clone(),
-                            self.lower_fixed_object_property_read(
-                                source.clone(),
-                                fields,
-                                name,
-                            )
-                            .expect("rest field was taken from its source type"),
-                        )
-                    })
-                    .collect(),
-            ));
+            let omitted = omitted.into_iter().collect::<Vec<_>>();
+            return self.lower_fixed_object_rest_copy(source, fields, &omitted)
+                .map(|(value, _)| value);
         }
 
         if let Expr::Member(member) = callee_expr.as_ref() {

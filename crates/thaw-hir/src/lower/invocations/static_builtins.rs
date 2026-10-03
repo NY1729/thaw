@@ -58,11 +58,11 @@ impl<'a> FnLowerer<'a> {
             .map(|index| {
                 let name = fields[index].0.clone();
                 let ty = Self::fixed_object_property_read_type(fields, &name)?;
-                Ok((name, ty))
+                Ok((index, name, ty))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let mut types = Vec::new();
-        for (_, ty) in &ordered {
+        for (_, _, ty) in &ordered {
             if !types.contains(ty) { types.push(ty.clone()); }
         }
         let value_type = match types.as_slice() {
@@ -87,11 +87,8 @@ impl<'a> FnLowerer<'a> {
         let mut statements = vec![HirStmt::Let(
             result_name.clone(), array_type, HirExpr::ArrayLit(Vec::new()),
         )];
-        for (field, _) in ordered {
-            let hidden = HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
-                vec![receiver.clone(), HirExpr::Lit(HirLit::Str(field.clone()))],
-            );
+        let mut actions = Vec::new();
+        for (index, field, _) in ordered {
             let read = self.lower_fixed_object_property_read(receiver.clone(), fields, &field)?;
             let read = self.coerce_to_declared(&value_type, read)?;
             let item = if entries {
@@ -104,8 +101,9 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_array_push".into())),
                 vec![HirExpr::Var(result_name.clone()), item],
             );
-            statements.push(HirStmt::If(hidden, Vec::new(), vec![HirStmt::Expr(append)]));
+            actions.push((index, vec![HirStmt::Expr(append)]));
         }
+        statements.extend(self.lower_ordered_fixed_field_statements(receiver, fields, actions)?);
         statements.push(HirStmt::Return(Some(HirExpr::Var(result_name))));
         self.wrap_call_argument_bindings(
             HirExpr::Block(statements),
@@ -1105,7 +1103,7 @@ impl<'a> FnLowerer<'a> {
                                 descriptor_type.clone()
                             };
                             map_fields.push((name.clone(), field_type));
-                            descriptors.push((name, descriptor, descriptor_type, marker));
+                            descriptors.push((index, name, descriptor, descriptor_type, marker));
                         }
                         let map_type = HirType::Object(map_fields);
                         let map_name = format!("__thaw_descriptor_map_{}", self.next_binding);
@@ -1115,7 +1113,20 @@ impl<'a> FnLowerer<'a> {
                         let mut statements = vec![HirStmt::Let(
                             map_name, map_type.clone(), HirExpr::ObjectAlloc(map_type.clone()),
                         )];
-                        for (name, descriptor, descriptor_type, marker) in descriptors {
+                        statements.push(HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_order_begin".into())),
+                            vec![map.clone()],
+                        )));
+                        for (_, name, _, _, marker) in &descriptors {
+                            if *marker {
+                                statements.push(HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_object_hide_marker".into())),
+                                    vec![map.clone(), HirExpr::Lit(HirLit::Str(name.clone()))],
+                                )));
+                            }
+                        }
+                        let mut actions = Vec::new();
+                        for (index, name, descriptor, descriptor_type, marker) in descriptors {
                             let value = if marker {
                                 HirExpr::OptionalSome(Box::new(descriptor), descriptor_type)
                             } else {
@@ -1124,21 +1135,15 @@ impl<'a> FnLowerer<'a> {
                             let write = HirStmt::Expr(HirExpr::PropAssign(
                                 Box::new(map.clone()), map_type.clone(), name.clone(), Box::new(value),
                             ));
-                            if marker {
-                                let key = HirExpr::Lit(HirLit::Str(name));
-                                let hidden = HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
-                                    vec![source.clone(), key.clone()],
-                                );
-                                let hide = HirStmt::Expr(HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_object_hide_marker".into())),
-                                    vec![map.clone(), key],
-                                ));
-                                statements.push(HirStmt::If(hidden, vec![hide], vec![write]));
-                            } else {
-                                statements.push(write);
-                            }
+                            let seed = HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_order_seed".into())),
+                                vec![map.clone(), HirExpr::Lit(HirLit::Str(name))],
+                            ));
+                            actions.push((index, vec![write, seed]));
                         }
+                        statements.extend(self.lower_ordered_fixed_field_statements(
+                            source.clone(), fields, actions,
+                        )?);
                         statements.push(HirStmt::Return(Some(map)));
                         let result = self.wrap_call_argument_bindings(
                             HirExpr::Block(statements), &[(source_name, target_type, target.clone())],
@@ -3295,43 +3300,30 @@ impl<'a> FnLowerer<'a> {
                                 "`{label}` currently requires a fixed object, got {ty:?}"
                             ));
                         };
-                        let names = ecmascript_field_order(fields)
-                            .into_iter()
-                            .map(|index| HirExpr::Lit(HirLit::Str(fields[index].0.clone())))
-                            .collect::<Vec<_>>();
+                        let names = ecmascript_field_order(fields);
                         let name = format!("__thaw_object_keys_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), ty.clone());
-                        let result = if names.is_empty() {
-                            HirExpr::ArrayLit(names)
-                        } else {
-                            let key_name = format!("__thaw_object_key_{}", self.next_binding);
-                            self.next_binding += 1;
-                            self.scope.insert(key_name.clone(), HirType::Str);
-                            let hidden = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
-                                vec![HirExpr::Var(name.clone()), HirExpr::Var(key_name.clone())],
+                        let result_name = format!("__thaw_object_key_result_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let array_type = HirType::Array(Box::new(HirType::Str));
+                        self.scope.insert(result_name.clone(), array_type.clone());
+                        let mut body = vec![HirStmt::Let(
+                            result_name.clone(), array_type, HirExpr::ArrayLit(Vec::new()),
+                        )];
+                        let actions = names.into_iter().map(|index| {
+                            let key = HirExpr::Lit(HirLit::Str(fields[index].0.clone()));
+                            let push = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                                vec![HirExpr::Var(result_name.clone()), key],
                             );
-                            let keep = HirExpr::Conditional(
-                                Box::new(hidden),
-                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
-                                HirType::Bool,
-                            );
-                            self.lower_array_filter(
-                                HirExpr::ArrayLit(names),
-                                HirType::Array(Box::new(HirType::Str)),
-                                HirType::Str,
-                                HirType::Str,
-                                HirExpr::Lambda(
-                                    vec![HirParam { name: name.clone(), ty: ty.clone() }],
-                                    vec![HirParam { name: key_name, ty: HirType::Str }],
-                                    HirType::Bool,
-                                    Box::new(keep),
-                                ),
-                                None,
-                            )?
-                        };
+                            (index, vec![HirStmt::Expr(push)])
+                        }).collect();
+                        body.extend(self.lower_ordered_fixed_field_statements(
+                            HirExpr::Var(name.clone()), fields, actions,
+                        )?);
+                        body.push(HirStmt::Return(Some(HirExpr::Var(result_name))));
+                        let result = HirExpr::Block(body);
                         bindings.push((name, ty, value));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }

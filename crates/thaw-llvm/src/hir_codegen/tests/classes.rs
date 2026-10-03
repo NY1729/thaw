@@ -3429,3 +3429,78 @@ fn hidden_class_marker_reveals_only_after_successful_public_data_write() {
     assert_eq!(compile_and_run(source, "class_marker_public_write_reveal"),
         "false true\ntrue 2 true\ntrue true\ntrue\ntrue\nblocked 1\nfalse 1\nsealed\nfalse\nfalse 1 1 false\nfalse 1 1 false\nfalse false\ntrue true\ntrue true true\ntrue true\nfrozen\nfalse\nfalse false\n7 1\n");
 }
+
+#[test]
+fn fixed_marker_copy_keeps_runtime_own_key_insertion_order() {
+    let source = r#"
+        class A {}
+        function main(): void {
+            const marker = "__thaw_class_identity_\u001eA";
+            const plain = { ["__thaw_class_identity_\u001eA"]: true };
+            const later = { ...new A(), x: 1, ...plain };
+            const earlier = { ...plain, x: 1, ...new A() };
+            const laterKeys = Object.keys(later);
+            const earlierKeys = Object.keys(earlier);
+            console.log(laterKeys.length, laterKeys[0] === "x", laterKeys[1] === marker);
+            console.log(earlierKeys.length, earlierKeys[0] === marker, earlierKeys[1] === "x");
+            const values = Object.values(later);
+            const entries = Object.entries(later);
+            console.log(values.length, values[0], values[1], entries[0][0] === "x");
+            const names = Object.getOwnPropertyNames(later);
+            const own = Reflect.ownKeys(later);
+            const descriptors = Object.getOwnPropertyDescriptors(later);
+            console.log(names[0] === "x", own[0] === "x", Object.keys(descriptors)[0] === "x");
+            const copied = structuredClone(later);
+            const nested = { ...later };
+            const { x, ...rest } = later;
+            console.log(Object.keys(copied)[0] === "x", Object.keys(nested)[0] === "x",
+                Object.keys(rest).length, Object.keys(rest)[0] === marker);
+            const json = JSON.stringify(later);
+            console.log(json.indexOf("\"x\"") < json.indexOf("__thaw_class_identity_"));
+            const holder = { fire: () => 0 };
+            const revealed = {
+                ...new A(),
+                get first(): number {
+                    holder.fire();
+                    return 3;
+                }
+            };
+            holder.fire = () => {
+                Object.defineProperty(revealed, marker, { value: true });
+                return 0;
+            };
+            const snap = { ...revealed };
+            console.log(Object.keys(snap).length, Object.keys(snap)[0] === "first",
+                Object.hasOwn(snap, marker), Object.hasOwn(revealed, marker));
+            let effects = 0;
+            function first(): number { effects++; return 1; }
+            const overwritten = { ...new A(), x: first(), x: "last" };
+            const accessor = {
+                ...new A(),
+                set value(next: number) { effects += 100; },
+                value: 3,
+            };
+            console.log(effects, overwritten.x, Object.keys(overwritten)[0] === "x",
+                accessor.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "fixed_marker_copy_order"),
+        "2 true true\n2 true true\n2 1 true true\ntrue true true\ntrue true 1 true\ntrue\n1 true false true\n1 last true 3\n");
+}
+
+#[test]
+fn fixed_marker_copy_preserves_order_across_awaited_field() {
+    let source = r#"
+        class A {}
+        async function next(): Promise<number> { return 1; }
+        async function main(): Promise<void> {
+            const plain = { ["__thaw_class_identity_\u001eA"]: true };
+            const copied = { ...new A(), x: await next(), ...plain };
+            const keys = Object.keys(copied);
+            console.log(keys.length, keys[0] === "x",
+                keys[1] === "__thaw_class_identity_\u001eA", copied.x);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "fixed_marker_copy_awaited_field"),
+        "2 true true 1\n");
+}
