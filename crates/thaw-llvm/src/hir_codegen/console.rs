@@ -350,6 +350,16 @@ impl<'ctx> HirCompiler<'ctx> {
         newline: bool,
         descriptor: u64,
     ) -> Result<(), String> {
+        let generated = !matches!(ty, HirType::Json | HirType::Dictionary(_));
+        let rollback = if generated {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_typed_decode_scope_begin").unwrap(),
+                &[], "begin_console_json_scope",
+            ).map_err(|error| error.to_string())?;
+            let failed = self.context.append_basic_block(self.current_function(), "console_marshal_failed");
+            self.catch_stack.push(failed);
+            Some(failed)
+        } else { None };
         let json = match ty {
             HirType::Json | HirType::Dictionary(_) => value.into(),
             HirType::Array(element) => self.compile_native_array_to_json(value, element)?,
@@ -357,29 +367,44 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(_) => self.compile_native_object_to_json(value, ty)?,
             _ => return Err(format!("console.log cannot serialize {ty:?}")),
         };
+        if generated {
+            self.catch_stack.pop();
+            self.builder.build_call(
+                self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
+                &[self.context.i8_type().const_zero().into()], "finish_console_json_scope",
+            ).map_err(|error| error.to_string())?;
+        }
         let formatter = if matches!(ty, HirType::Json) {
             "thaw_json_console_string"
         } else {
             "thaw_json_stringify"
         };
-        let text = self
-            .builder
-            .build_call(
-                self.module.get_function(formatter).unwrap(),
-                &[json.into()],
-                "console_json_format",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("JSON console formatter returned no value")?
-            .into_pointer_value();
+        let text = self.builder.build_call(
+            self.module.get_function(formatter).unwrap(), &[json.into()], "console_json_format",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("JSON console formatter returned no value")?.into_pointer_value();
         let text = if formatter == "thaw_json_stringify" {
-            self.compile_check_json_stringify_error(text.into())?.into_pointer_value()
-        } else {
-            text
-        };
-        self.compile_console_text(text, newline, "console_structured", descriptor)
+            let cleanup: &[BasicValueEnum<'ctx>] = if generated { std::slice::from_ref(&json) } else { &[] };
+            self.compile_check_json_stringify_error_with_cleanup(text.into(), cleanup)?
+                .into_pointer_value()
+        } else { text };
+        self.compile_console_text(text, newline, "console_structured", descriptor)?;
+        if generated {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[json.into()], "destroy_console_json_root",
+            ).map_err(|error| error.to_string())?;
+        }
+        if let Some(failed) = rollback {
+            let done = self.builder.get_insert_block().ok_or("console log lost its success block")?;
+            self.builder.position_at_end(failed);
+            self.compile_discard_typed_decode_scope()?;
+            self.branch_on_pending_exception()?;
+            self.builder.build_unreachable().map_err(|error| error.to_string())?;
+            self.builder.position_at_end(done);
+        }
+        Ok(())
     }
 
     fn compile_console_collection(
