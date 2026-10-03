@@ -161,11 +161,9 @@ type UFormattedNumberRange = c_void;
 type UNumberRangeFormatter = c_void;
 
 unsafe fn resolve<T>(handle: *mut c_void, base: &str) -> Option<T> {
-    // Fedora (and some other distros) build ICU with a per-major symbol
-    // suffix for parallel installability (`ucol_open_77`), while upstream
-    // exports the unsuffixed name (versioned); try the suffixed names
-    // first, then the plain one.
-    for major in [77_i32, 76, 75, 74, 73, 72, 71, 70] {
+    // Some ICU builds export per-major symbols (`ucol_open_78`), while
+    // others export unsuffixed names; try suffixes before the plain name.
+    for major in [78_i32, 77, 76, 75, 74, 73, 72, 71, 70] {
         let name = CString::new(format!("{base}_{major}")).ok()?;
         let symbol = unsafe { dlsym(handle, name.as_ptr()) };
         if !symbol.is_null() {
@@ -183,7 +181,7 @@ unsafe fn resolve<T>(handle: *mut c_void, base: &str) -> Option<T> {
 fn icu() -> Option<&'static Icu> {
     static ICU: OnceLock<Option<Icu>> = OnceLock::new();
     ICU.get_or_init(|| unsafe {
-        let handle = ["libicui18n.so", "libicui18n.so.77", "libicui18n.so.76"]
+        let handle = ["libicui18n.so", "libicui18n.so.78", "libicui18n.so.77", "libicui18n.so.76"]
             .into_iter()
             .find_map(|name| {
                 let name = CString::new(name).ok()?;
