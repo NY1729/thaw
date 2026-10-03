@@ -45,6 +45,31 @@ const ERROR_SUPPRESSED_ERROR_MARKER: char = '\u{6}';
 /// A `SuppressedError`'s `.suppressed` sub-error tag.
 const ERROR_SUPPRESSED_MARKER: char = '\u{7}';
 
+fn framed_error(message: &str) -> Option<thaw_arena::error_wire::ErrorFrame<'_>> {
+    thaw_arena::error_wire::parse_tagged(message.as_bytes())
+}
+
+fn metadata_suffix(message: &str) -> &str {
+    if let Some(frame) = framed_error(message) {
+        return std::str::from_utf8(frame.suffix).unwrap_or("");
+    }
+    message
+}
+
+/// Length-frame a structured error message without changing the pointer ABI.
+/// # Safety
+/// Both pointers must reference live native strings.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char {
+    if name.is_null() || message.is_null() { return std::ptr::null(); }
+    let name = unsafe { wtf8_bytes(name) };
+    let message = unsafe { wtf8_bytes(message) };
+    thaw_arena::error_wire::encode_tagged(name, message, None)
+        .and_then(|bytes| arena_wtf8(&bytes))
+        .map_or(std::ptr::null(), |value| value.cast())
+}
+
+
 /// Drops a `SuppressedError`'s trailing `.error`/`.suppressed` sub-tags
 /// (and anything after them) so `.message`/`.cause`/`.code`/`.name` read
 /// only the real fields. Nested sub-error tags carry `\u{1}`-`\u{5}`, never
@@ -63,6 +88,9 @@ fn split_once_error_marker(message: &[u8], marker: u8) -> Option<(&[u8], &[u8])>
 // The markers are ASCII bytes, so splitting raw WTF-8 also preserves lone
 // surrogate sequences and embedded NULs in the message body.
 fn split_error_tag_bytes(message: &[u8]) -> (&[u8], &[u8]) {
+    if let Some(frame) = thaw_arena::error_wire::parse_tagged(message) {
+        return (frame.chain, frame.display);
+    }
     let message = split_once_error_marker(message, ERROR_SUPPRESSED_ERROR_MARKER as u8)
         .map_or(message, |value| value.0);
     let Some(rest) = message.strip_prefix(&[ERROR_TAG_MARKER as u8]) else {
@@ -94,7 +122,7 @@ fn split_error_tag(message: &str) -> (&str, &str) {
 /// The runtime `.name` override embedded after the message, if any --
 /// see `ERROR_NAME_OVERRIDE_MARKER`.
 fn split_error_name_override(message: &str) -> Option<&str> {
-    let message = strip_suppressed_segments(message);
+    let message = strip_suppressed_segments(metadata_suffix(message));
     let (_, after) = message.split_once(ERROR_NAME_OVERRIDE_MARKER)?;
     let after = after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0);
     let after = after.split_once(ERROR_CAUSE_MARKER).map_or(after, |value| value.0);
@@ -113,14 +141,14 @@ fn resolved_error_name(message: &str) -> String {
 }
 
 fn split_error_cause(message: &str) -> Option<&str> {
-    let message = strip_suppressed_segments(message);
+    let message = strip_suppressed_segments(metadata_suffix(message));
     let after = message.split_once(ERROR_CAUSE_MARKER)?.1;
     let after = after.split_once(ERROR_CODE_MARKER).map_or(after, |value| value.0);
     Some(after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0))
 }
 
 fn split_error_code(message: &str) -> Option<&str> {
-    let message = strip_suppressed_segments(message);
+    let message = strip_suppressed_segments(metadata_suffix(message));
     message
         .split_once(ERROR_CODE_MARKER)
         .map(|value| value.1.split_once(ERROR_PROPS_MARKER).map_or(value.1, |props| props.0))
@@ -128,7 +156,7 @@ fn split_error_code(message: &str) -> Option<&str> {
 
 /// A `SuppressedError`'s `.error` sub-error tag, or `None`.
 fn split_suppressed_error(message: &str) -> Option<&str> {
-    let after = message.split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    let after = metadata_suffix(message).split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
     if let Some((error, _)) = split_length_prefixed(after) {
         return Some(error);
     }
@@ -144,7 +172,7 @@ fn split_suppressed_error(message: &str) -> Option<&str> {
 
 /// A `SuppressedError`'s `.suppressed` sub-error tag, or `None`.
 fn split_suppressed(message: &str) -> Option<&str> {
-    let after_error = message.split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    let after_error = metadata_suffix(message).split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
     if let Some((_, suppressed)) = split_length_prefixed(after_error) {
         return Some(suppressed);
     }
@@ -178,11 +206,12 @@ pub unsafe extern "C" fn thaw_error_suppress(
     let error = unsafe { CStr::from_ptr(error) }.to_string_lossy();
     let suppressed = unsafe { CStr::from_ptr(suppressed) }.to_string_lossy();
     let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    let tagged = format!(
-        "{ERROR_TAG_MARKER}SuppressedError{ERROR_TAG_MARKER}{message}{ERROR_SUPPRESSED_ERROR_MARKER}{}:{error}{suppressed}",
-        error.len()
-    );
-    arena_c_string(&tagged).map_or(std::ptr::null(), |value| value.cast())
+    let Some(mut tagged) = thaw_arena::error_wire::encode_tagged(
+        b"SuppressedError", message.as_bytes(), None,
+    ) else { return std::ptr::null(); };
+    tagged.push(ERROR_SUPPRESSED_ERROR_MARKER as u8);
+    tagged.extend_from_slice(format!("{}:{error}{suppressed}", error.len()).as_bytes());
+    arena_wtf8(&tagged).map_or(std::ptr::null(), |value| value.cast())
 }
 
 /// Reads a caught error's own custom property from the trailing
@@ -194,7 +223,7 @@ pub unsafe extern "C" fn thaw_error_suppress(
 /// yields `undefined`, matching an absent property). Strings are returned
 /// without JSON quoting.
 fn error_property(message: &str, name: &str) -> Option<String> {
-    let bag = message.split_once(ERROR_PROPS_MARKER)?.1;
+    let bag = metadata_suffix(message).split_once(ERROR_PROPS_MARKER)?.1;
     let value: serde_json::Value = serde_json::from_str(bag).ok()?;
     let value = value.as_object()?.get(name)?;
     Some(match value {
@@ -677,6 +706,25 @@ mod error_native_tests {
         }
         assert_eq!(call_message("\u{1}TypeError\u{1}plain\u{3}ERR_TEST"), "plain");
         assert_eq!(call_message("plain"), "plain");
+    }
+
+    #[test]
+    fn framed_error_message_keeps_control_text_before_real_suffix() {
+        let body = "first\u{2}second\u{3}third\u{4}fourth\u{5}fifth\u{6}sixth";
+        let name = c"TypeError";
+        let body_arg = thaw_arena::arena_string(body.as_bytes());
+        let framed = unsafe { thaw_error_frame(name.as_ptr(), body_arg) };
+        assert!(!framed.is_null());
+        let mut wire = unsafe { wtf8_bytes(framed) }.to_vec();
+        wire.extend_from_slice(b"\x02real cause\x03REAL_CODE\x05{\"status\":418}");
+        let source = arena_wtf8(&wire).unwrap();
+        let result = unsafe { thaw_error_message(source.cast()) };
+        assert_eq!(unsafe { wtf8_bytes(result) }, body.as_bytes());
+        let source = unsafe { CStr::from_ptr(source.cast()) }.to_string_lossy();
+        assert_eq!(resolved_error_name(&source), "TypeError");
+        assert_eq!(split_error_cause(&source), Some("real cause"));
+        assert_eq!(split_error_code(&source), Some("REAL_CODE"));
+        assert_eq!(error_property(&source, "status"), Some("418".into()));
     }
 
     #[test]

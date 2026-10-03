@@ -968,10 +968,10 @@ fn native_addon_exceptions_preserve_their_tagged_class_name() {
             NAPI_OK
         );
         assert_eq!(napi_throw(env_ptr, error), NAPI_OK);
-        assert_eq!(
-            take_env_exception(env_ptr),
-            Err("\u{1}TypeError\u{1}bad promise".to_string())
-        );
+        let wire = take_env_exception(env_ptr).unwrap_err();
+        let frame = thaw_arena::error_wire::parse_tagged(wire.as_bytes()).unwrap();
+        assert_eq!(frame.chain, b"TypeError");
+        assert_eq!(frame.display, b"bad promise");
         assert!(env.exception.is_none(), "exception must be taken, not just read");
 
         // A plain string exception (no napi_create_*_error involved) has no

@@ -18,7 +18,7 @@ static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 #[test]
 fn quickjs_reference_throw_sets_napi_exception_without_spoofing_returned_object() {
     assert_eq!(
-        thaw_quickjs::thaw_js_load(c"globalThis.__thaw_napi_reference_746291201 = () => ({ __thaw_error__: 'ordinary' }); globalThis.__thaw_napi_reference_746291202 = () => { throw new TypeError('callback boom'); };".as_ptr()),
+        thaw_quickjs::thaw_js_load(c"globalThis.__thaw_napi_reference_746291201 = () => ({ __thaw_error__: 'ordinary' }); globalThis.__thaw_napi_reference_746291202 = () => { throw new TypeError('callback \\u0002boom'); };".as_ptr()),
         1
     );
     let mut env = Env::new();
@@ -39,13 +39,15 @@ fn quickjs_reference_throw_sets_napi_exception_without_spoofing_returned_object(
             assert!(result.is_null());
             let mut error = ptr::null_mut();
             unsafe { assert_eq!(napi_get_and_clear_last_exception(&mut env, &mut error), NAPI_OK); }
-            assert!(matches!(unsafe { value_ref(error) }, Ok(Value::Error(message)) if message.contains("callback boom")));
+            assert!(matches!(unsafe { value_ref(error) }, Ok(Value::Error(message)) if message == "callback \u{2}boom"));
             let mut name = ptr::null_mut();
             unsafe { assert_eq!(napi_get_named_property(&mut env, error, c"name".as_ptr(), &mut name), NAPI_OK); }
             assert!(matches!(unsafe { value_ref(name) }, Ok(Value::String(value)) if value == "TypeError"));
             let forwarded = unsafe { describe_env_exception(&mut env, error) }.unwrap();
-            assert!(forwarded.starts_with("\u{1}TypeError\u{1}"));
-            assert_eq!(forwarded.matches("\u{1}TypeError\u{1}").count(), 1);
+            let frame = thaw_arena::error_wire::parse_tagged(forwarded.as_bytes()).unwrap();
+            assert_eq!(frame.chain, b"TypeError");
+            assert_eq!(frame.display, b"callback \x02boom");
+            assert_eq!(frame.suffix, b"");
         } else {
             let Ok(Value::Object(fields)) = (unsafe { value_ref(result) }) else { panic!("callback result was not an object") };
             let returned = fields.get(&PropertyKey::String("__thaw_error__".into())).copied().unwrap();
@@ -99,7 +101,7 @@ fn exported_callback_exception_is_consumed_before_the_next_call() {
         let first = thaw_napi_call_result(c"stale-test::throw".as_ptr(), c"[]".as_ptr());
         assert!(first.value.is_null());
         let first_error = CString::from_raw(first.error).into_string().unwrap();
-        assert!(first_error.contains("\u{1}TypeError\u{1}first failure"), "{first_error}");
+        assert!(first_error.starts_with("\u{1}TypeError\u{1}\u{1e}E1:") && first_error.contains("first failure"), "{first_error}");
         assert!((*env_ptr).exception.is_none());
         let good = thaw_napi_call_result(c"stale-test::good".as_ptr(), c"[]".as_ptr());
         assert!(good.error.is_null());
@@ -153,7 +155,7 @@ fn nested_export_getter_preserves_its_exception() {
         assert_eq!(result.value, 0);
         assert!(!result.error.is_null());
         let error = CString::from_raw(result.error).into_string().unwrap();
-        assert!(error.contains("\u{1}TypeError\u{1}original getter failure"), "{error}");
+        assert!(error.starts_with("\u{1}TypeError\u{1}\u{1e}E1:") && error.contains("original getter failure"), "{error}");
         assert!(!error.contains("unknown native addon export"));
         assert!((*env_ptr).exception.is_none());
     }

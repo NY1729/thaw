@@ -955,10 +955,9 @@ impl<'a> FnLowerer<'a> {
                             object_type.clone(),
                             "name".to_string(),
                         );
-                        let tag = HirExpr::Lit(HirLit::Str(format!("\u{1}{chain}\u{1}")));
                         let tagged_message = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                            vec![tag, message],
+                            Box::new(HirExpr::Var("__thaw_error_frame".to_string())),
+                            vec![HirExpr::Lit(HirLit::Str(chain)), message],
                         );
                         let name_marker = HirExpr::Lit(HirLit::Str("\u{4}".to_string()));
                         let tagged_name = HirExpr::Call(
