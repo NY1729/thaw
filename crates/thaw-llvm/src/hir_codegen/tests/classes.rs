@@ -3667,3 +3667,41 @@ fn non_arrow_implicit_json_receiver_preserves_bigint_scalar() {
     assert_eq!(compile_and_run(source, "non_arrow_bigint_this"),
         "bigint false 0\nbigint 9007199254740993 true\nTypeError\nTypeError\nTypeError\n");
 }
+
+#[test]
+fn non_arrow_json_receiver_tracks_live_constructor_and_returned_alias() {
+    let source = r#"
+        class Holder { static value: number = 7; }
+        function main(): void {
+            const read = function(this: Json): number { return Number(this["value"]); };
+            const identity = function(this: Json): Json { return this; };
+            const alias = identity.call(Holder);
+            console.log(read.call(Holder));
+            console.log(Number(alias["value"]));
+            console.log(read.call(Holder));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_live_constructor_this"), "7\n7\n7\n");
+}
+
+#[test]
+fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
+    let source = r#"
+        function __thaw_module_init(): void {}
+        function main(): void {
+            const read = function(this: Json): number { return 1; };
+            console.log(read.call(3));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "json_receiver_arena_tracing");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.find("define i32 @main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let enable = body.find("call void @thaw_arena_enable_tracing(").expect(body);
+    let init = body.find("call void @__thaw_module_init(").expect(body);
+    assert!(enable < init, "{body}");
+}
