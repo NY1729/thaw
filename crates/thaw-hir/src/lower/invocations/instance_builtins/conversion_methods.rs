@@ -739,6 +739,16 @@ impl<'a> FnLowerer<'a> {
         for comparison in comparisons {
             result = self.lower_logical_expr(result, comparison, false)?;
         }
+        let hidden = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+            vec![HirExpr::Var(object_name.clone()), HirExpr::Var(key_name.clone())],
+        );
+        let result = HirExpr::Conditional(
+            Box::new(hidden),
+            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            Box::new(result),
+            HirType::Bool,
+        );
         self.wrap_call_argument_bindings(
             result,
             &[

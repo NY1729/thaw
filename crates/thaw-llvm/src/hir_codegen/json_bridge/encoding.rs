@@ -192,6 +192,27 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for index in ecmascript_object_field_order(fields) {
+            let visibility_name = &fields[index].0;
+            let hidden = if visibility_name.as_bytes().contains(&0) {
+                // Compiler markers never contain NUL; a C string would lose
+                // the suffix of an ordinary user field's name.
+                self.context.bool_type().const_zero()
+            } else {
+                let marker_name = self.builder.build_global_string_ptr(visibility_name, "native_field_visibility_name")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_marker_hidden").unwrap(),
+                    &[object.into(), marker_name.as_pointer_value().into()],
+                    "native_field_hidden",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native field visibility query returned no value")?.into_int_value()
+            };
+            let function = self.current_function();
+            let visibility_write = self.context.append_basic_block(function, "write_visible_native_field");
+            let visibility_done = self.context.append_basic_block(function, "native_field_done");
+            self.builder.build_conditional_branch(hidden, visibility_done, visibility_write)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(visibility_write);
             let (name, field_ty) = &fields[index];
             let getter = format!("__thaw_getter_{name}");
             let setter = format!("__thaw_setter_{name}");
@@ -209,6 +230,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         json, key.as_pointer_value(), undefined, &HirType::Json, true, true,
                     )?;
                 }
+                self.builder.build_unconditional_branch(visibility_done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(visibility_done);
                 continue;
             }
             let (value, value_type) = if let Some(getter) = getter {
@@ -231,6 +254,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 preserve_undefined,
                 false,
             )?;
+            self.builder.build_unconditional_branch(visibility_done).map_err(|error| error.to_string())?;
+            self.builder.position_at_end(visibility_done);
         }
         // Carries `object`'s own frozen/sealed/non-extensible state (if
         // any -- a no-op otherwise) across onto the freshly built `json`
