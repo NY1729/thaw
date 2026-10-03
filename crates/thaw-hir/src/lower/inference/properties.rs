@@ -218,6 +218,25 @@ impl<'a> FnLowerer<'a> {
         ty: &HirType,
         result: &HirType,
     ) -> Result<Vec<HirStmt>, String> {
+        if matches!(&value, HirExpr::Var(_) | HirExpr::Lit(_)) {
+            return self.lower_flattened_bound_property_return(value, ty, result);
+        }
+        let name = format!("__thaw_property_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let body = self.lower_flattened_bound_property_return(HirExpr::Var(name.clone()), ty, result);
+        self.scope.remove(&name);
+        let mut statements = vec![HirStmt::Let(name, ty.clone(), value)];
+        statements.extend(body?);
+        Ok(statements)
+    }
+
+    fn lower_flattened_bound_property_return(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+        result: &HirType,
+    ) -> Result<Vec<HirStmt>, String> {
         match ty {
             HirType::Optional(payload) => {
                 let mut statements = vec![HirStmt::If(
