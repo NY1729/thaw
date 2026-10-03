@@ -112,6 +112,45 @@ impl<'ctx> HirCompiler<'ctx> {
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("object marker query returned no value".into());
             }
+            "__thaw_object_has_full_layout" => {
+                let [object] = args else {
+                    return Err("full object layout query expects one object".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_has_full_layout").unwrap(),
+                    &[object.into()],
+                    "has_full_object_layout",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("full object layout query returned no value".into());
+            }
+            "__thaw_object_full_has_own" => {
+                let [object, key] = args else {
+                    return Err("full object own-property query expects object and key".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_full_has_own").unwrap(),
+                    &[object.into(), key.into()],
+                    "full_object_has_own",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("full object own-property query returned no value".into());
+            }
+            "__thaw_object_full_own_keys" => {
+                let [object, include_non_enumerable] = args else {
+                    return Err("full object keys query expects object and mode".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let mode = self.compile_expr(include_non_enumerable)?.into_int_value();
+                let raw_keys = self.builder.build_call(
+                    self.module.get_function("thaw_object_full_own_keys").unwrap(),
+                    &[object.into(), mode.into()],
+                    "full_object_own_keys",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("full object keys query returned no value")?.into_pointer_value();
+                return Ok(self.compile_array_wrap(raw_keys)?.into());
+            }
             "__thaw_object_hide_marker" => {
                 let [object, marker] = args else {
                     return Err("object marker registration expects two operands".into());

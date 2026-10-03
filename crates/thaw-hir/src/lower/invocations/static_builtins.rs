@@ -3324,6 +3324,22 @@ impl<'a> FnLowerer<'a> {
                         )?);
                         body.push(HirStmt::Return(Some(HirExpr::Var(result_name))));
                         let result = HirExpr::Block(body);
+                        let native_object = HirExpr::Var(name.clone());
+                        let result = HirExpr::Conditional(
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_has_full_layout".into())),
+                                vec![native_object.clone()],
+                            )),
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_full_own_keys".into())),
+                                vec![
+                                    native_object,
+                                    HirExpr::Lit(HirLit::Bool(property.sym != *"keys")),
+                                ],
+                            )),
+                            Box::new(result),
+                            HirType::Array(Box::new(HirType::Str)),
+                        );
                         bindings.push((name, ty, value));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
