@@ -486,6 +486,15 @@ fn bundle_exports_self_contained_worker_runtime_source() {
         .unwrap();
     assert_eq!(result.as_deref(), Some("42"));
 
+    // The serialized origin resolver must carry its factory-key classifier.
+    // This lookup runs inside the detached Worker source, where outer bundle
+    // helper declarations are not available.
+    let origin = thaw_quickjs::eval_json(
+            "Function('require', __thaw_worker_bundle_source + \"return __thaw_bundle_worker_origin('pkg/index.js').resolve('missing') === null;\")(function(name) { throw new Error(name); })",
+        )
+        .unwrap();
+    assert_eq!(origin.as_deref(), Some("true"));
+
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules_dir);
 }
@@ -1405,7 +1414,7 @@ fn bundled_require_cache_and_commonjs_this_respect_module_format() {
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.factoryContext = function() {{ return module.exports; }};");
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
     let result = thaw_quickjs::thaw_js_call(c"factoryContext".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,1,2,3,7,8,4,5,6,1,2,true,true,true,true,true,true]");
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,1,2,3,7,8,4,5,6,1,2,true,true,false,false,true,true]");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
 }
@@ -1960,4 +1969,121 @@ fn native_esm_failed_link_never_marks_source_linked() {
         let result = thaw_quickjs::thaw_js_call(c"failedRead".as_ptr(), c"[]".as_ptr());
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
     }).join().unwrap();
+}
+
+#[test]
+fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() {
+    // Unrun: a CommonJS main enters a native ESM dependency synchronously.
+    // The native star getter must read the final module.exports after the
+    // provisional CommonJS object was replaced later in the same cycle.
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("cjs-first-native-cycle");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-first-native-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "exports.value = 1; var first = require('./native.mjs'); var second = require('./native.mjs'); var created = require('node:module').createRequire(__filename)('./native.mjs'); module.exports = { value: 2, same: first === second && second === created, read: function() { return first.value; } };").unwrap();
+    fs::write(package.join("native.mjs"), "export * from './index.cjs';").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-first-native-pkg", &package, "index.cjs").unwrap();
+    assert!(bundle.contains("evalNativeSync"));
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.cjsFirstNativeResult = function() {{ return [module.exports.same, module.exports.read()]; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"cjsFirstNativeResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,2]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn sync_require_rejects_async_factory_and_native_tla_before_side_effects() {
+    // Unrun: both direct and created synchronous require must fail before
+    // any pre-await statement runs. Async import remains a separate path.
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("cjs-first-async-guard");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-first-async-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "var created = require('node:module').createRequire(__filename); var errors = []; try { require('./late.cjs'); } catch (error) { errors.push(error.code === 'ERR_REQUIRE_ASYNC_MODULE'); } try { created('./late.cjs'); } catch (error) { errors.push(error.code === 'ERR_REQUIRE_ASYNC_MODULE'); } try { require('./native.mjs'); } catch (error) { errors.push(error.code === 'ERR_REQUIRE_ASYNC_MODULE'); } try { created('./native.mjs'); } catch (error) { errors.push(error.code === 'ERR_REQUIRE_ASYNC_MODULE'); } module.exports = errors;").unwrap();
+    fs::write(package.join("late.cjs"), "globalThis.asyncFactoryRan = true; await Promise.resolve(); module.exports = 1;").unwrap();
+    fs::write(package.join("native.mjs"), "globalThis.nativeTlaRan = true; await Promise.resolve(); export const value = 2;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-first-async-pkg", &package, "index.cjs").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.asyncGuardResult = function() {{ return [module.exports, globalThis.asyncFactoryRan === undefined, globalThis.nativeTlaRan === undefined]; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"asyncGuardResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[true,true,true,true],true,true]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_first_native_route_keeps_worker_url_on_legacy_snapshot() {
+    // Unrun: the Worker URL serializes factories, not native registrations.
+    // Keep this graph on the existing renderer until Worker native parity.
+    let root = temp_registry("cjs-first-worker-gate");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-first-worker-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "var Worker = require('node:worker_threads').Worker; module.exports = new Worker(new URL('./worker.mjs', import.meta.url));").unwrap();
+    fs::write(package.join("worker.mjs"), "export const value = 1;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-first-worker-pkg", &package, "index.cjs").unwrap();
+    assert!(bundle.contains("__thaw_worker_bundle_source"));
+    assert!(!bundle.contains("__thaw_register_native_bundle"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_first_require_preserves_pure_native_namespace_identity_and_live_binding() {
+    // Unrun: a pure ESM dependency keeps its engine namespace identity across
+    // synchronous require calls, and a mutable export stays live.
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("cjs-first-pure-namespace");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-first-pure-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "var first = require('./pure.mjs'), second = require('./pure.mjs'); module.exports = [first === second, first.value, (first.bump(), second.value)];").unwrap();
+    fs::write(package.join("pure.mjs"), "export let value = 1; export function bump() { value++; }").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-first-pure-pkg", &package, "index.cjs").unwrap();
+    assert!(bundle.contains("evalNativeSync"));
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.pureNamespaceResult = function() {{ return module.exports; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"pureNamespaceResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,1,2]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_created_require_keeps_computed_native_query_instances_distinct() {
+    // Unrun: this suffix is requested after collection, through the public
+    // created-require closure. It must not return the registered base module.
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("cjs-first-native-query-instance");
+    let modules = root.join("node_modules");
+    let package = modules.join("query-instance-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "module.exports = require('./leaf.mjs');").unwrap();
+    fs::write(package.join("leaf.mjs"), "globalThis.queryInstanceRuns = (globalThis.queryInstanceRuns || 0) + 1; export let value = 0; export function bump() { value++; }").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "query-instance-pkg", &package, "index.cjs").unwrap();
+    assert!(bundle.contains("evalNativeSync"));
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.queryInstanceRuns = 0; {bundle} var base = module.exports, made = globalThis.__thaw_bundle_create_require('query-instance-pkg/index.cjs'), one = made('./leaf.mjs?one'), two = made('./leaf.mjs?two'); one.bump(); globalThis.queryInstanceResult = function() {{ return [base === one, one === two, one === made('./leaf.mjs?one'), base.value, one.value, two.value, queryInstanceRuns]; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"queryInstanceResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,false,true,0,1,0,3]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_created_require_native_query_clones_private_opaque_edges() {
+    // Unrun: each native query instance gets its own private origin/edge
+    // records, while the imported CommonJS factory still runs only once.
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("cjs-first-native-query-opaque");
+    let modules = root.join("node_modules");
+    let package = modules.join("query-opaque-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "globalThis.queryIndexRuns = (globalThis.queryIndexRuns || 0) + 1; exports.value = 1; var base = require('./leaf.mjs'); module.exports = { value: 2, base: base };").unwrap();
+    fs::write(package.join("leaf.mjs"), "globalThis.queryOpaqueRuns = (globalThis.queryOpaqueRuns || 0) + 1; export * from './index.cjs'; export const token = {};").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "query-opaque-pkg", &package, "index.cjs").unwrap();
+    assert!(bundle.contains("evalNativeSync"));
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.queryOpaqueRuns = 0; globalThis.queryIndexRuns = 0; {bundle} var made = globalThis.__thaw_bundle_create_require('query-opaque-pkg/index.cjs'), base = module.exports.base, one = made('./leaf.mjs?one'), two = made('./leaf.mjs?two'); globalThis.queryOpaqueResult = function() {{ return [base.value, one.value, two.value, base === one, one === two, one === made('./leaf.mjs?one'), base.token === one.token, one.token === two.token, queryOpaqueRuns, queryIndexRuns]; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"queryOpaqueResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[2,2,2,false,false,true,false,false,3,1]");
+    let _ = fs::remove_dir_all(root);
 }
