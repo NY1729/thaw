@@ -80,7 +80,7 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
         }
         _ => hex,
     };
-    if hex.len() % 2 != 0 {
+    if hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     let bytes = (0..hex.len())
