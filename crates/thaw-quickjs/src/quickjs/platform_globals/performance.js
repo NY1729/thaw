@@ -124,8 +124,27 @@
     measure(name, startOrOptions, endMark) {
       let start, end, detail;
       if (startOrOptions && typeof startOrOptions === 'object') {
-        start = entryTime(startOrOptions.start, 0); detail = startOrOptions.detail;
-        end = startOrOptions.duration === undefined ? entryTime(startOrOptions.end, performanceNow()) : start + Number(startOrOptions.duration);
+        const options = startOrOptions;
+        detail = options.detail;
+        const durationValue = options.duration;
+        const duration = durationValue === undefined ? undefined : Number(durationValue);
+        const endValue = options.end;
+        const startValue = options.start;
+        const hasStart = startValue !== undefined;
+        const hasEnd = endValue !== undefined;
+        const hasDuration = durationValue !== undefined;
+        const populated = detail !== undefined || hasStart || hasEnd || hasDuration;
+        if (populated && endMark !== undefined) throw new TypeError('endMark cannot follow measure options');
+        if (populated && ((!hasStart && !hasEnd) || (hasStart && hasEnd && hasDuration))) {
+          throw new TypeError('measure options require start or end, but not all three');
+        }
+        if (hasEnd) {
+          end = entryTime(endValue, 0);
+          start = hasStart ? entryTime(startValue, 0) : hasDuration ? end - duration : 0;
+        } else if (hasStart) {
+          start = entryTime(startValue, 0);
+          end = hasDuration ? start + duration : performanceNow();
+        } else { start = 0; end = entryTime(endMark, performanceNow()); }
       } else { start = entryTime(startOrOptions, 0); end = entryTime(endMark, performanceNow()); }
       return queuePerformanceEntry(new PerformanceMeasure(name, start, end - start, detail));
     },
