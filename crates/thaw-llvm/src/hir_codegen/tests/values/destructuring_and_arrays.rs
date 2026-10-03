@@ -188,6 +188,68 @@ fn compiles_object_and_typed_array_string_conversion() {
 }
 
 #[test]
+fn tuple_join_uses_empty_text_for_only_absent_slots() {
+    let source = r#"
+        let calls = 0;
+        function make(): [number | null | undefined, string, string, number | undefined] {
+            calls++;
+            return [null, "null", "undefined", undefined];
+        }
+        function main(): void {
+            const staticSlots: [null, undefined, string, string] =
+                [null, undefined, "null", "undefined"];
+            console.log(String(staticSlots));
+            console.log(staticSlots.join("|"));
+            console.log(staticSlots.join());
+            const optional: [number | undefined, number | undefined] = [undefined, 4];
+            const nullable: [number | null, number | null] = [null, 5];
+            const nullish: [number | null | undefined, number | null | undefined, number | null | undefined] =
+                [null, undefined, 6];
+            console.log(String(optional), optional.join("|"));
+            console.log(String(nullable), nullable.join("|"));
+            console.log(String(nullish), nullish.join("|"));
+            const union: [number | string | null | undefined, number | string | null | undefined,
+                          number | string | null | undefined, number | string | null | undefined] =
+                [null, undefined, "null", 7];
+            console.log(String(union), union.join("|"));
+            console.log(String(make()), calls);
+            console.log(make().join("|"), calls);
+            console.log(String(null), String(undefined));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tuple_join_absent_static_tagged_union"),
+        ",,null,undefined\n||null|undefined\n,,null,undefined\n,4 |4\n,5 |5\n,,6 ||6\n,,null,7 ||null|7\n,null,undefined, 1\n|null|undefined| 2\nnull undefined\n"
+    );
+}
+
+#[test]
+fn tuple_join_checks_json_and_live_jsvalue_slots_without_stringifying_absence() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.joinNull = null; globalThis.joinMissing = undefined; globalThis.joinText = 'null'; globalThis.joinObject = { toString() { return 'object'; }, toJSON() { throw new Error('snapshot'); } }; globalThis.joinObject.self = globalThis.joinObject;");
+            const jsonNull: any = JSON.parse("null");
+            const jsonMissing: any = undefined;
+            const jsonText: any = JSON.parse("\"undefined\"");
+            const jsonSlots: [any, any, any] = [jsonNull, jsonMissing, jsonText];
+            console.log(String(jsonSlots), jsonSlots.join("|"));
+            const liveNull: JsValue = getDynamicValue("joinNull");
+            const liveMissing: JsValue = getDynamicValue("joinMissing");
+            const liveText: JsValue = getDynamicValue("joinText");
+            const liveObject: JsValue = getDynamicValue("joinObject");
+            const liveSlots: [JsValue, JsValue, JsValue, JsValue] =
+                [liveNull, liveMissing, liveText, liveObject];
+            console.log(String(liveSlots), liveSlots.join("|"));
+            console.log(String(jsonNull), String(jsonMissing));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tuple_join_absent_json_live"),
+        ",,undefined ||undefined\n,,null,object ||null|object\nnull undefined\n"
+    );
+}
+
+#[test]
 fn compiles_heterogeneous_tuple_string_conversion_once() {
     let source = r#"
         function tupleValue(): [number, string, boolean, { value: number }, number[], [string, boolean]] {
