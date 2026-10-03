@@ -853,17 +853,15 @@ impl<'a> FnLowerer<'a> {
                     // Object]"` (`__thaw_object_to_string`) every other
                     // class/object literal already gets.
                     _ => {
-                        if let Some(class_name) =
-                            class_name_from_type(&HirType::Object(fields.clone()))
-                        {
-                            let symbol = class_getter_symbol(
-                                class_name,
-                                &well_known_symbol_key("toStringTag"),
-                                false,
-                            );
-                            if self.signatures.contains_key(&symbol) {
-                                let tag =
-                                    HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![value]);
+                        let tag_property = well_known_symbol_key("toStringTag");
+                        if let Some(owner) = self.class_instance_accessor_owner(
+                            &HirType::Object(fields.clone()), &tag_property,
+                        ) {
+                            let symbol = class_getter_symbol(&owner, &tag_property, false);
+                            if self.signatures.get(&symbol).is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str())) {
+                                let tag = HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![
+                                    self.assert_class_accessor_receiver(value, &owner),
+                                ]);
                                 return Ok(HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                                     vec![

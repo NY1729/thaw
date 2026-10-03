@@ -29,6 +29,29 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_throw_text(value).map(Into::into);
             }
 
+            "__thaw_assert_class_identity" => {
+                let [object, HirExpr::Lit(HirLit::Str(class_name))] = args else {
+                    return Err("class identity assertion expects an object and a literal class name".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let expected = self.builder.build_global_string_ptr(class_name, "class_assert_name")
+                    .map_err(|error| error.to_string())?;
+                let trusted = self.builder.build_call(
+                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                    &[object.into(), expected.as_pointer_value().into()],
+                    "class_assert_identity",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("class identity assertion returned no value")?.into_int_value();
+                let function = self.current_function();
+                let accepted = self.context.append_basic_block(function, "class_identity_accepted");
+                let rejected = self.context.append_basic_block(function, "class_identity_rejected");
+                self.builder.build_conditional_branch(trusted, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.compile_throw_type_error("Incompatible class accessor receiver")?;
+                self.builder.position_at_end(accepted);
+                return Ok(object.into());
+            }
             "__thaw_object_has_class_identity" => {
                 let [object, HirExpr::Lit(HirLit::Str(class_name))] = args else {
                     return Err("class identity query expects an object and a literal class name".into());

@@ -1512,6 +1512,72 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    fn class_instance_accessor_owner(&self, ty: &HirType, property: &str) -> Option<Symbol> {
+        self.class_instance_accessor_owner_inner(ty, property, true)
+    }
+
+    fn class_super_instance_accessor_owner(&self, ty: &HirType, property: &str) -> Option<Symbol> {
+        self.class_instance_accessor_owner_inner(ty, property, false)
+    }
+
+    fn class_instance_accessor_owner_inner(
+        &self,
+        ty: &HirType,
+        property: &str,
+        respect_own_field: bool,
+    ) -> Option<Symbol> {
+        let HirType::Object(fields) = ty else { return None };
+        // A user object may spell a marker key and still own this ordinary
+        // data property. Class accessor layouts have no physical field for it.
+        // `super.property` starts at the base prototype, so it ignores that
+        // instance field even when it shadows the same accessor normally.
+        if respect_own_field && fields.iter().any(|(name, _)| name == property) { return None; }
+        let (marker, HirType::Bool) = fields.first()? else { return None };
+        let ancestry = marker.strip_prefix("__thaw_class_identity_\u{1e}")?;
+        ancestry.split('\u{1f}').find_map(|class| {
+            let owns = |symbol: Symbol| self.signatures.get(&symbol)
+                .is_some_and(|signature| signature.accessor_owner.as_deref() == Some(class));
+            (owns(class_getter_symbol(class, property, false))
+                || owns(class_setter_symbol(class, property, false)))
+                .then(|| class.to_string())
+        })
+    }
+
+    fn assert_class_accessor_receiver(&self, receiver: HirExpr, owner: &str) -> HirExpr {
+        HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_assert_class_identity".into())),
+            vec![receiver, HirExpr::Lit(HirLit::Str(owner.to_string()))],
+        )
+    }
+
+    fn call_class_instance_setter(
+        &mut self,
+        owner: &str,
+        symbol: Symbol,
+        receiver: HirExpr,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver_type = self.infer_expr_type(&receiver)?;
+        let value_type = self.infer_expr_type(&value)?;
+        let receiver_name = format!("__thaw_accessor_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let value_name = format!("__thaw_accessor_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), receiver_type.clone());
+        self.scope.insert(value_name.clone(), value_type.clone());
+        let call = HirExpr::Call(
+            Box::new(HirExpr::Var(symbol)),
+            vec![
+                self.assert_class_accessor_receiver(HirExpr::Var(receiver_name.clone()), owner),
+                HirExpr::Var(value_name.clone()),
+            ],
+        );
+        self.wrap_call_argument_bindings(call, &[
+            (receiver_name, receiver_type, receiver),
+            (value_name, value_type, value),
+        ])
+    }
+
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         if self.unbound_this_context && matches!(member.obj.as_ref(), Expr::This(_)) {
             let property = member_property_name(&member.prop)
@@ -1543,14 +1609,13 @@ impl<'a> FnLowerer<'a> {
                 // `classes/normalization.rs`) takes priority over the
                 // built-in table below, matching real JS: a class instance
                 // with its own tag getter reports *that*, not `undefined`.
-                if let Some(class_name) = class_name_from_type(&receiver_type) {
-                    let symbol = class_getter_symbol(
-                        class_name,
-                        &well_known_symbol_key("toStringTag"),
-                        false,
-                    );
-                    if self.signatures.contains_key(&symbol) {
-                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![receiver]));
+                let tag_property = well_known_symbol_key("toStringTag");
+                if let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &tag_property) {
+                    let symbol = class_getter_symbol(&owner, &tag_property, false);
+                    if self.signatures.get(&symbol).is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str())) {
+                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![
+                            self.assert_class_accessor_receiver(receiver, &owner),
+                        ]));
                     }
                 }
                 // Only the built-ins that actually define a
@@ -1717,12 +1782,12 @@ impl<'a> FnLowerer<'a> {
                 }
                 let binding = self.resolve_binding(receiver.sym.as_ref());
                 if let Some(receiver_type) = self.scope.get(&binding).cloned() {
-                    if let Some(class_name) = class_name_from_type(&receiver_type) {
-                        let symbol = class_getter_symbol(class_name, &property, false);
-                        if self.signatures.contains_key(&symbol) {
+                    if let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &property) {
+                        let symbol = class_getter_symbol(&owner, &property, false);
+                        if self.signatures.get(&symbol).is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str())) {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var(symbol)),
-                                vec![HirExpr::Var(binding)],
+                                vec![self.assert_class_accessor_receiver(HirExpr::Var(binding), &owner)],
                             ));
                         }
                     }
@@ -1731,12 +1796,12 @@ impl<'a> FnLowerer<'a> {
             if matches!(member.obj.as_ref(), Expr::This(_)) {
                 let binding = self.resolve_binding("this");
                 if let Some(receiver_type) = self.scope.get(&binding).cloned() {
-                    if let Some(class_name) = class_name_from_type(&receiver_type) {
-                        let symbol = class_getter_symbol(class_name, &property, false);
-                        if self.signatures.contains_key(&symbol) {
+                    if let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &property) {
+                        let symbol = class_getter_symbol(&owner, &property, false);
+                        if self.signatures.get(&symbol).is_some_and(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str())) {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var(symbol)),
-                                vec![HirExpr::Var(binding)],
+                                vec![self.assert_class_accessor_receiver(HirExpr::Var(binding), &owner)],
                             ));
                         }
                     }
