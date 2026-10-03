@@ -119,7 +119,7 @@ pub unsafe extern "C" fn thaw_object_marker_hidden(
     if object.is_null() || marker.is_null() {
         return false;
     }
-    let Ok(marker) = CStr::from_ptr(marker).to_str() else {
+    let Ok(marker) = thaw_arena::NativeStr::from_ptr(marker).to_str() else {
         return false;
     };
     OBJECT_CLASS_IDENTITIES.with(|stored| {
@@ -302,7 +302,15 @@ mod object_state_tests {
         assert!(unsafe { thaw_object_hide_marker(builtin, marker.as_ptr()) });
         assert!(unsafe { thaw_object_marker_hidden(builtin, marker.as_ptr()) });
         assert!(!unsafe { thaw_object_has_class_identity(builtin, aggregate.as_ptr()) });
+
         assert!(!unsafe { thaw_object_marker_hidden(ordinary, marker.as_ptr()) });
+        // A registered native string can contain NUL after a real marker.
+        // Query the full bytes, not its C-string prefix.
+        static EMBEDDED_NUL: &[u8] = b"__thaw_class_identity_\x1eAggregateError\x1fError\0extra\0";
+        let embedded = unsafe { thaw_arena::thaw_string_register_literal(
+            EMBEDDED_NUL.as_ptr().cast(), EMBEDDED_NUL.len() - 1,
+        ) };
+        assert!(!unsafe { thaw_object_marker_hidden(builtin, embedded) });
         clear_object_states();
         assert!(!unsafe { thaw_object_marker_hidden(builtin, marker.as_ptr()) });
     }

@@ -1,4 +1,34 @@
 #[test]
+fn hides_only_registered_class_markers_in_read_only_object_queries() {
+    let source = r#"
+        class Leaf { value: number; constructor() { this.value = 3; } }
+        function main(): void {
+            const instance = new Leaf();
+            const alias = instance;
+            const marker = "__thaw_class_identity_\u001eLeaf";
+            console.log(Object.keys(alias).join(","));
+            console.log(Object.getOwnPropertyNames(instance).join(","));
+            console.log(Reflect.ownKeys(instance).join(","));
+            console.log(Object.hasOwn(instance, marker), instance.hasOwnProperty(marker), Reflect.has(instance, marker));
+            console.log(Object.getOwnPropertyDescriptor(instance, "__thaw_class_identity_\u001eLeaf") === undefined);
+            console.log(JSON.stringify(instance));
+            const ordinary = { ["__thaw_class_identity_\u001eLeaf"]: true, value: 5 };
+            console.log(Object.keys(ordinary).length, Object.hasOwn(ordinary, marker));
+            console.log(Object.getOwnPropertyDescriptor(ordinary, "__thaw_class_identity_\u001eLeaf") !== undefined);
+            console.log(JSON.stringify(ordinary).includes("Leaf"));
+            const aggregate = new AggregateError([1], "x");
+            console.log(Object.keys(aggregate).join(","));
+            const suppressed = new SuppressedError("a", "b", "x");
+            console.log(Object.keys(suppressed).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "hidden_class_marker_read_only_queries"),
+        "value\nvalue\nvalue\nfalse false false\ntrue\n{\"value\":3}\n2 true\ntrue\ntrue\nmessage,name,errors\nmessage,name,error,suppressed\n"
+    );
+}
+
+#[test]
 fn compiles_omittable_arguments_beyond_one_mask_word() {
     let required = (0..64)
         .map(|index| format!("p{index}: number"))
