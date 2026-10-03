@@ -15,11 +15,10 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(quickjs_failure, self.context.i32_type().const_zero())
             .unwrap();
-        // Live native-object projections can retain arena allocations from
-        // ordinary `main` through a QuickJS wrapper. Enable tracking before
-        // module initialization creates any such object, and keep native
-        // globals and pending exceptions rooted across arena resets.
-        if self.projects_native_objects {
+        // Projection wrappers and owned Json receivers can outlive a call
+        // through a global or captured arena cell. Start tracing before
+        // module initialization creates either kind of value.
+        if self.projects_native_objects || self.tracks_owned_json_roots {
             let pointer = self.context.ptr_type(AddressSpace::default());
             let enable = self.module.add_function("thaw_arena_enable_tracing",
                 self.context.void_type().fn_type(&[], false), Some(Linkage::External));

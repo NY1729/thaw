@@ -351,7 +351,7 @@ pub extern "C" fn thaw_json_host_from_borrowed_handle(handle: u64) -> *mut Value
                 _ => false,
             };
             if is_live_object {
-                leak(Value::Host(lease))
+                thaw_json_track_arena_owned_root(leak(Value::Host(lease)))
             } else {
                 set_host_error("Live JSON object builder returned a nonobject".into());
                 std::ptr::null_mut()
@@ -962,6 +962,78 @@ fn string_value(value: *const c_char) -> Value {
         let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
         utf8_or_wtf8(bytes.to_vec())
     }
+}
+
+// A Box<Value> is outside thaw-arena, but generated globals/captured arena
+// cells can hold its raw pointer. Keep one arena token reachable from that
+// pointer and dispose the box when the token becomes unreachable at reset.
+thread_local! {
+    // The serial distinguishes an old dead root from a new Box reusing its
+    // address while a Host release callback reenters this thread.
+    static NEXT_ARENA_OWNED_JSON_ROOT: Cell<u64> = const { Cell::new(0) };
+    static ARENA_OWNED_JSON_ROOTS: RefCell<HashMap<usize, (usize, bool, u64)>> = RefCell::new(HashMap::new());
+}
+
+fn untrack_arena_owned_json_root(value: *mut Value) {
+    let removed = ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow_mut().remove(&(value as usize)));
+    if removed.is_some() { thaw_arena::forget_references(value as usize); }
+}
+
+fn reset_arena_owned_json_roots(tracing: bool) {
+    let dead = ARENA_OWNED_JSON_ROOTS.with(|roots| {
+        roots.borrow().iter().filter_map(|(&value, &(token, was_traced, serial))| {
+            (!tracing || !was_traced || thaw_arena::was_reclaimed(token))
+                .then_some((value, serial))
+        }).collect::<Vec<_>>()
+    });
+    for (value, serial) in dead {
+        // A previous release callback can destroy this root and even create
+        // a new Box at the same address. Remove only the exact old owner,
+        // and drop it with no side-table borrow held across reentry.
+        let removed = ARENA_OWNED_JSON_ROOTS.with(|roots| {
+            let mut roots = roots.borrow_mut();
+            if roots.get(&value).is_some_and(|entry| entry.2 == serial) {
+                roots.remove(&value)
+            } else { None }
+        });
+        if removed.is_none() { continue; }
+        thaw_arena::forget_references(value);
+        unsafe { thaw_json_destroy(value as *mut Value) };
+    }
+}
+
+/// Tie an owned Json box to the existing arena reachability graph.
+/// Returning or capturing its pointer preserves the token; an unescaped
+/// temporary is released when the invocation arena resets.
+#[no_mangle]
+pub extern "C" fn thaw_json_track_arena_owned_root(value: *mut Value) -> *mut Value {
+    if value.is_null() { return value; }
+    if ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize))) {
+        return value;
+    }
+    let traced = thaw_arena::is_tracing();
+    let token = thaw_arena::thaw_arena_alloc(1, 1);
+    if token.is_null() {
+        set_host_error("Unable to retain JSON value".into());
+        unsafe { thaw_json_destroy(value) };
+        return std::ptr::null_mut();
+    }
+    thaw_arena::register_reset_hook(reset_arena_owned_json_roots);
+    let serial = NEXT_ARENA_OWNED_JSON_ROOT.with(|next| {
+        let serial = next.get().checked_add(1);
+        if let Some(serial) = serial { next.set(serial); }
+        serial
+    });
+    let Some(serial) = serial else {
+        set_host_error("Unable to retain JSON value".into());
+        unsafe { thaw_json_destroy(value) };
+        return std::ptr::null_mut();
+    };
+    ARENA_OWNED_JSON_ROOTS.with(|roots| {
+        roots.borrow_mut().insert(value as usize, (token as usize, traced, serial));
+    });
+    if traced { thaw_arena::replace_reference(value as usize, 0, token as usize); }
+    value
 }
 
 fn leak(value: Value) -> *mut Value {
@@ -1795,6 +1867,7 @@ pub unsafe extern "C" fn thaw_json_destroy(value: *mut Value) {
         // Host error and discard any error reported only by that callback.
         let original_host_error = HOST_ERROR.with(|slot| slot.borrow_mut().take());
         untrack_typed_decode_child(value);
+        untrack_arena_owned_json_root(value);
         release_isolated_json_cycles(unsafe { &*value });
         drop(unsafe { Box::from_raw(value) });
         HOST_ERROR.with(|slot| *slot.borrow_mut() = original_host_error);
@@ -3114,6 +3187,7 @@ fn json_has_own_value(value: &Value, key: &[u8]) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_take(value: *mut Value, key: *const c_char) -> *mut Value {
     untrack_typed_decode_child(value);
+    untrack_arena_owned_json_root(value);
     let value = unsafe { Box::from_raw(value) };
     let result = value
         .as_object_mut()
@@ -5412,6 +5486,7 @@ pub unsafe extern "C" fn thaw_json_object_set_json_owned(
     value: *mut Value,
 ) {
     untrack_typed_decode_child(value);
+    untrack_arena_owned_json_root(value);
     object_insert(object, key, *unsafe { Box::from_raw(value) });
 }
 
@@ -5517,6 +5592,8 @@ mod tests {
         static NESTED_DESTROY: Cell<*mut Value> = const { Cell::new(std::ptr::null_mut()) };
         static NAPI_RETAINS: Cell<usize> = const { Cell::new(0) };
         static NAPI_RELEASES: Cell<usize> = const { Cell::new(0) };
+        static TRACKED_REENTRANT_ROOTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+        static TRACKED_RELEASE_REENTERED: Cell<bool> = const { Cell::new(false) };
     }
 
     extern "C" fn retain_test_napi_handle(handle: u64) -> u64 {
@@ -5536,6 +5613,17 @@ mod tests {
 
     extern "C" fn count_host_release(_handle: u64) -> u8 {
         HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        1
+    }
+
+    extern "C" fn release_and_destroy_other_tracked_root(handle: u64) -> u8 {
+        HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        if !TRACKED_RELEASE_REENTERED.with(|active| active.replace(true)) {
+            let (first, second) = TRACKED_REENTRANT_ROOTS.with(Cell::get);
+            let other = if handle == 41 { second } else { first };
+            assert_ne!(other, 0);
+            unsafe { thaw_json_destroy(other as *mut Value) };
+        }
         1
     }
 
@@ -5571,6 +5659,11 @@ mod tests {
 
     extern "C" fn cleanup_test_host_query(_: u64, _: u8) -> HostTextResult {
         HostTextResult { value: thaw_arena::owned_string(b"object"), error: std::ptr::null() }
+    }
+
+    extern "C" fn owned_receiver_test_host_query(_: u64, operation: u8) -> HostTextResult {
+        let value = if operation == 7 { b"0".as_slice() } else { b"object".as_slice() };
+        HostTextResult { value: thaw_arena::owned_string(value), error: std::ptr::null() }
     }
 
     extern "C" fn unused_typed_scope_date(_: u64, _: f64) -> HostTextResult {
@@ -6769,4 +6862,122 @@ mod tests {
         }).join().unwrap();
     }
 
+
+    #[test]
+    fn arena_owned_host_receiver_survives_root_then_releases() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            thaw_arena::thaw_arena_enable_tracing();
+            let receiver = leak(Value::Host(Rc::new(HostLease {
+                handle: 29,
+                release: count_host_release,
+            })));
+            assert_eq!(thaw_json_track_arena_owned_root(receiver), receiver);
+            let cell = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<usize>(), std::mem::align_of::<usize>());
+            assert!(!cell.is_null());
+            unsafe { (cell as *mut usize).write(receiver as usize) };
+            let root = thaw_arena::ArenaRoot::new(cell as usize);
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 0));
+            assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(receiver as usize))));
+            drop(root);
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+            assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(receiver as usize))));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn moving_tracked_receiver_into_object_does_not_release_twice() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            thaw_arena::thaw_arena_enable_tracing();
+            let receiver = leak(Value::Host(Rc::new(HostLease {
+                handle: 30,
+                release: count_host_release,
+            })));
+            assert_eq!(thaw_json_track_arena_owned_root(receiver), receiver);
+            let object = thaw_json_object_new();
+            unsafe { thaw_json_object_set_json_owned(object, c"receiver".as_ptr(), receiver) };
+            assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(receiver as usize))));
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 0));
+            unsafe { thaw_json_destroy(object) };
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn nonarena_owner_edge_keeps_escaped_receiver_until_owner_released() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            thaw_arena::thaw_arena_enable_tracing();
+            let receiver = leak(Value::Host(Rc::new(HostLease {
+                handle: 31,
+                release: count_host_release,
+            })));
+            assert_eq!(thaw_json_track_arena_owned_root(receiver), receiver);
+            // A settled Promise is also a non-arena Box with a registered
+            // owner→result edge; its caller keeps the Promise handle rooted.
+            let owner = Box::into_raw(Box::new(0_usize));
+            thaw_arena::replace_reference(owner as usize, 0, receiver as usize);
+            let root = thaw_arena::ArenaRoot::new(owner as usize);
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 0));
+            drop(root);
+            thaw_arena::forget_references(owner as usize);
+            unsafe { drop(Box::from_raw(owner)) };
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn live_host_helper_enrolls_its_fresh_owned_box() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            TYPED_SCOPE_RETAINS.with(|count| count.set(0));
+            HOST_OPERATIONS.with(|slot| slot.set(Some(HostOperations {
+                retain: retain_typed_scope_host,
+                release: count_host_release,
+                get: reentrant_typed_scope_get,
+                query: owned_receiver_test_host_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            })));
+            thaw_arena::thaw_arena_enable_tracing();
+            let value = thaw_json_host_from_borrowed_handle(32);
+            assert!(!value.is_null());
+            assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize))));
+            TYPED_SCOPE_RETAINS.with(|count| assert_eq!(count.get(), 1));
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+            assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize))));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn arena_reset_release_reentry_does_not_destroy_second_root_twice() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            TRACKED_RELEASE_REENTERED.with(|active| active.set(false));
+            thaw_arena::thaw_arena_enable_tracing();
+            let first = leak(Value::Host(Rc::new(HostLease {
+                handle: 41, release: release_and_destroy_other_tracked_root,
+            })));
+            let second = leak(Value::Host(Rc::new(HostLease {
+                handle: 42, release: release_and_destroy_other_tracked_root,
+            })));
+            TRACKED_REENTRANT_ROOTS.with(|roots| roots.set((first as usize, second as usize)));
+            assert_eq!(thaw_json_track_arena_owned_root(first), first);
+            assert_eq!(thaw_json_track_arena_owned_root(second), second);
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 2));
+            assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().is_empty()));
+        }).join().unwrap();
+    }
 }

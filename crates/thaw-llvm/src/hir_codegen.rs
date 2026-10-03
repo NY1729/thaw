@@ -294,6 +294,9 @@ pub struct HirCompiler<'ctx> {
     /// Compile full-layout native projection adapters only in modules whose
     /// completed HIR actually crosses a fixed object into QuickJS.
     projects_native_objects: bool,
+    /// Non-arrow Json receivers and live Json literals create owned boxes
+    /// that may escape through generated globals or captured arena cells.
+    tracks_owned_json_roots: bool,
     /// True while compiling a QuickJS-backed dynamic call's own JSON-shaped
     /// arguments (set/restored around that one argument-marshaling loop in
     /// `compile_typed_dynamic_call`, so a nested dynamic call compiled
@@ -435,6 +438,7 @@ impl<'ctx> HirCompiler<'ctx> {
             uses_quickjs: false,
             uses_quickjs_handles: false,
             projects_native_objects: false,
+            tracks_owned_json_roots: false,
             compiling_quickjs_dynamic_arguments: false,
         }
     }
