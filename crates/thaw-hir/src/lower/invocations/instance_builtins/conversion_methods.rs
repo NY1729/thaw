@@ -749,6 +749,20 @@ impl<'a> FnLowerer<'a> {
             Box::new(result),
             HirType::Bool,
         );
+        let object = HirExpr::Var(object_name.clone());
+        let key = HirExpr::Var(key_name.clone());
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_has_full_layout".into())),
+                vec![object.clone()],
+            )),
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_full_has_own".into())),
+                vec![object, key],
+            )),
+            Box::new(result),
+            HirType::Bool,
+        );
         self.wrap_call_argument_bindings(
             result,
             &[

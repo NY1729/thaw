@@ -542,6 +542,35 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, marker, "object marker query name")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_object_has_full_layout" => {
+                        let [object] = args.as_slice() else {
+                            return Err("full object layout query expects one object".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("full object layout query requires a fixed object".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_full_has_own" => {
+                        let [object, key] = args.as_slice() else {
+                            return Err("full object own-property query expects object and key".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("full object own-property query requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Str, key, "full object own-property key")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_full_own_keys" => {
+                        let [object, include_non_enumerable] = args.as_slice() else {
+                            return Err("full object keys query expects object and mode".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("full object keys query requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Bool, include_non_enumerable, "full object keys mode")?;
+                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
                     "__thaw_object_hide_marker" => {
                         let [object, marker] = args.as_slice() else {
                             return Err("object marker registration expects an object and a marker".into());
