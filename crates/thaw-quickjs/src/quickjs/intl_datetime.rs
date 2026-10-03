@@ -501,14 +501,12 @@ fn skeleton_fields(
     }
     let mut hour_symbol = None;
     if let Some(style) = options.hour.as_deref() {
-        let cycle = options
-            .hour_cycle
-            .as_deref()
-            .or(match options.hour12 {
+        let cycle = match options.hour12 {
                 Some(true) => Some("h12"),
                 Some(false) => Some("h23"),
                 None => None,
-            })
+            }
+            .or(options.hour_cycle.as_deref())
             .or(locale_hour_cycle)
             .unwrap_or("h23");
         let symbol = match cycle {
@@ -572,7 +570,12 @@ fn intl_datetime_skeleton_parts_json(
         })
         .collect();
 
-    let locale_hour_cycle = thaw_icu_data::preferred_hour_cycle(curated_tag);
+    let requested_hour_cycle = locale.extensions.unicode.keywords
+        .get(&"hc".parse().ok()?)
+        .map(|value| value.to_string());
+    let locale_hour_cycle = requested_hour_cycle.as_deref()
+        .filter(|cycle| matches!(*cycle, "h11" | "h12" | "h23" | "h24"))
+        .or(thaw_icu_data::preferred_hour_cycle(curated_tag));
     let (fields, hour_symbol) = skeleton_fields(&options, locale_hour_cycle);
     if fields.is_empty() {
         return None;
@@ -988,4 +991,27 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
     // field combination). Unlike NumberFormat, where fr's U+202F grouping
     // is legitimate, so this must not leak into `intl_number.rs`.
     formatted.replace('\u{202f}', " ")
+}
+
+#[cfg(test)]
+mod hour_cycle_skeleton_tests {
+    use super::*;
+
+    #[test]
+    fn skeleton_hour_cycle_obeys_option_and_locale_precedence() {
+        let zoned = r#"{"year":2024,"month":7,"day":4,"hour":13,"minute":0,"second":0}"#;
+        for (locale, options, expected) in [
+            ("en-US-u-hc-h23", r#"{"hour":"numeric"}"#, "13"),
+            ("en-US-u-hc-h12", r#"{"hour":"numeric"}"#, "1"),
+            ("en-US-u-hc-h23", r#"{"hour":"numeric","hourCycle":"h12"}"#, "1"),
+            ("en-US-u-hc-h12", r#"{"hour":"numeric","hourCycle":"h12","hour12":false}"#, "13"),
+            ("en-US", r#"{"hour":"numeric"}"#, "1"),
+        ] {
+            let result = intl_datetime_skeleton_parts_json(locale, options, zoned).unwrap();
+            let parts: serde_json::Value = serde_json::from_str(&result).unwrap();
+            let hour = parts.as_array().unwrap().iter()
+                .find(|part| part["type"] == "hour").unwrap();
+            assert_eq!(hour["value"], expected, "{locale}: {options}");
+        }
+    }
 }
