@@ -1,4 +1,28 @@
 #[test]
+fn native_array_json_join_uses_empty_nullish_slots() {
+    let source = r#"
+        let order = "";
+        function source(): any[] { order += "R"; return [null, undefined, "null", 0]; }
+        function separator(): string { order += "S"; return "|"; }
+        function main(): void {
+            const values: any[] = [null, undefined, "null", 0];
+            console.log(values.join("|"));
+            console.log(values.join());
+            console.log(values.join(null));
+            console.log(values.join(""));
+            const empty: any[] = [];
+            console.log(empty.join("|"));
+            console.log(String(null), String(undefined));
+            console.log(source().join(separator()), order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_json_join_nullish_slots"),
+        "||null|0\n,,null,0\nnullnullnullnull0\nnull0\n\nnull undefined\n||null|0 RS\n"
+    );
+}
+
+#[test]
 fn join_uses_default_comma_for_explicit_undefined_separator() {
     let source = r#"
         let order = "";
