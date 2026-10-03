@@ -1073,23 +1073,55 @@ impl<'a> FnLowerer<'a> {
             // lowered (so `new C().f?.()` constructs once) and let the
             // shared target path conditionally invoke the property value;
             // otherwise this is an ordinary member call.
-            let property_is_optional = match (&receiver_type, &member.prop) {
-                (HirType::Object(fields), MemberProp::Ident(prop)) => fields
+            let property_name = member_property_name(&member.prop);
+            let property_uses_optional_target = match (&receiver_type, property_name.as_deref()) {
+                (HirType::Object(fields), Some(property)) => fields
                     .iter()
-                    .find(|(name, _)| name == prop.sym.as_str())
+                    .find(|(name, _)| name == property)
                     .is_some_and(|(_, ty)| {
                         matches!(
                             ty,
-                            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                            HirType::Function(_, _) | HirType::CallableFunction(..)
+                                | HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
                         )
                     }),
                 _ => false,
             };
-            if property_is_optional {
-                let property = member_property_name(&member.prop)
+            if property_uses_optional_target {
+                let property = property_name
                     .ok_or("optional call requires a statically known property")?;
+                let field_type = match &receiver_type {
+                    HirType::Object(fields) => fields.iter().find(|(name, _)| name == &property)
+                        .map(|(_, ty)| ty),
+                    _ => None,
+                };
+                let method_payload = field_type.and_then(|ty| match ty {
+                    HirType::Function(params, _) | HirType::CallableFunction(params, ..) => Some(params),
+                    HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) =>
+                        match payload.as_ref() {
+                            HirType::Function(params, _) | HirType::CallableFunction(params, ..) => Some(params),
+                            _ => None,
+                        },
+                    _ => None,
+                });
+                let receiver_aware = method_payload.is_some_and(|params| params.first().is_some_and(|parameter| {
+                    matches!(parameter, HirType::Object(fields)
+                        if fields.iter().any(|(name, _)| name == "__thaw_object_method_receiver"))
+                }));
+                if receiver_aware {
+                    let receiver_name = format!("__thaw_optional_method_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                    let bound = HirExpr::Var(receiver_name.clone());
+                    let callee = HirExpr::PropAccess(Box::new(bound.clone()), receiver_type.clone(), property);
+                    let invoked = self.lower_optional_call_target(
+                        callee, call, Some((bound, receiver_type.clone())))?;
+                    return self.wrap_call_argument_bindings(
+                        invoked, &[(receiver_name, receiver_type, receiver)],
+                    );
+                }
                 let callee = HirExpr::PropAccess(Box::new(receiver), receiver_type, property);
-                return self.lower_optional_call_target(callee, call);
+                return self.lower_optional_call_target(callee, call, None);
             }
             let mut ordinary = CallExpr::from(call.clone());
             ordinary.callee = Callee::Expr(Box::new(Expr::Member(member.clone())));
@@ -1097,7 +1129,7 @@ impl<'a> FnLowerer<'a> {
         }
 
         let callee = self.lower_expr(&call.callee)?;
-        self.lower_optional_call_target(callee, call)
+        self.lower_optional_call_target(callee, call, None)
     }
 
     /// Shared tail of `lower_optional_call`: given an already-lowered callee
@@ -1107,12 +1139,15 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         callee: HirExpr,
         call: &swc_ecma_ast::OptCall,
+        receiver: Option<(HirExpr, HirType)>,
     ) -> Result<HirExpr, String> {
         let callee_type = self.infer_expr_type(&callee)?;
         let (payload, absence_kind) = match callee_type.clone() {
             HirType::Optional(payload) => (payload, 0),
             HirType::Nullable(payload) => (payload, 1),
             HirType::Nullish(payload) => (payload, 2),
+            ty @ (HirType::Function(_, _) | HirType::CallableFunction(..)) =>
+                (Box::new(ty), 3),
             _ => return self.lower_call(&CallExpr::from(call.clone())),
         };
         let (params, optional, rest, return_type) = match payload.as_ref() {
@@ -1137,8 +1172,26 @@ impl<'a> FnLowerer<'a> {
         if call.type_args.is_some() {
             return Err("optional native calls do not accept type arguments".into());
         }
-        let (mut arguments, spread_bindings) =
-            self.lower_native_spread_values(&call.args, "optional native call")?;
+        let receiver_offset = usize::from(receiver.is_some());
+        let (mut arguments, spread_bindings) = self.lower_native_spread_values_with_expected(
+            &call.args,
+            "optional native call",
+            &params[receiver_offset..],
+            rest.as_ref(),
+        )?;
+        if let Some((receiver, receiver_type)) = receiver {
+            let HirType::Object(fields) = &params[0] else {
+                return Err("object method receiver has no object parameter".into());
+            };
+            arguments.insert(0, HirExpr::ObjectLit(fields.iter().map(|(name, _)| {
+                if name == "__thaw_object_method_receiver" {
+                    (name.clone(), HirExpr::Lit(HirLit::Undefined))
+                } else {
+                    (name.clone(), HirExpr::PropAccess(
+                        Box::new(receiver.clone()), receiver_type.clone(), name.clone()))
+                }
+            }).collect()));
+        }
         if arguments.len() > params.len() && rest.is_none() {
             return Err(format!(
                 "optional function accepts {} argument(s), got {}",
@@ -1188,19 +1241,27 @@ impl<'a> FnLowerer<'a> {
             0 => HirExpr::OptionalValue(Box::new(bound.clone()), payload.as_ref().clone()),
             1 => HirExpr::NullableValue(Box::new(bound.clone()), payload.as_ref().clone()),
             2 => HirExpr::NullishValue(Box::new(bound.clone()), payload.as_ref().clone()),
+            3 => bound.clone(),
             _ => unreachable!(),
         };
         let invoked = HirExpr::Call(Box::new(function), arguments);
         let invoked = self.wrap_call_argument_bindings(invoked, &spread_bindings)?;
-        let is_none = |bound: HirExpr| match absence_kind {
-            0 => HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
-            1 => HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone()),
-            2 => HirExpr::NullishIsNone(Box::new(bound), payload.as_ref().clone()),
-            _ => unreachable!(),
-        };
+        // Both an absent outer wrapper and a present wrapper carrying a raw
+        // zero function are optional-call short circuits.
+        let is_present = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(self.function_observable_absence(bound.clone(), &callee_type)),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        );
+        let is_none = HirExpr::Conditional(
+            Box::new(is_present),
+            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+            HirType::Bool,
+        );
         let result = if return_type == HirType::Void {
             HirExpr::Block(vec![HirStmt::If(
-                is_none(bound),
+                is_none,
                 vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined)))],
                 vec![
                     HirStmt::Expr(invoked),
@@ -1212,7 +1273,7 @@ impl<'a> FnLowerer<'a> {
             let present = self.coerce_to_declared(&result_type, invoked)?;
             let absent = omitted_parameter_value(&result_type)?;
             HirExpr::Block(vec![HirStmt::If(
-                is_none(bound),
+                is_none,
                 vec![HirStmt::Return(Some(absent))],
                 vec![HirStmt::Return(Some(present))],
             )])
