@@ -33,6 +33,8 @@
   // here, rather than a second Rust-side walk, reuses the exact same
   // hook this file already wires into every JSON-argument parse.
   const thawSymbols = new Map();
+  const nativeSymbol = Symbol;
+  const nativeSymbolFor = Symbol.for.bind(Symbol);
   globalThis.__thaw_property_key = (value) => {
     if (typeof value !== 'string') return value;
     if (value.startsWith('\u001f@@')) return Symbol[value.slice(3)] || value;
@@ -40,7 +42,10 @@
     if (value.charCodeAt(0) !== 3) return value;
     if (!thawSymbols.has(value)) {
       const separator = value.indexOf(':');
-      thawSymbols.set(value, Symbol(separator < 0 ? undefined : value.slice(separator + 1)));
+      const registered = value.charCodeAt(1) === 82; // native `\u0003R{id}:description`
+      if (registered && !/^\u0003R[0-9]+:/.test(value)) return value;
+      const description = separator < 0 ? undefined : value.slice(separator + 1);
+      thawSymbols.set(value, registered ? nativeSymbolFor(description) : nativeSymbol(description));
     }
     return thawSymbols.get(value);
   };

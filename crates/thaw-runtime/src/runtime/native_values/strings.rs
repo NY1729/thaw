@@ -1228,7 +1228,9 @@ pub unsafe extern "C" fn thaw_symbol_for(description: *const c_char) -> *const c
         return arena_wtf8(symbol).map_or(std::ptr::null(), |value| value.cast());
     }
     let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut symbol = format!("\u{3}{id}:").into_bytes();
+    // The `R` distinguishes a registered Symbol from the otherwise identical
+    // unique-symbol wire before any QuickJS property-key decode.
+    let mut symbol = format!("\u{3}R{id}:").into_bytes();
     symbol.extend_from_slice(&description);
     registry.insert(description, symbol.clone());
     arena_wtf8(&symbol).map_or(std::ptr::null(), |value| value.cast())
