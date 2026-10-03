@@ -456,13 +456,19 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
-                        let HirExpr::Lit(HirLit::Str(key)) = key else {
-                            return Err(
-                                "`Object.getOwnPropertyDescriptor` currently requires a string-literal key"
-                                    .into(),
-                            );
+                        let key = if let HirExpr::Lit(HirLit::Str(key)) = key {
+                            key.clone()
+                        } else if call.args.len() == 2 && call.args[1].spread.is_none() {
+                            // The shared argument binder turns even a literal into a
+                            // Var; inspect source syntax while still evaluating its
+                            // bound argument in the usual left-to-right order.
+                            let Expr::Lit(Lit::Str(key)) = call.args[1].expr.as_ref() else {
+                                return Err("`Object.getOwnPropertyDescriptor` currently requires a string-literal key".into());
+                            };
+                            key.value.to_string_lossy().into_owned()
+                        } else {
+                            return Err("`Object.getOwnPropertyDescriptor` currently requires a string-literal key".into());
                         };
-                        let key = key.clone();
                         let target_type = self.infer_expr_type(target)?;
                         let HirType::Object(fields) = &target_type else {
                             return Err(format!(
@@ -476,13 +482,33 @@ impl<'a> FnLowerer<'a> {
                                 &bindings,
                             );
                         }
+                        if !key.starts_with("__thaw_class_identity_\u{1e}") {
+                            let descriptor = self.fixed_object_property_descriptor(
+                                target.clone(), &target_type, fields, &key,
+                            )?;
+                            return self.wrap_call_argument_bindings(descriptor, &bindings);
+                        }
+                        let mut bindings = bindings;
+                        let target_name = format!("__thaw_descriptor_target_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(target_name.clone(), target_type.clone());
+                        let bound = HirExpr::Var(target_name.clone());
+                        let hidden = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                            vec![bound.clone(), HirExpr::Lit(HirLit::Str(key.clone()))],
+                        );
                         let descriptor = self.fixed_object_property_descriptor(
-                            target.clone(),
-                            &target_type,
-                            fields,
-                            &key,
+                            bound, &target_type, fields, &key,
                         )?;
-                        return self.wrap_call_argument_bindings(descriptor, &bindings);
+                        let descriptor_type = self.infer_expr_type(&descriptor)?;
+                        let result = HirExpr::Conditional(
+                            Box::new(hidden),
+                            Box::new(HirExpr::OptionalNone(descriptor_type.clone())),
+                            Box::new(HirExpr::OptionalSome(Box::new(descriptor), descriptor_type.clone())),
+                            HirType::Optional(Box::new(descriptor_type)),
+                        );
+                        bindings.push((target_name, target_type, target.clone()));
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"create" {
                         // Approx: a fresh object with no modeled prototype,
@@ -3086,17 +3112,45 @@ impl<'a> FnLowerer<'a> {
                                 "`{label}` currently requires a fixed object, got {ty:?}"
                             ));
                         };
-                        let keys = HirExpr::ArrayLit(
-                            ecmascript_field_order(fields)
-                                .into_iter()
-                                .map(|index| HirExpr::Lit(HirLit::Str(fields[index].0.clone())))
-                                .collect(),
-                        );
+                        let names = ecmascript_field_order(fields)
+                            .into_iter()
+                            .map(|index| HirExpr::Lit(HirLit::Str(fields[index].0.clone())))
+                            .collect::<Vec<_>>();
                         let name = format!("__thaw_object_keys_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), ty.clone());
+                        let result = if names.is_empty() {
+                            HirExpr::ArrayLit(names)
+                        } else {
+                            let key_name = format!("__thaw_object_key_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(key_name.clone(), HirType::Str);
+                            let hidden = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                                vec![HirExpr::Var(name.clone()), HirExpr::Var(key_name.clone())],
+                            );
+                            let keep = HirExpr::Conditional(
+                                Box::new(hidden),
+                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                HirType::Bool,
+                            );
+                            self.lower_array_filter(
+                                HirExpr::ArrayLit(names),
+                                HirType::Array(Box::new(HirType::Str)),
+                                HirType::Str,
+                                HirType::Str,
+                                HirExpr::Lambda(
+                                    vec![HirParam { name: name.clone(), ty: ty.clone() }],
+                                    vec![HirParam { name: key_name, ty: HirType::Str }],
+                                    HirType::Bool,
+                                    Box::new(keep),
+                                ),
+                                None,
+                            )?
+                        };
                         bindings.push((name, ty, value));
-                        return self.wrap_call_argument_bindings(keys, &bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"values" {
                         let (arguments, mut bindings) =
