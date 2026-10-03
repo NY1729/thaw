@@ -4,6 +4,16 @@ thread_local! {
     // shows the pointer lookup matters.
     static OBJECT_ACCESSORS: RefCell<HashMap<usize, HashMap<String, [usize; 2]>>> =
         RefCell::new(HashMap::new());
+    // Descriptor attributes belong to the original native allocation, not a
+    // transient Json/QuickJS projection. Three bits model writable,
+    // enumerable, and configurable for a visible fixed data field.
+    static OBJECT_PROPERTY_FLAGS: RefCell<HashMap<usize, HashMap<String, u8>>> =
+        RefCell::new(HashMap::new());
+    // The full typed view is retained when a pointer is narrowed to a prefix
+    // layout. The closure is an arena child of its owner and runs only on the
+    // first reference projection.
+    static OBJECT_PROJECTORS: RefCell<HashMap<usize, (String, usize)>> =
+        RefCell::new(HashMap::new());
     // The source HIR type carries class ancestry in the marker field name;
     // the compiled object stores only that field's Boolean value. Keep the
     // marker beside the allocation so an extracted method can validate the
@@ -23,6 +33,61 @@ struct ObjectClassMetadata {
 const NON_EXTENSIBLE: u8 = 1;
 const SEALED: u8 = 2;
 const FROZEN: u8 = 4;
+const PROPERTY_WRITABLE: u8 = 1;
+const PROPERTY_ENUMERABLE: u8 = 2;
+const PROPERTY_CONFIGURABLE: u8 = 4;
+const PROPERTY_DEFAULT: u8 = PROPERTY_WRITABLE | PROPERTY_ENUMERABLE | PROPERTY_CONFIGURABLE;
+
+/// Effective descriptor flags for one physically present native data field.
+/// A zero result is a valid fully restricted property; callers establish
+/// existence from the allocation's trusted field layout before querying.
+fn object_property_flags(object: *const u8, property: &str) -> u8 {
+    let mut flags = OBJECT_PROPERTY_FLAGS.with(|stored| stored.borrow()
+        .get(&(object as usize)).and_then(|fields| fields.get(property)).copied()
+        .unwrap_or(PROPERTY_DEFAULT));
+    let state = OBJECT_STATES.with(|states| states.borrow()
+        .get(&(object as usize)).copied().unwrap_or_default());
+    if state & SEALED != 0 { flags &= !PROPERTY_CONFIGURABLE; }
+    if state & FROZEN != 0 { flags &= !PROPERTY_WRITABLE; }
+    flags
+}
+
+#[no_mangle]
+/// # Safety
+/// `property` points to a live native string; `object` is an opaque identity.
+pub unsafe extern "C" fn thaw_object_property_flags(object: *const u8, property: *const c_char) -> u8 {
+    if object.is_null() || property.is_null() { return 0; }
+    let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else { return 0; };
+    object_property_flags(object, property)
+}
+
+/// Records a successful descriptor update on the original native object.
+/// The caller must first verify that the property is a visible physical
+/// field, and must apply the corresponding JS target descriptor only when
+/// this transition is allowed.
+#[no_mangle]
+/// # Safety
+/// `property` points to a live native string; `object` is an opaque identity.
+pub unsafe extern "C" fn thaw_object_set_property_flags(
+    object: *const u8, property: *const c_char, requested: u8,
+) -> bool {
+    if object.is_null() || property.is_null() || requested & !PROPERTY_DEFAULT != 0 {
+        return false;
+    }
+    let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else { return false; };
+    let current = object_property_flags(object, property);
+    let configurable = current & PROPERTY_CONFIGURABLE != 0;
+    if !configurable && (requested & PROPERTY_CONFIGURABLE != 0
+        || (requested ^ current) & PROPERTY_ENUMERABLE != 0
+        || (current & PROPERTY_WRITABLE == 0 && requested & PROPERTY_WRITABLE != 0)) {
+        return false;
+    }
+    OBJECT_PROPERTY_FLAGS.with(|stored| {
+        stored.borrow_mut().entry(object as usize).or_default()
+            .insert(property.to_owned(), requested);
+    });
+    true
+}
 
 /// A dynamic JSON object's last shared handle has been dropped.
 #[no_mangle]
@@ -363,9 +428,50 @@ pub unsafe extern "C" fn thaw_object_accessor(
     })
 }
 
+#[no_mangle]
+/// # Safety
+/// `layout` is a live native string; `owner` and `closure` are arena objects.
+pub unsafe extern "C" fn thaw_object_register_projector(
+    owner: *mut u8, layout: *const c_char, closure: *mut u8,
+) -> bool {
+    if owner.is_null() || layout.is_null() || closure.is_null()
+        || !thaw_arena::contains_allocation(owner as usize) { return false; }
+    let Ok(layout) = thaw_arena::NativeStr::from_ptr(layout).to_str() else { return false; };
+    OBJECT_PROJECTORS.with(|projectors| {
+        let mut projectors = projectors.borrow_mut();
+        let previous = projectors.get(&(owner as usize));
+        if let Some((existing, _)) = previous {
+            if existing.starts_with(layout) { return true; }
+            if !layout.starts_with(existing) { return false; }
+        }
+        let old = projectors.insert(owner as usize, (layout.to_owned(), closure as usize))
+            .map(|(_, pointer)| pointer).unwrap_or_default();
+        thaw_arena::replace_reference(owner as usize, old, closure as usize);
+        true
+    })
+}
+
+#[no_mangle]
+/// # Safety
+/// `layout` is a live native string; `owner` is an arena object.
+pub unsafe extern "C" fn thaw_object_projector(
+    owner: *const u8, layout: *const c_char,
+) -> *mut u8 {
+    if owner.is_null() || layout.is_null() { return std::ptr::null_mut(); }
+    let Ok(layout) = thaw_arena::NativeStr::from_ptr(layout).to_str() else {
+        return std::ptr::null_mut();
+    };
+    OBJECT_PROJECTORS.with(|projectors| projectors.borrow().get(&(owner as usize))
+        .filter(|(actual, _)| actual.starts_with(layout))
+        .map(|(_, closure)| *closure as *mut u8)
+        .unwrap_or(std::ptr::null_mut()))
+}
+
 fn clear_object_states() {
     OBJECT_STATES.with(|states| states.borrow_mut().clear());
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().clear());
+    OBJECT_PROPERTY_FLAGS.with(|flags| flags.borrow_mut().clear());
+    OBJECT_PROJECTORS.with(|projectors| projectors.borrow_mut().clear());
     OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().clear());
 }
 
@@ -373,6 +479,8 @@ fn prune_object_states() {
     if !thaw_arena::is_tracing() { clear_object_states(); return; }
     OBJECT_STATES.with(|states| states.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
+    OBJECT_PROPERTY_FLAGS.with(|flags| flags.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
+    OBJECT_PROJECTORS.with(|projectors| projectors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
 }
 

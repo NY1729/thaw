@@ -407,6 +407,44 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(entry_fn)
     }
 
+    /// Query only the private native-object wrapper metadata. The returned
+    /// pointer is valid while the graph Host lease keeps the JS wrapper and
+    /// its ArenaRoot guardian alive through the callback invocation.
+    fn query_native_object_receiver(
+        &mut self,
+        json: PointerValue<'ctx>,
+        fields: &[(String, HirType)],
+    ) -> Result<(IntValue<'ctx>, IntValue<'ctx>), String> {
+        let actual_fields = if fields.last().is_some_and(|(name, _)|
+            name == "__thaw_object_method_receiver") {
+            &fields[..fields.len() - 1]
+        } else { fields };
+        let expected = thaw_hir::native_object_layout_token(actual_fields);
+        let expected = self.builder.build_global_string_ptr(&expected, "native_receiver_layout")
+            .map_err(|error| error.to_string())?;
+        let handle = self.builder.build_call(
+            self.module.get_function("thaw_json_borrowed_handle_id").unwrap(),
+            &[json.into()], "native_receiver_handle")
+            .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native receiver has no handle result")?.into_int_value();
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_native_object_pointer").unwrap(),
+            &[handle.into(), expected.as_pointer_value().into()], "native_receiver_pointer")
+            .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native receiver has no pointer result")?.into_struct_value();
+        let pointer = self.builder.build_extract_value(result, 0, "native_receiver_pointer_word")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let error = self.builder.build_extract_value(result, 1, "native_receiver_pointer_error")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[error.into()], "destroy_native_receiver_query_error")
+            .map_err(|error| error.to_string())?;
+        let present = self.builder.build_int_compare(IntPredicate::NE, pointer,
+            self.context.i64_type().const_zero(), "native_receiver_pointer_present")
+            .map_err(|error| error.to_string())?;
+        Ok((pointer, present))
+    }
+
     fn non_arrow_receiver_tags(receiver: &HirType) -> Result<Vec<u64>, String> {
         let tags = match receiver {
             HirType::Undefined => vec![0],
@@ -421,6 +459,10 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::JsValue => vec![8],
             HirType::Object(fields) if fields.first().is_some_and(|(name, _)|
                     name.starts_with("__thaw_class_identity_\u{1e}")) => vec![9],
+            // A native fixed object crosses the graph callback boundary as
+            // a borrowed Host Json. Its private wrapper token is checked at
+            // call time before recovering the original arena pointer.
+            HirType::Object(_) => vec![7],
             HirType::Optional(inner) => {
                 let mut tags = Self::non_arrow_receiver_tags(inner)?;
                 if !tags.contains(&0) { tags.push(0); }
@@ -470,6 +512,30 @@ impl<'ctx> HirCompiler<'ctx> {
         word: IntValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match receiver {
+            HirType::Object(fields) if !fields.first().is_some_and(|(name, _)|
+                    name.starts_with("__thaw_class_identity_\u{1e}")) => {
+                let is_host = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                    self.context.i8_type().const_int(7, false), "native_receiver_is_host")
+                    .map_err(|error| error.to_string())?;
+                let host = self.context.append_basic_block(entry_fn, "native_receiver_host");
+                let rejected = self.context.append_basic_block(entry_fn, "native_receiver_rejected");
+                let accepted = self.context.append_basic_block(entry_fn, "native_receiver_accepted");
+                self.builder.build_conditional_branch(is_host, host, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(host);
+                let json = self.builder.build_int_to_ptr(word,
+                    self.context.ptr_type(AddressSpace::default()), "native_receiver_json")
+                    .map_err(|error| error.to_string())?;
+                let (pointer, present) = self.query_native_object_receiver(json, fields)?;
+                self.builder.build_conditional_branch(present, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.reject_non_arrow_receiver()?;
+                self.builder.position_at_end(accepted);
+                return self.builder.build_int_to_ptr(pointer,
+                    self.context.ptr_type(AddressSpace::default()), "native_receiver_original_pointer")
+                    .map(Into::into).map_err(|error| error.to_string());
+            }
             HirType::Json => return self.compile_non_arrow_json_value(entry_fn, kind, word).map(Into::into),
             HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
                 let is_absent = match receiver {

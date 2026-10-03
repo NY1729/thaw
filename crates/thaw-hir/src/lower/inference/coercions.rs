@@ -33,6 +33,92 @@ fn absent_after(value: HirExpr, absent: HirExpr) -> HirExpr {
 }
 
 impl<'a> FnLowerer<'a> {
+    /// Preserve the allocation's wider typed view before a prefix coercion
+    /// erases its trailing fields. Registration is lazy at codegen when this
+    /// program never projects a native object into QuickJS.
+    fn retain_full_native_object_projection(
+        &mut self, value: HirExpr, fields: &[(Symbol, HirType)],
+    ) -> Result<HirExpr, String> {
+        let full_type = HirType::Object(fields.to_vec());
+        let owner = format!("__thaw_full_native_owner_{}", self.next_binding);
+        self.next_binding += 1;
+        let previous = self.scope.insert(owner.clone(), full_type.clone());
+        let projection = self.lower_fixed_object_as_dynamic_accessor_object(
+            HirExpr::Var(owner.clone()), fields, true,
+        );
+        let factory = HirExpr::Lambda(
+            vec![HirParam { name: owner.clone(), ty: full_type.clone() }],
+            Vec::new(), HirType::JsValue, Box::new(projection?),
+        );
+        let register = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_register_native_object_projector".into())),
+            vec![HirExpr::Var(owner.clone()),
+                HirExpr::Lit(HirLit::Str(crate::native_object_layout_token(fields))), factory],
+        );
+        let result = self.wrap_call_argument_bindings(
+            HirExpr::EvalThen(Box::new(register), Box::new(HirExpr::Var(owner.clone()))),
+            &[(owner.clone(), full_type, value)],
+        );
+        match previous {
+            Some(previous) => { self.scope.insert(owner, previous); }
+            None => { self.scope.remove(&owner); }
+        }
+        result
+    }
+
+    /// Capture source fields before assembling the declared storage layout.
+    /// ObjectLit codegen visits its fields in storage order, which can differ
+    /// from the order of effects in the original object literal.
+    fn reorder_object_literal_in_source_order(
+        &mut self,
+        lit_fields: &[(Symbol, HirExpr)],
+        declared_fields: &[(Symbol, HirType)],
+        include_hidden: bool,
+    ) -> Result<HirExpr, String> {
+        let mut bindings: Vec<LoweredBinding> = Vec::with_capacity(lit_fields.len());
+        let mut saved = Vec::with_capacity(lit_fields.len());
+        let result = (|| {
+            for (name, source) in lit_fields {
+                let value = if let Some((_, expected)) = declared_fields.iter().find(|(key, _)| key == name) {
+                    self.coerce_to_declared(expected, source.clone())
+                        .map_err(|error| format!("field `{name}`: {error}"))?
+                } else {
+                    source.clone()
+                };
+                let ty = self.infer_expr_type(&value)?;
+                let temp = format!("__thaw_ordered_object_field_{}", self.next_binding);
+                self.next_binding += 1;
+                saved.push((temp.clone(), self.scope.insert(temp.clone(), ty.clone())));
+                bindings.push((temp, ty, value));
+            }
+            let mut reordered = Vec::with_capacity(declared_fields.len() + lit_fields.len());
+            for (name, expected) in declared_fields {
+                let value = if let Some(index) = lit_fields.iter().position(|(key, _)| key == name) {
+                    HirExpr::Var(bindings[index].0.clone())
+                } else {
+                    omitted_parameter_value(expected)
+                        .map_err(|_| format!("object literal is missing required property `{name}`"))?
+                };
+                reordered.push((name.clone(), value));
+            }
+            if include_hidden {
+                for (index, (name, _)) in lit_fields.iter().enumerate() {
+                    if is_hidden_accessor_field(name) {
+                        reordered.push((name.clone(), HirExpr::Var(bindings[index].0.clone())));
+                    }
+                }
+            }
+            self.wrap_call_argument_bindings(HirExpr::ObjectLit(reordered), &bindings)
+        })();
+        for (name, previous) in saved {
+            match previous {
+                Some(previous) => { self.scope.insert(name, previous); }
+                None => { self.scope.remove(&name); }
+            }
+        }
+        result
+    }
+
     /// Coerces a value into its declared native layout.
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         if *declared == HirType::Dynamic {
@@ -217,28 +303,9 @@ impl<'a> FnLowerer<'a> {
                 && actual_fields.iter().any(|(name, _)| is_hidden_accessor_field(name))
             {
                 if let HirExpr::ObjectLit(fields) = &value {
-                    let mut reordered = declared_fields
-                        .iter()
-                        .map(|(name, expected)| {
-                            let (_, field) = fields
-                                .iter()
-                                .find(|(field, _)| field == name)
-                                .ok_or_else(|| {
-                                    format!("object literal is missing required property `{name}`")
-                                })?;
-                            Ok((
-                                name.clone(),
-                                self.coerce_to_declared(expected, field.clone())?,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, String>>()?;
-                    reordered.extend(
-                        fields
-                            .iter()
-                            .filter(|(name, _)| is_hidden_accessor_field(name))
-                            .cloned(),
+                    return self.reorder_object_literal_in_source_order(
+                        fields, declared_fields, true,
                     );
-                    return Ok(HirExpr::ObjectLit(reordered));
                 }
                 let visible = actual_fields
                     .iter()
@@ -257,6 +324,11 @@ impl<'a> FnLowerer<'a> {
                 return Err("cannot reorder a non-literal accessor object layout".into());
             }
             if actual_fields.starts_with(declared_fields) {
+                if actual_fields.len() > declared_fields.len()
+                    && Self::fixed_object_supports_live_projection(
+                        &HirType::Object(actual_fields.clone())) {
+                    return self.retain_full_native_object_projection(value, &actual_fields);
+                }
                 return Ok(value);
             }
             if HirType::Object(actual_fields.clone()) == date_object_type() {
@@ -673,6 +745,19 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
             }
+            if let HirType::Object(fields) = &actual {
+                // A plain fixed object crossing into Json can be borrowed by
+                // a dynamic caller. Project field operations over the source
+                // arena pointer and let the existing JsValue-to-Json wrapper
+                // keep the live identity; class instances retain their
+                // dedicated nominal/Date conversion path.
+                if !fields.iter().any(|(name, _)|
+                    name.starts_with("__thaw_class_identity_\u{1e}"))
+                    && Self::fixed_object_supports_live_projection(&actual) {
+                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false)?;
+                    return self.coerce_to_declared(&HirType::Json, projected);
+                }
+            }
             if json_convertible_native_type(&actual) {
                 return self.wrap_native_value_as_json(value, actual);
             }
@@ -1033,22 +1118,7 @@ impl<'a> FnLowerer<'a> {
             ));
         }
 
-        let reordered = declared_fields
-            .iter()
-            .map(|(name, expected_ty)| {
-                let Some((_, field_value)) = lit_fields.iter().find(|(n, _)| n == name) else {
-                    let value = omitted_parameter_value(expected_ty)
-                        .map_err(|_| format!("object literal is missing required property `{name}`"))?;
-                    return Ok((name.clone(), value));
-                };
-                let field_value = self
-                    .coerce_to_declared(expected_ty, field_value.clone())
-                    .map_err(|error| format!("field `{name}`: {error}"))?;
-                Ok((name.clone(), field_value))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        Ok(HirExpr::ObjectLit(reordered))
+        self.reorder_object_literal_in_source_order(lit_fields, declared_fields, false)
     }
 
     /// Normalize nested alias wrappers and unions one tag at a time. The
