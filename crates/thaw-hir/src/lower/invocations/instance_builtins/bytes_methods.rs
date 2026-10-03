@@ -349,8 +349,7 @@ impl<'a> FnLowerer<'a> {
     /// `Uint8Array.prototype.toHex()` / `.toBase64()` and
     /// `.setFromHex(text)` / `.setFromBase64(text)` (ECMAScript 2026). The
     /// `set*` variants write into the buffer from offset 0 and return
-    /// `{ read, written }` (`read` is approximated as the source length, so
-    /// a fully valid input matches the spec).
+    /// `{ read, written }` from the native capacity-bounded decoder.
     fn lower_native_bytes_encoding_method(
         &mut self,
         member: &MemberExpr,
@@ -389,42 +388,10 @@ impl<'a> FnLowerer<'a> {
             return Err(format!("`{}` expects exactly one argument", property.sym));
         };
         let source = self.coerce_primitive_to_string(source.clone())?;
-        let written_call = HirExpr::Call(
+        let result = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_bytes_set_from_string".to_string())),
             vec![receiver, source, encoding_lit],
         );
-        let written_name = format!("__thaw_bytes_written_{}", self.next_binding);
-        self.next_binding += 1;
-        self.scope.insert(written_name.clone(), HirType::F64);
-        let written = HirExpr::Var(written_name.clone());
-        // `read` is the number of source characters consumed to produce
-        // `written` bytes: 2 per byte for hex, 4 per 3-byte group for
-        // base64 (so a truncating write stops at a group boundary).
-        let read = if encoding == "hex" {
-            HirExpr::BinOp(
-                BinOp::Mul,
-                Box::new(written.clone()),
-                Box::new(HirExpr::Lit(HirLit::F64(2.0))),
-            )
-        } else {
-            HirExpr::BinOp(
-                BinOp::Mul,
-                Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_math_ceil".to_string())),
-                    vec![HirExpr::BinOp(
-                        BinOp::Div,
-                        Box::new(written.clone()),
-                        Box::new(HirExpr::Lit(HirLit::F64(3.0))),
-                    )],
-                )),
-                Box::new(HirExpr::Lit(HirLit::F64(4.0))),
-            )
-        };
-        let result = HirExpr::ObjectLit(vec![
-            ("read".to_string(), read),
-            ("written".to_string(), written),
-        ]);
-        bindings.push((written_name, HirType::F64, written_call));
         self.wrap_call_argument_bindings(result, &bindings)
     }
 }

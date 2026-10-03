@@ -1034,10 +1034,10 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         // `Uint8Array.prototype.setFromHex`/`setFromBase64`: writes into the
-        // buffer and returns the byte count.
+        // buffer and returns an arena object with read/written f64 fields.
         self.module.add_function(
             "thaw_bytes_set_from_string",
-            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         // `Buffer.from(number[])` clamps each element to a byte; takes a
