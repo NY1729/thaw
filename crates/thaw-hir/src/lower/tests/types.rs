@@ -2425,3 +2425,25 @@ fn tagged_function_present_leaves_keep_native_identity_and_ordered_dynamic_compa
     assert!(body.contains("registerNativeCallback"), "{body}");
     assert!(body.contains("JsValueAsJson"), "{body}");
 }
+
+#[test]
+fn function_dynamic_conversion_keeps_raw_undefined_before_registration() {
+    let program = lower(r#"
+        function asJson(callback: (value: number) => number): any { return callback; }
+        function asHandle(callback: (value: number) => number): JsValue { return callback; }
+        function asCallableJson(callback: (head: number, ...rest: number[]) => number): any {
+            return callback;
+        }
+        function main(): void {}
+    "#);
+    for name in ["asJson", "asCallableJson"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let body = format!("{:?}", function.body);
+        assert!(body.contains("__thaw_function_json_source_"), "{name}: {body}");
+        assert!(body.contains("OptionalNone"), "{name}: {body}");
+        assert!(body.contains("Conditional"), "{name}: {body}");
+        assert!(body.contains("registerNativeCallback"), "{name}: {body}");
+    }
+    let handle = program.functions.iter().find(|function| function.name == "asHandle").unwrap();
+    assert!(format!("{:?}", handle.body).contains("registerNativeCallback"));
+}
