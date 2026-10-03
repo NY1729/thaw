@@ -915,7 +915,7 @@ impl<'a> FnLowerer<'a> {
             }
             HirType::Tuple(elements) => {
                 let tuple_type = HirType::Tuple(elements.clone());
-                let (tuple, binding) = if matches!(value, HirExpr::Var(_) | HirExpr::TypedIndex(..))
+                let (tuple, binding) = if matches!(value, HirExpr::Var(_))
                 {
                     (value, None)
                 } else {

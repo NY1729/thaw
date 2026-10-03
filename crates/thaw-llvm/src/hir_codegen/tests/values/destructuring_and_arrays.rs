@@ -209,6 +209,39 @@ fn compiles_heterogeneous_tuple_string_conversion_once() {
     );
 }
 
+/// A tuple-valued index must be captured before its elements are stringified.
+/// The empty tuple still evaluates its source once despite using no elements.
+#[test]
+fn tuple_index_string_conversion_evaluates_source_once() {
+    let source = r#"
+        let makes = 0;
+        let indexes = 0;
+        let empties = 0;
+        function make(): [number, string][] {
+            makes++;
+            return [[1, "x"]];
+        }
+        function index(): number {
+            indexes++;
+            return 0;
+        }
+        function empty(): [[]] {
+            empties++;
+            return [[]];
+        }
+        function main(): void {
+            const text = String(make()[index()]);
+            console.log(text === "1,x" && makes === 1 && indexes === 1);
+            const blank = String(empty()[0]);
+            console.log(blank === "" && empties === 1);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tuple_index_string_conversion_once"),
+        "true\ntrue\n"
+    );
+}
+
 #[test]
 fn compiles_in_place_array_copy_within() {
     let source = r#"
