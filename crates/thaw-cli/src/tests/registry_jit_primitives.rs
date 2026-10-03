@@ -1939,7 +1939,7 @@ fn set_operations_use_jit_without_quickjs() {
 }
 
 #[test]
-fn set_composition_uses_jit_without_quickjs() {
+fn set_composition_keeps_jit_with_maplike_js_fallback() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-set-compose-{}",
         std::process::id()
@@ -1966,7 +1966,7 @@ fn set_composition_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
+    assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -2138,7 +2138,7 @@ fn set_from_iterable_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn map_get_set_uses_jit_without_quickjs() {
+fn map_get_set_use_typed_js_fallback() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-map-{}",
         std::process::id()
@@ -2165,7 +2165,7 @@ fn map_get_set_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
+    assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -2174,7 +2174,7 @@ fn map_get_set_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn map_keys_values_use_jit_without_quickjs() {
+fn map_keys_values_use_typed_js_fallback() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-map-keys-{}",
         std::process::id()
@@ -2189,7 +2189,7 @@ fn map_keys_values_use_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.keys = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); const k = m.keys(); return k.join(','); }; module.exports.values = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); const v = m.values(); return v.join(','); };\n",
+        "module.exports.keys = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); const k = m.keys(); return Array.from(k).join(','); }; module.exports.values = function() { const m = new Map(); m.set('a', 1); m.set('b', 2); const v = m.values(); return Array.from(v).join(','); };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -2201,7 +2201,7 @@ fn map_keys_values_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
+    assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -2210,7 +2210,7 @@ fn map_keys_values_use_jit_without_quickjs() {
 }
 
 #[test]
-fn direct_map_entry_iteration_uses_jit_without_quickjs() {
+fn direct_map_entry_iteration_uses_typed_js_fallback() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-map-entries-{}",
         std::process::id()
@@ -2237,7 +2237,7 @@ fn direct_map_entry_iteration_uses_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
+    assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -2246,7 +2246,7 @@ fn direct_map_entry_iteration_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn map_and_set_for_each_use_jit_without_quickjs() {
+fn map_and_set_for_each_keep_map_on_js_fallback() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-collection-foreach-{}",
         std::process::id()
@@ -2273,11 +2273,39 @@ fn map_and_set_for_each_use_jit_without_quickjs() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
+    assert_eq!(manifest["quickjs"], true);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(String::from_utf8_lossy(&result.stdout), "11\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mixed_map_key_types_use_js_fallback_with_same_value_zero() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-map-key-kinds-{}", std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("map-key-kinds");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), "export declare function run(): string;\n").unwrap();
+    std::fs::write(package.join("bundle.js"),
+        "function add(m) { m.set(true, 30); } module.exports.run = function() { const m = new Map(); const alias = m; m.set(1, 10); alias.set('1', 20); add(m); if (true) m.set('true', 40); m.set(NaN, 50); m.set(-0, 60); m.set(+0, 70); const keys = Array.from(m.keys()).map(k => typeof k + ':' + String(k)).join('|'); const entries = Array.from(m.entries()).map(([k,v]) => typeof k + ':' + String(k) + '=' + v).join('|'); let iter = 0; for (const [k,v] of m) iter += v; let each = 0; m.forEach(v => { each += v; }); const before = [m.size, m.get(1), m.get('1'), m.get(true), m.get('true'), m.get(NaN), m.get(-0), m.get(+0), iter, each].join(','); m.delete('1'); return before + ';' + keys + ';' + entries + ';' + [m.has(1), m.has('1')].join(','); };\n"
+    ).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry,
+        "import { run } from 'map-key-kinds';\nfunction main(): void { console.log(run()); }\n"
+    ).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], true);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout),
+        "6,10,20,30,40,50,70,70,220,220;number:1|string:1|boolean:true|string:true|number:NaN|number:0;number:1=10|string:1=20|boolean:true=30|string:true=40|number:NaN=50|number:0=70;true,false\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
