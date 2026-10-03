@@ -1225,3 +1225,61 @@ fn promise_returning_main_values_still_drive_completion() {
         "async-start\nasync-done\n"
     );
 }
+
+#[test]
+fn absent_promise_executor_checks_before_allocation() {
+    // Direct HIR supplies a Function-typed null pointer before any class
+    // method read starts producing this value. The compiler gate must run
+    // after the executor expression but before allocating a Promise.
+    let resolved = HirType::F64;
+    let resolve = HirType::Function(vec![resolved.clone()], Box::new(HirType::Void));
+    let reject = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
+    let executor_type = HirType::Function(vec![resolve, reject], Box::new(HirType::Void));
+    let absent = HirExpr::OptionalValue(
+        Box::new(HirExpr::OptionalNone(executor_type.clone())),
+        executor_type.clone(),
+    );
+    let program = HirProgram {
+        functions: vec![
+            HirFunction {
+                name: "make_absent_executor".into(),
+                params: vec![],
+                ret: executor_type,
+                is_async: false,
+                body: vec![HirStmt::Return(Some(absent))],
+            },
+            HirFunction {
+                name: "main".into(),
+                params: vec![],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![
+                    HirStmt::Expr(HirExpr::PromiseNew(
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("make_absent_executor".into())),
+                            vec![],
+                        )),
+                        resolved,
+                        false,
+                        false,
+                    )),
+                    HirStmt::Return(None),
+                ],
+            },
+        ],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "absent_promise_executor_order");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.lines()
+        .skip_while(|line| !(line.starts_with("define ") && line.contains("@main(")))
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let evaluate = main.find("@make_absent_executor(").expect(&ir);
+    let check = main.find("callable_is_undefined").expect(&ir);
+    let allocate = main.find("@thaw_promise_new(").expect(&ir);
+    assert!(evaluate < check && check < allocate, "{ir}");
+}

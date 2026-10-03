@@ -279,6 +279,11 @@ impl<'ctx> HirCompiler<'ctx> {
         typed_rejection: bool,
         mixed_resolver: Option<&HirType>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // `new Promise(nonCallable)` throws synchronously. Evaluate the
+        // executor expression once before allocating the Promise, and do not
+        // dereference an absent Function closure.
+        let executor = self.compile_expr(executor)?.into_pointer_value();
+        self.guard_callable_closure(executor, "Promise executor is not a function")?;
         let promise = self
             .builder
             .build_call(
@@ -324,7 +329,6 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(called_slot, self.context.i8_type().const_zero())
             .map_err(|error| error.to_string())?;
-        let executor = self.compile_expr(executor)?.into_pointer_value();
         let resolve_fn = self.compile_promise_resolver(
             resolved, false, assimilates, false, mixed_resolver.is_some(),
         )?;
