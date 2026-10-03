@@ -9558,6 +9558,27 @@ fn compiles_string_raw() {
     );
 }
 
+/// All direct-call `String.raw` substitutions evaluate left to right even when
+/// no raw segment consumes them. The empty-raw branch must retain the effects.
+#[test]
+fn string_raw_evaluates_unused_substitutions() {
+    let source = r#"
+        function main(): void {
+            let count = 0;
+            const one = String.raw({ raw: ["x"] }, ++count);
+            console.log(one === "x" && count === 1);
+            const empty = String.raw({ raw: [] }, ++count);
+            console.log(empty === "" && count === 2);
+            const usedAndExtra = String.raw({ raw: ["a", "b"] }, ++count, ++count);
+            console.log(usedAndExtra === "a3b" && count === 4);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_raw_unused_substitutions"),
+        "true\ntrue\ntrue\n"
+    );
+}
+
 /// `WeakRef<T>` (a one-element-array model), `Uint8Array.from`, and
 /// `Uint8Array.prototype.set` -- the three gaps closed after the
 /// `tests/builtins-compat.json` coverage pass.
