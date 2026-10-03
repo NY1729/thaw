@@ -15,6 +15,55 @@ fn load(source: &str) -> u8 {
 }
 
 #[test]
+fn stdin_pause_keeps_the_rest_of_a_polled_batch_until_resume() {
+    std::thread::spawn(|| {
+        assert_eq!(load(r#"
+      function stdinPauseBatch() {
+        const originalStart = __thaw_process_start_stdin;
+        const originalPoll = __thaw_process_poll_stdin;
+        const seen = [];
+        let starts = 0, polls = 0;
+        const onData = chunk => {
+          seen.push(chunk.toString());
+          if (seen.length === 1) process.stdin.pause();
+        };
+        const onEnd = () => seen.push('end');
+        try {
+          __thaw_process_start_stdin = () => { starts++; };
+          __thaw_process_poll_stdin = () => {
+            polls++;
+            return polls === 1 ? JSON.stringify([
+              {type: 'data', value: '61'},
+              {type: 'data', value: '62'},
+              {type: 'end'}
+            ]) : '[]';
+          };
+          process.stdin.on('data', onData);
+          process.stdin.on('end', onEnd);
+          process.stdin.pause();
+          __thaw_poll_platform_events();
+          const beforeResume = seen.slice();
+          process.stdin.resume();
+          __thaw_drain_next_tick_queue();
+          const afterFirstResume = seen.slice();
+          process.stdin.resume();
+          __thaw_drain_next_tick_queue();
+          return [beforeResume, afterFirstResume, seen.slice(), starts, polls];
+        } finally {
+          process.stdin.pause();
+          process.stdin.off('data', onData);
+          process.stdin.off('end', onEnd);
+          __thaw_process_start_stdin = originalStart;
+          __thaw_process_poll_stdin = originalPoll;
+        }
+      }
+    "#), 1);
+        assert_eq!(call("stdinPauseBatch", "[]"),
+            r#"[[],["a"],["a","b","end"],1,1]"#);
+    }).join().unwrap();
+}
+
+#[test]
 fn load_script_accepts_gzip_base64_source() {
     use base64::Engine as _;
     use std::io::Write;
