@@ -167,7 +167,7 @@ impl<'a> FnLowerer<'a> {
         if callable_abi_compatible(declared, &inferred) {
             return Ok(value);
         }
-        if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _)) {
+        if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _) | HirType::CallableFunction(..)) {
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("registerNativeCallback".to_string())),
                 vec![HirExpr::TypedClosure(inferred, Box::new(value))],
@@ -462,10 +462,22 @@ impl<'a> FnLowerer<'a> {
                 // call-argument case included (its own `is_int_value()`
                 // check now simply sees an already-wrapped pointer and
                 // skips, never double-wrapping).
-                return Ok(HirExpr::JsValueAsJson(Box::new(HirExpr::Call(
+                let name = format!("__thaw_function_json_source_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), actual.clone());
+                let bound = HirExpr::Var(name.clone());
+                let absent = self.coerce_to_declared(
+                    &HirType::Json, HirExpr::Lit(HirLit::Undefined),
+                )?;
+                let present = HirExpr::JsValueAsJson(Box::new(HirExpr::Call(
                     Box::new(HirExpr::Var("registerNativeCallback".to_string())),
-                    vec![HirExpr::TypedClosure(actual.clone(), Box::new(value))],
-                ))));
+                    vec![HirExpr::TypedClosure(actual.clone(), Box::new(bound.clone()))],
+                )));
+                let result = HirExpr::Conditional(
+                    Box::new(Self::function_pointer_is_undefined(bound, &actual)),
+                    Box::new(absent), Box::new(present), HirType::Json,
+                );
+                return self.wrap_call_argument_bindings(result, &[(name, actual, value)]);
             }
             // A bare `undefined` literal (`schema.safeParse(undefined)`,
             // real zod) has no JSON representation either -- JSON has no

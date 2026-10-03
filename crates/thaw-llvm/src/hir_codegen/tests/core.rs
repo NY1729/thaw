@@ -3384,3 +3384,33 @@ fn absent_function_pointer_checks_after_plain_call_arguments() {
     let load = main.find("closure_code").expect(&ir);
     assert!(effect < check && check < load, "{ir}");
 }
+
+#[test]
+fn absent_function_registration_takes_undefined_handle_path() {
+    // Direct HIR supplies a Function-typed zero before a class property
+    // read starts producing one in a later dependent unit.
+    let callback = HirType::Function(vec![HirType::F64], Box::new(HirType::Void));
+    let absent = HirExpr::OptionalValue(
+        Box::new(HirExpr::OptionalNone(callback.clone())), callback.clone(),
+    );
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "main".into(), params: vec![], ret: HirType::Void, is_async: false,
+            body: vec![
+                HirStmt::Let("missing_callback".into(), callback, absent),
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("registerNativeCallback".into())),
+                    vec![HirExpr::Var("missing_callback".into())],
+                )),
+                HirStmt::Return(None),
+            ],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "absent_function_registration");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("native_callback_is_undefined"), "{ir}");
+    assert!(ir.contains("native_callback_undefined_handle"), "{ir}");
+}
