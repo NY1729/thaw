@@ -3664,6 +3664,7 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(callbacks_name.clone(), HirType::Array(Box::new(HirType::JsValue)));
         let mut metadata_actions = Vec::new();
         let mut callback_actions = Vec::new();
+        let mut define_actions = Vec::new();
         for index in ecmascript_field_order(fields) {
             let name = &fields[index].0;
             let has_getter = fields
@@ -3748,6 +3749,44 @@ impl<'a> FnLowerer<'a> {
                 append(&callbacks_name, getter),
                 append(&callbacks_name, setter),
             ]));
+            // DefineOwnProperty writes an existing data slot even when it is
+            // non-writable but still configurable. Its private callback
+            // stores through the same typed offset without using PropAssign's
+            // ordinary-assignment readonly guard.
+            let define_value = if has_getter || has_setter {
+                absent_callback()
+            } else {
+                let field_type = fields[index].1.clone();
+                let value_name = format!("__thaw_dynamic_define_{}", self.next_binding);
+                self.next_binding += 1;
+                let flags_name = format!("__thaw_dynamic_define_flags_{}", self.next_binding);
+                self.next_binding += 1;
+                let callback = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![
+                        HirParam { name: "__thaw_this".into(), ty: source_type.clone() },
+                        HirParam { name: value_name.clone(), ty: field_type },
+                        HirParam { name: flags_name.clone(), ty: HirType::F64 },
+                    ],
+                    HirType::Bool,
+                    Box::new(HirExpr::Block(vec![
+                        HirStmt::Return(Some(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_define_data_value".into())),
+                            vec![
+                                HirExpr::Var("__thaw_this".into()),
+                                HirExpr::Lit(HirLit::Str(name.clone())),
+                                HirExpr::Var(value_name),
+                                HirExpr::Var(flags_name),
+                            ],
+                        ))),
+                    ])),
+                );
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_register_native_method_callback_graph".into())),
+                    vec![callback],
+                )
+            };
+            define_actions.push((index, vec![append(&callbacks_name, define_value)]));
         }
         let cached_name = format!("__thaw_cached_native_object_{}", self.next_binding);
         self.next_binding += 1;
@@ -3889,29 +3928,36 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let flags_name = format!("__thaw_native_descriptor_flags_{}", self.next_binding);
         self.next_binding += 1;
-        let descriptor_callback = |set: bool| {
+        let descriptor_callback = |operation: usize| {
             let mut params = vec![HirParam { name: key_name.clone(), ty: HirType::Str }];
-            let (name, ret) = if set {
+            let (name, ret) = if operation != 0 {
                 params.push(HirParam { name: flags_name.clone(), ty: HirType::F64 });
-                ("__thaw_object_set_property_flags", HirType::Bool)
+                (if operation == 1 {
+                    "__thaw_object_set_property_flags"
+                } else {
+                    "__thaw_object_can_set_property_flags"
+                }, HirType::Bool)
             } else { ("__thaw_object_property_flags", HirType::F64) };
             let mut arguments = vec![HirExpr::Var(source_name.clone()), HirExpr::Var(key_name.clone())];
-            if set { arguments.push(HirExpr::Var(flags_name.clone())); }
+            if operation != 0 { arguments.push(HirExpr::Var(flags_name.clone())); }
             HirExpr::Lambda(
                 vec![HirParam { name: source_name.clone(), ty: source_type.clone() }],
                 params, ret,
                 Box::new(HirExpr::Call(Box::new(HirExpr::Var(name.into())), arguments)),
             )
         };
-        for set in [false, true] {
+        for operation in 0..3 {
             body.push(HirStmt::Expr(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_array_push".into())),
                 vec![HirExpr::Var(callbacks_name.clone()), HirExpr::Call(
                     Box::new(HirExpr::Var("registerNativeCallbackGraph".into())),
-                    vec![descriptor_callback(set)],
+                    vec![descriptor_callback(operation)],
                 )],
             )));
         }
+        body.extend(self.lower_ordered_fixed_field_statements(
+            HirExpr::Var(source_name.clone()), fields, define_actions,
+        )?);
         let callback_body = body.split_off(callback_start);
         let failure_name = format!("__thaw_native_projection_failure_{}", self.next_binding);
         self.next_binding += 1;

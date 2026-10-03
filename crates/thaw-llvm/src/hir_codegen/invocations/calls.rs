@@ -259,7 +259,70 @@ impl<'ctx> HirCompiler<'ctx> {
                     flags, self.context.f64_type(), "native_property_flags_number",
                 ).map(Into::into).map_err(|error| error.to_string());
             }
-            "__thaw_object_set_property_flags" => {
+            "__thaw_object_define_data_value" => {
+                let [object, HirExpr::Lit(HirLit::Str(field)), value, requested] = args else {
+                    return Err("native data definition expects object, static field, value, flags".into());
+                };
+                let Some(HirType::Object(fields)) = self.expr_hir_type(object) else {
+                    return Err("native data definition requires a typed object".into());
+                };
+                let index = fields.iter().position(|(name, _)| name == field)
+                    .ok_or_else(|| format!("native object has no field `{field}`"))?;
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let field_ptr = self.compile_field_ptr_from_pointer(object, &fields, index)?;
+                // Graph decoding the RHS can invoke a host getter that
+                // freezes or redefines this same owner. Recheck its current
+                // flags after decoding, immediately before the store.
+                let value = self.compile_expr(value)?;
+                let requested = self.compile_expr(requested)?.into_float_value();
+                let requested = self.builder.build_float_to_unsigned_int(
+                    requested, self.context.i8_type(), "define_requested_flags",
+                ).map_err(|error| error.to_string())?;
+                let property = self.compile_expr(&HirExpr::Lit(HirLit::Str(field.clone())))?
+                    .into_pointer_value();
+                let valid = self.builder.build_call(
+                    self.module.get_function("thaw_object_can_set_property_flags").unwrap(),
+                    &[object.into(), property.into(), requested.into()],
+                    "define_native_flags_still_valid",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native descriptor preflight returned no value")?.into_int_value();
+                let current = self.builder.build_call(
+                    self.module.get_function("thaw_object_property_flags").unwrap(),
+                    &[object.into(), property.into()], "define_native_current_flags",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native descriptor flags returned no value")?.into_int_value();
+                let can_write = self.builder.build_and(
+                    current, self.context.i8_type().const_int(5, false),
+                    "define_native_writable_or_configurable",
+                ).map_err(|error| error.to_string())?;
+                let can_write = self.builder.build_int_compare(
+                    IntPredicate::NE, can_write, self.context.i8_type().const_zero(),
+                    "define_native_value_allowed",
+                ).map_err(|error| error.to_string())?;
+                let allowed = self.builder.build_and(valid, can_write, "define_native_allowed")
+                    .map_err(|error| error.to_string())?;
+                let checked = self.builder.get_insert_block()
+                    .ok_or("native data definition has no insertion block")?;
+                let function = self.current_function();
+                let store = self.context.append_basic_block(function, "define_native_store");
+                let done = self.context.append_basic_block(function, "define_native_done");
+                self.builder.build_conditional_branch(allowed, store, done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(store);
+                self.builder.build_store(field_ptr, value)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_unconditional_branch(done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+                let result = self.builder.build_phi(self.context.bool_type(), "define_native_result")
+                    .map_err(|error| error.to_string())?;
+                let rejected = self.context.bool_type().const_zero();
+                let accepted = self.context.bool_type().const_all_ones();
+                result.add_incoming(&[(&rejected, checked), (&accepted, store)]);
+                return Ok(result.as_basic_value());
+            }
+            "__thaw_object_set_property_flags"
+            | "__thaw_object_can_set_property_flags" => {
                 let [object, key, flags] = args else {
                     return Err("native descriptor update expects object, key, flags".into());
                 };
@@ -270,7 +333,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     flags, self.context.i8_type(), "native_property_flags_byte",
                 ).map_err(|error| error.to_string())?;
                 return self.builder.build_call(
-                    self.module.get_function("thaw_object_set_property_flags").unwrap(),
+                    self.module.get_function(if name == "__thaw_object_set_property_flags" {
+                        "thaw_object_set_property_flags"
+                    } else {
+                        "thaw_object_can_set_property_flags"
+                    }).unwrap(),
                     &[object.into(), key.into(), flags.into()], "set_native_property_flags",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("native descriptor update returned no value".into());

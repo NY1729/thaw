@@ -493,8 +493,13 @@ impl<'a> FnLowerer<'a> {
                         if args.len() != 2 { return Err("native descriptor query expects object and key".into()); }
                         return Ok(HirType::F64);
                     }
-                    "__thaw_object_set_property_flags" => {
+                    "__thaw_object_set_property_flags"
+                    | "__thaw_object_can_set_property_flags" => {
                         if args.len() != 3 { return Err("native descriptor update expects object, key, flags".into()); }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_object_define_data_value" => {
+                        if args.len() != 4 { return Err("native data definition expects object, key, value, flags".into()); }
                         return Ok(HirType::Bool);
                     }
                     "__thaw_date_assert_native_identity" => {

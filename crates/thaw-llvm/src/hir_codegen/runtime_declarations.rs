@@ -1691,6 +1691,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_object_can_set_property_flags",
+            self.context.bool_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i8_type().into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_arena_contains_allocation",
             self.context.i8_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

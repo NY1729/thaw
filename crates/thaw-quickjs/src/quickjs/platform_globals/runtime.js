@@ -731,11 +731,14 @@
         }
       }
       const state = thawGraphApply(thawGraphArraySlice, callbacks, [keys.length * 2]);
-      const [extensible, sealed, frozen, setState, propertyFlags, setFlags] = state;
+      const [extensible, sealed, frozen, setState, propertyFlags, setFlags, canFlags] = state;
+      const defineWrites = thawGraphApply(thawGraphArraySlice, state, [7]);
       const stateReceiver = thawGraphObjectCreate(null);
       let wrapper;
       const read = index => thawGraphApply(callbacks[index * 2], wrapper, []);
       const write = (index, value) => thawGraphApply(callbacks[index * 2 + 1], wrapper, [value]);
+      const defineWrite = (index, value, requested) =>
+        thawGraphApply(defineWrites[index], wrapper, [value, requested]);
       // State callbacks capture the native pointer and have no receiver.
       // Supplying this wrapper as their JS `this` would make the graph
       // callback encode the whole Proxy holder and recursively enter sync().
@@ -824,16 +827,6 @@
           const updated = { ...descriptor };
           if (!accessors[index]) {
             if ('get' in descriptor || 'set' in descriptor) return false;
-            if ('value' in descriptor) {
-              if (!(flags(key) & 1)) return false;
-              // A value write can invoke an accessor installed on the native
-              // owner. Keep it separate from attribute transitions so a
-              // throwing user setter cannot partially change native flags.
-              if ('writable' in descriptor || 'enumerable' in descriptor
-                  || 'configurable' in descriptor) return false;
-              write(index, descriptor.value);
-              return true;
-            }
           } else if ('get' in descriptor || 'set' in descriptor || 'value' in descriptor
               || 'writable' in descriptor) {
             // Replacing the native accessor itself needs a distinct owner
@@ -843,6 +836,28 @@
           const requested = ((updated.writable ?? before.writable) ? 1 : 0)
             | ((updated.enumerable ?? before.enumerable) ? 2 : 0)
             | ((updated.configurable ?? before.configurable) ? 4 : 0);
+          if (!thawGraphApply(canFlags, stateReceiver, [key, requested])) return false;
+          // Check the JS target transition without changing it. The native
+          // value write may still throw; committing target attributes first
+          // would leave the alias with a descriptor the owner never accepted.
+          const probe = thawGraphObjectCreate(null);
+          if (!thawGraphReflectDefineProperty(probe, key, before)
+              || !thawGraphReflectDefineProperty(probe, key, updated)) return false;
+          if (!accessors[index] && 'value' in descriptor) {
+            const current = flags(key);
+            // A frozen, non-writable field accepts the same value without a
+            // write. Configurable non-writable fields accept a new value via
+            // DefineOwnProperty, unlike ordinary assignment.
+            if (!(current & 1) && !(current & 4)) {
+              if (!thawGraphObjectIs(descriptor.value, read(index))) return false;
+            } else {
+              if (!defineWrite(index, descriptor.value, requested)) return false;
+            }
+          }
+          // A fixed field can coerce the written value. Once the target
+          // becomes non-configurable and non-writable, Proxy invariants need
+          // its actual stored value, including for an attributes-only update.
+          if (!accessors[index]) updated.value = read(index);
           if (!thawGraphApply(setFlags, stateReceiver, [key, requested])) return false;
           if (!thawGraphReflectDefineProperty(target, key, updated)) return false;
           if (thawGraphObjectIsFrozen(target)) thawGraphApply(setState, stateReceiver, [3]);
