@@ -901,10 +901,9 @@ macro_rules! jit_expressions {
                 }
             }
             Expr::New(new_expr) if is_untyped_map_constructor(new_expr) => {
-                // `new Map()`, when not a declaration initializer whose
-                // value kind was inferred, defaults to a string-valued
-                // dictionary.
-                output.push("dsempty".into());
+                // A string-keyed dictionary cannot preserve Map key kinds.
+                // Decline this callable so the ordinary JS fallback owns it.
+                return None;
             }
             Expr::New(new_expr)
                 if set_constructor(new_expr, parameters, locals, context.helpers).is_some() =>
