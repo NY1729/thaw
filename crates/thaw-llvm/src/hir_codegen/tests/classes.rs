@@ -1,4 +1,34 @@
 #[test]
+fn fixed_object_values_entries_skip_only_runtime_hidden_markers() {
+    let source = r#"
+        class Leaf { value: number; label: string; constructor() { this.value = 3; this.label = "s"; } }
+        const marker = "__thaw_class_identity_\u001eLeaf";
+        let reads = 0;
+        interface Mixed { first: number; second: string; }
+        const mixed: Mixed = {
+            get first(): number { reads++; return 7; },
+            second: "s",
+        };
+        function main(): void {
+            const instance = new Leaf();
+            const alias = instance;
+            console.log(Object.values(alias).length, Object.values(alias).join(","));
+            console.log(Object.entries(instance).length, Object.entries(instance)[0][0]);
+            const ordinary = { ["__thaw_class_identity_\u001eLeaf"]: true, get value(): number { reads++; return 5; } };
+            console.log(Object.values(ordinary).length, Object.entries(ordinary).length);
+            console.log(Object.entries(ordinary)[0][0] === marker);
+            const values = Object.values(mixed);
+            const entries = Object.entries(mixed);
+            console.log(values.length, values[0], values[1], entries.length, entries[0][0], entries[0][1], reads);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "visible_fixed_values_entries"),
+        "2 3,s\n2 value\n2 2\ntrue\n2 7 s 2 first 7 5\n"
+    );
+}
+
+#[test]
 fn hides_only_registered_class_markers_in_read_only_object_queries() {
     let source = r#"
         class Leaf { value: number; constructor() { this.value = 3; } }
