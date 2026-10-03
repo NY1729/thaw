@@ -4962,6 +4962,75 @@ fn intl_followup_exact_notation_and_style_grouping() {
     );
 }
 
+/// Large exact inputs must not become Infinity at the JS 10k guard or the
+/// native fixed_decimal i16 magnitude boundary. Kept unrun for the requested
+/// source-only remediation phase.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_large_exact_digits_share_format_parts_range_and_styles() {
+    assert_eq!(
+        load(r#"function intlLargeExact() {
+          const short = '1' + '0'.repeat(10000);
+          const huge = '1' + '0'.repeat(33000);
+          const giant = BigInt(huge);
+          const plain = new Intl.NumberFormat('en-US', { useGrouping: false });
+          const grouped = new Intl.NumberFormat('en-US');
+          const scientific = new Intl.NumberFormat('en-US', { notation: 'scientific' });
+          const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', useGrouping: false });
+          const percent = new Intl.NumberFormat('en-US', { style: 'percent', useGrouping: false });
+          const scaledScientific = new Intl.NumberFormat('en-US', { style: 'percent', useGrouping: false });
+          scaledScientific._notation = 'scientific';
+          const scaledEngineering = new Intl.NumberFormat('en-US', { style: 'percent', useGrouping: false });
+          scaledEngineering._notation = 'engineering';
+          const unit = new Intl.NumberFormat('en-US', { style: 'unit', unit: 'day', unitDisplay: 'long', useGrouping: false });
+          const preciseCurrency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', currencyDisplay: 'name', maximumFractionDigits: 3, useGrouping: false });
+          const carriedCurrency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2, minimumFractionDigits: 2, useGrouping: false });
+          const localizedCurrency = new Intl.NumberFormat('en-u-nu-arab', { style: 'currency', currency: 'USD' });
+          const signedUnit = new Intl.NumberFormat('en-US', { style: 'unit', unit: 'day', signDisplay: 'always', useGrouping: false });
+          const frenchPercent = new Intl.NumberFormat('fr-FR', { style: 'percent', useGrouping: false });
+          const frenchUnit = new Intl.NumberFormat('fr-FR', { style: 'unit', unit: 'day', unitDisplay: 'long', useGrouping: false });
+          const tinyPercent = new Intl.NumberFormat('fr-FR', { style: 'percent', maximumSignificantDigits: 3, useGrouping: false });
+          const tinyPaddedPercent = new Intl.NumberFormat('fr-FR', { style: 'percent', minimumSignificantDigits: 3, maximumSignificantDigits: 3, useGrouping: false });
+          const tinyCurrency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumSignificantDigits: 3, useGrouping: false });
+          const tinyCurrencyName = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', currencyDisplay: 'name', maximumSignificantDigits: 3, useGrouping: false });
+          const tinyUnit = new Intl.NumberFormat('fr-FR', { style: 'unit', unit: 'day', unitDisplay: 'long', maximumSignificantDigits: 3, useGrouping: false });
+          const text = plain.format(giant);
+          const range = grouped.formatRange(huge, huge + '1');
+          return [
+            plain.format(short).length === 10001,
+            text.length === 33001 && text[0] === '1' && text.endsWith('000'),
+            plain.formatToParts(giant).map(p => p.value).join('') === text,
+            grouped.format(giant).includes(',') && !grouped.format(giant).includes('Infinity'),
+            scientific.format(giant) === '1E33000',
+            scientific.format('1e-20000') === '1E-20000',
+            new Intl.NumberFormat('en-US', { notation: 'scientific', signDisplay: 'exceptZero' }).format('-1e-20000').startsWith('-'),
+            currency.format(giant).startsWith('$1') && currency.format(giant).endsWith('.00'),
+            percent.format(giant).length > 33000 && percent.format(giant).endsWith('%'),
+            percent.format(1e308).endsWith('%') && !percent.format(1e308).includes('Infinity'),
+            scaledScientific.format('1') === '1E2' && scaledScientific.format('1e308') === '1E310',
+            scaledEngineering.format('1') === '100E0' && scaledEngineering.format('1e308') === '10E309',
+            unit.format(giant).endsWith(' days'),
+            preciseCurrency.format(huge + '.001').includes('.001') && preciseCurrency.format(huge + '.001').includes('US dollars'),
+            preciseCurrency.formatToParts(huge + '.001').map(p => p.value).join('') === preciseCurrency.format(huge + '.001'),
+            carriedCurrency.format('9'.repeat(33001) + '.999').startsWith('$1') && carriedCurrency.format('9'.repeat(33001) + '.999').endsWith('.00'),
+            localizedCurrency.formatToParts(giant).map(p => p.value).join('') === localizedCurrency.format(giant) && !localizedCurrency.format(giant).includes('Infinity'),
+            signedUnit.format(giant).startsWith('+1') && signedUnit.format(giant).endsWith(' days'),
+            frenchPercent.format(giant).slice(-2) === frenchPercent.format(1).slice(-2),
+            frenchUnit.format(giant).includes('jours'),
+            tinyPercent.format('1e-40000').length > 32000 && tinyPercent.format('1e-40000').slice(-2) === tinyPercent.format(1).slice(-2),
+            tinyPaddedPercent.formatToParts('1e-40000').find(p => p.type === 'fraction').value.endsWith('100'),
+            tinyCurrency.format('1e-40000').startsWith('$0.') && tinyCurrency.format('1e-40000').length > 32000,
+            tinyCurrencyName.format('1e-40000').includes('US dollars') && tinyCurrencyName.formatToParts('1e-40000').map(p => p.value).join('') === tinyCurrencyName.format('1e-40000'),
+            tinyUnit.format('1e-40000').includes('jour') && tinyUnit.format('1e-40000').length > 32000,
+            range.includes('–') && !range.includes('Infinity'),
+            grouped.formatRangeToParts(huge, huge + '1').map(p => p.value).join('') === range,
+          ];
+        }"#),
+        1
+    );
+    assert_eq!(call("intlLargeExact", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
+}
+
 #[cfg(all(feature = "intl", not(feature = "icu4c")))]
 #[test]
 fn intl_followup_flexible_day_period_without_icu4c() {
