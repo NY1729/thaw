@@ -1343,3 +1343,55 @@ fn error_constructor_messages_with_control_markers_are_bound_once() {
         "true\ntrue\ntrue true\n3\n"
     );
 }
+
+#[test]
+fn using_disposes_only_acquired_resources_once_on_return_failure() {
+    let source = r#"
+        function make(name: string) {
+            console.log("acquire " + name);
+            if (name === "b") throw new Error("acquire b");
+            return { [Symbol.dispose]() { console.log("dispose " + name); } };
+        }
+        function partial(): void {
+            using a = make("a"), b = make("b"), c = make("c");
+        }
+        function failing(name: string) {
+            return { [Symbol.dispose]() {
+                console.log("dispose " + name);
+                if (name === "b") throw new Error("dispose b");
+            } };
+        }
+        function early(): number {
+            using a = failing("a"), b = failing("b");
+            return 7;
+        }
+        function main(): void {
+            try { partial(); } catch (error) { console.log(error.message); }
+            try { console.log(early()); } catch (error) { console.log(error.message); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "using_acquired_once"),
+        "acquire a\nacquire b\ndispose a\nacquire b\ndispose b\ndispose a\ndispose b\n");
+}
+
+#[test]
+fn using_iteration_disposal_failure_does_not_repeat_after_continue() {
+    let source = r#"
+        function make(name: string) {
+            return { [Symbol.dispose]() {
+                console.log("dispose " + name);
+                throw new Error(name);
+            } };
+        }
+        function main(): void {
+            try {
+                for (using item of [make("first"), make("second")]) {
+                    console.log("body");
+                    continue;
+                }
+            } catch (error) { console.log("caught " + error.message); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "using_iteration_once"),
+        "body\ndispose first\ncaught first\n");
+}
