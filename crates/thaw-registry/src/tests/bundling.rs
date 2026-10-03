@@ -1447,3 +1447,179 @@ fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules(
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn native_esm_cycle_links_original_mjs_before_evaluation() {
+    // Unrun regression: B evaluates first, observes A's hoisted function, and
+    // gets TDZ for A's let binding. The old factory rewrite evaluated eagerly.
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("native-esm-cycle-origin");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-origin-cycle-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "import { observed } from './b.mjs'; export function ready() { return 7; } export let value = 3; export const result = observed;").unwrap();
+    fs::write(package.join("b.mjs"), "import { ready, value } from './index.mjs'; export const observed = [typeof ready, (() => { try { return value; } catch (error) { return error.name; } })()];").unwrap();
+    let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-origin-cycle-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(count, 2);
+    assert!(bundle.contains("__thaw_native_esm_sources"));
+    let script = format!("globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.nativeOriginResult = function() {{ return [module.exports.result, module.exports.ready(), module.exports.value]; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"nativeOriginResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[\"function\",\"ReferenceError\"],7,3]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_route_keeps_mixed_mjs_cjs_on_legacy_bridge() {
+    let root = temp_registry("native-esm-mixed-fallback");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-mixed-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "import legacy from './legacy.cjs'; export const value = legacy;").unwrap();
+    fs::write(package.join("legacy.cjs"), "module.exports = 9;").unwrap();
+    let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-mixed-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(count, 2);
+    assert!(!bundle.contains("__thaw_native_esm_sources"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_bundle_name_is_fresh_for_same_key_new_source() {
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("native-esm-fresh-bundle");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-fresh-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
+    let (first, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
+    let first_script = format!("globalThis.module = {{ exports: {{}} }}; {first} globalThis.firstNativeValue = function() {{ return module.exports.value; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first_script).unwrap().as_ptr()), 1);
+    let one = thaw_quickjs::thaw_js_call(c"firstNativeValue".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(one) }.to_string_lossy(), "1");
+    fs::write(package.join("index.mjs"), "export const value = 2;").unwrap();
+    let (second, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
+    let second_script = format!("globalThis.module = {{ exports: {{}} }}; {second} globalThis.secondNativeValue = function() {{ return module.exports.value; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second_script).unwrap().as_ptr()), 1);
+    let two = thaw_quickjs::thaw_js_call(c"secondNativeValue".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(two) }.to_string_lossy(), "2");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_query_suffixes_retain_distinct_module_identity() {
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("native-esm-query-identity");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-query-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "import * as a from './leaf.mjs?one'; import * as b from './leaf.mjs?two'; export const result = [a.token === b.token, globalThis.queryLeafRuns];").unwrap();
+    fs::write(package.join("leaf.mjs"), "globalThis.queryLeafRuns = (globalThis.queryLeafRuns || 0) + 1; export const token = {};").unwrap();
+    let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-query-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(count, 3);
+    assert!(bundle.contains("__thaw_native_esm_sources"));
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.queryLeafRuns = 0; {bundle} globalThis.nativeQueryResult = function() {{ return module.exports.result; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"nativeQueryResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,2]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_type_module_js_uses_parsed_capability_gate() {
+    let root = temp_registry("native-esm-type-module");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-type-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), r#"{"type":"module"}"#).unwrap();
+    fs::write(package.join("index.js"), "// module require Worker fetch import.meta are only words here\nexport const text = 'module require Worker fetch import.meta';").unwrap();
+    let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-type-pkg", &package, "index.js").unwrap();
+    assert_eq!(count, 1);
+    assert!(bundle.contains("__thaw_native_esm_sources"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_requires_a_valid_declared_file_context() {
+    let root = temp_registry("native-esm-declared-context");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-context-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.js"), "export const value = 1;").unwrap();
+    fs::write(package.join("package.json"), r#"{"type":"unknown"}"#).unwrap();
+    let (invalid_type, _, _, _) = bundle_commonjs_package(&modules, "native-context-pkg", &package, "index.js").unwrap();
+    assert!(!invalid_type.contains("__thaw_native_esm_sources"));
+    fs::write(package.join("package.json"), "{").unwrap();
+    assert!(!declared_native_esm_context(&package.join("index.js"), &package));
+    fs::write(package.join("package.json"), r#"{"type":"module"}"#).unwrap();
+    fs::write(package.join("other.xyz"), "export const value = 2;").unwrap();
+    let (arbitrary_extension, _, _, _) = bundle_commonjs_package(&modules, "native-context-pkg", &package, "other.xyz").unwrap();
+    assert!(!arbitrary_extension.contains("__thaw_native_esm_sources"));
+    let (declared_js, _, _, _) = bundle_commonjs_package(&modules, "native-context-pkg", &package, "index.js").unwrap();
+    assert!(declared_js.contains("__thaw_native_esm_sources"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_dynamic_global_capability_uses_legacy_bundle() {
+    let root = temp_registry("native-esm-computed-worker");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-computed-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "const name = 'Worker'; export const capability = globalThis[name];").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-computed-pkg", &package, "index.mjs").unwrap();
+    assert!(!bundle.contains("__thaw_native_esm_sources"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
+    // Unrun: a finite literal dynamic import is admitted by collection, but
+    // an older absolute module name is not an edge of this new bundle.
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("native-esm-absolute-escape");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-escape-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
+    let (first, _, _, _) = bundle_commonjs_package(&modules, "native-escape-pkg", &package, "index.mjs").unwrap();
+    let first_script = format!("globalThis.module = {{ exports: {{}} }}; {first} globalThis.oldNativeName = function() {{ return Object.keys(globalThis.__thaw_native_esm_sources).find(function(name) {{ return name.endsWith(':native-escape-pkg/index.mjs'); }}); }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first_script).unwrap().as_ptr()), 1);
+    let name_result = thaw_quickjs::thaw_js_call(c"oldNativeName".as_ptr(), c"[]".as_ptr());
+    let old_name: String = serde_json::from_str(&unsafe { CStr::from_ptr(name_result) }.to_string_lossy()).unwrap();
+    let old_literal = serde_json::to_string(&old_name).unwrap();
+    fs::write(package.join("index.mjs"), format!("export const blocked = await import({old_literal}).then(function() {{ return false; }}, function() {{ return true; }});")).unwrap();
+    let (second, _, _, _) = bundle_commonjs_package(&modules, "native-escape-pkg", &package, "index.mjs").unwrap();
+    assert!(second.contains("__thaw_native_esm_sources"));
+    let second_script = format!("globalThis.module = {{ exports: {{}} }}; {second} globalThis.absoluteImportBlocked = function() {{ return module.exports.blocked; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second_script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"absoluteImportBlocked".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_bundle_sequence_ignores_mutable_global_reset() {
+    // Unrun: the first bundle's exact name is known, so resetting the old
+    // global counter to its predecessor would force a same-name cache hit.
+    use std::ffi::{CStr, CString};
+    let root = temp_registry("native-esm-sequence-reset");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-counter-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
+    let (first, _, _, _) = bundle_commonjs_package(&modules, "native-counter-pkg", &package, "index.mjs").unwrap();
+    let first_script = format!("globalThis.module = {{ exports: {{}} }}; {first} globalThis.counterNativeName = function() {{ return Object.keys(globalThis.__thaw_native_esm_sources).find(function(name) {{ return name.endsWith(':native-counter-pkg/index.mjs'); }}); }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first_script).unwrap().as_ptr()), 1);
+    let name_result = thaw_quickjs::thaw_js_call(c"counterNativeName".as_ptr(), c"[]".as_ptr());
+    let first_name: String = serde_json::from_str(&unsafe { CStr::from_ptr(name_result) }.to_string_lossy()).unwrap();
+    let sequence = first_name.strip_prefix("thaw-bundle:").unwrap().split_once(':').unwrap().0.parse::<u64>().unwrap();
+    let reset_script = format!("globalThis.__thaw_native_esm_sequence = {}; try {{ globalThis.__thaw_native_esm_next_sequence = function() {{ return '{}'; }}; }} catch (error) {{}} try {{ Object.defineProperty(globalThis, '__thaw_native_esm_next_sequence', {{ value: function() {{ return '{}'; }} }}); }} catch (error) {{}}", sequence - 1, sequence, sequence);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(reset_script).unwrap().as_ptr()), 1);
+    fs::write(package.join("index.mjs"), "export const value = 2;").unwrap();
+    let (second, _, _, _) = bundle_commonjs_package(&modules, "native-counter-pkg", &package, "index.mjs").unwrap();
+    let second_script = format!("globalThis.module = {{ exports: {{}} }}; {second} globalThis.secondCounterValue = function() {{ return module.exports.value; }};");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second_script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"secondCounterValue".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "2");
+    let _ = fs::remove_dir_all(root);
+}

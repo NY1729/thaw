@@ -61,6 +61,25 @@ fn commonjs_factory_context(path: &Path, package_dir: &Path, has_esm: bool, uses
 }
 
 
+// Only an explicit `.mjs` extension or the nearest valid `type: module`
+// package scope declares an ESM source to the native loader.
+fn declared_native_esm_context(path: &Path, package_dir: &Path) -> bool {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("mjs") => return true,
+        Some("js") => {},
+        _ => return false,
+    }
+    for directory in path.ancestors().skip(1) {
+        if !directory.starts_with(package_dir) { break; }
+        if directory.join("package.json").exists() {
+            return read_manifest(directory).is_ok_and(|manifest|
+                manifest.get("type").and_then(serde_json::Value::as_str) == Some("module"));
+        }
+        if directory == package_dir { break; }
+    }
+    false
+}
+
 /// Bundles `root_package`'s own CommonJS module graph -- starting from
 /// `main_relative` (its `main` field, or a default) -- into a single
 /// self-contained JS string with a small embedded module-system
@@ -146,6 +165,10 @@ fn add_builtin_module(
         has_esm: false,
         has_top_level_await: false,
         commonjs_context: true,
+        native_esm_context: false,
+        uses_legacy_bundle_globals: true,
+        has_nonliteral_module_load: false,
+        uses_import_meta: false,
         async_module: false,
         source_path: None,
     });
@@ -562,6 +585,10 @@ fn bundle_commonjs_package_cached(
             has_esm: analysis.has_esm,
             has_top_level_await: analysis.has_top_level_await,
             commonjs_context: commonjs_factory_context(&abs_path, &pkg_dir, analysis.has_esm, analysis.uses_import_meta),
+            native_esm_context: declared_native_esm_context(&abs_path, &pkg_dir),
+            uses_legacy_bundle_globals: analysis.uses_legacy_bundle_globals,
+            has_nonliteral_module_load: analysis.has_nonliteral_module_load,
+            uses_import_meta: analysis.uses_import_meta,
             async_module: false,
             source_path: Some(abs_path),
         });
@@ -576,14 +603,31 @@ fn bundle_commonjs_package_cached(
         );
     }
 
-    prepare_async_modules(&mut modules, source_cache)?;
+    // Native module linking owns the original source only when the complete
+    // collected graph is ESM. Mixed graphs retain the existing CJS bridge.
+    let native_esm = modules.iter().any(|module| module.has_esm)
+        && modules.iter().all(|module| {
+            module.native_esm_context && !module.commonjs_context
+                && module.requires.is_empty()
+                && !module.uses_legacy_bundle_globals
+                && !module.has_nonliteral_module_load
+                && !module.uses_import_meta
+                && module.static_esm_specs.iter().all(|spec| {
+                    module.imports.iter().any(|(request, target)| request == spec
+                        && modules.iter().any(|candidate| candidate.key == *target))
+                })
+        });
+    if !native_esm {
+        prepare_async_modules(&mut modules, source_cache)?;
+    }
 
     let file_count = modules.len();
     let dependency_versions = project_package_versions(package_versions.clone())?;
     source_cache.last_bundle_versions = package_versions.clone();
     source_cache.package_versions.extend(package_versions);
     Ok((
-        render_bundle(&main_key, &modules),
+        if native_esm { render_native_esm_bundle(&main_key, &modules) }
+        else { render_bundle(&main_key, &modules) },
         main_key,
         file_count,
         dependency_versions,

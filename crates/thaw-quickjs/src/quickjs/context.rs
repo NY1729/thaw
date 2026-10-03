@@ -183,14 +183,86 @@ fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
     unsafe { rquickjs::qjs::JS_SetSharedArrayBufferFunctions(runtime, &functions) };
 }
 
+// Native modules use QuickJS's own per-runtime module cache. Retaining a
+// Persistent<Module> inside Runtime's loader is unsafe: RawRuntime frees the
+// engine before dropping its LoaderHolder.
+struct BundleModuleResolver;
+
+impl rquickjs::loader::Resolver for BundleModuleResolver {
+    fn resolve<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        base: &str,
+        name: &str,
+        _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
+        let registry: Object = ctx.globals().get("__thaw_native_esm_sources")
+            .map_err(|_| rquickjs::Error::new_resolving(base, name))?;
+        if let Some(sequence) = base.strip_prefix("thaw-bundle:")
+            .and_then(|remainder| remainder.split_once(':'))
+            .map(|(sequence, _)| sequence) {
+            // A bundled module can import only its own collected edges. In
+            // particular, an absolute name from an earlier bundle is not an
+            // authority to bypass this bundle's import map.
+            let parent: Object = registry.get(base)
+                .map_err(|_| rquickjs::Error::new_resolving(base, name))?;
+            let imports: Object = parent.get("imports")?;
+            let target: String = imports.get(name)
+                .map_err(|_| rquickjs::Error::new_resolving(base, name))?;
+            let resolved = format!("thaw-bundle:{sequence}:{target}");
+            if !registry.contains_key(resolved.as_str())? {
+                return Err(rquickjs::Error::new_resolving(base, name));
+            }
+            return Ok(resolved);
+        }
+        // The entry import originates in the surrounding eval script, not
+        // in a bundled module. It names the already registered entry once.
+        if name.starts_with("thaw-bundle:") && registry.contains_key(name)? {
+            return Ok(name.to_owned());
+        }
+        Err(rquickjs::Error::new_resolving(base, name))
+    }
+}
+
+struct BundleModuleLoader;
+
+impl rquickjs::loader::Loader for BundleModuleLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<rquickjs::Module<'js, rquickjs::module::Declared>> {
+        let registry: Object = ctx.globals().get("__thaw_native_esm_sources")
+            .map_err(|_| rquickjs::Error::new_loading(name))?;
+        let entry: Object = registry.get(name)
+            .map_err(|_| rquickjs::Error::new_loading(name))?;
+        let source: String = entry.get("source")?;
+        rquickjs::Module::declare(ctx.clone(), name, source)
+    }
+}
+
 fn ensure_context() {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
         slot.get_or_insert_with(|| {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
+            runtime.set_loader(BundleModuleResolver, BundleModuleLoader);
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
                 install_shared_array_buffer_functions(&ctx);
+                // QuickJS caches modules by name for the lifetime of this
+                // realm. Keep each bundle prefix monotonic outside writable
+                // JavaScript globals, even when the same package is reloaded.
+                let next_sequence = std::cell::Cell::new(0u64);
+                let mint_sequence = Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+                    let next = next_sequence.get().checked_add(1).ok_or_else(||
+                        rquickjs::Error::new_from_js_message("native ESM sequence", "string", "bundle sequence overflow"))?;
+                    next_sequence.set(next);
+                    Ok(next.to_string())
+                }).expect("failed to create native ESM sequence source");
+                ctx.globals().prop("__thaw_native_esm_next_sequence", mint_sequence)
+                    .expect("failed to install native ESM sequence source");
                 ctx.globals()
                     .set(
                         "__thaw_os_thread_token",

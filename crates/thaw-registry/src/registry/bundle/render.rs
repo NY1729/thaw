@@ -1,3 +1,26 @@
+// Register original source under the same canonical package-instance keys as
+// the old bundle. QuickJS links the full graph before evaluating any module.
+fn render_native_esm_bundle(main_key: &str, modules: &[BundledModule]) -> String {
+    let mut out = String::from("module.exports = (function() {\n");
+    out.push_str("var registry = globalThis.__thaw_native_esm_sources || (globalThis.__thaw_native_esm_sources = Object.create(null));\n");
+    out.push_str("var sequence = globalThis.__thaw_native_esm_next_sequence();\n");
+    out.push_str("var prefix = 'thaw-bundle:' + sequence + ':';\n");
+    for module in modules {
+        let imports = module.imports.iter().map(|(request, target)| {
+            (request.clone(), target.clone())
+        }).collect::<std::collections::BTreeMap<String, String>>();
+        let record = serde_json::json!({ "source": module.source, "imports": imports });
+        out.push_str(&format!("registry[prefix + {}] = {};\n",
+            js_string_literal(&module.key), record));
+    }
+    out.push_str("var exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\n");
+    out.push_str(&format!(
+        "globalThis.__thaw_module_ready = import(prefix + {}).then(function(namespace) {{ module.exports = namespace; exports[{}] = namespace; return namespace; }});\n",
+        js_string_literal(main_key), js_string_literal(main_key)));
+    out.push_str("return {};\n})();\n");
+    out
+}
+
 const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_origin_for(ownerKey) {
   var own = Object.prototype.hasOwnProperty;
   var ambiguous = {};
