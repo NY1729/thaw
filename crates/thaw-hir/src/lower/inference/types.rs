@@ -489,6 +489,17 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_object_hide_marker" => {
+                        let [object, marker] = args.as_slice() else {
+                            return Err("object marker registration expects an object and a marker".into());
+                        };
+                        let object_type = self.infer_expr_type(object)?;
+                        if !matches!(object_type, HirType::Object(_)) {
+                            return Err("object marker registration requires an object".into());
+                        }
+                        self.expect_type(&HirType::Str, marker, "object marker name")?;
+                        return Ok(object_type);
+                    }
                     "__thaw_object_has_accessor" => {
                         let [_, property, setter] = args.as_slice() else {
                             return Err(

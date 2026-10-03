@@ -28,6 +28,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 return self.compile_throw_text(value).map(Into::into);
             }
+            "__thaw_object_hide_marker" => {
+                let [object, marker] = args else {
+                    return Err("object marker registration expects two operands".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let marker = self.compile_expr(marker)?.into_pointer_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_hide_marker").unwrap(),
+                    &[object.into(), marker.into()],
+                    "register_hidden_object_marker",
+                ).map_err(|error| error.to_string())?;
+                return Ok(object.into());
+            }
             "__thaw_object_has_accessor" => {
                 let [object, property, setter] = args else {
                     return Err(
