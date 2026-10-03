@@ -29,6 +29,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_throw_text(value).map(Into::into);
             }
 
+            "__thaw_object_has_class_identity" => {
+                let [object, HirExpr::Lit(HirLit::Str(class_name))] = args else {
+                    return Err("class identity query expects an object and a literal class name".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let expected = self.builder.build_global_string_ptr(class_name, "class_identity_name")
+                    .map_err(|error| error.to_string())?;
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                    &[object.into(), expected.as_pointer_value().into()],
+                    "has_class_identity",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("class identity query returned no value".into());
+            }
             "__thaw_object_marker_hidden" => {
                 let [object, marker] = args else {
                     return Err("object marker query expects two operands".into());

@@ -490,6 +490,15 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
 
+                    "__thaw_object_has_class_identity" => {
+                        let [object, HirExpr::Lit(HirLit::Str(_))] = args.as_slice() else {
+                            return Err("class identity query expects an object and a literal class name".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("class identity query requires a fixed object".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_object_marker_hidden" => {
                         let [object, marker] = args.as_slice() else {
                             return Err("object marker query expects an object and a name".into());
