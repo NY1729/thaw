@@ -1,5 +1,17 @@
 impl<'a> FnLowerer<'a> {
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        self.lower_call_with_class_guard(call, None)
+    }
+
+    /// The guard is set only by the source-proven `receiver.method(...)`
+    /// rewrite below. Keep named-call overload/default/rest normalization in
+    /// this shared path, then check the allocated class identity after all
+    /// supplied arguments and their conversions have been evaluated.
+    fn lower_call_with_class_guard(
+        &mut self,
+        call: &CallExpr,
+        class_method_guard: Option<&str>,
+    ) -> Result<HirExpr, String> {
         // Taken (not just read) as the very first action, before this
         // call's own arguments are lowered below -- a hint set for *this*
         // call must never still be visible if lowering one of its own
@@ -351,9 +363,10 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 let receiver_type = self.infer_member_receiver_type(&member.obj);
-                if let Some(class_receiver_type) =
-                    receiver_type.clone().filter(|ty| class_name_from_type(ty).is_some())
-                {
+                if let Some(class_receiver_type) = receiver_type.clone().filter(|ty| {
+                    class_name_from_type(ty).is_some()
+                        && !Self::class_receiver_has_own_field(ty, &property)
+                }) {
                     let class_name = class_name_from_type(&class_receiver_type)
                         .expect("the receiver was classified as a native class");
                     let symbol = class_method_symbol(class_name, &property);
@@ -369,7 +382,7 @@ impl<'a> FnLowerer<'a> {
                             expr: member.obj.clone(),
                         });
                         args.extend(call.args.iter().cloned());
-                        return self.lower_call(&CallExpr {
+                        return self.lower_call_with_class_guard(&CallExpr {
                             span: call.span,
                             ctxt: call.ctxt,
                             callee: Callee::Expr(Box::new(Expr::Ident(
@@ -377,7 +390,7 @@ impl<'a> FnLowerer<'a> {
                             ))),
                             args,
                             type_args: None,
-                        });
+                        }, Some(class_name));
                     }
                     return Err(format!(
                         "class `{class_name}` has no native method `{property}`"
@@ -1698,8 +1711,9 @@ impl<'a> FnLowerer<'a> {
             }
             lowered.push(value);
         }
-        let preserve_argument_order =
-            call.args.iter().any(|arg| arg.spread.is_some()) || lowered.iter().any(contains_await);
+        let preserve_argument_order = class_method_guard.is_some()
+            || call.args.iter().any(|arg| arg.spread.is_some())
+            || lowered.iter().any(contains_await);
         for (arg, mut value) in call.args.iter().zip(lowered) {
             if !preserve_argument_order {
                 lowered_arguments.push(value);
@@ -2351,7 +2365,32 @@ impl<'a> FnLowerer<'a> {
         } else {
             callee_name
         };
-        let result = HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), args);
+        let result = if let Some(class_name) = class_method_guard {
+            // The ordinary named-call path above has already selected its
+            // overload, optional/default wrapper, rest ABI, and coercions.
+            // Bind those final values once before checking identity: putting
+            // the assertion in argument slot zero would reject a forged
+            // receiver before later argument side effects could run.
+            let mut final_bindings = Vec::with_capacity(args.len());
+            let mut bound_args = Vec::with_capacity(args.len());
+            for value in args {
+                let ty = self.infer_expr_type(&value)?;
+                let name = format!("__thaw_class_call_arg_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                final_bindings.push((name.clone(), ty, value));
+                bound_args.push(HirExpr::Var(name));
+            }
+            let receiver = bound_args.first_mut().ok_or("class method call has no receiver")?;
+            *receiver = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_assert_class_identity".into())),
+                vec![receiver.clone(), HirExpr::Lit(HirLit::Str(class_name.to_string()))],
+            );
+            let result = HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), bound_args);
+            self.wrap_call_argument_bindings(result, &final_bindings)?
+        } else {
+            HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), args)
+        };
         self.wrap_call_argument_bindings(result, &argument_bindings)
     }
 

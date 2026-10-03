@@ -102,6 +102,54 @@ fn throwing_class_accessor_setter_prevents_update_result() {
 }
 
 #[test]
+fn class_method_calls_require_allocated_identity_after_argument_effects() {
+    let source = r#"
+        let effects = 0;
+        class Base {
+            add(value: number): number { return value + 1; }
+        }
+        class Derived extends Base {}
+        class DefaultRest {
+            total(base: number = 3, ...values: number[]): number { return base + values.length; }
+        }
+        class OwnShadow extends Base {
+            add: (value: number) => number;
+            constructor() { super(); this.add = (value: number): number => value + 20; }
+        }
+        class VoidBox { hit(value: number): void { voidEffects += value; } }
+        let voidEffects = 0;
+        let receivers = 0;
+        function argument(): number { effects++; return 4; }
+        function voidArgument(): number { voidEffects++; return 2; }
+        function spread(): [number] { effects++; return [6]; }
+        function make(): Base { receivers++; return new Base(); }
+        function main(): void {
+            console.log(make().add(argument()), new Derived().add(argument()), receivers, effects);
+            const fake = { ["__thaw_class_identity_\u001eBase"]: true } as Base;
+            try { fake.add(argument()); console.log("unexpected"); }
+            catch (error) { console.log("rejected", effects); }
+            try { fake.add(...spread()); console.log("unexpected"); }
+            catch (error) { console.log("spread", effects); }
+            const ordinary = {
+                ["__thaw_class_identity_\u001eBase"]: true,
+                add(value: number): number { return value + 10; }
+            };
+            console.log(ordinary.add(argument()), effects);
+            new VoidBox().hit(voidArgument());
+            console.log("void", voidEffects);
+            console.log("default-rest", new DefaultRest().total(), new DefaultRest().total(4, 5, 6));
+            console.log("own-field", new OwnShadow().add(2));
+            const voidFake = { ["__thaw_class_identity_\u001eVoidBox"]: true } as VoidBox;
+            try { voidFake.hit(voidArgument()); console.log("unexpected"); }
+            catch (error) { console.log("void-rejected", voidEffects); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_method_allocated_identity"),
+        "5 5 1 2\nrejected 3\nspread 4\n14 5\nvoid 3\ndefault-rest 3 6\nown-field 22\nvoid-rejected 4\n");
+}
+
+
+#[test]
 fn copied_class_marker_cannot_dispatch_symbol_tag_getter() {
     let source = r#"
         let called = 0;
