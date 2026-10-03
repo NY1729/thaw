@@ -2110,7 +2110,9 @@ fn write_graph_token(
     ids: &mut HashMap<usize, usize>,
     nodes: &mut Vec<Value>,
 ) {
-    if is_branded_wrapper(value) && is_napi_undefined(value) {
+    if value.as_f64().is_some_and(|number| number.to_bits() == (-0.0f64).to_bits()) {
+        out.extend_from_slice(b"{\"nf\":\"-0\"}");
+    } else if is_branded_wrapper(value) && is_napi_undefined(value) {
         out.extend_from_slice(b"{\"u\":1}");
     } else if let Some(number) = is_branded_wrapper(value).then(|| non_finite_number(value)).flatten() {
         out.extend_from_slice(b"{\"nf\":");
@@ -2359,6 +2361,7 @@ fn graph_token_value(token: &Value, nodes: &[Value]) -> Option<Value> {
     }
     let non_finite = fields.get(b"nf".as_slice())?.as_str()?;
     let number = match non_finite {
+        "-0" => return Some(number_value(-0.0)),
         "NaN" => f64::NAN,
         "Infinity" => f64::INFINITY,
         "-Infinity" => f64::NEG_INFINITY,
@@ -6242,6 +6245,20 @@ mod tests {
             bytes.extend_from_slice(&(pointer as usize as u64).to_ne_bytes());
         }
         Box::leak(bytes.into_boxed_slice()).as_ptr()
+    }
+
+    #[test]
+    fn graph_transport_preserves_negative_zero_without_changing_public_json() {
+        let value = leak(number_value(-0.0));
+        let wire = thaw_json_graph_encode(value);
+        assert!(read_c_string(wire).contains("\"nf\":\"-0\""));
+        let decoded = thaw_json_graph_decode(wire);
+        assert_eq!(thaw_json_take_graph_error(), 0);
+        assert_eq!(unsafe { &*decoded }.as_f64().unwrap().to_bits(), (-0.0f64).to_bits());
+        let mut ordinary = Vec::new();
+        write_json_value(unsafe { &*value }, &mut ordinary, None, 0);
+        assert_eq!(ordinary, b"0");
+        unsafe { thaw_json_destroy(value); thaw_json_destroy(decoded); thaw_cstring_destroy(wire.cast_mut()); }
     }
 
     #[test]
