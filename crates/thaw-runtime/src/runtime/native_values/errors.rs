@@ -55,28 +55,40 @@ fn strip_suppressed_segments(message: &str) -> &str {
         .map_or(message, |value| value.0)
 }
 
-fn split_error_tag(message: &str) -> (&str, &str) {
-    let message = strip_suppressed_segments(message);
-    let Some(rest) = message.strip_prefix(ERROR_TAG_MARKER) else {
-        // No leading tag: a plain message, possibly with a *trailing*
-        // `\u{1}name\u{1}message` segment a labeled rejection appends (see
-        // thaw-quickjs's `describe_promise_exception`), plus an optional
-        // `\u{5}` property bag. Keep only the text before either.
-        let body = message.split_once(ERROR_PROPS_MARKER).map_or(message, |value| value.0);
-        let body = body.split_once(ERROR_TAG_MARKER).map_or(body, |value| value.0);
-        return ("Error", body);
+fn split_once_error_marker(message: &[u8], marker: u8) -> Option<(&[u8], &[u8])> {
+    let index = message.iter().position(|&byte| byte == marker)?;
+    Some((&message[..index], &message[index + 1..]))
+}
+
+// The markers are ASCII bytes, so splitting raw WTF-8 also preserves lone
+// surrogate sequences and embedded NULs in the message body.
+fn split_error_tag_bytes(message: &[u8]) -> (&[u8], &[u8]) {
+    let message = split_once_error_marker(message, ERROR_SUPPRESSED_ERROR_MARKER as u8)
+        .map_or(message, |value| value.0);
+    let Some(rest) = message.strip_prefix(&[ERROR_TAG_MARKER as u8]) else {
+        // Untagged rejections may still have trailing identity/property tags.
+        let body = split_once_error_marker(message, ERROR_PROPS_MARKER as u8)
+            .map_or(message, |value| value.0);
+        let body = split_once_error_marker(body, ERROR_TAG_MARKER as u8)
+            .map_or(body, |value| value.0);
+        return (b"Error", body);
     };
-    let (name, body) = rest
-        .split_once(ERROR_TAG_MARKER)
-        .unwrap_or(("Error", message));
-    let body = body
-        .split_once(ERROR_PROPS_MARKER)
+    let (name, body) = split_once_error_marker(rest, ERROR_TAG_MARKER as u8)
+        .unwrap_or((b"Error", message));
+    let body = split_once_error_marker(body, ERROR_PROPS_MARKER as u8)
         .map_or(body, |value| value.0);
-    let body = body
-        .split_once(ERROR_NAME_OVERRIDE_MARKER)
+    let body = split_once_error_marker(body, ERROR_NAME_OVERRIDE_MARKER as u8)
         .map_or(body, |value| value.0);
-    let body = body.split_once(ERROR_CAUSE_MARKER).map_or(body, |value| value.0);
-    (name, body.split_once(ERROR_CODE_MARKER).map_or(body, |value| value.0))
+    let body = split_once_error_marker(body, ERROR_CAUSE_MARKER as u8)
+        .map_or(body, |value| value.0);
+    (name, split_once_error_marker(body, ERROR_CODE_MARKER as u8)
+        .map_or(body, |value| value.0))
+}
+
+fn split_error_tag(message: &str) -> (&str, &str) {
+    let (name, body) = split_error_tag_bytes(message.as_bytes());
+    // ASCII markers cannot split a UTF-8 code point in a valid `str`.
+    (std::str::from_utf8(name).unwrap(), std::str::from_utf8(body).unwrap())
 }
 
 /// The runtime `.name` override embedded after the message, if any --
@@ -238,12 +250,9 @@ pub unsafe extern "C" fn thaw_error_message(message: *const c_char) -> *const c_
     if message.is_null() {
         return std::ptr::null();
     }
-    // WTF-8-aware lossy decode: a lone surrogate becomes one U+FFFD, not
-    // `std`'s one-per-invalid-byte (3 for a 3-byte WTF-8 surrogate).
     let bytes = unsafe { wtf8_bytes(message) };
-    let text = String::from_utf8(wtf8_to_well_formed(bytes)).unwrap_or_default();
-    let (_, body) = split_error_tag(&text);
-    arena_c_string(body).map_or(std::ptr::null(), |value| value.cast())
+    let (_, body) = split_error_tag_bytes(bytes);
+    arena_wtf8(body).map_or(std::ptr::null(), |value| value.cast())
 }
 
 /// # Safety
@@ -652,6 +661,22 @@ mod error_native_tests {
         assert_eq!(call_suppressed(&outer), "\u{1}RangeError\u{1}third");
         assert_eq!(call_suppressed_error(&inner), "\u{1}Error\u{1}first");
         assert_eq!(call_suppressed(&inner), "\u{1}TypeError\u{1}second");
+    }
+
+    #[test]
+    fn error_message_preserves_wtf8_surrogates_and_embedded_nul() {
+        let body = b"high\xed\xa0\x80\0low\xed\xb0\x80";
+        for source in [
+            body.to_vec(),
+            [b"\x01TypeError\x01".as_slice(), body, b"\x03ERR_TEST"].concat(),
+        ] {
+            let source = arena_wtf8(&source).unwrap();
+            let result = unsafe { thaw_error_message(source.cast()) };
+            assert!(!result.is_null());
+            assert_eq!(unsafe { wtf8_bytes(result) }, body);
+        }
+        assert_eq!(call_message("\u{1}TypeError\u{1}plain\u{3}ERR_TEST"), "plain");
+        assert_eq!(call_message("plain"), "plain");
     }
 
     #[test]
