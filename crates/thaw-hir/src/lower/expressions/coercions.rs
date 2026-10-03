@@ -10,6 +10,19 @@ enum AbsenceKind {
 }
 
 impl<'a> FnLowerer<'a> {
+    // Function and CallableFunction have a raw-pointer ABI. An absent
+    // function value is a typed null pointer, distinct from JS `null`.
+    fn function_pointer_is_undefined(value: HirExpr, ty: &HirType) -> HirExpr {
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(value),
+            Box::new(HirExpr::OptionalValue(
+                Box::new(HirExpr::OptionalNone(ty.clone())),
+                ty.clone(),
+            )),
+        )
+    }
+
     fn truthiness_expr(&self, value: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
         let false_lit = || HirExpr::Lit(HirLit::Bool(false));
         match ty {
@@ -59,9 +72,12 @@ impl<'a> FnLowerer<'a> {
             | HirType::Tuple(_)
             | HirType::Object(_)
             | HirType::Dictionary(_)
-            | HirType::Promise(_)
-            | HirType::Function(_, _)
-            | HirType::CallableFunction(..) => Ok(HirExpr::Lit(HirLit::Bool(true))),
+            | HirType::Promise(_) => Ok(HirExpr::Lit(HirLit::Bool(true))),
+            HirType::Function(_, _) | HirType::CallableFunction(..) => Ok(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(Self::function_pointer_is_undefined(value, ty)),
+                Box::new(false_lit()),
+            )),
             // `T | null` / `T | undefined` (`T | null | undefined`):
             // falsy when absent, otherwise the payload's own truthiness.
             HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
@@ -246,8 +262,7 @@ impl<'a> FnLowerer<'a> {
         let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
         let payload_always_truthy = matches!(&payload,
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
-            | HirType::Dictionary(_) | HirType::Promise(_)
-            | HirType::Function(_, _) | HirType::CallableFunction(..));
+            | HirType::Dictionary(_) | HirType::Promise(_));
 
         fn add_member(ty: HirType, members: &mut Vec<HirType>) {
             if !members.contains(&ty) { members.push(ty); }
@@ -1149,6 +1164,12 @@ impl<'a> FnLowerer<'a> {
             HirExpr::BinOp(BinOp::EqEqEq,
                 Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(left))),
                 Box::new(HirExpr::TypedClosure(HirType::Str, Box::new(right))))
+        } else if matches!(&lhs_type, HirType::Function(_, _) | HirType::CallableFunction(..))
+            && rhs_type == HirType::Undefined {
+            Self::function_pointer_is_undefined(left, &lhs_type)
+        } else if matches!(&rhs_type, HirType::Function(_, _) | HirType::CallableFunction(..))
+            && lhs_type == HirType::Undefined {
+            Self::function_pointer_is_undefined(right, &rhs_type)
         } else if lhs_type == rhs_type {
             HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right))
         } else if Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type) {
@@ -1311,6 +1332,31 @@ impl<'a> FnLowerer<'a> {
         let rhs_type = self.infer_expr_type(&rhs)?;
         if lhs_type == rhs_type {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
+        }
+        // A raw-null Function is JavaScript `undefined`, so it loosely
+        // equals both `undefined` and `null`. Bind both operands first to
+        // preserve their effects and order, even when one is statically nullish.
+        let nullish_function = match (&lhs_type, &rhs_type) {
+            (ty @ (HirType::Function(_, _) | HirType::CallableFunction(..)),
+                HirType::Null | HirType::Undefined) => Some((true, (*ty).clone())),
+            (HirType::Null | HirType::Undefined,
+                ty @ (HirType::Function(_, _) | HirType::CallableFunction(..))) => {
+                Some((false, (*ty).clone()))
+            }
+            _ => None,
+        };
+        if let Some((function_left, function_type)) = nullish_function {
+            let left_name = format!("__thaw_loose_function_left_{}", self.next_binding);
+            self.next_binding += 1;
+            let right_name = format!("__thaw_loose_function_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(left_name.clone(), lhs_type.clone());
+            self.scope.insert(right_name.clone(), rhs_type.clone());
+            let function = HirExpr::Var(if function_left { left_name.clone() } else { right_name.clone() });
+            return self.wrap_call_argument_bindings(
+                Self::function_pointer_is_undefined(function, &function_type),
+                &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
+            );
         }
         // A native `bigint` against a beyond-`i64` one (a live handle):
         // equal exactly when their decimal digits agree.
