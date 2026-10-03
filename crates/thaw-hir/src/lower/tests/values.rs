@@ -1391,3 +1391,126 @@ fn rejects_unsafe_values_for_mutating_union_array_methods() {
         );
     }
 }
+
+
+#[test]
+fn function_operations_guard_property_access_before_argument_bindings() {
+    let program = lower(r#"
+        function effect(): number { return 1; }
+        function main(): void {
+            const f = function (this: number, value: number): number { return value; };
+            f.call(effect(), effect());
+            f.apply(effect(), [effect()] as [number]);
+            f.bind(effect(), effect());
+        }
+    "#);
+    let lowered = format!("{:?}", program.functions);
+    for property in ["call", "apply", "bind"] {
+        assert!(lowered.contains(&format!("Cannot read properties of undefined (reading '{property}')")),
+            "{lowered}");
+    }
+    assert!(lowered.contains("__thaw_function_operation_target_"), "{lowered}");
+    assert!(lowered.contains("__thaw_function_bind_target_"), "{lowered}");
+}
+
+#[test]
+fn optional_function_calls_check_raw_and_wrapped_pointer_absence() {
+    let program = lower(r#"
+        function maybe(present: boolean): ((value: number) => number) | undefined {
+            if (present) return value => value + 1;
+            return undefined;
+        }
+        function effect(): number { return 1; }
+        function main(): void {
+            const direct = (value: number): number => value;
+            direct?.(effect());
+            const wrapped = maybe(false);
+            wrapped?.(effect());
+            const holder: { handler: (value: number) => number } = { handler: direct };
+            holder.handler?.(effect());
+        }
+    "#);
+    let lowered = format!("{:?}", program.functions);
+    assert!(lowered.matches("__thaw_optional_callee_").count() >= 3, "{lowered}");
+    assert!(lowered.contains("OptionalNone"), "{lowered}");
+}
+
+#[test]
+fn saved_method_call_captures_callee_then_arguments_before_absence_guard() {
+    let program = lower(r#"
+        class Box {
+            read(value: number): number { return value; }
+        }
+        function effect(): number { return 1; }
+        function main(): number {
+            const box = new Box();
+            const saved = box.read;
+            return saved(effect());
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let lowered = format!("{:?}", main.body);
+    assert!(lowered.contains("__thaw_saved_selected_"), "{lowered}");
+    assert!(lowered.contains("__thaw_native_arg_"), "{lowered}");
+    assert!(lowered.contains("Value is not a function"), "{lowered}");
+    assert!(lowered.contains("FunctionCall") || lowered.contains("__thaw_class_Box_method_read"), "{lowered}");
+}
+
+#[test]
+fn optional_object_method_call_keeps_receiver_parameter() {
+    let program = lower(r#"
+        function effect(): number { return 1; }
+        function main(): number | undefined {
+            const object = {
+                value: 2,
+                read(extra: number): number { return this.value + extra; }
+            };
+            return object.read?.(effect());
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let lowered = format!("{:?}", main.body);
+    assert!(lowered.contains("__thaw_optional_method_receiver_"), "{lowered}");
+    assert!(lowered.contains("__thaw_object_method_receiver"), "{lowered}");
+    assert!(lowered.contains("__thaw_optional_callee_"), "{lowered}");
+}
+
+#[test]
+fn rest_function_bind_checks_missing_property_before_bound_arguments() {
+    let program = lower(r#"
+        function effect(): number { return 1; }
+        function sum(...values: number[]): number { return values[0]; }
+        function main(): void {
+            const bound = sum.bind(undefined, effect());
+            console.log(bound());
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let lowered = format!("{:?}", main.body);
+    assert!(lowered.contains("__thaw_rest_bind_target_"), "{lowered}");
+    assert!(lowered.contains("Cannot read properties of undefined (reading 'bind')"), "{lowered}");
+}
+
+#[test]
+fn optional_method_and_plain_field_calls_contextually_type_callbacks() {
+    let program = lower(r#"
+        function main(): void {
+            const object = {
+                value: 2,
+                read(callback: (n: number) => number): number {
+                    return callback(this.value);
+                }
+            };
+            const plain: { run: (callback: (n: number) => number) => number } = {
+                run: (callback) => callback(3)
+            };
+            console.log(object.read?.(n => n + 1));
+            console.log(plain.run?.(n => n + 1));
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let lowered = format!("{:?}", main.body);
+    assert!(lowered.contains("__thaw_object_method_receiver"), "{lowered}");
+    assert!(lowered.matches("__thaw_optional_callee_").count() >= 2, "{lowered}");
+    assert!(lowered.contains("F64"), "{lowered}");
+}

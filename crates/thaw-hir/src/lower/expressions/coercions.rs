@@ -12,7 +12,7 @@ enum AbsenceKind {
 impl<'a> FnLowerer<'a> {
     // Function and CallableFunction have a raw-pointer ABI. An absent
     // function value is a typed null pointer, distinct from JS `null`.
-    fn function_pointer_is_undefined(value: HirExpr, ty: &HirType) -> HirExpr {
+    pub(crate) fn function_pointer_is_undefined(value: HirExpr, ty: &HirType) -> HirExpr {
         HirExpr::BinOp(
             BinOp::EqEqEq,
             Box::new(value),
@@ -36,7 +36,7 @@ impl<'a> FnLowerer<'a> {
     // 0 = present, 1 = undefined, 2 = null. Inspect both operands once an
     // equality pair contains a Function leaf: the *other* operand may itself
     // be an absent Optional<number>, Union, or dynamic value.
-    fn function_observable_absence(&mut self, value: HirExpr, ty: &HirType) -> HirExpr {
+    pub(crate) fn function_observable_absence(&mut self, value: HirExpr, ty: &HirType) -> HirExpr {
         let number = |n| HirExpr::Lit(HirLit::F64(n));
         let choose = |test, yes, no| HirExpr::Conditional(
             Box::new(test), Box::new(yes), Box::new(no), HirType::F64,

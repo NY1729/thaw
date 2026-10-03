@@ -764,6 +764,28 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    // A function operation reads `.call`/`.apply`/`.bind` before it evaluates
+    // thisArg or arguments. This block is a binding-wrapper lambda body, not
+    // a standalone expression block.
+    fn guard_function_value(
+        &mut self, value: HirExpr, ty: &HirType, message: &str, body: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let result_type = self.infer_expr_type(&body)?;
+        let mut statements = vec![HirStmt::If(
+            Self::function_pointer_is_undefined(value, ty),
+            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                format!("\u{1}TypeError\u{1}{message}"),
+            )))],
+            Vec::new(),
+        )];
+        if result_type == HirType::Void {
+            statements.push(HirStmt::Expr(body));
+        } else {
+            statements.push(HirStmt::Return(Some(body)));
+        }
+        Ok(HirExpr::Block(statements))
+    }
+
     fn lower_function_bind(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
         let Callee::Expr(callee) = &call.callee else {
             return Ok(None);
@@ -816,11 +838,8 @@ impl<'a> FnLowerer<'a> {
             let this_name = format!("__thaw_rest_bind_this_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(this_name.clone(), this_type.clone());
-            let mut bindings = vec![
-                (target_name.clone(), target_type, target),
-                (this_name.clone(), this_type, this_value),
-            ];
-            bindings.extend(spread_bindings);
+            let mut argument_bindings = vec![(this_name.clone(), this_type.clone(), this_value)];
+            argument_bindings.extend(spread_bindings);
 
             let mut bound_names = Vec::with_capacity(leading.len());
             for (index, value) in leading.into_iter().enumerate() {
@@ -832,7 +851,7 @@ impl<'a> FnLowerer<'a> {
                 let name = format!("__thaw_rest_bound_argument_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), expected.clone());
-                bindings.push((name.clone(), expected.clone(), value));
+                argument_bindings.push((name.clone(), expected.clone(), value));
                 bound_names.push((name, expected.clone()));
             }
 
@@ -893,7 +912,7 @@ impl<'a> FnLowerer<'a> {
             );
             let mut captures = vec![
                 HirParam {
-                    name: target_name,
+                    name: target_name.clone(),
                     ty: HirType::CallableFunction(
                         params.clone(),
                         optional.clone(),
@@ -903,7 +922,7 @@ impl<'a> FnLowerer<'a> {
                 },
                 HirParam {
                     name: this_name,
-                    ty: bindings[1].1.clone(),
+                    ty: this_type,
                 },
             ];
             captures.extend(
@@ -918,12 +937,17 @@ impl<'a> FnLowerer<'a> {
                 rest.map(Box::new),
                 Box::new(ret),
             );
-            return self
-                .wrap_call_argument_bindings(
-                    HirExpr::TypedClosure(logical, Box::new(closure)),
-                    &bindings,
-                )
-                .map(Some);
+            let bound = self.wrap_call_argument_bindings(
+                HirExpr::TypedClosure(logical, Box::new(closure)),
+                &argument_bindings,
+            )?;
+            let guarded = self.guard_function_value(
+                HirExpr::Var(target_name.clone()), &target_type,
+                "Cannot read properties of undefined (reading 'bind')", bound,
+            )?;
+            return self.wrap_call_argument_bindings(
+                guarded, &[(target_name, target_type, target)],
+            ).map(Some);
         }
         if leading.len() > params.len() {
             return Err(format!(
@@ -943,22 +967,24 @@ impl<'a> FnLowerer<'a> {
         let this_name = format!("__thaw_function_bind_this_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(this_name.clone(), this_type.clone());
-        let mut bindings = vec![
-            (target_name.clone(), target_type, target),
-            (this_name.clone(), this_type, this_value),
-        ];
-        bindings.extend(spread_bindings);
-        self.wrap_call_argument_bindings(
+        let mut argument_bindings = vec![(this_name.clone(), this_type, this_value)];
+        argument_bindings.extend(spread_bindings);
+        let bound = self.wrap_call_argument_bindings(
             HirExpr::FunctionBindThis(
-                Box::new(HirExpr::Var(target_name)),
+                Box::new(HirExpr::Var(target_name.clone())),
                 Box::new(HirExpr::Var(this_name)),
                 leading,
                 params,
                 ret,
             ),
-            &bindings,
-        )
-        .map(Some)
+            &argument_bindings,
+        )?;
+        let guarded = self.guard_function_value(
+            HirExpr::Var(target_name.clone()), &target_type,
+            "Cannot read properties of undefined (reading 'bind')", bound,
+        )?;
+        self.wrap_call_argument_bindings(guarded, &[(target_name, target_type, target)])
+            .map(Some)
     }
 
     fn lower_function_call_or_apply(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
@@ -1072,22 +1098,25 @@ impl<'a> FnLowerer<'a> {
         let this_name = format!("__thaw_function_operation_this_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(this_name.clone(), this_type.clone());
-        let mut bindings = vec![
-            (target_name.clone(), target_type, target),
-            (this_name.clone(), this_type, this_value),
-        ];
-        bindings.extend(spread_bindings);
-        self.wrap_call_argument_bindings(
+        let mut argument_bindings = vec![(this_name.clone(), this_type, this_value)];
+        argument_bindings.extend(spread_bindings);
+        let invoked = self.wrap_call_argument_bindings(
             HirExpr::FunctionCallWithThis(
-                Box::new(HirExpr::Var(target_name)),
+                Box::new(HirExpr::Var(target_name.clone())),
                 Box::new(HirExpr::Var(this_name)),
                 arguments,
                 abi_params,
                 ret,
             ),
-            &bindings,
-        )
-        .map(Some)
+            &argument_bindings,
+        )?;
+        let guarded = self.guard_function_value(
+            HirExpr::Var(target_name.clone()), &target_type,
+            &format!("Cannot read properties of undefined (reading '{operation_name}')"),
+            invoked,
+        )?;
+        self.wrap_call_argument_bindings(guarded, &[(target_name, target_type, target)])
+            .map(Some)
     }
 
     fn lower_saved_native_method_call_or_apply(
@@ -1102,6 +1131,13 @@ impl<'a> FnLowerer<'a> {
             let Some(method) = self.native_method_values.get(&binding).cloned() else {
                 return Ok(None);
             };
+            // A saved symbol is only an optimization hint. Capture the selected
+            // function before arguments, but report a missing call after them.
+            let selected = HirExpr::Var(binding.clone());
+            let selected_type = self.infer_expr_type(&selected)?;
+            let selected_name = format!("__thaw_saved_selected_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(selected_name.clone(), selected_type.clone());
             let label = format!("unbound native method `{}`", target.sym);
             let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
             let mut symbol = unbound_class_method_symbol(&method.symbol);
@@ -1119,12 +1155,15 @@ impl<'a> FnLowerer<'a> {
                 0,
                 &label,
             )?;
-            return self
-                .wrap_call_argument_bindings(
-                    HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments),
-                    &bindings,
-                )
-                .map(Some);
+            let guarded = self.guard_function_value(
+                HirExpr::Var(selected_name.clone()), &selected_type,
+                "Value is not a function",
+                HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments),
+            )?;
+            let after_arguments = self.wrap_call_argument_bindings(guarded, &bindings)?;
+            return self.wrap_call_argument_bindings(
+                after_arguments, &[(selected_name, selected_type, selected)],
+            ).map(Some);
         }
         let Expr::Member(operation) = callee.as_ref() else {
             return Ok(None);
@@ -1142,10 +1181,20 @@ impl<'a> FnLowerer<'a> {
         let Some(method) = self.native_method_values.get(&binding).cloned() else {
             return Ok(None);
         };
+        let selected = HirExpr::Var(binding.clone());
+        let selected_type = self.infer_expr_type(&selected)?;
+        let selected_name = format!("__thaw_saved_operation_selected_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(selected_name.clone(), selected_type.clone());
         if operation_name == "bind" {
-            return self
-                .lower_saved_native_method_bind(target.sym.as_ref(), &method, call)
-                .map(Some);
+            let bound = self.lower_saved_native_method_bind(target.sym.as_ref(), &method, call)?;
+            let guarded = self.guard_function_value(
+                HirExpr::Var(selected_name.clone()), &selected_type,
+                "Cannot read properties of undefined (reading 'bind')", bound,
+            )?;
+            return self.wrap_call_argument_bindings(
+                guarded, &[(selected_name, selected_type, selected)],
+            ).map(Some);
         }
         let Some((this_argument, supplied)) = call.args.split_first() else {
             return Err(format!(
@@ -1197,12 +1246,18 @@ impl<'a> FnLowerer<'a> {
                 &label,
             )?;
             bindings.insert(0, (this_name, this_type, this_value));
-            return self
-                .wrap_call_argument_bindings(
-                    HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments),
-                    &bindings,
-                )
-                .map(Some);
+            let invoked = self.wrap_call_argument_bindings(
+                HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments),
+                &bindings,
+            )?;
+            let guarded = self.guard_function_value(
+                HirExpr::Var(selected_name.clone()), &selected_type,
+                &format!("Cannot read properties of undefined (reading '{operation_name}')"),
+                invoked,
+            )?;
+            return self.wrap_call_argument_bindings(
+                guarded, &[(selected_name, selected_type, selected)],
+            ).map(Some);
         }
         let mut arguments = Vec::with_capacity(forwarded.len() + 1);
         arguments.push(this_argument.clone());
@@ -1217,7 +1272,14 @@ impl<'a> FnLowerer<'a> {
             args: arguments,
             type_args: None,
         })?;
-        Ok(Some(lowered))
+        let guarded = self.guard_function_value(
+            HirExpr::Var(selected_name.clone()), &selected_type,
+            &format!("Cannot read properties of undefined (reading '{operation_name}')"),
+            lowered,
+        )?;
+        self.wrap_call_argument_bindings(
+            guarded, &[(selected_name, selected_type, selected)],
+        ).map(Some)
     }
 
     fn lower_native_class_call_or_apply(
