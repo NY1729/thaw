@@ -533,9 +533,16 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?;
                     return Ok(val);
                 }
+                let marker = if field.starts_with("__thaw_class_identity_\u{1e}") {
+                    Some(self.compile_expr(&HirExpr::Lit(HirLit::Str(field.clone())))?.into_pointer_value())
+                } else {
+                    None
+                };
                 let setter = self.compile_object_accessor(object, field, true)?;
                 let function = self.current_function();
                 let call_setter = self.context.append_basic_block(function, "object_setter");
+                let check_marker = marker.map(|_| self.context.append_basic_block(function, "object_write_check_marker"));
+                let marker_blocked = marker.map(|_| self.context.append_basic_block(function, "object_write_marker_nonextensible"));
                 let check_frozen = self.context.append_basic_block(function, "object_write_check_frozen");
                 let frozen_blocked = self.context.append_basic_block(function, "object_write_frozen");
                 let store_field = self.context.append_basic_block(function, "object_data_write");
@@ -545,7 +552,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_is_not_null(setter, "object_has_setter")
                     .map_err(|error| error.to_string())?;
                 self.builder
-                    .build_conditional_branch(has_setter, call_setter, check_frozen)
+                    .build_conditional_branch(has_setter, call_setter, check_marker.unwrap_or(check_frozen))
                     .map_err(|error| error.to_string())?;
 
                 self.builder.position_at_end(call_setter);
@@ -559,6 +566,34 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_unconditional_branch(done)
                     .map_err(|error| error.to_string())?;
+
+                if let (Some(marker), Some(check_marker), Some(marker_blocked)) =
+                    (marker, check_marker, marker_blocked)
+                {
+                    self.builder.position_at_end(check_marker);
+                    let hidden = self.builder.build_call(
+                        self.module.get_function("thaw_object_marker_hidden").unwrap(),
+                        &[object.into(), marker.into()],
+                        "object_marker_was_hidden",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("marker query returned no value")?.into_int_value();
+                    let extensible = self.builder.build_call(
+                        self.module.get_function("thaw_object_state").unwrap(),
+                        &[object.into(), self.context.i8_type().const_zero().into()],
+                        "object_marker_is_extensible",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("object state returned no value")?.into_int_value();
+                    let not_extensible = self.builder.build_not(extensible, "object_marker_not_extensible")
+                        .map_err(|error| error.to_string())?;
+                    let blocked = self.builder.build_and(hidden, not_extensible, "object_marker_add_blocked")
+                        .map_err(|error| error.to_string())?;
+                    self.builder.build_conditional_branch(blocked, marker_blocked, check_frozen)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(marker_blocked);
+                    self.compile_throw_type_error(&format!(
+                        "Cannot add property '{field}', object is not extensible"
+                    ))?;
+                }
 
                 // `Object.freeze` blocks every plain data-field write (see
                 // `thaw_object_state`'s query 2, `thaw-runtime/src/
@@ -591,6 +626,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(field_ptr, val)
                     .map_err(|error| error.to_string())?;
+                if let Some(marker) = marker {
+                    self.builder.build_call(
+                        self.module.get_function("thaw_object_reveal_marker").unwrap(),
+                        &[object.into(), marker.into()],
+                        "reveal_written_object_marker",
+                    ).map_err(|error| error.to_string())?;
+                }
                 self.builder
                     .build_unconditional_branch(done)
                     .map_err(|error| error.to_string())?;

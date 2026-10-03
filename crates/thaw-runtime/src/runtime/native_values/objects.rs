@@ -82,7 +82,7 @@ pub unsafe extern "C" fn thaw_object_has_class_identity(
 /// class identity to an ordinary object allocation.
 #[no_mangle]
 /// # Safety
-/// `marker` must be a valid NUL-terminated compiler marker name. `object`
+/// `marker` must be a live native string for a compiler marker name. `object`
 /// is an opaque arena allocation identity and is never dereferenced.
 pub unsafe extern "C" fn thaw_object_hide_marker(
     object: *const u8,
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn thaw_object_hide_marker(
     if object.is_null() || marker.is_null() {
         return false;
     }
-    let Ok(marker) = CStr::from_ptr(marker).to_str() else {
+    let Ok(marker) = thaw_arena::NativeStr::from_ptr(marker).to_str() else {
         return false;
     };
     if !marker.starts_with("__thaw_class_identity_\u{1e}") {
@@ -106,6 +106,27 @@ pub unsafe extern "C" fn thaw_object_hide_marker(
             .insert(marker.to_owned());
     });
     true
+}
+
+/// Makes a physically present marker field public after a successful data
+/// write, without changing the object's nominal class ancestry.
+#[no_mangle]
+/// # Safety
+/// `marker` must be a live native string; `object` is an opaque identity.
+pub unsafe extern "C" fn thaw_object_reveal_marker(
+    object: *const u8,
+    marker: *const c_char,
+) -> bool {
+    if object.is_null() || marker.is_null() {
+        return false;
+    }
+    let Ok(marker) = thaw_arena::NativeStr::from_ptr(marker).to_str() else {
+        return false;
+    };
+    OBJECT_CLASS_IDENTITIES.with(|stored| {
+        stored.borrow_mut().get_mut(&(object as usize))
+            .is_some_and(|metadata| metadata.hidden_markers.remove(marker))
+    })
 }
 
 #[no_mangle]
@@ -379,5 +400,41 @@ mod object_state_tests {
             clear_object_states();
             assert!(thaw_object_accessor(&object, property.as_ptr(), false).is_null());
         }
+    }
+}
+
+#[cfg(test)]
+mod marker_reveal_tests {
+    use super::*;
+
+    #[test]
+    fn reveal_removes_only_the_exact_hidden_key_and_keeps_ancestry() {
+        clear_object_states();
+        let object = 0_u8;
+        let object = &object as *const u8;
+        let first = std::ffi::CString::new("__thaw_class_identity_\u{1e}Leaf\u{1f}Base").unwrap();
+        let sibling = std::ffi::CString::new("__thaw_class_identity_\u{1e}Other").unwrap();
+        let leaf = std::ffi::CString::new("Leaf").unwrap();
+        assert!(unsafe { thaw_object_set_class_identity(object, first.as_ptr()) });
+        assert!(unsafe { thaw_object_hide_marker(object, sibling.as_ptr()) });
+        assert!(unsafe { thaw_object_reveal_marker(object, first.as_ptr()) });
+        assert!(!unsafe { thaw_object_marker_hidden(object, first.as_ptr()) });
+        assert!(unsafe { thaw_object_marker_hidden(object, sibling.as_ptr()) });
+        assert!(unsafe { thaw_object_has_class_identity(object, leaf.as_ptr()) });
+        assert!(!unsafe { thaw_object_reveal_marker(object, first.as_ptr()) });
+        assert!(unsafe { thaw_object_reveal_marker(object, sibling.as_ptr()) });
+        assert!(!unsafe { thaw_object_marker_hidden(object, sibling.as_ptr()) });
+
+        static EMBEDDED: &[u8] = b"__thaw_class_identity_\x1eOther\0tail\0";
+        let full = unsafe { thaw_arena::thaw_string_register_literal(
+            EMBEDDED.as_ptr().cast(), EMBEDDED.len() - 1,
+        ) };
+        assert!(unsafe { thaw_object_hide_marker(object, full) });
+        assert!(!unsafe { thaw_object_reveal_marker(object, sibling.as_ptr()) });
+        assert!(unsafe { thaw_object_marker_hidden(object, full) });
+        assert!(unsafe { thaw_object_reveal_marker(object, full) });
+        assert!(!unsafe { thaw_object_marker_hidden(object, full) });
+        clear_object_states();
+        assert!(!unsafe { thaw_object_has_class_identity(object, leaf.as_ptr()) });
     }
 }
