@@ -1,24 +1,7 @@
-  // Thaw represents a `Date` natively as a fixed object with a single
-  // `timestamp` (milliseconds since epoch) field -- see thaw-hir's
-  // `date_object_type` and thaw-bridge's matching `.d.ts` `Date`
-  // classification. Crossing the `callDynamic` JSON boundary, a real JS
-  // `Date` instance would otherwise serialize via its own default
-  // `toJSON` (an ISO string) and a `{ timestamp }` argument would arrive
-  // as a plain object not a `Date`, so neither side would recognize the
-  // other's representation. These two hooks make the `{"timestamp": N}`
-  // shape the shared wire format in both directions:
-  //  - overriding `toJSON` here means every `JSON.stringify` in this
-  //    runtime (the `callDynamic` return path, but also anything nested
-  //    inside a returned array/object) emits `{"timestamp": N}` for any
-  //    `Date`, at any depth, for free;
-  //  - the reviver is applied explicitly by `invoke_impl` (thaw-quickjs's
-  //    Rust side) when parsing incoming call arguments, reconstructing a
-  //    real `Date` from that same shape so native functions doing
-  //    `instanceof Date`/`typeof` checks (e.g. date-fns's `toDate`) see
-  //    the value they expect.
-  Date.prototype.toJSON = function () {
-    return { timestamp: this.getTime() };
-  };
+  // The native Date wire shape is `{timestamp: milliseconds}`. The
+  // bridge's own stringify replacer emits it when crossing into native
+  // JSON; user JSON.stringify keeps Date.prototype.toJSON (including an
+  // instance's custom override) untouched.
   // This reviver also recognizes `{"__thaw_js_handle_id__": N}` -- a
   // `JsValue` (an opaque handle to a live QuickJS object, e.g. a schema
   // instance returned by a Fallback function like zod's `z.string()`)
@@ -192,6 +175,7 @@
   globalThis.__thaw_dynamic_add = (left, right) => left + right;
   globalThis.__thaw_json_binary_replacer = function (key, value) {
     const source = this[key];
+    if (source instanceof Date) return { timestamp: source.getTime() };
     if (source instanceof ArrayBuffer) {
       return { type: 'Buffer', data: Array.from(new Uint8Array(source)) };
     }

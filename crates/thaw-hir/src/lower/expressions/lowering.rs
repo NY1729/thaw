@@ -1740,6 +1740,12 @@ impl<'a> FnLowerer<'a> {
                     // probe -- this affected the plain static case, not
                     // just the `any`/`JsValue` ones the checks above
                     // handle).
+                    if class.sym == *"Date" && value_type == date_object_type() {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_date_has_native_identity".into())),
+                            vec![value],
+                        ));
+                    }
                     let native_builtin_match =
                         native_builtin_instanceof_static_match(class.sym.as_ref(), &value_type);
                     if !extends_error_family
@@ -3181,6 +3187,9 @@ impl<'a> FnLowerer<'a> {
                                         | "callDynamicMethod"
                                         | "callDynamicMethodHandle"
                                         | "callDynamicMethodHandleRaw"
+                                        | "__thaw_call_selected_dynamic_method"
+                                        | "__thaw_call_selected_dynamic_method_handle"
+                                        | "__thaw_call_selected_dynamic_method_raw"
                                         // Invoking an arbitrary already-held
                                         // `JsValue` (e.g. a Hono middleware's
                                         // `next()` continuation) is the same
@@ -3620,10 +3629,20 @@ impl<'a> FnLowerer<'a> {
                                 Vec::new(),
                             )
                         };
-                        return Ok(HirExpr::ObjectLit(vec![(
-                            "timestamp".to_string(),
-                            timestamp,
-                        )]));
+                        let date_type = date_object_type();
+                        let date_name = format!("__thaw_native_date_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(date_name.clone(), date_type.clone());
+                        return Ok(HirExpr::Block(vec![
+                            HirStmt::Let(date_name.clone(), date_type.clone(), HirExpr::ClassAlloc(date_type.clone())),
+                            HirStmt::Expr(HirExpr::PropAssign(
+                                Box::new(HirExpr::Var(date_name.clone())),
+                                date_type,
+                                "timestamp".to_string(),
+                                Box::new(timestamp),
+                            )),
+                            HirStmt::Return(Some(HirExpr::Var(date_name))),
+                        ]));
                     }
                     if class.sym == *"SuppressedError" {
                         // `new SuppressedError(error, suppressed, message?)`.

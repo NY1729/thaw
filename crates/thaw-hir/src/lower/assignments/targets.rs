@@ -1,54 +1,11 @@
 impl<'a> FnLowerer<'a> {
-    /// Resolves `expr` for use as an assignment's intermediate/target
-    /// container, walking through `.field`/`[index]` accesses on a `Json`
-    /// (`any`-typed) value via a *mutable* chain instead of an ordinary
-    /// read. An ordinary read (`self.lower_expr`, `thaw_json_get`/
-    /// `thaw_json_index`) always clones, so a nested assignment
-    /// (`a.b.c = x`) would resolve `a.b` to a disconnected copy and write
-    /// into that instead of `a`'s own nested object -- silently doing
-    /// nothing observable, confirmed against real Node (`a.b.c = x` then
-    /// reading `a.b.c` back still shows the old value).
-    /// `__thaw_json_get_mut`/`__thaw_json_index_get_mut` instead return a
-    /// pointer *into* the parent's own storage, so the final write at the
-    /// bottom of the chain reaches the original.
-    ///
-    /// Bottoms out at a plain variable, or any non-`Json`/non-chain
-    /// sub-expression, which `lower_expr` already resolves correctly (a
-    /// `Json`-typed local already holds its own pointer -- no clone
-    /// happens reading a bare variable -- and every other native value
-    /// type is already pointer-identity by construction).
+    /// A Json read now shares its native Array/Object allocation (or its
+    /// live host lease). Thus an intermediate `.field`/`[index]` read keeps
+    /// the same receiver identity for nested assignment. The old mutable
+    /// slot ABI cannot represent a QuickJS property, and is unnecessary
+    /// with shared native values.
     fn lower_json_mutable_chain(&mut self, expr: &Expr) -> Result<HirExpr, String> {
-        let Expr::Member(member) = expr else {
-            return self.lower_expr(expr);
-        };
-        let plain_inner = self.lower_expr(&member.obj)?;
-        let inner_type = self.infer_expr_type(&plain_inner)?;
-        if inner_type != HirType::Json {
-            return self.lower_expr(expr);
-        }
-        let inner = self.lower_json_mutable_chain(&member.obj)?;
-        match &member.prop {
-            MemberProp::Ident(prop) => Ok(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_json_get_mut".to_string())),
-                vec![inner, HirExpr::Lit(HirLit::Str(prop.sym.to_string()))],
-            )),
-            MemberProp::Computed(computed) => {
-                let key = self.lower_expr(&computed.expr)?;
-                if self.infer_expr_type(&key)? == HirType::F64 {
-                    Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_json_index_get_mut".to_string())),
-                        vec![inner, key],
-                    ))
-                } else {
-                    let key = self.coerce_primitive_to_string(key)?;
-                    Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_json_get_mut".to_string())),
-                        vec![inner, key],
-                    ))
-                }
-            }
-            _ => self.lower_expr(expr),
-        }
+        self.lower_expr(expr)
     }
 
     /// Resolves a computed assignment/update target without confusing the

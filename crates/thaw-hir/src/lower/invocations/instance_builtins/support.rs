@@ -12,7 +12,10 @@ fn regex_object_type() -> HirType {
 /// `thaw-runtime`'s calendar math is UTC-only -- there is no host timezone
 /// database, so "local" `Date` methods alias their UTC counterparts.
 fn date_object_type() -> HirType {
-    HirType::Object(vec![("timestamp".to_string(), HirType::F64)])
+    HirType::Object(vec![
+        ("__thaw_class_identity_\u{1e}Date".to_string(), HirType::Bool),
+        ("timestamp".to_string(), HirType::F64),
+    ])
 }
 
 /// `Map`/`Set`'s key/element type selects which family of native

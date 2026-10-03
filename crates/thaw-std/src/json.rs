@@ -64,8 +64,428 @@ type SharedArray = Rc<SharedValue<Vec<Value>>>;
 /// `ordered_object_fields`; WTF-8 keys retain UTF-16 property identity.
 type SharedObject = Rc<SharedValue<indexmap::IndexMap<Vec<u8>, Value>>>;
 
+/// A native lease on one QuickJS value. The bridge installs the release
+/// operation before decoding a callback graph; cloning a Json value shares
+/// this lease, so only its final owner releases the handle. The handle ID is
+/// canonical in the QuickJS registry (Object.is) and is stable for aliases.
+struct HostLease {
+    handle: u64,
+    release: extern "C" fn(u64) -> u8,
+}
+
+// A decoded N-API instance graph node owns one positive native reference.
+// The object Rc shares it across native Json aliases; the last owner releases
+// only after graph edges have been detached (see release_isolated_json_cycles).
+struct NapiLease {
+    handle: u64,
+    reference: u64,
+    release: extern "C" fn(u64) -> u8,
+}
+
+impl Drop for NapiLease {
+    fn drop(&mut self) {
+        without_typed_decode_scope(|| (self.release)(self.reference));
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NapiHandleOperations {
+    retain: extern "C" fn(u64) -> u64,
+    release: extern "C" fn(u64) -> u8,
+}
+
+thread_local! {
+    static NAPI_HANDLE_OPERATIONS: Cell<Option<NapiHandleOperations>> = const { Cell::new(None) };
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_register_napi_handle_operations(
+    retain: extern "C" fn(u64) -> u64,
+    release: extern "C" fn(u64) -> u8,
+) {
+    NAPI_HANDLE_OPERATIONS.with(|slot| slot.set(Some(NapiHandleOperations { retain, release })));
+}
+
+#[repr(C)]
+struct HostHandleResult {
+    value: u64,
+    error: *const c_char,
+}
+
+#[repr(C)]
+struct HostTextResult {
+    value: *const c_char,
+    error: *const c_char,
+}
+
+#[derive(Clone, Copy)]
+struct HostOperations {
+    retain: extern "C" fn(u64) -> u8,
+    release: extern "C" fn(u64) -> u8,
+    get: extern "C" fn(u64, *const c_char) -> HostHandleResult,
+    query: extern "C" fn(u64, u8) -> HostTextResult,
+    date_set: extern "C" fn(u64, f64) -> HostTextResult,
+    set: extern "C" fn(u64, *const c_char, *const c_char) -> HostHandleResult,
+    predicate: extern "C" fn(u64, *const c_char, u8) -> HostHandleResult,
+    enumerate: extern "C" fn(u64, u8) -> HostTextResult,
+}
+
+impl Drop for HostLease {
+    fn drop(&mut self) {
+        without_typed_decode_scope(|| (self.release)(self.handle));
+    }
+}
+
+thread_local! {
+    static HOST_OPERATIONS: Cell<Option<HostOperations>> = const { Cell::new(None) };
+    static HOST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    // `None` is a boundary while a trusted Host/NAPI callback executes.
+    // User reentry without its own decode scope must not join the caller's ledger.
+    static TYPED_DECODE_SCOPES: RefCell<Vec<Option<TypedDecodeScope>>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Default)]
+struct TypedDecodeScope {
+    children: Vec<usize>,
+    handles: Vec<u64>,
+}
+
+fn track_typed_decode_child(value: *mut Value) -> *mut Value {
+    TYPED_DECODE_SCOPES.with(|scopes| {
+        let mut scopes = scopes.borrow_mut();
+        if scopes.iter().any(|scope| scope.as_ref().is_some_and(|scope|
+            scope.children.contains(&(value as usize)))) {
+            return;
+        }
+        if let Some(scope) = scopes.last_mut().and_then(Option::as_mut) {
+            scope.children.push(value as usize);
+        }
+    });
+    value
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_typed_decode_scope_own(value: *mut Value) {
+    if !value.is_null() { track_typed_decode_child(value); }
+}
+
+fn untrack_typed_decode_child(value: *mut Value) {
+    TYPED_DECODE_SCOPES.with(|scopes| {
+        for scope in scopes.borrow_mut().iter_mut().rev().filter_map(Option::as_mut) {
+            if let Some(index) = scope.children.iter().position(|child| *child == value as usize) {
+                scope.children.swap_remove(index);
+                break;
+            }
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_typed_decode_scope_begin() {
+    TYPED_DECODE_SCOPES.with(|scopes| scopes.borrow_mut().push(Some(TypedDecodeScope::default())));
+}
+
+struct SuspendedTypedDecodeScope;
+
+impl Drop for SuspendedTypedDecodeScope {
+    fn drop(&mut self) {
+        TYPED_DECODE_SCOPES.with(|scopes| {
+            let boundary = scopes.borrow_mut().pop();
+            debug_assert!(matches!(boundary, Some(None)));
+        });
+    }
+}
+
+fn without_typed_decode_scope<T>(callback: impl FnOnce() -> T) -> T {
+    TYPED_DECODE_SCOPES.with(|scopes| scopes.borrow_mut().push(None));
+    let _boundary = SuspendedTypedDecodeScope;
+    callback()
+}
+
+/// Mode 0 disarms a completed top-level conversion, 1 rolls it back, and 2
+/// merges a completed nested conversion into its parent's failure ownership.
+#[no_mangle]
+pub extern "C" fn thaw_json_typed_decode_scope_end(mode: u8) {
+    let Some(scope) = TYPED_DECODE_SCOPES.with(|scopes| scopes.borrow_mut().pop()).flatten() else { return };
+    if mode == 2 {
+        TYPED_DECODE_SCOPES.with(|scopes| {
+            if let Some(parent) = scopes.borrow_mut().last_mut().and_then(Option::as_mut) {
+                parent.children.extend(scope.children);
+                parent.handles.extend(scope.handles);
+            }
+        });
+        return;
+    }
+    if mode == 0 { return; }
+    // Cleanup callbacks may report their own Host error. Keep the conversion's
+    // original state and do not let a cleanup-only error poison the next call.
+    let original_host_error = HOST_ERROR.with(|slot| slot.borrow_mut().take());
+    // Remove the scope before dropping any child or handle: release callbacks
+    // can re-enter a separate typed decoder on this thread.
+    for child in scope.children.into_iter().rev() {
+        unsafe { thaw_json_destroy(child as *mut Value) };
+    }
+    for handle in scope.handles.into_iter().rev() {
+        if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+            without_typed_decode_scope(|| (ops.release)(handle));
+        }
+    }
+    HOST_ERROR.with(|slot| *slot.borrow_mut() = original_host_error);
+}
+
+fn set_host_error(message: String) {
+    HOST_ERROR.with(|slot| {
+        let mut pending = slot.borrow_mut();
+        if pending.is_none() { *pending = Some(message); }
+    });
+}
+
+/// Registration is scoped to the thread running the reentrant QuickJS
+/// callback. `thaw-std` has no link dependency on the optional JS runtime.
+#[no_mangle]
+pub extern "C" fn thaw_json_register_host_operations(
+    retain: extern "C" fn(u64) -> u8,
+    release: extern "C" fn(u64) -> u8,
+    get: extern "C" fn(u64, *const c_char) -> HostHandleResult,
+    query: extern "C" fn(u64, u8) -> HostTextResult,
+    date_set: extern "C" fn(u64, f64) -> HostTextResult,
+    set: extern "C" fn(u64, *const c_char, *const c_char) -> HostHandleResult,
+    predicate: extern "C" fn(u64, *const c_char, u8) -> HostHandleResult,
+    enumerate: extern "C" fn(u64, u8) -> HostTextResult,
+) {
+    HOST_OPERATIONS.with(|slot| slot.set(Some(HostOperations {
+        retain, release, get, query, date_set, set, predicate, enumerate,
+    })));
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_take_host_error() -> *const c_char {
+    HOST_ERROR.with(|error| error.borrow_mut().take())
+        .map(|message| thaw_arena::owned_string(message).cast_const())
+        .unwrap_or(std::ptr::null())
+}
+
+fn canonical_bigint_decimal(value: &str) -> bool {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    !digits.is_empty() && (digits == "0" || !digits.starts_with('0'))
+        && !(value.starts_with('-') && digits == "0")
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn host_value_from_owned_handle(handle: u64) -> Option<Value> {
+    if handle == 0 { return None; }
+    let ops = HOST_OPERATIONS.with(|slot| slot.get())?;
+    let lease = HostLease { handle, release: ops.release };
+    // A property read may return a primitive. Materialize those as native
+    // scalars so strict equality, Object.is and SameValueZero retain their
+    // established number/string/undefined semantics (including -0/NaN).
+    // Objects, functions and Symbols retain live JS identity; BigInt is a value.
+    let kind = host_query(&lease, 0)?;
+    let value = match kind.as_str() {
+        "undefined" => napi_undefined_value(),
+        "boolean" => Value::Bool(host_query(&lease, 1)?.as_str() == "1"),
+        "number" => {
+            let text = host_query(&lease, 10)?;
+            let number = match text.as_str() {
+                "NaN" => f64::NAN,
+                "Infinity" => f64::INFINITY,
+                "-Infinity" => f64::NEG_INFINITY,
+                _ => match text.parse::<f64>() {
+                    Ok(number) => number,
+                    Err(_) => { set_host_error("Invalid host number value".into()); return None; }
+                },
+            };
+            number_value(number)
+        }
+        "bigint" => {
+            let text = host_query(&lease, 10)?;
+            if !canonical_bigint_decimal(&text) {
+                set_host_error("Invalid host BigInt value".into());
+                return None;
+            }
+            Value::BigInt(text)
+        }
+        "string" => {
+            let text = host_query(&lease, 3)?;
+            let Some(parsed) = JsonParser::new(text.as_bytes()).parse() else {
+                set_host_error("Invalid host string value".into());
+                return None;
+            };
+            match parsed {
+                value @ (Value::String(_) | Value::Wtf8(_)) => value,
+                _ => { set_host_error("Invalid host string value".into()); return None; }
+            }
+        }
+        "object" if host_query(&lease, 7)?.as_str() == "1" => Value::Null,
+        _ => return Some(Value::Host(Rc::new(lease))),
+    };
+    Some(value)
+}
+
+fn host_value_from_borrowed_handle(handle: u64) -> Option<Value> {
+    let ops = HOST_OPERATIONS.with(|slot| slot.get())?;
+    if handle == 0 || without_typed_decode_scope(|| (ops.retain)(handle)) == 0 { return None; }
+    let lease = HostLease { handle, release: ops.release };
+    if host_query(&lease, 0)?.as_str() == "bigint" {
+        let decimal = host_query(&lease, 10)?;
+        if !canonical_bigint_decimal(&decimal) {
+            set_host_error("Invalid host BigInt value".into());
+            return None;
+        }
+        return Some(Value::BigInt(decimal));
+    }
+    Some(Value::Host(Rc::new(lease)))
+}
+
+fn host_key_json(key: &[u8]) -> CString {
+    let mut encoded = Vec::new();
+    write_json_string(key, &mut encoded);
+    CString::new(encoded).expect("escaped property key contains no NUL")
+}
+
+fn host_get_property(lease: &HostLease, key: &[u8]) -> Value {
+    let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
+        set_host_error("Host operations unavailable".into());
+        return Value::Null;
+    };
+    // JSON-string escaping preserves NUL and lone UTF-16 surrogates across
+    // the C boundary; the host parses this as one exact property key.
+    let key_json = host_key_json(key);
+    let result = without_typed_decode_scope(|| (ops.get)(lease.handle, key_json.as_ptr()));
+    if !result.error.is_null() {
+        let error = to_str(result.error);
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        set_host_error(error);
+        return Value::Null;
+    }
+    host_value_from_owned_handle(result.value).unwrap_or_else(|| {
+        set_host_error("Invalid host value handle".into());
+        Value::Null
+    })
+}
+
+fn host_set_property(lease: &HostLease, key: &[u8], value: &Value) {
+    let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
+        set_host_error("Host operations unavailable".into());
+        return;
+    };
+    let key_json = host_key_json(key);
+    let graph = thaw_json_graph_encode(value as *const Value);
+    if graph.is_null() {
+        set_host_error("Unable to encode host assignment".into());
+        return;
+    }
+    if unsafe { *graph.cast::<u8>() } == 2 {
+        set_host_error(to_str(graph));
+        unsafe { thaw_arena::destroy_string(graph.cast_mut()) };
+        return;
+    }
+    let result = without_typed_decode_scope(|| (ops.set)(lease.handle, key_json.as_ptr(), graph));
+    unsafe { thaw_arena::destroy_string(graph.cast_mut()) };
+    if !result.error.is_null() {
+        let error = to_str(result.error);
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        set_host_error(error);
+    }
+}
+
+fn host_property_predicate(lease: &HostLease, key: &[u8], operation: u8) -> bool {
+    let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
+        set_host_error("Host operations unavailable".into());
+        return false;
+    };
+    let key_json = host_key_json(key);
+    let result = without_typed_decode_scope(|| (ops.predicate)(lease.handle, key_json.as_ptr(), operation));
+    if !result.error.is_null() {
+        let error = to_str(result.error);
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        set_host_error(error);
+        return false;
+    }
+    result.value != 0
+}
+
+fn host_enumerate_values(lease: &HostLease, operation: u8) -> Vec<Value> {
+    let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
+        set_host_error("Host operations unavailable".into());
+        return Vec::new();
+    };
+    let result = without_typed_decode_scope(|| (ops.enumerate)(lease.handle, operation));
+    if !result.error.is_null() {
+        let error = to_str(result.error);
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        set_host_error(error);
+        return Vec::new();
+    }
+    if result.value.is_null() {
+        set_host_error("Host enumeration returned no value".into());
+        return Vec::new();
+    }
+    let decoded = thaw_json_graph_decode(result.value);
+    unsafe { thaw_arena::destroy_string(result.value.cast_mut()) };
+    let invalid = thaw_json_take_graph_error() != 0;
+    let decoded = unsafe { Box::from_raw(decoded) };
+    if invalid {
+        set_host_error("Invalid host enumeration graph".into());
+        return Vec::new();
+    }
+    decoded.as_array().cloned().unwrap_or_else(|| {
+        set_host_error("Invalid host enumeration result".into());
+        Vec::new()
+    })
+}
+
+fn host_enumerable_entries(lease: &HostLease) -> Vec<(Vec<u8>, Value)> {
+    let mut entries = Vec::new();
+    for pair in host_enumerate_values(lease, 0) {
+        if HOST_ERROR.with(|error| error.borrow().is_some()) { break; }
+        let Value::Host(pair) = pair else {
+            set_host_error("Invalid host entry pair".into());
+            break;
+        };
+        let key = host_get_property(&pair, b"0");
+        if HOST_ERROR.with(|error| error.borrow().is_some()) { break; }
+        let key_text = thaw_json_as_string(&key as *const Value as *mut Value);
+        if HOST_ERROR.with(|error| error.borrow().is_some()) {
+            unsafe { thaw_arena::destroy_string(key_text.cast_mut()) };
+            break;
+        }
+        let key = canonical_key(unsafe { CStr::from_ptr(key_text) }.to_bytes());
+        unsafe { thaw_arena::destroy_string(key_text.cast_mut()) };
+        let value = host_get_property(&pair, b"1");
+        if HOST_ERROR.with(|error| error.borrow().is_some()) { break; }
+        entries.push((key, value));
+    }
+    if HOST_ERROR.with(|error| error.borrow().is_some()) {
+        entries.clear();
+    }
+    entries
+}
+
+fn host_query(lease: &HostLease, operation: u8) -> Option<String> {
+    let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
+        set_host_error("Host operations unavailable".into());
+        return None;
+    };
+    let result = without_typed_decode_scope(|| (ops.query)(lease.handle, operation));
+    if !result.error.is_null() {
+        let error = to_str(result.error);
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        set_host_error(error);
+        return None;
+    }
+    if result.value.is_null() {
+        set_host_error("Host query returned no value".into());
+        return None;
+    }
+    let value = to_str(result.value);
+    unsafe { thaw_arena::destroy_string(result.value.cast_mut()) };
+    Some(value)
+}
+
 struct SharedValue<T> {
     data: UnsafeCell<T>,
+    napi_lease: RefCell<Option<Rc<NapiLease>>>,
 }
 
 impl<T> SharedValue<T> {
@@ -84,6 +504,12 @@ impl<T> Drop for SharedValue<T> {
         let _ = ARRAY_HOLES.try_with(|holes| {
             holes.borrow_mut().remove(&key);
         });
+        let _ = WRAPPER_BRANDS.try_with(|brands| {
+            brands.borrow_mut().remove(&key);
+        });
+        let _ = GRAPH_PLAIN_OBJECTS.try_with(|objects| {
+            objects.borrow_mut().remove(&key);
+        });
         unsafe { thaw_object_clear_state(key as *const u8) };
     }
 }
@@ -101,7 +527,7 @@ unsafe extern "C" {
 /// array is read into a local and mutated (`const inner = obj.c; inner.d
 /// = false;` never reached back into `obj.c.d`, a long-standing tracked
 /// gap). Only `Array`/`Object` carry a `Rc<UnsafeCell<...>>` -- a
-/// scalar (`Null`/`Bool`/`Number`/`String`) stays a plain value (real JS
+/// scalar (`Null`/`Bool`/`Number`/`BigInt`/`String`) stays a plain value (real JS
 /// primitives are values, not references, so this isn't a divergence to
 /// fix). `#[derive(Clone)]` on this enum is exactly the "shallow, shares
 /// the same container" clone `Rc::clone` already gives `Array`/`Object`,
@@ -114,6 +540,8 @@ pub(crate) enum Value {
     Null,
     Bool(bool),
     Number(serde_json::Number),
+    /// Canonical signed decimal integer; unlike a JSON number, never passes through f64.
+    BigInt(String),
     String(String),
     /// A string containing at least one lone UTF-16 surrogate, held as
     /// WTF-8 bytes (a Rust `String` cannot represent it). Only ever
@@ -122,15 +550,26 @@ pub(crate) enum Value {
     Wtf8(Vec<u8>),
     Array(SharedArray),
     Object(SharedObject),
+    Host(Rc<HostLease>),
 }
 
 impl Value {
     fn shared_array(items: Vec<Value>) -> Value {
-        Value::Array(Rc::new(SharedValue { data: UnsafeCell::new(items) }))
+        Value::Array(Rc::new(SharedValue {
+            data: UnsafeCell::new(items), napi_lease: RefCell::new(None),
+        }))
     }
 
     fn shared_object(fields: indexmap::IndexMap<Vec<u8>, Value>) -> Value {
-        Value::Object(Rc::new(SharedValue { data: UnsafeCell::new(fields) }))
+        Self::shared_object_with_lease(fields, None)
+    }
+
+    fn shared_object_with_lease(
+        fields: indexmap::IndexMap<Vec<u8>, Value>, lease: Option<Rc<NapiLease>>,
+    ) -> Value {
+        Value::Object(Rc::new(SharedValue {
+            data: UnsafeCell::new(fields), napi_lease: RefCell::new(lease),
+        }))
     }
 
     fn as_array(&self) -> Option<&Vec<Value>> {
@@ -202,6 +641,7 @@ impl Value {
             Value::Null => Value::Null,
             Value::Bool(value) => Value::Bool(*value),
             Value::Number(value) => Value::Number(value.clone()),
+            Value::BigInt(value) => Value::BigInt(value.clone()),
             Value::String(value) => Value::String(value.clone()),
             Value::Wtf8(bytes) => Value::Wtf8(bytes.clone()),
             Value::Array(items) => {
@@ -213,12 +653,20 @@ impl Value {
                 }
                 copy
             }
-            Value::Object(fields) => Value::shared_object(
-                unsafe { &*fields.get() }
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.deep_clone()))
-                    .collect(),
-            ),
+            Value::Object(fields) => {
+                let copy = Value::shared_object_with_lease(
+                    unsafe { &*fields.get() }
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.deep_clone()))
+                        .collect(),
+                    fields.napi_lease.borrow().clone(),
+                );
+                if is_branded_wrapper(self) { brand_internal_value(copy) }
+                else { if is_graph_plain_object(self) { mark_graph_plain_object(&copy); } copy }
+            },
+            // A host object cannot be cloned by walking native fields. Its
+            // clone operation must be delegated to the registered host.
+            Value::Host(lease) => Value::Host(Rc::clone(lease)),
         }
     }
 }
@@ -226,8 +674,12 @@ impl Value {
 /// Display uses the same serializer as `JSON.stringify`, including UTF-16 keys.
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        begin_stringify();
         let mut bytes = Vec::new();
         write_json_value(self, &mut bytes, None, 0);
+        if thaw_json_take_stringify_error() != 0 {
+            return Err(std::fmt::Error);
+        }
         f.write_str(std::str::from_utf8(&bytes).map_err(|_| std::fmt::Error)?)
     }
 }
@@ -247,6 +699,51 @@ thread_local! {
     static PROTOTYPE_ERROR: Cell<bool> = const { Cell::new(false) };
     static FROM_ENTRIES_ERROR: Cell<bool> = const { Cell::new(false) };
     static PARSE_ERROR: Cell<bool> = const { Cell::new(false) };
+    static STRINGIFY_ERROR: Cell<bool> = const { Cell::new(false) };
+    static STRINGIFY_ANCESTORS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static WRAPPER_BRANDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    static GRAPH_PLAIN_OBJECTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    static GRAPH_ERROR: Cell<bool> = const { Cell::new(false) };
+}
+
+struct StringifyAncestor(Option<usize>);
+
+impl Drop for StringifyAncestor {
+    fn drop(&mut self) {
+        if let Some(identity) = self.0 {
+            STRINGIFY_ANCESTORS.with(|ancestors| {
+                let popped = ancestors.borrow_mut().pop();
+                debug_assert_eq!(popped, Some(identity));
+            });
+        }
+    }
+}
+
+fn stringify_ancestor(value: &Value) -> Option<StringifyAncestor> {
+    let Some(identity) = object_identity_key(value) else {
+        return Some(StringifyAncestor(None));
+    };
+    let cycle = STRINGIFY_ANCESTORS.with(|ancestors| ancestors.borrow().contains(&identity));
+    if cycle {
+        STRINGIFY_ERROR.with(|error| error.set(true));
+        return None;
+    }
+    STRINGIFY_ANCESTORS.with(|ancestors| ancestors.borrow_mut().push(identity));
+    Some(StringifyAncestor(Some(identity)))
+}
+
+fn begin_stringify() {
+    STRINGIFY_ERROR.with(|error| error.set(false));
+}
+
+fn stringify_cycle_error() -> *const c_char {
+    CString::new("\u{1}TypeError\u{1}Converting circular structure to JSON")
+        .expect("static error message").into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_take_stringify_error() -> u8 {
+    STRINGIFY_ERROR.with(|error| u8::from(error.replace(false)))
 }
 
 fn object_writable(object: *const Value, key: &[u8]) -> bool {
@@ -360,6 +857,9 @@ fn object_identity_key(object: &Value) -> Option<usize> {
     match object {
         Value::Array(items) => Some(Rc::as_ptr(items) as usize),
         Value::Object(fields) => Some(Rc::as_ptr(fields) as usize),
+        // Native allocations are aligned; the low-bit tag keeps canonical
+        // host handle IDs disjoint from all native allocation identities.
+        Value::Host(lease) => Some(((lease.handle as usize) << 1) | 1),
         _ => None,
     }
 }
@@ -574,7 +1074,7 @@ fn napi_non_finite_value(value: f64) -> Value {
         b"$__thaw_non_finite$".to_vec(),
         Value::String(tag.to_string()),
     );
-    Value::shared_object(fields)
+    brand_internal_value(Value::shared_object(fields))
 }
 
 fn array_index_key(key: &[u8]) -> Option<u32> {
@@ -627,6 +1127,7 @@ fn ordered_object_fields_shared(fields: &SharedObject) -> Vec<(&Vec<u8>, &Value)
 // `JSON.stringify(...)` call, precisely because it's reached *only*
 // from there -- see its own doc comment.
 fn ordered_json(value: &Value) -> Value {
+    let Some(_ancestor) = stringify_ancestor(value) else { return Value::Null };
     match value {
         Value::Object(fields) => Value::shared_object(
             ordered_object_fields_shared(fields)
@@ -666,8 +1167,9 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
         Some(None) => return Value::Null,
         None => {}
     }
+    let Some(_ancestor) = stringify_ancestor(value) else { return Value::Null };
     match value {
-        Value::Object(fields) if is_thaw_internal_wrapper(shared_object_ref(fields)) => {
+        Value::Object(_) if is_thaw_internal_wrapper(value) => {
             Value::shared_object(indexmap::IndexMap::new())
         }
         Value::Object(fields) => Value::shared_object(
@@ -719,6 +1221,7 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[Vec<u8>]) -> Value {
         Some(None) => return Value::Null,
         None => {}
     }
+    let Some(_ancestor) = stringify_ancestor(value) else { return Value::Null };
     match value {
         // The `PropertyList` filter's own `[[Get]]` walks the prototype
         // chain for each requested key -- unlike the no-replacer form
@@ -736,7 +1239,7 @@ fn filtered_json_omitting_undefined(value: &Value, keys: &[Vec<u8>]) -> Value {
         // Map/Set). A key that resolves to nothing (no such accessor,
         // e.g. `["a"]` against a Map) is omitted, matching a real
         // `undefined` `[[Get]]` result being skipped by `JSON.stringify`.
-        Value::Object(fields) if is_thaw_internal_wrapper(shared_object_ref(fields)) => {
+        Value::Object(_) if is_thaw_internal_wrapper(value) => {
             Value::shared_object(
                 keys.iter()
                     .filter_map(|key| {
@@ -1133,6 +1636,122 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
     leak(value)
 }
 
+enum DestroyNode {
+    Array(SharedArray),
+    Object(SharedObject),
+}
+
+impl DestroyNode {
+    fn strong_count(&self) -> usize {
+        match self {
+            Self::Array(items) => Rc::strong_count(items),
+            Self::Object(fields) => Rc::strong_count(fields),
+        }
+    }
+
+    fn values(&self) -> Vec<Value> {
+        match self {
+            Self::Array(items) => shared_array_ref(items).clone(),
+            Self::Object(fields) => shared_object_ref(fields).values().cloned().collect(),
+        }
+    }
+
+    fn take_values(&self) -> Vec<Value> {
+        match self {
+            Self::Array(items) => std::mem::take(shared_array_ref_mut(items)),
+            Self::Object(fields) => std::mem::take(shared_object_ref_mut(fields))
+                .into_iter().map(|(_, value)| value).collect(),
+        }
+    }
+
+    fn take_napi_lease(&self) -> Option<Rc<NapiLease>> {
+        match self {
+            Self::Array(_) => None,
+            Self::Object(fields) => fields.napi_lease.borrow_mut().take(),
+        }
+    }
+}
+
+// A graph result may contain native Rc cycles, including a HostLease inside
+// one of the cycle's fields. Dropping the Box alone cannot release them. Count
+// edges within the reachable component, then keep every node reachable from
+// another live Box/alias. Only the isolated remainder may have edges severed.
+// The prototype side table owns real Value clones, so it participates as an
+// outgoing edge from its key's object rather than looking like an outside root.
+fn release_isolated_json_cycles(root: &Value) {
+    let root_identity = object_identity_key(root);
+    let mut nodes = HashMap::<usize, DestroyNode>::new();
+    let mut edges = HashMap::<usize, Vec<usize>>::new();
+    let mut pending = vec![root.clone()];
+    while let Some(value) = pending.pop() {
+        let Some(identity) = object_identity_key(&value) else { continue };
+        if nodes.contains_key(&identity) { continue; }
+        let node = match value {
+            Value::Array(items) => DestroyNode::Array(items),
+            Value::Object(fields) => DestroyNode::Object(fields),
+            Value::Host(_) => continue,
+            _ => continue,
+        };
+        let mut children = node.values();
+        if let Some(prototype) = PROTOTYPES.with(|table| table.borrow().get(&identity).cloned()) {
+            children.push(prototype);
+        }
+        edges.insert(identity, children.iter().filter_map(object_identity_key).collect());
+        nodes.insert(identity, node);
+        pending.extend(children);
+    }
+
+    let mut internal = HashMap::<usize, usize>::new();
+    for targets in edges.values() {
+        for target in targets {
+            if nodes.contains_key(target) {
+                *internal.entry(*target).or_default() += 1;
+            }
+        }
+    }
+    let mut retained = HashSet::new();
+    let mut pending = nodes.iter().filter_map(|(identity, node)| {
+        // Each entry in `nodes` itself owns one temporary Rc reference.
+        // The root Box owns one more reference, which this destroy consumes.
+        let accounted = 1 + internal.get(identity).copied().unwrap_or_default()
+            + usize::from(Some(*identity) == root_identity);
+        (node.strong_count() != accounted).then_some(*identity)
+    }).collect::<Vec<_>>();
+    while let Some(identity) = pending.pop() {
+        if !retained.insert(identity) { continue; }
+        if let Some(targets) = edges.get(&identity) {
+            pending.extend(targets.iter().filter(|target| nodes.contains_key(*target)).copied());
+        }
+    }
+    let mut detached = Vec::new();
+    let mut pending_napi_release = Vec::new();
+    for (identity, node) in &nodes {
+        if retained.contains(identity) { continue; }
+        // Detach every edge before dropping a HostLease: its release callback
+        // enters QuickJS and may run user-observable code. No side-table borrow
+        // or partly-cleared graph remains when the callbacks run.
+        detached.extend(PROTOTYPES.with(|table| table.borrow_mut().remove(identity)));
+        detached.extend(node.take_values());
+        pending_napi_release.extend(node.take_napi_lease());
+    }
+    // A HostLease release can re-enter thaw_json_destroy for another Box.
+    // Drop all temporary Rc graph owners before calling any such release:
+    // otherwise a nested traversal mistakes these guards for external aliases
+    // and can leave a newly isolated cycle behind.
+    let mut pending_host_release = Vec::new();
+    let mut detached_non_host = Vec::new();
+    for value in detached {
+        match value {
+            Value::Host(lease) => pending_host_release.push(lease),
+            other => detached_non_host.push(other),
+        }
+    }
+    drop(nodes);
+    drop(detached_non_host);
+    drop(pending_host_release);
+    drop(pending_napi_release);
+}
+
 /// # Safety
 ///
 /// `value` must be null or a pointer returned by this module's JSON constructors,
@@ -1140,7 +1759,14 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_destroy(value: *mut Value) {
     if !value.is_null() {
+        // Dropping the last Host/NAPI lease may invoke a reentrant release
+        // callback. Destruction is cleanup: preserve the operation's prior
+        // Host error and discard any error reported only by that callback.
+        let original_host_error = HOST_ERROR.with(|slot| slot.borrow_mut().take());
+        untrack_typed_decode_child(value);
+        release_isolated_json_cycles(unsafe { &*value });
         drop(unsafe { Box::from_raw(value) });
+        HOST_ERROR.with(|slot| *slot.borrow_mut() = original_host_error);
     }
 }
 
@@ -1185,16 +1811,561 @@ pub unsafe extern "C" fn thaw_json_borrowed_handle_id(value: *const Value) -> u6
 /// `value` must point to a valid JSON value.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_handle_id(value: *const Value) -> u64 {
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        // The compiled JsValue callback parameter has its own end-of-call
+        // release; give it an independent reference from the Json lease.
+        let handle = HOST_OPERATIONS.with(|slot| slot.get())
+            .filter(|ops| without_typed_decode_scope(|| (ops.retain)(lease.handle)) != 0)
+            .map(|_| lease.handle).unwrap_or(0);
+        if handle != 0 {
+            TYPED_DECODE_SCOPES.with(|scopes| {
+                if let Some(scope) = scopes.borrow_mut().last_mut().and_then(Option::as_mut) {
+                    scope.handles.push(handle);
+                }
+            });
+        }
+        return handle;
+    }
     unsafe { value.as_ref() }
+        .filter(|value| is_branded_wrapper(value))
         .and_then(Value::as_object)
+        .filter(|fields| fields.len() == 1)
         .and_then(|fields| fields.get(b"__thaw_js_handle_id__".as_slice()))
         .and_then(Value::as_f64)
-        .map(|value| value as u64)
+        .filter(|handle| handle.is_finite() && *handle > 0.0 && handle.fract() == 0.0)
+        .map(|handle| handle as u64)
         .unwrap_or(0)
+}
+
+// Cycle-preserving transport for the function-replacer path. The envelope is
+// private to the bridge: user property names are kept as pairs, never treated
+// as control fields, and node indices refer only to this envelope's table.
+#[no_mangle]
+pub extern "C" fn thaw_json_brand_wrapper(value: *mut Value) -> *mut Value {
+    if let Some(identity) = unsafe { value.as_ref() }.and_then(object_identity_key) {
+        WRAPPER_BRANDS.with(|brands| { brands.borrow_mut().insert(identity); });
+    }
+    value
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_brand_wrapper_if(value: *mut Value, trusted_origin: bool) -> *mut Value {
+    if trusted_origin { thaw_json_brand_wrapper(value) } else { value }
+}
+
+fn is_branded_wrapper(value: &Value) -> bool {
+    object_identity_key(value).is_some_and(|identity| {
+        WRAPPER_BRANDS.with(|brands| brands.borrow().contains(&identity))
+    })
+}
+
+fn is_graph_plain_object(value: &Value) -> bool {
+    object_identity_key(value).is_some_and(|identity| {
+        GRAPH_PLAIN_OBJECTS.with(|objects| objects.borrow().contains(&identity))
+    })
+}
+
+fn mark_graph_plain_object(value: &Value) {
+    if let Some(identity) = object_identity_key(value) {
+        GRAPH_PLAIN_OBJECTS.with(|objects| { objects.borrow_mut().insert(identity); });
+    }
+}
+
+fn brand_internal_value(value: Value) -> Value {
+    if let Some(identity) = object_identity_key(&value) {
+        WRAPPER_BRANDS.with(|brands| { brands.borrow_mut().insert(identity); });
+    }
+    value
+}
+
+fn write_graph_token(
+    value: &Value,
+    out: &mut Vec<u8>,
+    ids: &mut HashMap<usize, usize>,
+    nodes: &mut Vec<Value>,
+) {
+    if is_branded_wrapper(value) && is_napi_undefined(value) {
+        out.extend_from_slice(b"{\"u\":1}");
+    } else if let Some(number) = is_branded_wrapper(value).then(|| non_finite_number(value)).flatten() {
+        out.extend_from_slice(b"{\"nf\":");
+        write_json_string(non_finite_display(number).as_bytes(), out);
+        out.push(b'}');
+    } else if let Value::BigInt(decimal) = value {
+        out.extend_from_slice(b"{\"bi\":");
+        write_json_string(decimal.as_bytes(), out);
+        out.push(b'}');
+    } else if let Some(identity) = object_identity_key(value) {
+        let index = *ids.entry(identity).or_insert_with(|| {
+            let index = nodes.len();
+            nodes.push(value.clone());
+            index
+        });
+        out.extend_from_slice(format!("{{\"r\":{index}}}").as_bytes());
+    } else {
+        out.extend_from_slice(b"{\"v\":");
+        write_json_value(value, out, None, 0);
+        out.push(b'}');
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
+    begin_stringify();
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return CString::new("{\"root\":{\"v\":null},\"nodes\":[]}").unwrap().into_raw();
+    };
+    let mut ids = HashMap::new();
+    let mut nodes = Vec::new();
+    let mut output_leases = Vec::new();
+    let mut napi_output_leases = Vec::new();
+    let mut lease_error = false;
+    let mut out = b"{\"root\":".to_vec();
+    write_graph_token(value, &mut out, &mut ids, &mut nodes);
+    out.extend_from_slice(b",\"nodes\":[");
+    let mut index = 0;
+    while index < nodes.len() {
+        if index != 0 { out.push(b','); }
+        let node = nodes[index].clone();
+        if is_branded_wrapper(&node) {
+            if let Some(handle) = node.as_object()
+                .filter(|fields| fields.len() == 1)
+                .and_then(|fields| fields.get(b"__thaw_js_handle_id__".as_slice()))
+                .and_then(Value::as_f64)
+                .filter(|handle| handle.is_finite() && *handle > 0.0 && handle.fract() == 0.0) {
+                let handle = handle as u64;
+                if HOST_OPERATIONS.with(|slot| slot.get())
+                    .is_some_and(|ops| without_typed_decode_scope(|| (ops.retain)(handle)) != 0) {
+                    output_leases.push(handle);
+                    out.extend_from_slice(format!("{{\"hdl\":{handle}}}").as_bytes());
+                } else {
+                    lease_error = true;
+                }
+                index += 1;
+                continue;
+            }
+        }
+        if let Value::Object(fields) = &node {
+            // The retain callback can re-enter graph destruction. Drop the
+            // RefCell borrow before crossing that boundary.
+            let napi_lease = fields.napi_lease.borrow().clone();
+            if let Some(lease) = napi_lease.as_ref() {
+                if let Some(reference) = NAPI_HANDLE_OPERATIONS.with(|slot| slot.get())
+                    .map(|ops| without_typed_decode_scope(|| (ops.retain)(lease.handle))).filter(|reference| *reference != 0) {
+                    napi_output_leases.push(reference);
+                    out.extend_from_slice(format!("{{\"nh\":\"{}\"}}", lease.handle).as_bytes());
+                } else {
+                    lease_error = true;
+                }
+                index += 1;
+                continue;
+            }
+        }
+        if is_branded_wrapper(&node) {
+            if let Some(fields) = node.as_object().filter(|fields| fields.len() == 2) {
+                if fields.get(b"type".as_slice()).and_then(Value::as_str) == Some("Buffer") {
+                    if let Some(bytes) = fields.get(b"data".as_slice()).and_then(Value::as_array)
+                        .filter(|bytes| bytes.iter().all(|byte| byte.as_f64().is_some_and(
+                            |number| number >= 0.0 && number <= 255.0 && number.fract() == 0.0))) {
+                        out.extend_from_slice(b"{\"b\":[");
+                        for (slot, byte) in bytes.iter().enumerate() {
+                            if slot != 0 { out.push(b','); }
+                            out.extend_from_slice(byte.as_f64().unwrap().to_string().as_bytes());
+                        }
+                        out.extend_from_slice(b"]}");
+                        index += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        if is_branded_wrapper(&node) && date_iso_string(&node).is_some() {
+            out.extend_from_slice(b"{\"d\":");
+            let timestamp = thaw_json_date_timestamp(&node as *const Value);
+            if timestamp.is_finite() {
+                out.extend_from_slice(timestamp.to_string().as_bytes());
+            } else {
+                out.extend_from_slice(b"null");
+            }
+            out.push(b'}');
+            index += 1;
+            continue;
+        }
+        match &node {
+            Value::Host(lease) => {
+                if HOST_OPERATIONS.with(|slot| slot.get())
+                    .is_some_and(|ops| without_typed_decode_scope(|| (ops.retain)(lease.handle)) != 0) {
+                    output_leases.push(lease.handle);
+                    out.extend_from_slice(format!("{{\"hdl\":{}}}", lease.handle).as_bytes());
+                } else {
+                    lease_error = true;
+                }
+            }
+            Value::Array(items) => {
+                out.extend_from_slice(b"{\"a\":[");
+                let items_ref = shared_array_ref(items);
+                for (slot, item) in items_ref.iter().enumerate() {
+                    if slot != 0 { out.push(b','); }
+                    if array_has_index(items, slot) {
+                        write_graph_token(item, &mut out, &mut ids, &mut nodes);
+                    } else {
+                        out.extend_from_slice(b"{\"h\":1}");
+                    }
+                }
+                out.extend_from_slice(b"]}");
+            }
+            Value::Object(fields) => {
+                let fields_ref = shared_object_ref(fields);
+                if is_branded_wrapper(&node) && fields_ref.len() == 1 {
+                    if let Some(Value::Array(_)) = fields_ref.get(b"__thaw_map_entries__".as_slice()) {
+                        out.extend_from_slice(b"{\"m\":");
+                        write_graph_token(fields_ref.get(b"__thaw_map_entries__".as_slice()).unwrap(), &mut out, &mut ids, &mut nodes);
+                        out.push(b'}');
+                        index += 1;
+                        continue;
+                    }
+                    if let Some(Value::Array(_)) = fields_ref.get(b"__thaw_set_values__".as_slice()) {
+                        out.extend_from_slice(b"{\"s\":");
+                        write_graph_token(fields_ref.get(b"__thaw_set_values__".as_slice()).unwrap(), &mut out, &mut ids, &mut nodes);
+                        out.push(b'}');
+                        index += 1;
+                        continue;
+                    }
+                    if let Some(Value::Object(pattern)) = fields_ref.get(b"__thaw_regexp__".as_slice()) {
+                        let pattern = shared_object_ref(pattern);
+                        if let Some(source @ (Value::String(_) | Value::Wtf8(_))) = pattern.get(b"source".as_slice()) {
+                            out.extend_from_slice(b"{\"re\":[");
+                            write_json_value(source, &mut out, None, 0);
+                            out.push(b',');
+                            if let Some(flags @ (Value::String(_) | Value::Wtf8(_))) = pattern.get(b"flags".as_slice()) {
+                                write_json_value(flags, &mut out, None, 0);
+                            } else {
+                                out.extend_from_slice(b"\"\"");
+                            }
+                            out.push(b',');
+                            match pattern.get(b"lastIndex".as_slice()) {
+                                Some(number @ Value::Number(_)) => write_json_value(number, &mut out, None, 0),
+                                Some(value) if non_finite_number(value).is_some() => {
+                                    write_json_string(non_finite_display(non_finite_number(value).unwrap()).as_bytes(), &mut out);
+                                }
+                                _ => out.push(b'0'),
+                            }
+                            out.extend_from_slice(b"]}");
+                            index += 1;
+                            continue;
+                        }
+                    }
+                }
+                out.extend_from_slice(b"{\"o\":[");
+                for (slot, (key, item)) in ordered_object_fields_shared(fields).into_iter().enumerate() {
+                    if slot != 0 { out.push(b','); }
+                    out.push(b'[');
+                    write_json_string(key, &mut out);
+                    out.push(b',');
+                    write_graph_token(item, &mut out, &mut ids, &mut nodes);
+                    out.push(b']');
+                }
+                out.extend_from_slice(b"]}");
+            }
+            _ => unreachable!("graph node is not an object or array"),
+        }
+        index += 1;
+    }
+    // A host property/metadata query can fail after earlier live nodes were
+    // retained. No decoder receives this wire on that path, so release those
+    // provisional transfers here; the caller still consumes HOST_ERROR.
+    let host_failed = HOST_ERROR.with(|slot| slot.borrow().is_some());
+    if lease_error || host_failed {
+        if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+            for handle in output_leases { without_typed_decode_scope(|| (ops.release)(handle)); }
+        }
+        if let Some(ops) = NAPI_HANDLE_OPERATIONS.with(|slot| slot.get()) {
+            for reference in napi_output_leases { without_typed_decode_scope(|| (ops.release)(reference)); }
+        }
+        if lease_error {
+            set_host_error("\u{1}TypeError\u{1}Unable to retain host JSON value".into());
+            return CString::new("\u{2}TypeError:Unable to retain host JSON value")
+                .unwrap().into_raw();
+        }
+        return CString::new("").unwrap().into_raw();
+    }
+    out.extend_from_slice(b"],\"leases\":[");
+    for (index, handle) in output_leases.iter().enumerate() {
+        if index != 0 { out.push(b','); }
+        out.extend_from_slice(handle.to_string().as_bytes());
+    }
+    out.extend_from_slice(b"],\"napiLeases\":[");
+    for (index, reference) in napi_output_leases.iter().enumerate() {
+        if index != 0 { out.push(b','); }
+        write_json_string(reference.to_string().as_bytes(), &mut out);
+    }
+    out.extend_from_slice(b"]}");
+    CString::new(out).expect("JSON graph envelope contains no raw NUL").into_raw()
+}
+
+fn graph_field<'a>(value: &'a Value, key: &[u8]) -> Option<&'a Value> {
+    value.as_object()?.get(key)
+}
+
+fn napi_wire_lease_tokens(graph: &Value) -> Vec<u64> {
+    graph_field(graph, b"napiLeases").and_then(Value::as_array)
+        .map(|tokens| tokens.iter().filter_map(Value::as_str)
+            .filter_map(|token| token.parse::<u64>().ok())
+            .filter(|token| *token != 0).collect())
+        .unwrap_or_default()
+}
+
+fn graph_token_value(token: &Value, nodes: &[Value]) -> Option<Value> {
+    let fields = token.as_object()?;
+    if fields.len() != 1 { return None; }
+    if let Some(index) = fields.get(b"r".as_slice()).and_then(Value::as_f64) {
+        if index < 0.0 || index.fract() != 0.0 { return None; }
+        return nodes.get(index as usize).cloned();
+    }
+    if let Some(decimal) = fields.get(b"bi".as_slice()).and_then(Value::as_str) {
+        return canonical_bigint_decimal(decimal).then(|| Value::BigInt(decimal.to_string()));
+    }
+    if let Some(value) = fields.get(b"v".as_slice()) {
+        return matches!(value, Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Wtf8(_))
+            .then(|| value.clone());
+    }
+    if fields.get(b"u".as_slice()).and_then(Value::as_f64) == Some(1.0) {
+        return Some(napi_undefined_value());
+    }
+    let non_finite = fields.get(b"nf".as_slice())?.as_str()?;
+    let number = match non_finite {
+        "NaN" => f64::NAN,
+        "Infinity" => f64::INFINITY,
+        "-Infinity" => f64::NEG_INFINITY,
+        _ => return None,
+    };
+    Some(napi_non_finite_value(number))
+}
+
+fn clear_unreachable_graph_nodes(nodes: &[Value], root: Option<&Value>) {
+    let indices = nodes.iter().enumerate().filter_map(|(index, node)|
+        object_identity_key(node).map(|identity| (identity, index)))
+        .collect::<HashMap<_, _>>();
+    let mut reachable = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut pending = root.cloned().into_iter().collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        let Some(identity) = object_identity_key(&value) else { continue };
+        if !visited.insert(identity) { continue; }
+        if let Some(index) = indices.get(&identity) { reachable.insert(*index); }
+        match &value {
+            Value::Array(items) => pending.extend(shared_array_ref(items).iter().cloned()),
+            Value::Object(fields) => pending.extend(shared_object_ref(fields).values().cloned()),
+            _ => {}
+        }
+    }
+    // These nodes were allocated only for this decode. On failure none
+    // escaped; on success only nodes unreachable from the returned root
+    // are cleared, so a returned alias keeps every edge it can observe.
+    for (index, node) in nodes.iter().enumerate() {
+        if reachable.contains(&index) { continue; }
+        match node {
+            Value::Array(items) => shared_array_ref_mut(items).clear(),
+            Value::Object(fields) => shared_object_ref_mut(fields).clear(),
+            _ => {}
+        }
+    }
+}
+
+fn decode_graph_value(graph: &Value) -> Option<Value> {
+    let descriptions = graph_field(graph, b"nodes")?.as_array()?;
+    let mut nodes = Vec::with_capacity(descriptions.len());
+    for description in descriptions {
+        let fields = description.as_object()?;
+        if fields.len() != 1 { return None; }
+        let node = if let Some(items) = fields.get(b"a".as_slice()).and_then(Value::as_array) {
+            Value::shared_array(Vec::with_capacity(items.len()))
+        } else if let Some(entries) = fields.get(b"o".as_slice()).and_then(Value::as_array) {
+            let plain = Value::shared_object(indexmap::IndexMap::with_capacity(entries.len()));
+            mark_graph_plain_object(&plain);
+            plain
+        } else if let Some(timestamp) = fields.get(b"d".as_slice()) {
+            if !timestamp.is_null() && timestamp.as_f64().is_none() { return None; }
+            let timestamp = if timestamp.is_null() { napi_non_finite_value(f64::NAN) }
+                else { timestamp.clone() };
+            brand_internal_value(Value::shared_object(indexmap::IndexMap::from([(b"timestamp".to_vec(), timestamp)])))
+        } else if let Some(bytes) = fields.get(b"b".as_slice()).and_then(Value::as_array) {
+            if !bytes.iter().all(|byte| byte.as_f64().is_some_and(|number| number >= 0.0 && number <= 255.0 && number.fract() == 0.0)) { return None; }
+            brand_internal_value(Value::shared_object(indexmap::IndexMap::from([
+                (b"type".to_vec(), Value::String("Buffer".to_string())),
+                (b"data".to_vec(), Value::shared_array(bytes.to_vec())),
+            ])))
+        } else if let Some(handle) = fields.get(b"nh".as_slice()).and_then(Value::as_str) {
+            let handle = handle.parse::<u64>().ok()?;
+            if handle == 0 { return None; }
+            let ops = NAPI_HANDLE_OPERATIONS.with(|slot| slot.get())?;
+            let reference = without_typed_decode_scope(|| (ops.retain)(handle));
+            if reference == 0 { return None; }
+            let lease = Rc::new(NapiLease { handle, reference, release: ops.release });
+            brand_internal_value(Value::shared_object_with_lease(indexmap::IndexMap::from([
+                (b"__thaw_napi_handle__".to_vec(), Value::String(handle.to_string())),
+            ]), Some(lease)))
+        } else if let Some(handle) = fields.get(b"hdl".as_slice()).and_then(Value::as_f64) {
+            if !handle.is_finite() || handle <= 0.0 || handle.fract() != 0.0 { return None; }
+            if HOST_OPERATIONS.with(|slot| slot.get()).is_some() {
+                host_value_from_borrowed_handle(handle as u64)?
+            } else {
+                Value::shared_object(indexmap::IndexMap::from([
+                    (b"__thaw_js_handle_id__".to_vec(), Value::Number(serde_json::Number::from_f64(handle)?)),
+                ]))
+            }
+        } else if fields.contains_key(b"m".as_slice())
+            || fields.contains_key(b"s".as_slice())
+            || fields.contains_key(b"re".as_slice()) {
+            Value::shared_object(indexmap::IndexMap::new())
+        } else { return None };
+        nodes.push(node);
+    }
+    let decoded = (|| -> Option<Value> {
+    for (description, node) in descriptions.iter().zip(&nodes) {
+        if let Some(items) = graph_field(description, b"a").and_then(Value::as_array) {
+            let Value::Array(array) = node else { return None };
+            let mut holes = Vec::new();
+            for (slot, item) in items.iter().enumerate() {
+                if item.as_object().is_some_and(|fields| fields.len() == 1)
+                    && graph_field(item, b"h").and_then(Value::as_f64) == Some(1.0) {
+                    shared_array_ref_mut(array).push(Value::Null);
+                    holes.push(slot);
+                } else {
+                    shared_array_ref_mut(array).push(graph_token_value(item, &nodes)?);
+                }
+            }
+            mark_array_holes(array, holes);
+        } else if let Some(entries) = graph_field(description, b"o").and_then(Value::as_array) {
+            let Value::Object(object) = node else { return None };
+            for entry in entries {
+                let [key, token] = entry.as_array()?.as_slice() else { return None };
+                let bytes = match key { Value::String(text) => text.as_bytes(), Value::Wtf8(bytes) => bytes, _ => return None };
+                shared_object_ref_mut(object).insert(canonical_key(bytes), graph_token_value(token, &nodes)?);
+            }
+        }
+    }
+    for (description, node) in descriptions.iter().zip(&nodes) {
+        let Value::Object(object) = node else { continue };
+        if let Some(token) = graph_field(description, b"m") {
+            let entries = graph_token_value(token, &nodes)?;
+            if !entries.is_array() { return None; }
+            shared_object_ref_mut(object).insert(b"__thaw_map_entries__".to_vec(), entries);
+        } else if let Some(token) = graph_field(description, b"s") {
+            let values = graph_token_value(token, &nodes)?;
+            if !values.is_array() { return None; }
+            shared_object_ref_mut(object).insert(b"__thaw_set_values__".to_vec(), values);
+        } else if let Some(parts) = graph_field(description, b"re").and_then(Value::as_array) {
+            let [source, flags, last_index] = parts.as_slice() else { return None };
+            if !matches!(source, Value::String(_) | Value::Wtf8(_))
+                || !matches!(flags, Value::String(_) | Value::Wtf8(_)) {
+                return None;
+            }
+            let last_index = match last_index {
+                Value::Number(_) => last_index.clone(),
+                Value::String(text) => match text.as_str() {
+                    "NaN" => number_value(f64::NAN),
+                    "Infinity" => number_value(f64::INFINITY),
+                    "-Infinity" => number_value(f64::NEG_INFINITY),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            let mut inner = indexmap::IndexMap::new();
+            inner.insert(b"source".to_vec(), source.clone());
+            inner.insert(b"flags".to_vec(), flags.clone());
+            inner.insert(b"lastIndex".to_vec(), last_index);
+            shared_object_ref_mut(object).insert(b"__thaw_regexp__".to_vec(), Value::shared_object(inner));
+        }
+        if graph_field(description, b"m").is_some()
+            || graph_field(description, b"s").is_some()
+            || graph_field(description, b"re").is_some()
+            || graph_field(description, b"hdl").is_some()
+            || graph_field(description, b"b").is_some() {
+            if let Some(identity) = object_identity_key(node) {
+                WRAPPER_BRANDS.with(|brands| { brands.borrow_mut().insert(identity); });
+            }
+        }
+    }
+    graph_token_value(graph_field(graph, b"root")?, &nodes)
+    })();
+    clear_unreachable_graph_nodes(&nodes, decoded.as_ref());
+    decoded
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_take_graph_error() -> u8 {
+    GRAPH_ERROR.with(|error| u8::from(error.replace(false)))
+}
+
+/// Returns the transferred host leases in a graph wire that was never sent
+/// to a decoder. This is used only on producer-side failures after encoding.
+/// The decoder remains the sole owner once dispatch begins.
+#[no_mangle]
+pub extern "C" fn thaw_json_discard_graph_wire(source: *const c_char) {
+    if source.is_null() { return; }
+    // A producer already failed before dispatch. Release callbacks for its
+    // unconsumed wire must not replace that error or poison a later call.
+    let original_host_error = HOST_ERROR.with(|slot| slot.borrow_mut().take());
+    let graph = thaw_json_parse(source);
+    let parse_error = thaw_json_take_parse_error() != 0;
+    if !parse_error {
+        if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+            if let Some(handles) = graph_field(unsafe { &*graph }, b"leases").and_then(Value::as_array) {
+                for handle in handles.iter().filter_map(Value::as_f64)
+                    .filter(|handle| handle.is_finite() && *handle > 0.0
+                        && *handle <= 9_007_199_254_740_991.0 && handle.fract() == 0.0) {
+                    without_typed_decode_scope(|| (ops.release)(handle as u64));
+                }
+            }
+        }
+        if let Some(ops) = NAPI_HANDLE_OPERATIONS.with(|slot| slot.get()) {
+            for reference in napi_wire_lease_tokens(unsafe { &*graph }) {
+                without_typed_decode_scope(|| (ops.release)(reference));
+            }
+        }
+    }
+    unsafe { thaw_json_destroy(graph) };
+    HOST_ERROR.with(|slot| *slot.borrow_mut() = original_host_error);
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_graph_decode(source: *const c_char) -> *mut Value {
+    GRAPH_ERROR.with(|error| error.set(false));
+    let graph = thaw_json_parse(source);
+    let parse_error = thaw_json_take_parse_error() != 0;
+    let leases = if parse_error { Vec::new() } else {
+        graph_field(unsafe { &*graph }, b"leases")
+            .and_then(Value::as_array)
+            .map(|handles| handles.iter().filter_map(Value::as_f64)
+                .filter(|handle| handle.is_finite() && *handle > 0.0
+                    && *handle <= 9_007_199_254_740_991.0 && handle.fract() == 0.0)
+                .map(|handle| handle as u64).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let napi_leases = if parse_error { Vec::new() }
+        else { napi_wire_lease_tokens(unsafe { &*graph }) };
+    let decoded = if parse_error { None } else { decode_graph_value(unsafe { &*graph }) };
+    // The JS encoder owns these initial references. A decoded Host node
+    // independently retains its handle, including when it escapes the call.
+    if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+        for handle in leases { without_typed_decode_scope(|| (ops.release)(handle)); }
+    }
+    if let Some(ops) = NAPI_HANDLE_OPERATIONS.with(|slot| slot.get()) {
+        for reference in napi_leases { without_typed_decode_scope(|| (ops.release)(reference)); }
+    }
+    unsafe { thaw_json_destroy(graph) };
+    match decoded {
+        Some(value) => leak(value),
+        None => {
+            GRAPH_ERROR.with(|error| error.set(true));
+            leak(Value::Null)
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
+    begin_stringify();
     let value = unsafe { &*value };
     stringify_value(&ordered_json(value), &[])
 }
@@ -1231,6 +2402,7 @@ fn top_level_undefined_string() -> *const c_char {
 /// string`'s own doc comment).
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify_public(value: *mut Value) -> *const c_char {
+    begin_stringify();
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return top_level_undefined_string();
@@ -1380,6 +2552,7 @@ fn inspect_json_value(value: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
+        Value::BigInt(value) => format!("{value}n"),
         Value::String(value) => inspect_string_literal(value),
         Value::Wtf8(bytes) => inspect_string_literal(&wtf8_to_string(bytes)),
         Value::Array(items) => {
@@ -1420,6 +2593,7 @@ fn inspect_json_value(value: &Value) -> String {
                 format!("{{ {} }}", items.join(", "))
             }
         }
+        Value::Host(lease) => host_query(lease, 3).unwrap_or_default(),
     }
 }
 
@@ -1591,10 +2765,21 @@ fn write_json_indent(out: &mut Vec<u8>, indent: &[u8], depth: usize) {
 /// Serializes a `Value` directly (bypassing `serde_json`, which cannot
 /// represent a lone surrogate) to JSON text.
 fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, depth: usize) {
+    let Some(_ancestor) = stringify_ancestor(value) else {
+        out.extend_from_slice(b"null");
+        return;
+    };
     match value {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(true) => out.extend_from_slice(b"true"),
         Value::Bool(false) => out.extend_from_slice(b"false"),
+        Value::BigInt(_) => {
+            // The public stringify caller reads this through the existing
+            // host-error branch, which preserves the distinct TypeError
+            // message rather than reporting a circular structure.
+            set_host_error("\u{1}TypeError\u{1}Do not know how to serialize a BigInt".into());
+            out.extend_from_slice(b"null");
+        }
         Value::Number(number) => {
             // A JSON number with an exponent (`-2e3`) parses to an `f64`;
             // Node's `JSON.stringify` writes an integral value without a
@@ -1656,6 +2841,13 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
             }
             out.push(b'}');
         }
+        Value::Host(lease) => {
+            if let Some(serialized) = host_query(lease, 8) {
+                out.extend_from_slice(serialized.as_bytes());
+            } else {
+                out.extend_from_slice(b"null");
+            }
+        }
     }
 }
 
@@ -1667,12 +2859,19 @@ fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
     } else {
         Some(indent)
     };
+    if STRINGIFY_ERROR.with(Cell::get) {
+        return stringify_cycle_error();
+    }
     let mut output = Vec::new();
     write_json_value(value, &mut output, indent, 0);
+    if STRINGIFY_ERROR.with(Cell::get) {
+        return stringify_cycle_error();
+    }
     CString::new(output).unwrap_or_default().into_raw()
 }
 
 fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
+    begin_stringify();
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return top_level_undefined_string();
@@ -1700,6 +2899,7 @@ fn string_array(array: *const u8, presence: *const u8) -> Vec<Vec<u8>> {
 }
 
 fn stringify_with_keys(value: *mut Value, keys: *const u8, presence: *const u8, indent: &[u8]) -> *const c_char {
+    begin_stringify();
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return top_level_undefined_string();
@@ -1756,12 +2956,15 @@ pub extern "C" fn thaw_json_stringify_keys_string_space(
 pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut Value {
     let value = unsafe { &*value };
     let key = to_key(key);
+    if let Value::Host(lease) = value {
+        return track_typed_decode_child(leak(host_get_property(lease, &key)));
+    }
     if let Some(result) = regexp_wrapper_property(value, &wtf8_to_string(&key)) {
-        return leak(result);
+        return track_typed_decode_child(leak(result));
     }
     if key.as_slice() == b"size" {
         if let Some(result) = map_or_set_wrapper_size(value) {
-            return leak(result);
+            return track_typed_decode_child(leak(result));
         }
     }
     // `.length` on a JSON array (or a Buffer-shaped object, `{"type":
@@ -1786,7 +2989,7 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
             .unwrap_or_else(napi_undefined_value),
         _ => json_get_with_prototype(value, &key),
     };
-    leak(result)
+    track_typed_decode_child(leak(result))
 }
 
 /// `object[key]` with prototype-chain lookup: own field, else walk the
@@ -1832,6 +3035,9 @@ fn json_get_with_prototype(value: &Value, key: &[u8]) -> Value {
 pub extern "C" fn thaw_json_has(value: *mut Value, key: *const c_char) -> u8 {
     let key = to_key(key);
     let value = unsafe { &*value };
+    if let Value::Host(lease) = value {
+        return u8::from(host_property_predicate(lease, &key, 0));
+    }
     let mut current = value.clone();
     let mut seen = HashSet::new();
     loop {
@@ -1876,6 +3082,7 @@ fn json_has_own_value(value: &Value, key: &[u8]) -> bool {
 /// `value` must be a pointer returned by this module and must not be used again.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_take(value: *mut Value, key: *const c_char) -> *mut Value {
+    untrack_typed_decode_child(value);
     let value = unsafe { Box::from_raw(value) };
     let result = value
         .as_object_mut()
@@ -1887,6 +3094,10 @@ pub unsafe extern "C" fn thaw_json_take(value: *mut Value, key: *const c_char) -
 #[no_mangle]
 pub extern "C" fn thaw_json_index(value: *mut Value, index: f64, key: *const c_char) -> *mut Value {
     let value = unsafe { &*value };
+    if let Value::Host(lease) = value {
+        let key = if key.is_null() { index.to_string().into_bytes() } else { to_key(key) };
+        return track_typed_decode_child(leak(host_get_property(lease, &key)));
+    }
     let valid_index =
         index.is_finite() && index >= 0.0 && index <= (u32::MAX - 1) as f64 && index.fract() == 0.0;
     let result = match value {
@@ -1908,7 +3119,7 @@ pub extern "C" fn thaw_json_index(value: *mut Value, index: f64, key: *const c_c
         _ => None,
     }
     .unwrap_or_else(napi_undefined_value);
-    leak(result)
+    track_typed_decode_child(leak(result))
 }
 
 #[no_mangle]
@@ -1921,6 +3132,13 @@ pub unsafe extern "C" fn thaw_json_index_set(
     key: *const c_char,
     value: *mut Value,
 ) -> *mut Value {
+    if let Some(Value::Host(lease)) = unsafe { array.as_ref() } {
+        let key = if key.is_null() { index.to_string().into_bytes() } else { to_key(key) };
+        if let Some(value_ref) = unsafe { value.as_ref() } {
+            host_set_property(lease, &key, value_ref);
+        }
+        return value;
+    }
     if !object_writable(array, &to_key(key)) {
         return value;
     }
@@ -2052,6 +3270,7 @@ fn json_to_number(value: &Value) -> f64 {
     }
     match value {
         Value::Number(number) => number.as_f64().unwrap_or(0.0),
+        Value::BigInt(decimal) => decimal.parse::<f64>().unwrap_or(f64::NAN),
         Value::Null => 0.0,
         Value::Bool(flag) => f64::from(*flag),
         Value::String(text) => javascript_string_to_number(text),
@@ -2064,6 +3283,8 @@ fn json_to_number(value: &Value) -> f64 {
         }
         Value::Object(_) if thaw_json_is_date_shape(value) != 0 => thaw_json_date_timestamp(value),
         Value::Object(_) => f64::NAN,
+        Value::Host(lease) => host_query(lease, 2)
+            .map(|text| javascript_string_to_number(&text)).unwrap_or(f64::NAN),
     }
 }
 
@@ -2157,6 +3378,7 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
     }
     let text = match value {
         Value::String(s) => s.clone(),
+        Value::BigInt(decimal) => decimal.clone(),
         Value::Null => "null".to_string(),
         // Matches real JS `String(undefined)` -- without this, `other`
         // below would stringify the sentinel's own raw JSON shape
@@ -2174,6 +3396,14 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
             return unsafe { thaw_json_array_join(value, c",".as_ptr()) };
         }
         Value::Object(_) => "[object Object]".to_string(),
+        Value::Host(lease) => {
+            let encoded = host_query(lease, 3).unwrap_or_else(|| "\"\"".into());
+            match JsonParser::new(encoded.as_bytes()).parse() {
+                Some(Value::String(text)) => text,
+                Some(Value::Wtf8(bytes)) => return thaw_arena::owned_string(bytes),
+                _ => String::new(),
+            }
+        }
     };
     thaw_arena::owned_string(text)
 }
@@ -2191,8 +3421,19 @@ pub unsafe extern "C" fn thaw_json_typeof(value: *const Value) -> *const c_char 
     }
     match value {
         Value::Null | Value::Array(_) | Value::Object(_) => c"object".as_ptr(),
+        Value::Host(lease) => match host_query(lease, 0).as_deref() {
+            Some("undefined") => c"undefined".as_ptr(),
+            Some("boolean") => c"boolean".as_ptr(),
+            Some("number") => c"number".as_ptr(),
+            Some("string") => c"string".as_ptr(),
+            Some("function") => c"function".as_ptr(),
+            Some("symbol") => c"symbol".as_ptr(),
+            Some("bigint") => c"bigint".as_ptr(),
+            _ => c"object".as_ptr(),
+        },
         Value::Bool(_) => c"boolean".as_ptr(),
         Value::Number(_) => c"number".as_ptr(),
+        Value::BigInt(_) => c"bigint".as_ptr(),
         Value::String(_) | Value::Wtf8(_) => c"string".as_ptr(),
     }
 }
@@ -2214,17 +3455,20 @@ pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
         Value::Null => 0,
         Value::Bool(value) => u8::from(*value),
         Value::Number(value) => u8::from(value.as_f64().is_some_and(|value| value != 0.0)),
+        Value::BigInt(value) => u8::from(value != "0"),
         Value::String(value) => u8::from(!value.is_empty()),
         Value::Wtf8(bytes) => u8::from(!bytes.is_empty()),
         Value::Array(_) | Value::Object(_) => 1,
+        Value::Host(lease) => u8::from(host_query(lease, 1).as_deref() == Some("1")),
     }
 }
 
 fn is_napi_undefined(value: &Value) -> bool {
+    if is_graph_plain_object(value) { return false; }
     matches!(
         value,
         Value::Object(object)
-            if matches!(
+            if shared_object_ref(object).len() == 1 && matches!(
                 shared_object_ref(object).get(b"$__thaw_napi_undefined$".as_slice()),
                 Some(Value::Bool(true))
             )
@@ -2240,7 +3484,10 @@ fn is_napi_undefined(value: &Value) -> bool {
 /// `JSON.stringify(new Set())` (none of the three have their own
 /// enumerable properties), so the wrapper should stringify the same way
 /// instead of leaking its internal representation.
-fn is_thaw_internal_wrapper(fields: &indexmap::IndexMap<Vec<u8>, Value>) -> bool {
+fn is_thaw_internal_wrapper(value: &Value) -> bool {
+    let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
+        return false;
+    };
     fields.len() == 1 && fields.keys().next().is_some_and(|key| {
         [b"__thaw_regexp__".as_slice(), b"__thaw_map_entries__", b"__thaw_set_values__"]
             .contains(&key.as_slice())
@@ -2262,11 +3509,10 @@ pub extern "C" fn thaw_json_has_wrapper_key(value: *const Value, key: *const c_c
     let Some(value) = (unsafe { value.as_ref() }) else {
         return 0;
     };
-    let Value::Object(fields) = value else {
+    let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return 0;
     };
     let key = to_key(key);
-    let fields = shared_object_ref(fields);
     u8::from(fields.len() == 1 && fields.keys().next().is_some_and(|field| *field == key))
 }
 
@@ -2281,10 +3527,13 @@ pub extern "C" fn thaw_json_has_wrapper_key(value: *const Value, key: *const c_c
 /// `is_napi_undefined`'s exact pattern for the sibling `undefined`
 /// sentinel.
 fn non_finite_number(value: &Value) -> Option<f64> {
+    if is_graph_plain_object(value) { return None; }
     let Value::Object(object) = value else {
         return None;
     };
-    match shared_object_ref(object)
+    let fields = shared_object_ref(object);
+    if fields.len() != 1 { return None; }
+    match fields
         .get(b"$__thaw_non_finite$".as_slice())?
         .as_str()?
     {
@@ -2310,6 +3559,7 @@ pub extern "C" fn thaw_json_is_buffer_shape(value: *const Value) -> u8 {
     let Some(value) = (unsafe { value.as_ref() }) else {
         return 0;
     };
+    if is_graph_plain_object(value) { return 0; }
     let Value::Object(fields) = value else {
         return 0;
     };
@@ -2320,19 +3570,18 @@ pub extern "C" fn thaw_json_is_buffer_shape(value: *const Value) -> u8 {
     )
 }
 
-/// `Date.prototype.toJSON` is overridden globally (`platform_globals/
-/// dates.js`) to `{ timestamp: this.getTime() }`, so a `Date` returned
-/// from a Fallback call already survives the QuickJS boundary as this
-/// exact, structurally-recognizable shape -- an `Object` with exactly
-/// one key, `"timestamp"`, holding a `Number`. Used by `instanceof
-/// Date`/Date-prototype-method dispatch on a `Json`-typed value (see
-/// `crates/thaw-hir/src/lower/expressions/lowering.rs` and `crates/
-/// thaw-hir/src/lower/invocations/calls.rs`).
+/// Recognize a trusted native or graph Date wrapper, or a live Host value
+/// with a genuine Date internal slot. A plain user `{timestamp: ...}` object
+/// is not enough to establish Date origin.
 #[no_mangle]
 pub extern "C" fn thaw_json_is_date_shape(value: *const Value) -> u8 {
     let Some(value) = (unsafe { value.as_ref() }) else {
         return 0;
     };
+    if let Value::Host(lease) = value {
+        return u8::from(host_query(lease, 12).as_deref() == Some("1"));
+    }
+    if !is_branded_wrapper(value) || is_graph_plain_object(value) { return 0; }
     let Value::Object(object) = value else {
         return 0;
     };
@@ -2355,6 +3604,46 @@ pub extern "C" fn thaw_json_is_date_shape(value: *const Value) -> u8 {
     u8::from(object.len() == 1 && is_timestamp(object.get(b"timestamp".as_slice())))
 }
 
+/// Apply a Date setter's already-computed clipped time to the original
+/// receiver. A `Json::Host` Date must mutate its JS internal slot; assigning
+/// an ordinary `timestamp` property would leave aliases unchanged.
+#[no_mangle]
+pub extern "C" fn thaw_json_date_set_timestamp(value: *mut Value, timestamp: f64) -> f64 {
+    if thaw_json_is_date_shape(value.cast_const()) == 0 {
+        if HOST_ERROR.with(|error| error.borrow().is_none()) {
+            set_host_error("\u{1}TypeError\u{1}Date method called on a non-Date value".into());
+        }
+        return f64::NAN;
+    }
+    let Some(value) = (unsafe { value.as_mut() }) else { return f64::NAN; };
+    if let Value::Host(lease) = value {
+        let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
+            set_host_error("Host operations unavailable".into());
+            return f64::NAN;
+        };
+        let result = without_typed_decode_scope(|| (ops.date_set)(lease.handle, timestamp));
+        if !result.error.is_null() {
+            let error = to_str(result.error);
+            unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+            set_host_error(error);
+            return f64::NAN;
+        }
+        if result.value.is_null() {
+            set_host_error("Host Date setter returned no value".into());
+            return f64::NAN;
+        }
+        let actual = javascript_string_to_number(&to_str(result.value));
+        unsafe { thaw_arena::destroy_string(result.value.cast_mut()) };
+        return actual;
+    }
+    if let Some(fields) = value.as_object_mut() {
+        fields.insert(b"timestamp".to_vec(), number_value(timestamp));
+        return timestamp;
+    }
+    set_host_error("\u{1}TypeError\u{1}Date method called on a non-Date value".into());
+    f64::NAN
+}
+
 /// Extracts the millisecond timestamp from the `{"timestamp": N}` shape
 /// `thaw_json_is_date_shape` recognizes -- including a non-finite one
 /// wrapped in the `$__thaw_non_finite$` sentinel (see that function's
@@ -2366,6 +3655,16 @@ pub extern "C" fn thaw_json_date_timestamp(value: *const Value) -> f64 {
     let Some(value) = (unsafe { value.as_ref() }) else {
         return f64::NAN;
     };
+    if thaw_json_is_date_shape(value as *const Value) == 0 {
+        if HOST_ERROR.with(|error| error.borrow().is_none()) {
+            set_host_error("\u{1}TypeError\u{1}Date method called on a non-Date value".into());
+        }
+        return f64::NAN;
+    }
+    if let Value::Host(lease) = value {
+        return host_query(lease, 13)
+            .map(|text| javascript_string_to_number(&text)).unwrap_or(f64::NAN);
+    }
     let Some(field) = value.as_object().and_then(|fields| fields.get(b"timestamp".as_slice())) else {
         return f64::NAN;
     };
@@ -2385,7 +3684,7 @@ pub extern "C" fn thaw_json_date_timestamp(value: *const Value) -> f64 {
 fn napi_undefined_value() -> Value {
     let mut fields = indexmap::IndexMap::new();
     fields.insert(b"$__thaw_napi_undefined$".to_vec(), Value::Bool(true));
-    Value::shared_object(fields)
+    brand_internal_value(Value::shared_object(fields))
 }
 
 #[no_mangle]
@@ -2705,7 +4004,11 @@ pub extern "C" fn thaw_json_array_new() -> *mut Value {
 ///
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_is_array(value: *const Value) -> u8 {
-    (!value.is_null() && matches!(unsafe { &*value }, Value::Array(_))).into()
+    match unsafe { value.as_ref() } {
+        Some(Value::Host(lease)) => u8::from(host_query(lease, 4).as_deref() == Some("1")),
+        Some(value) => u8::from(matches!(value, Value::Array(_))),
+        None => 0,
+    }
 }
 
 /// Native array presence uses null for dense arrays and a `[length][state...]`
@@ -2806,6 +4109,9 @@ pub unsafe extern "C" fn thaw_json_is_buffer(value: *const Value) -> u8 {
     let Some(value) = (unsafe { value.as_ref() }) else {
         return 0;
     };
+    if let Value::Host(lease) = value {
+        return u8::from(host_query(lease, 11).as_deref() == Some("1"));
+    }
     let Some(fields) = value.as_object() else {
         return 0;
     };
@@ -2820,7 +4126,11 @@ pub unsafe extern "C" fn thaw_json_is_buffer(value: *const Value) -> u8 {
 ///
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_is_null(value: *const Value) -> u8 {
-    (!value.is_null() && unsafe { &*value }.is_null()).into()
+    match unsafe { value.as_ref() } {
+        Some(Value::Host(lease)) => u8::from(host_query(lease, 7).as_deref() == Some("1")),
+        Some(value) => u8::from(value.is_null()),
+        None => 0,
+    }
 }
 
 #[no_mangle]
@@ -2836,6 +4146,9 @@ pub unsafe extern "C" fn thaw_json_is_null(value: *const Value) -> u8 {
 pub unsafe extern "C" fn thaw_json_is_undefined(value: *const Value) -> u8 {
     if value.is_null() {
         return 0;
+    }
+    if let Value::Host(lease) = unsafe { &*value } {
+        return u8::from(host_query(lease, 5).as_deref() == Some("1"));
     }
     u8::from(is_napi_undefined(unsafe { &*value }))
 }
@@ -2855,6 +4168,9 @@ pub unsafe extern "C" fn thaw_json_is_nullish(value: *const Value) -> u8 {
         return 0;
     }
     let value = unsafe { &*value };
+    if let Value::Host(lease) = value {
+        return u8::from(host_query(lease, 6).as_deref() == Some("1"));
+    }
     (matches!(value, Value::Null) || is_napi_undefined(value)).into()
 }
 
@@ -2863,6 +4179,7 @@ pub unsafe extern "C" fn thaw_json_is_nullish(value: *const Value) -> u8 {
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_is_object_like(value: *const Value) -> u8 {
     match unsafe { value.as_ref() } {
+        Some(Value::Host(lease)) => u8::from(host_query(lease, 9).as_deref() == Some("1")),
         Some(Value::Array(_)) => 1,
         Some(value @ Value::Object(_)) => {
             u8::from(!is_napi_undefined(value) && non_finite_number(value).is_none())
@@ -2885,6 +4202,7 @@ fn alloc_pointer_array(values: Vec<*mut u8>) -> *mut u8 {
 
 fn enumerable_entries(value: &Value) -> Vec<(Vec<u8>, Value)> {
     match value {
+        Value::Host(lease) => host_enumerable_entries(lease),
         Value::Object(fields) => ordered_object_fields_shared(fields)
             .into_iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
         Value::Array(items) => shared_array_ref(items).iter().enumerate()
@@ -2954,6 +4272,10 @@ unsafe fn unwrap_array_presence(handle: *const u8) -> *const u8 {
 ///
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        return alloc_pointer_array(host_enumerate_values(lease, 2).iter()
+            .map(|key| native_string_value(key).cast()).collect());
+    }
     let keys = unsafe { value.as_ref() }.map(enumerable_entries).unwrap_or_default()
         .into_iter().map(|(key, _)| key).collect::<Vec<_>>();
     alloc_pointer_array(
@@ -2967,16 +4289,22 @@ pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
 /// # Safety
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
-    let Some(Value::Array(items)) = (unsafe { value.as_ref() }) else {
-        return unsafe { thaw_json_keys(value) };
-    };
-    alloc_pointer_array(
-        (0..shared_array_ref(items).len()).filter(|index| array_has_index(items, *index))
-            .map(|index| index.to_string())
-            .chain(std::iter::once("length".to_string()))
-            .map(|key| thaw_arena::owned_string(key).cast())
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        return alloc_pointer_array(host_enumerate_values(lease, 1).into_iter()
+            .map(|key| Box::into_raw(Box::new(key)).cast()).collect());
+    }
+    let keys: Vec<Value> = match unsafe { value.as_ref() } {
+        Some(Value::Array(items)) => (0..shared_array_ref(items).len())
+            .filter(|index| array_has_index(items, *index))
+            .map(|index| Value::String(index.to_string()))
+            .chain(std::iter::once(Value::String("length".to_string())))
             .collect(),
-    )
+        Some(value) => enumerable_entries(value).into_iter()
+            .map(|(key, _)| Value::Wtf8(key)).collect(),
+        None => Vec::new(),
+    };
+    alloc_pointer_array(keys.into_iter()
+        .map(|key| Box::into_raw(Box::new(key)).cast()).collect())
 }
 
 #[no_mangle]
@@ -2984,6 +4312,10 @@ pub unsafe extern "C" fn thaw_json_own_keys(value: *const Value) -> *mut u8 {
 ///
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        return alloc_pointer_array(host_enumerate_values(lease, 3).into_iter()
+            .map(|value| Box::into_raw(Box::new(value)).cast()).collect());
+    }
     let values = unsafe { value.as_ref() }.map(enumerable_entries).unwrap_or_default()
         .into_iter().map(|(_, value)| value).collect::<Vec<_>>();
     alloc_pointer_array(
@@ -2996,6 +4328,7 @@ pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {
 
 fn object_values(value: *const Value) -> Vec<Value> {
     match unsafe { value.as_ref() } {
+        Some(Value::Host(lease)) => host_enumerate_values(lease, 3),
         Some(Value::Object(fields)) => ordered_object_fields_shared(fields)
             .into_iter()
             .map(|(_, value)| value.clone())
@@ -3027,7 +4360,11 @@ fn alloc_scalar_array(
 /// `value` must be null or point to a valid JSON object containing numbers.
 pub unsafe extern "C" fn thaw_json_number_values(value: *const Value) -> *mut u8 {
     alloc_scalar_array(&object_values(value), 8, |slot, value| unsafe {
-        (slot as *mut f64).write(non_finite_number(value).or_else(|| value.as_f64()).unwrap_or(0.0));
+        (slot as *mut f64).write(if matches!(value, Value::Host(_) | Value::BigInt(_)) {
+            json_to_number(value)
+        } else {
+            non_finite_number(value).or_else(|| value.as_f64()).unwrap_or(0.0)
+        });
     })
 }
 
@@ -3035,6 +4372,8 @@ fn native_string_value(value: &Value) -> *mut c_char {
     match value {
         Value::String(text) => thaw_arena::owned_string(text),
         Value::Wtf8(bytes) => thaw_arena::owned_string(bytes),
+        Value::BigInt(decimal) => thaw_arena::owned_string(decimal),
+        Value::Host(_) => thaw_json_as_string(value as *const Value as *mut Value).cast_mut(),
         _ => thaw_arena::owned_string(b""),
     }
 }
@@ -3055,7 +4394,11 @@ pub unsafe extern "C" fn thaw_json_string_values(value: *const Value) -> *mut u8
 /// `value` must be null or point to a valid JSON object containing booleans.
 pub unsafe extern "C" fn thaw_json_bool_values(value: *const Value) -> *mut u8 {
     alloc_scalar_array(&object_values(value), 1, |slot, value| unsafe {
-        slot.write(value.as_bool().unwrap_or(false).into());
+        slot.write(if matches!(value, Value::Host(_) | Value::BigInt(_)) {
+            thaw_json_as_bool(value as *const Value as *mut Value)
+        } else {
+            value.as_bool().unwrap_or(false).into()
+        });
     })
 }
 
@@ -3221,6 +4564,7 @@ pub unsafe extern "C" fn thaw_json_object_from_json_entries(entries: *const u8, 
 pub unsafe extern "C" fn thaw_json_has_own(value: *const Value, key: *const c_char) -> u8 {
     let key = to_key(key);
     match unsafe { value.as_ref() } {
+        Some(Value::Host(lease)) => u8::from(host_property_predicate(lease, &key, 1)),
         Some(value) => json_has_own_value(value, &key).into(),
         None => 0,
     }
@@ -3267,12 +4611,14 @@ pub unsafe extern "C" fn thaw_json_object_is(left: *const Value, right: *const V
         | (Some(Value::Wtf8(_)), Some(Value::String(_))) => {
             same_string(unsafe { &*left }, unsafe { &*right }).unwrap_or(false)
         }
+        (Some(Value::BigInt(left)), Some(Value::BigInt(right))) => left == right,
         (Some(Value::Number(left)), Some(Value::Number(right))) => left
             .as_f64()
             .zip(right.as_f64())
             .is_some_and(|(left, right)| json_number_is(left, right)),
         (Some(Value::Array(left)), Some(Value::Array(right))) => Rc::ptr_eq(left, right),
         (Some(Value::Object(left)), Some(Value::Object(right))) => Rc::ptr_eq(left, right),
+        (Some(Value::Host(left)), Some(Value::Host(right))) => left.handle == right.handle,
         _ => false,
     };
     result.into()
@@ -3317,6 +4663,7 @@ pub unsafe extern "C" fn thaw_json_strict_equal(a: *const Value, b: *const Value
     u8::from(match (a_val, b_val) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Wtf8(_), Value::Wtf8(_))
@@ -3324,6 +4671,7 @@ pub unsafe extern "C" fn thaw_json_strict_equal(a: *const Value, b: *const Value
         | (Value::Wtf8(_), Value::String(_)) => same_string(a_val, b_val).unwrap_or(false),
         (Value::Array(x), Value::Array(y)) => Rc::ptr_eq(x, y),
         (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
+        (Value::Host(x), Value::Host(y)) => x.handle == y.handle,
         _ => false,
     })
 }
@@ -3357,6 +4705,7 @@ pub unsafe extern "C" fn thaw_json_same_value_zero(a: *const Value, b: *const Va
     u8::from(match (a_val, b_val) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Wtf8(_), Value::Wtf8(_))
@@ -3364,6 +4713,7 @@ pub unsafe extern "C" fn thaw_json_same_value_zero(a: *const Value, b: *const Va
         | (Value::Wtf8(_), Value::String(_)) => same_string(a_val, b_val).unwrap_or(false),
         (Value::Array(x), Value::Array(y)) => Rc::ptr_eq(x, y),
         (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
+        (Value::Host(x), Value::Host(y)) => x.handle == y.handle,
         _ => false,
     })
 }
@@ -3466,6 +4816,11 @@ pub extern "C" fn thaw_json_array_push_json(array: *mut Value, value: *mut Value
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_json_receiver_bigint(value: i64) -> *mut Value {
+    leak(Value::BigInt(value.to_string()))
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_receiver_bool(value: u8) -> *mut Value {
     leak(Value::Bool(value != 0))
 }
@@ -3550,6 +4905,7 @@ pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
 /// identical match table for the statically-typed case
 /// (`lower_member_read`, `thaw-hir/src/lower/objects.rs`).
 fn regexp_wrapper_property(value: &Value, key: &str) -> Option<Value> {
+    if !is_branded_wrapper(value) { return None; }
     let inner = value.as_object()?.get(b"__thaw_regexp__".as_slice())?.as_object()?;
     if matches!(key, "source" | "flags" | "lastIndex") {
         return Some(inner.get(key.as_bytes()).cloned().unwrap_or(Value::Null));
@@ -3584,6 +4940,7 @@ fn regexp_wrapper_property(value: &Value, key: &str) -> Option<Value> {
 /// `thaw_json_map_or_set_entries`/`thaw_json_map_or_set_get`/
 /// `thaw_json_map_or_set_has`, below.)
 fn map_or_set_wrapper_size(value: &Value) -> Option<Value> {
+    if !is_branded_wrapper(value) { return None; }
     let fields = value.as_object()?;
     let entries = fields
         .get(b"__thaw_map_entries__".as_slice())
@@ -3600,7 +4957,7 @@ fn map_or_set_wrapper_size(value: &Value) -> Option<Value> {
 /// way but its *meaning* differs (a flat list of values for a `Set`, a
 /// list of pairs for a `Map`).
 fn is_map_wrapper(value: &Value) -> bool {
-    value
+    is_branded_wrapper(value) && value
         .as_object()
         .is_some_and(|fields| fields.contains_key(b"__thaw_map_entries__".as_slice()))
 }
@@ -3616,7 +4973,7 @@ fn is_map_wrapper(value: &Value) -> bool {
 #[no_mangle]
 pub extern "C" fn thaw_json_map_or_set_entries(value: *mut Value) -> *mut Value {
     let value = unsafe { &*value };
-    let Some(fields) = value.as_object() else {
+    let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return leak(value.clone());
     };
     let Some(entries) = fields
@@ -3672,7 +5029,7 @@ pub extern "C" fn thaw_json_map_or_set_get(value: *const Value, key: *const Valu
 pub extern "C" fn thaw_json_map_or_set_has(value: *const Value, key: *const Value) -> u8 {
     let value = unsafe { &*value };
     let key = unsafe { &*key };
-    let Some(fields) = value.as_object() else {
+    let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return 0;
     };
     let entries = fields
@@ -3717,6 +5074,7 @@ pub extern "C" fn thaw_json_map_or_set_set(
     let value = unsafe { &*value };
     let key = unsafe { &*key };
     let new_value = unsafe { &*new_value };
+    if !is_branded_wrapper(value) { return leak(value.clone()); }
     let Value::Object(fields_rc) = value else {
         return leak(value.clone());
     };
@@ -3748,6 +5106,7 @@ pub extern "C" fn thaw_json_map_or_set_add(
 ) -> *mut Value {
     let value = unsafe { &*value };
     let element = unsafe { &*element };
+    if !is_branded_wrapper(value) { return leak(value.clone()); }
     let Value::Object(fields_rc) = value else {
         return leak(value.clone());
     };
@@ -3775,6 +5134,7 @@ pub extern "C" fn thaw_json_map_or_set_delete(
 ) -> *mut Value {
     let value = unsafe { &*value };
     let key = unsafe { &*key };
+    if !is_branded_wrapper(value) { return leak(value.clone()); }
     let Value::Object(fields_rc) = value else {
         return leak(value.clone());
     };
@@ -3798,6 +5158,7 @@ pub extern "C" fn thaw_json_map_or_set_delete(
 #[no_mangle]
 pub extern "C" fn thaw_json_map_or_set_clear(value: *const Value) -> *mut Value {
     let value = unsafe { &*value };
+    if !is_branded_wrapper(value) { return leak(value.clone()); }
     if let Value::Object(fields_rc) = value {
         let fields = shared_object_ref(fields_rc);
         if let Some(Value::Array(entries_rc)) = fields.get(b"__thaw_map_entries__".as_slice()) {
@@ -3825,7 +5186,7 @@ pub extern "C" fn thaw_json_map_or_set_clear(value: *const Value) -> *mut Value 
 /// common `for (const k of m.keys())`/`[...m.values()]` usage, which
 /// only needs *something* iterable, and an eager array is one.
 fn map_or_set_keys(value: &Value) -> Vec<Value> {
-    let Some(fields) = value.as_object() else {
+    let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return Vec::new();
     };
     if let Some(entries) = fields.get(b"__thaw_map_entries__".as_slice()).and_then(Value::as_array) {
@@ -3842,7 +5203,7 @@ fn map_or_set_keys(value: &Value) -> Vec<Value> {
 }
 
 fn map_or_set_values(value: &Value) -> Vec<Value> {
-    let Some(fields) = value.as_object() else {
+    let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return Vec::new();
     };
     if let Some(entries) = fields.get(b"__thaw_map_entries__".as_slice()).and_then(Value::as_array) {
@@ -3859,7 +5220,7 @@ fn map_or_set_values(value: &Value) -> Vec<Value> {
 }
 
 fn map_or_set_entries_view(value: &Value) -> Vec<Value> {
-    let Some(fields) = value.as_object() else {
+    let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return Vec::new();
     };
     if let Some(entries) = fields.get(b"__thaw_map_entries__".as_slice()).and_then(Value::as_array) {
@@ -3908,6 +5269,7 @@ pub extern "C" fn thaw_json_map_or_set_entries_view(value: *const Value) -> *mut
 }
 
 fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {
+    if is_graph_plain_object(value) { return value.as_array(); }
     if let Some(array) = value.as_array() {
         return Some(array);
     }
@@ -3955,7 +5317,7 @@ pub extern "C" fn thaw_json_array_slice(value: *mut Value, start: i64) -> *mut V
     if let (Some(Value::Array(source)), Value::Array(target)) = (unsafe { value.as_ref() }, &copy) {
         copy_array_holes(source, target, start.max(0) as usize);
     }
-    leak(copy)
+    track_typed_decode_child(leak(copy))
 }
 
 #[no_mangle]
@@ -3965,6 +5327,10 @@ pub extern "C" fn thaw_json_object_new() -> *mut Value {
 
 fn object_insert(object: *mut Value, key: *const c_char, value: Value) {
     let key = to_key(key);
+    if let Some(Value::Host(lease)) = unsafe { object.as_ref() } {
+        host_set_property(lease, &key, &value);
+        return;
+    }
     if !object_writable(object, &key) {
         return;
     }
@@ -4014,6 +5380,7 @@ pub unsafe extern "C" fn thaw_json_object_set_json_owned(
     key: *const c_char,
     value: *mut Value,
 ) {
+    untrack_typed_decode_child(value);
     object_insert(object, key, *unsafe { Box::from_raw(value) });
 }
 
@@ -4022,6 +5389,9 @@ pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char
     let Some(value) = (unsafe { object.as_ref() }) else {
         return 0;
     };
+    if let Value::Host(lease) = value {
+        return u8::from(host_property_predicate(lease, &to_key(key), 2));
+    }
     if matches!(value, Value::Null) || is_napi_undefined(value) {
         return 0;
     }
@@ -4106,6 +5476,84 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static HOST_RELEASES: Cell<usize> = const { Cell::new(0) };
+        static CLEANUP_HOST_RELEASES: Cell<usize> = const { Cell::new(0) };
+        static TYPED_SCOPE_RETAINS: Cell<usize> = const { Cell::new(0) };
+        static REENTRANT_SOURCE: Cell<*mut Value> = const { Cell::new(std::ptr::null_mut()) };
+        static REENTRANT_CHILD: Cell<*mut Value> = const { Cell::new(std::ptr::null_mut()) };
+        static NESTED_DESTROY: Cell<*mut Value> = const { Cell::new(std::ptr::null_mut()) };
+        static NAPI_RETAINS: Cell<usize> = const { Cell::new(0) };
+        static NAPI_RELEASES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    extern "C" fn retain_test_napi_handle(handle: u64) -> u64 {
+        if handle != 17 { return 0; }
+        NAPI_RETAINS.with(|count| {
+            let next = count.get() + 1;
+            count.set(next);
+            117 + next as u64
+        })
+    }
+
+    extern "C" fn release_test_napi_reference(reference: u64) -> u8 {
+        assert!((118..=120).contains(&reference));
+        NAPI_RELEASES.with(|count| count.set(count.get() + 1));
+        1
+    }
+
+    extern "C" fn count_host_release(_handle: u64) -> u8 {
+        HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        1
+    }
+
+    extern "C" fn retain_typed_scope_host(_handle: u64) -> u8 {
+        TYPED_SCOPE_RETAINS.with(|count| count.set(count.get() + 1));
+        1
+    }
+
+    extern "C" fn release_with_cleanup_host_error(_handle: u64) -> u8 {
+        CLEANUP_HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        set_host_error("cleanup callback error".into());
+        1
+    }
+
+    extern "C" fn reentrant_typed_scope_get(_: u64, _: *const c_char) -> HostHandleResult {
+        let source = REENTRANT_SOURCE.with(Cell::get);
+        let child = thaw_json_get(source, c"x".as_ptr());
+        REENTRANT_CHILD.with(|slot| slot.set(child));
+        HostHandleResult { value: 0, error: std::ptr::null() }
+    }
+
+    extern "C" fn unused_typed_scope_set(_: u64, _: *const c_char, _: *const c_char) -> HostHandleResult {
+        HostHandleResult { value: 1, error: std::ptr::null() }
+    }
+
+    extern "C" fn unused_typed_scope_predicate(_: u64, _: *const c_char, _: u8) -> HostHandleResult {
+        HostHandleResult { value: 0, error: std::ptr::null() }
+    }
+
+    extern "C" fn unused_typed_scope_text(_: u64, _: u8) -> HostTextResult {
+        HostTextResult { value: std::ptr::null(), error: std::ptr::null() }
+    }
+
+    extern "C" fn cleanup_test_host_query(_: u64, _: u8) -> HostTextResult {
+        HostTextResult { value: thaw_arena::owned_string(b"object"), error: std::ptr::null() }
+    }
+
+    extern "C" fn unused_typed_scope_date(_: u64, _: f64) -> HostTextResult {
+        HostTextResult { value: std::ptr::null(), error: std::ptr::null() }
+    }
+
+    extern "C" fn release_and_destroy_nested(_handle: u64) -> u8 {
+        NESTED_DESTROY.with(|slot| {
+            let nested = slot.replace(std::ptr::null_mut());
+            assert!(!nested.is_null());
+            unsafe { thaw_json_destroy(nested) };
+        });
+        count_host_release(0)
+    }
 
     fn parse(s: &str) -> *mut Value {
         let c = CString::new(s).unwrap();
@@ -4525,6 +5973,209 @@ mod tests {
         Box::leak(bytes.into_boxed_slice()).as_ptr()
     }
 
+    #[test]
+    fn graph_transport_keeps_wrapper_identity_and_map_back_edges() {
+        let map = thaw_json_brand_wrapper(thaw_json_object_new());
+        let entries = thaw_json_array_new();
+        let pair = thaw_json_array_new();
+        thaw_json_array_push_string(pair, CString::new("self").unwrap().as_ptr());
+        thaw_json_array_push_json(pair, map);
+        thaw_json_array_push_json(entries, pair);
+        thaw_json_object_set_json(map, CString::new("__thaw_map_entries__").unwrap().as_ptr(), entries);
+        let root = thaw_json_object_new();
+        thaw_json_object_set_json(root, CString::new("left").unwrap().as_ptr(), map);
+        thaw_json_object_set_json(root, CString::new("right").unwrap().as_ptr(), map);
+        let graph: serde_json::Value = serde_json::from_str(
+            &read_c_string(thaw_json_graph_encode(root))
+        ).unwrap();
+        assert_eq!(graph["nodes"][0]["o"][0][1]["r"], 1);
+        assert_eq!(graph["nodes"][0]["o"][1][1]["r"], 1);
+        assert_eq!(graph["nodes"][1]["m"]["r"], 2);
+        assert_eq!(graph["nodes"][3]["a"][1]["r"], 1);
+
+        let ordinary = parse(r#"{"__thaw_map_entries__":[["a",1]]}"#);
+        let ordinary_graph: serde_json::Value = serde_json::from_str(
+            &read_c_string(thaw_json_graph_encode(ordinary))
+        ).unwrap();
+        assert!(ordinary_graph["nodes"][0].get("o").is_some());
+        assert!(ordinary_graph["nodes"][0].get("m").is_none());
+    }
+
+    #[test]
+    fn parsed_wrapper_shaped_user_objects_remain_plain_objects() {
+        let parsed = parse(r#"{"__thaw_map_entries__":[["k",1]]}"#);
+        assert_eq!(thaw_json_has_wrapper_key(parsed, c"__thaw_map_entries__".as_ptr()), 0);
+        let key = parse(r#""k""#);
+        let missing = thaw_json_map_or_set_get(parsed, key);
+        assert_eq!(unsafe { thaw_json_is_undefined(missing) }, 1);
+        assert_eq!(thaw_json_map_or_set_has(parsed, key), 0);
+        let branded = thaw_json_brand_wrapper(parse(r#"{"__thaw_map_entries__":[["k",1]]}"#));
+        assert_eq!(thaw_json_has_wrapper_key(branded, c"__thaw_map_entries__".as_ptr()), 1);
+        assert_eq!(thaw_json_map_or_set_has(branded, key), 1);
+    }
+
+    #[test]
+    fn only_branded_dynamic_handle_placeholders_expose_handle_ids() {
+        let forged = parse(r#"{"__thaw_js_handle_id__":7}"#);
+        assert_eq!(unsafe { thaw_json_handle_id(forged) }, 0);
+        let extra = parse(r#"{"__thaw_js_handle_id__":7,"user":true}"#);
+        thaw_json_brand_wrapper(extra);
+        assert_eq!(unsafe { thaw_json_handle_id(extra) }, 0);
+        let placeholder = parse(r#"{"__thaw_js_handle_id__":7}"#);
+        thaw_json_brand_wrapper(placeholder);
+        assert_eq!(unsafe { thaw_json_handle_id(placeholder) }, 7);
+    }
+
+    #[test]
+    fn graph_decode_preserves_callback_cycles_binary_and_handles() {
+        let encoded = CString::new(r#"{"root":{"r":0},"nodes":[{"a":[{"r":0},{"r":1},{"r":2}]},{"b":[0,127,255]},{"hdl":7}]}"#).unwrap();
+        let decoded = thaw_json_graph_decode(encoded.as_ptr());
+        assert_eq!(thaw_json_take_graph_error(), 0);
+        let graph: serde_json::Value = serde_json::from_str(
+            &read_c_string(thaw_json_graph_encode(decoded))
+        ).unwrap();
+        assert_eq!(graph["nodes"][0]["a"][0]["r"], 0);
+        assert_eq!(graph["nodes"][1]["b"], serde_json::json!([0, 127, 255]));
+        assert_eq!(graph["nodes"][2]["hdl"], 7);
+        let malformed = CString::new(r#"{"root":{"r":3},"nodes":[]}"#).unwrap();
+        let invalid = thaw_json_graph_decode(malformed.as_ptr());
+        assert_eq!(thaw_json_take_graph_error(), 1);
+        unsafe { thaw_json_destroy(invalid) };
+    }
+
+    #[test]
+    fn graph_transport_preserves_cycle_alias_and_date_node_identity() {
+        let root = thaw_json_object_new();
+        thaw_json_object_set_json(root, CString::new("self").unwrap().as_ptr(), root);
+        let date = thaw_json_brand_wrapper(parse(r#"{"timestamp":0}"#));
+        thaw_json_object_set_json(root, CString::new("left").unwrap().as_ptr(), date);
+        thaw_json_object_set_json(root, CString::new("right").unwrap().as_ptr(), date);
+        let graph: serde_json::Value = serde_json::from_str(
+            &read_c_string(thaw_json_graph_encode(root))
+        ).unwrap();
+        assert_eq!(graph["root"]["r"], 0);
+        assert_eq!(graph["nodes"][0]["o"][0][1]["r"], 0);
+        assert_eq!(graph["nodes"][0]["o"][1][1]["r"], 1);
+        assert_eq!(graph["nodes"][0]["o"][2][1]["r"], 1);
+        assert_eq!(graph["nodes"][1]["d"], 0);
+        assert_eq!(thaw_json_take_stringify_error(), 0);
+    }
+
+    #[test]
+    fn graph_tokens_distinguish_napi_and_user_reserved_shapes() {
+        NAPI_RETAINS.with(|count| count.set(0));
+        NAPI_RELEASES.with(|count| count.set(0));
+        thaw_json_register_napi_handle_operations(retain_test_napi_handle, release_test_napi_reference);
+        let source = CString::new(r#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"r":2},{"u":1},{"r":3},{"r":4},{"r":5}]},{"d":0},{"o":[["timestamp",{"v":0}]]},{"o":[["$__thaw_napi_undefined$",{"v":true}]]},{"nh":"17"},{"o":[["__thaw_napi_handle__",{"v":"17"}]]}]}"#).unwrap();
+        let value = thaw_json_graph_decode(source.as_ptr());
+        assert_eq!(thaw_json_take_graph_error(), 0);
+        let items = unsafe { &*value }.as_array().unwrap();
+        assert_eq!(thaw_json_is_date_shape(&items[0]), 1);
+        assert_eq!(thaw_json_is_date_shape(&items[1]), 0);
+        assert!(is_napi_undefined(&items[2]));
+        assert!(!is_napi_undefined(&items[3]));
+        let wire = thaw_json_graph_encode(value);
+        let encoded: serde_json::Value = serde_json::from_str(&read_c_string(wire)).unwrap();
+        assert_eq!(encoded["nodes"][1]["d"], 0);
+        assert!(encoded["nodes"][2].get("o").is_some());
+        assert!(encoded["nodes"][3].get("o").is_some());
+        assert_eq!(encoded["nodes"][4]["nh"], "17");
+        assert_eq!(encoded["napiLeases"], serde_json::json!(["119"]));
+        assert_eq!(encoded["nodes"][5]["o"][0][0], "__thaw_napi_handle__");
+        NAPI_RETAINS.with(|count| assert_eq!(count.get(), 2));
+        thaw_json_discard_graph_wire(wire);
+        unsafe { thaw_cstring_destroy(wire.cast_mut()) };
+        NAPI_RELEASES.with(|count| assert_eq!(count.get(), 1));
+        let cloned = unsafe { thaw_json_clone(value) };
+        unsafe { thaw_json_destroy(value) };
+        NAPI_RELEASES.with(|count| assert_eq!(count.get(), 1));
+        unsafe { thaw_json_destroy(cloned) };
+        NAPI_RELEASES.with(|count| assert_eq!(count.get(), 2));
+
+        // A later malformed node must roll back the positive reference
+        // acquired for an earlier nh node, even though no root escapes.
+        let invalid = CString::new(r#"{"root":{"r":0},"nodes":[{"nh":"17"},{"unknown":1}]}"#).unwrap();
+        let failed = thaw_json_graph_decode(invalid.as_ptr());
+        assert_eq!(thaw_json_take_graph_error(), 1);
+        unsafe { thaw_json_destroy(failed) };
+        NAPI_RETAINS.with(|count| assert_eq!(count.get(), 3));
+        NAPI_RELEASES.with(|count| assert_eq!(count.get(), 3));
+    }
+
+    #[test]
+    fn parsed_timestamp_object_is_not_a_date() {
+        let ordinary = parse(r#"{"timestamp":0}"#);
+        assert_eq!(thaw_json_is_date_shape(ordinary), 0);
+        let trusted = thaw_json_brand_wrapper(parse(r#"{"timestamp":0}"#));
+        assert_eq!(thaw_json_is_date_shape(trusted), 1);
+    }
+
+    #[test]
+    fn graph_regexp_last_index_keeps_nonfinite_number_kind() {
+        for name in ["NaN", "Infinity", "-Infinity"] {
+            let source = CString::new(format!(r#"{{"root":{{"r":0}},"nodes":[{{"re":["x","g","{name}"]}}]}}"#)).unwrap();
+            let decoded = thaw_json_graph_decode(source.as_ptr());
+            assert_eq!(thaw_json_take_graph_error(), 0);
+            let last_index = regexp_wrapper_property(unsafe { &*decoded }, "lastIndex").unwrap();
+            assert_eq!(unsafe { CStr::from_ptr(thaw_json_typeof(&last_index)) }.to_str().unwrap(), "number");
+            let encoded: serde_json::Value = serde_json::from_str(
+                &read_c_string(thaw_json_graph_encode(decoded))
+            ).unwrap();
+            assert_eq!(encoded["nodes"][0]["re"][2], name);
+        }
+    }
+
+    #[test]
+    fn stringify_rejects_only_ancestor_cycles_and_resets_error() {
+        let object = thaw_json_object_new();
+        thaw_json_object_set_number(object, CString::new("value").unwrap().as_ptr(), 1.0);
+        thaw_json_object_set_json(object, CString::new("self").unwrap().as_ptr(), object);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_public(object)),
+            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+        );
+        assert_eq!(thaw_json_take_stringify_error(), 1);
+        assert_eq!(thaw_json_take_stringify_error(), 0);
+
+        // The selected property list excludes the back edge.
+        let keys = encode_string_array(&["value"]);
+        assert_eq!(read_c_string(thaw_json_stringify_keys(object, keys, std::ptr::null())), r#"{"value":1}"#);
+        assert_eq!(thaw_json_take_stringify_error(), 0);
+
+        let child = thaw_json_object_new();
+        thaw_json_object_set_number(child, CString::new("n").unwrap().as_ptr(), 2.0);
+        let shared = thaw_json_object_new();
+        thaw_json_object_set_json(shared, CString::new("left").unwrap().as_ptr(), child);
+        thaw_json_object_set_json(shared, CString::new("right").unwrap().as_ptr(), child);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_public(shared)),
+            r#"{"left":{"n":2},"right":{"n":2}}"#
+        );
+        assert_eq!(thaw_json_take_stringify_error(), 0);
+    }
+
+    #[test]
+    fn stringify_cyclic_array_and_spaced_replacer_report_type_error() {
+        let array = thaw_json_array_new();
+        thaw_json_array_push_json(array, array);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_number_space(array, 2.0)),
+            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+        );
+        assert_eq!(thaw_json_take_stringify_error(), 1);
+
+        let object = thaw_json_object_new();
+        thaw_json_object_set_json(object, CString::new("self").unwrap().as_ptr(), object);
+        let keys = encode_string_array(&["self"]);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_keys_string_space(
+                object, keys, std::ptr::null(), CString::new("  ").unwrap().as_ptr()
+            )),
+            "\u{1}TypeError\u{1}Converting circular structure to JSON"
+        );
+        assert_eq!(thaw_json_take_stringify_error(), 1);
+    }
+
     /// User-facing `JSON.stringify` (the `_public` entry points) matches
     /// real JS's own object-vs-array asymmetry for a nested genuinely
     /// `undefined` value (here, a real napi-undefined sentinel obtained
@@ -4778,6 +6429,81 @@ mod tests {
     }
 
     #[test]
+    fn destroy_releases_isolated_cycle_but_preserves_external_alias() {
+        let object = Value::shared_object(indexmap::IndexMap::new());
+        let Value::Object(fields) = &object else { unreachable!() };
+        let weak = Rc::downgrade(fields);
+        shared_object_ref_mut(fields).insert(b"self".to_vec(), object.clone());
+        let first = leak(object.clone());
+        let second = leak(object);
+        unsafe { thaw_json_destroy(first) };
+        assert!(weak.upgrade().is_some());
+        let self_value = thaw_json_get(second, c"self".as_ptr());
+        assert_eq!(unsafe { thaw_json_strict_equal(second, self_value) }, 1);
+        unsafe { thaw_json_destroy(self_value); thaw_json_destroy(second) };
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn destroy_retains_prototype_child_alias_then_releases_host_once() {
+        HOST_RELEASES.with(|count| count.set(0));
+        let parent = Value::shared_object(indexmap::IndexMap::new());
+        let child = Value::shared_object(indexmap::IndexMap::new());
+        let Value::Object(parent_fields) = &parent else { unreachable!() };
+        let Value::Object(child_fields) = &child else { unreachable!() };
+        let parent_weak = Rc::downgrade(parent_fields);
+        let child_weak = Rc::downgrade(child_fields);
+        shared_object_ref_mut(child_fields).insert(b"parent".to_vec(), parent.clone());
+        shared_object_ref_mut(child_fields).insert(b"host".to_vec(),
+            Value::Host(Rc::new(HostLease { handle: 47, release: count_host_release })));
+        let parent = leak(parent);
+        let child = leak(child);
+        unsafe { thaw_json_set_prototype(parent, child) };
+        assert_eq!(thaw_json_take_prototype_error(), 0);
+        unsafe { thaw_json_destroy(parent) };
+        HOST_RELEASES.with(|count| assert_eq!(count.get(), 0));
+        assert!(parent_weak.upgrade().is_some());
+        assert!(child_weak.upgrade().is_some());
+        unsafe { thaw_json_destroy(child) };
+        HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+        assert!(parent_weak.upgrade().is_none());
+        assert!(child_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn host_release_reenters_destroy_without_temporary_graph_aliases() {
+        HOST_RELEASES.with(|count| count.set(0));
+        let outer = Value::shared_object(indexmap::IndexMap::new());
+        let nested = Value::shared_object(indexmap::IndexMap::new());
+        let Value::Object(outer_fields) = &outer else { unreachable!() };
+        let Value::Object(nested_fields) = &nested else { unreachable!() };
+        let outer_weak = Rc::downgrade(outer_fields);
+        let nested_weak = Rc::downgrade(nested_fields);
+        shared_object_ref_mut(nested_fields).insert(b"self".to_vec(), nested.clone());
+        shared_object_ref_mut(outer_fields).insert(b"self".to_vec(), outer.clone());
+        shared_object_ref_mut(outer_fields).insert(b"nested".to_vec(), nested.clone());
+        shared_object_ref_mut(outer_fields).insert(b"host".to_vec(),
+            Value::Host(Rc::new(HostLease { handle: 48, release: release_and_destroy_nested })));
+        let outer = leak(outer);
+        let nested = leak(nested);
+        NESTED_DESTROY.with(|slot| slot.set(nested));
+        unsafe { thaw_json_destroy(outer) };
+        HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+        NESTED_DESTROY.with(|slot| assert!(slot.get().is_null()));
+        assert!(outer_weak.upgrade().is_none());
+        assert!(nested_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn host_error_text_keeps_embedded_nul() {
+        set_host_error("before\0after".to_string());
+        let text = thaw_json_take_host_error();
+        assert_eq!(unsafe { CStr::from_ptr(text) }.to_bytes(), b"before\0after");
+        unsafe { thaw_cstring_destroy(text.cast_mut()) };
+        assert!(thaw_json_take_host_error().is_null());
+    }
+
+    #[test]
     fn jit_dictionary_callbacks_preserve_presence_and_typed_failures() {
         unsafe extern "C" {
             fn thaw_object_set_state(object: *const u8, operation: u8) -> bool;
@@ -4838,4 +6564,178 @@ mod tests {
         unsafe { thaw_json_destroy(sealed) };
         unsafe { thaw_json_destroy(source) };
     }
+
+    #[test]
+    fn bigint_receiver_graph_uses_exact_decimal_and_public_stringify_errors() {
+        let value = thaw_json_receiver_bigint(9_007_199_254_740_993);
+        assert_eq!(read_c_string(thaw_json_graph_encode(value)),
+            r#"{"root":{"bi":"9007199254740993"},"nodes":[],"leases":[],"napiLeases":[]}"#);
+        let graph = CString::new(r#"{"root":{"bi":"-18446744073709551617"},"nodes":[]}"#).unwrap();
+        let decoded = thaw_json_graph_decode(graph.as_ptr());
+        assert_eq!(read_c_string(thaw_json_as_string(decoded)), "-18446744073709551617");
+        assert_eq!(unsafe { CStr::from_ptr(thaw_json_typeof(decoded)) }.to_bytes(), b"bigint");
+        let _ = thaw_json_stringify_public(decoded);
+        assert_eq!(read_c_string(thaw_json_take_host_error()),
+            "\u{1}TypeError\u{1}Do not know how to serialize a BigInt");
+        unsafe { thaw_json_destroy(value); thaw_json_destroy(decoded); }
+    }
+
+    #[test]
+    fn destroying_last_host_root_does_not_leave_cleanup_error() {
+        std::thread::spawn(|| {
+            CLEANUP_HOST_RELEASES.with(|count| count.set(0));
+            HOST_OPERATIONS.with(|slot| slot.set(Some(HostOperations {
+                retain: retain_typed_scope_host,
+                release: release_with_cleanup_host_error,
+                get: reentrant_typed_scope_get,
+                query: cleanup_test_host_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            })));
+            let first = leak(Value::Host(Rc::new(HostLease {
+                handle: 11,
+                release: release_with_cleanup_host_error,
+            })));
+            unsafe { thaw_json_destroy(first) };
+            CLEANUP_HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+            assert!(thaw_json_take_host_error().is_null());
+
+            let second = leak(Value::Host(Rc::new(HostLease {
+                handle: 12,
+                release: release_with_cleanup_host_error,
+            })));
+            assert_eq!(unsafe { CStr::from_ptr(thaw_json_typeof(second)) }.to_bytes(), b"object");
+            unsafe { thaw_json_destroy(second) };
+            CLEANUP_HOST_RELEASES.with(|count| assert_eq!(count.get(), 2));
+            assert!(thaw_json_take_host_error().is_null());
+
+            set_host_error("original operation error".into());
+            let third = leak(Value::Host(Rc::new(HostLease {
+                handle: 13,
+                release: release_with_cleanup_host_error,
+            })));
+            unsafe { thaw_json_destroy(third) };
+            CLEANUP_HOST_RELEASES.with(|count| assert_eq!(count.get(), 3));
+            let original = thaw_json_take_host_error();
+            assert_eq!(read_c_string(original), "original operation error");
+            unsafe { thaw_arena::destroy_string(original.cast_mut()) };
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn typed_decode_scope_rollback_preserves_original_host_error() {
+        std::thread::spawn(|| {
+            HOST_OPERATIONS.with(|slot| slot.set(Some(HostOperations {
+                retain: retain_typed_scope_host,
+                release: release_with_cleanup_host_error,
+                get: reentrant_typed_scope_get,
+                query: unused_typed_scope_text,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            })));
+            let host = Value::Host(Rc::new(HostLease {
+                handle: 12, release: release_with_cleanup_host_error,
+            }));
+            let array = leak(Value::shared_array(vec![host]));
+            set_host_error("original conversion error".into());
+            thaw_json_typed_decode_scope_begin();
+            let child = thaw_json_index(array, 0.0, std::ptr::null());
+            assert_eq!(unsafe { thaw_json_handle_id(child) }, 12);
+            thaw_json_typed_decode_scope_end(1);
+            let original = thaw_json_take_host_error();
+            assert_eq!(read_c_string(original), "original conversion error");
+            unsafe { thaw_arena::destroy_string(original.cast_mut()) };
+
+            thaw_json_typed_decode_scope_begin();
+            let child = thaw_json_index(array, 0.0, std::ptr::null());
+            assert_eq!(unsafe { thaw_json_handle_id(child) }, 12);
+            thaw_json_typed_decode_scope_end(1);
+            assert!(thaw_json_take_host_error().is_null());
+            let discarded = CString::new(r#"{"root":{"v":null},"nodes":[],"leases":[12]}"#).unwrap();
+            thaw_json_discard_graph_wire(discarded.as_ptr());
+            assert!(thaw_json_take_host_error().is_null());
+            let value = parse(r#"{"ok":1}"#);
+            let ok = thaw_json_get(value, c"ok".as_ptr());
+            assert_eq!(thaw_json_as_number(ok), 1.0);
+            unsafe { thaw_json_destroy(ok); thaw_json_destroy(value); thaw_json_destroy(array) };
+            // The source's final Host lease may itself set an error; it is
+            // independent of the completed conversion.
+            let final_error = thaw_json_take_host_error();
+            if !final_error.is_null() {
+                unsafe { thaw_arena::destroy_string(final_error.cast_mut()) };
+            }
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            TYPED_SCOPE_RETAINS.with(|count| count.set(0));
+            HOST_OPERATIONS.with(|slot| slot.set(Some(HostOperations {
+                retain: retain_typed_scope_host,
+                release: count_host_release,
+                get: reentrant_typed_scope_get,
+                query: unused_typed_scope_text,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            })));
+
+            let host = Value::Host(Rc::new(HostLease {
+                handle: 7, release: count_host_release,
+            }));
+            let array = leak(Value::shared_array(vec![host.clone(), host]));
+            thaw_json_typed_decode_scope_begin();
+            for index in 0..2 {
+                let child = thaw_json_index(array, index as f64, std::ptr::null());
+                assert_eq!(unsafe { thaw_json_handle_id(child) }, 7);
+                unsafe { thaw_json_destroy(child) };
+            }
+            thaw_json_typed_decode_scope_end(1);
+            TYPED_SCOPE_RETAINS.with(|count| assert_eq!(count.get(), 2));
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 2));
+
+            let nested = leak(Value::shared_array(vec![Value::shared_object(
+                indexmap::IndexMap::from([(b"ok".to_vec(), number_value(1.0))]),
+            )]));
+            let Value::Array(items) = unsafe { &*nested } else { unreachable!() };
+            let Value::Object(fields) = &shared_array_ref(items)[0] else { unreachable!() };
+            let before = Rc::strong_count(fields);
+            thaw_json_typed_decode_scope_begin();
+            thaw_json_typed_decode_scope_begin();
+            let _child = thaw_json_index(nested, 0.0, std::ptr::null());
+            assert_eq!(Rc::strong_count(fields), before + 1);
+            thaw_json_typed_decode_scope_end(2);
+            thaw_json_typed_decode_scope_end(1);
+            assert_eq!(Rc::strong_count(fields), before);
+
+            let source = parse(r#"{"x":{"ok":1}}"#);
+            REENTRANT_SOURCE.with(|slot| slot.set(source));
+            let host_root = leak(Value::Host(Rc::new(HostLease {
+                handle: 9, release: count_host_release,
+            })));
+            thaw_json_typed_decode_scope_begin();
+            let _outer = thaw_json_get(host_root, c"reenter".as_ptr());
+            thaw_json_typed_decode_scope_end(1);
+            let escaped = REENTRANT_CHILD.with(|slot| slot.replace(std::ptr::null_mut()));
+            assert!(!escaped.is_null());
+            let ok = thaw_json_get(escaped, c"ok".as_ptr());
+            assert_eq!(thaw_json_as_number(ok), 1.0);
+            unsafe {
+                thaw_json_destroy(ok);
+                thaw_json_destroy(escaped);
+                thaw_json_destroy(source);
+                thaw_json_destroy(host_root);
+                thaw_json_destroy(array);
+                thaw_json_destroy(nested);
+            }
+        }).join().unwrap();
+    }
+
 }

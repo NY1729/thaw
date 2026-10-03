@@ -2098,9 +2098,22 @@ impl<'a> FnLowerer<'a> {
                 // `Symbol.toStringTag` getter report one; an Array/plain
                 // object has none, so this reads `undefined` (its "Array"
                 // tag comes from `Object.prototype.toString`, not here).
-                let tag = if receiver_type == date_object_type() {
-                    Some("Date")
-                } else if receiver_type == regex_object_type() {
+                if receiver_type == date_object_type() {
+                    let checked = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_date_has_native_identity".into())),
+                        vec![receiver],
+                    );
+                    return Ok(HirExpr::Conditional(
+                        Box::new(checked),
+                        Box::new(HirExpr::OptionalSome(
+                            Box::new(HirExpr::Lit(HirLit::Str("Date".into()))),
+                            HirType::Str,
+                        )),
+                        Box::new(HirExpr::OptionalNone(HirType::Str)),
+                        HirType::Optional(Box::new(HirType::Str)),
+                    ));
+                }
+                let tag = if receiver_type == regex_object_type() {
                     Some("RegExp")
                 } else {
                     match &receiver_type {

@@ -3953,6 +3953,50 @@ fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
 }
 
 #[test]
+fn json_date_setters_mutate_original_alias_after_argument_evaluation() {
+    let source = r#"
+        function main(): void {
+            const date: any = new Date(0);
+            const alias: any = date;
+            console.log(date.setTime(2000));
+            console.log(alias.getTime());
+            console.log(date.setYear(72));
+            console.log(alias.getFullYear());
+            let effects = 0;
+            const lookalike: any = { timestamp: 0 };
+            try { lookalike.setTime(++effects); } catch (_) {}
+            console.log(effects);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_date_setter_alias_and_order"),
+        "2000\n2000\n63072002000\n1972\n1\n"
+    );
+}
+
+#[test]
+fn forged_date_layout_does_not_gain_native_date_methods_or_coercion() {
+    let source = r#"
+        function main(): void {
+            const fake = {
+                ["__thaw_class_identity_\u001eDate"]: true,
+                timestamp: 0,
+            } as Date;
+            let effects = 0;
+            try { fake.setTime(++effects); } catch (_) { console.log("setter rejected"); }
+            console.log(effects);
+            try { fake.getTime(); } catch (_) { console.log("getter rejected"); }
+            try { Number(fake); } catch (_) { console.log("coercion rejected"); }
+            console.log(Object.prototype.toString.call(fake));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "forged_date_layout_identity"),
+        "setter rejected\n1\ngetter rejected\ncoercion rejected\n[object Object]\n"
+    );
+}
+
+#[test]
 fn compiles_instanceof_and_size_for_native_collections() {
     // `Date`/`RegExp`/`Map`/`Set` aren't registered in `self.signatures`
     // (each has its own bespoke method-dispatch file, not a real class
@@ -9870,6 +9914,52 @@ fn regex_javascript_ascii_digit_and_word_classes() {
 }
 
 #[test]
+fn json_stringify_cycle_replacer_runs_before_cycle_error() {
+    let source = r#"
+        function main(): void {
+            const value: any = JSON.parse('{"keep":1}');
+            value.self = value;
+            console.log(JSON.stringify(value, (key: string, item: any) =>
+                key === "self" ? undefined : item));
+            try {
+                JSON.stringify(value, (_key: string, item: any) => item);
+            } catch (error) {
+                console.log((error as any).name);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_cycle_function_replacer"),
+        "{\"keep\":1}\nTypeError\n"
+    );
+}
+
+#[test]
+fn json_stringify_function_replacer_observes_live_holder_and_saved_this() {
+    let source = r#"
+        function main(): void {
+            const root: any = JSON.parse('{"child":{"value":3}}');
+            console.log(JSON.stringify(root, function(key: string, value: any): any {
+                if (key === "value") console.log(this === root.child);
+                return value;
+            }));
+            const receiver = { label: "lexical" };
+            const ordinary = function(this: { label: string }, suffix: string): string {
+                return this.label + suffix;
+            };
+            const saved = { ordinary };
+            console.log(saved.ordinary.call(receiver, "-call"));
+            console.log(saved.ordinary.apply(receiver, ["-apply"]));
+            console.log(saved.ordinary.bind(receiver, "-bind")());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_live_replacer_holder"),
+        "true\n{\"child\":{\"value\":3}}\nlexical-call\nlexical-apply\nlexical-bind\n"
+    );
+}
+
+#[test]
 fn date_set_year_truncates_before_two_digit_year_adjustment() {
     let source = r#"
         function main(): void {
@@ -10138,6 +10228,33 @@ fn date_constructor_uses_live_value_without_snapshot_or_user_date_globals() {
 }
 
 #[test]
+fn graph_callback_argument_conversion_failure_preserves_exception_and_skips_body() {
+    let source = r#"
+        let entered = 0;
+        function callback(prior: JsValue, item: { value: number }): number {
+            entered++;
+            return item.value;
+        }
+        function main(): void {
+            loadScript("globalThis.invokeBadCallback = callback => callback({ prior: true }, { get value() { throw new Error('argument getter'); } }); globalThis.invokeGoodCallback = callback => callback({ prior: true }, { value: 4 });");
+            const handle: JsValue = registerNativeCallbackGraph(callback);
+            try {
+                callDynamicValueWithValue(getDynamicValue("invokeBadCallback"), handle);
+                console.log("missed exception");
+            } catch (error) {
+                console.log((error as Error).message === "argument getter");
+            }
+            console.log(Number(callDynamicValueWithValue(getDynamicValue("invokeGoodCallback"), handle)), entered);
+            releaseDynamicValue(handle);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "graph_callback_conversion_failure"),
+        "true\n4 1\n"
+    );
+}
+
+#[test]
 fn date_constructor_dispatches_static_string_and_absence_wrappers_once() {
     let source = r#"
         let calls = 0;
@@ -10263,4 +10380,44 @@ fn native_object_method_receiver_mutations_use_original_prefix_storage() {
         compile_and_run(source, "native_object_method_receiver_live_prefix"),
         "2 2\n3 3\n1 1\n2 2\n{\"value\":7}\n"
     );
+}
+
+#[test]
+fn live_json_date_selected_getter_precedes_argument_and_preserves_this() {
+    let source = r#"
+        let effects = 0;
+        function argument(): number { effects++; return 7; }
+        function main(): void {
+            loadScript("globalThis.d = new Date(0); globalThis.selected = 0; Object.defineProperty(d, 'getTime', { get() { selected++; return function(value) { return this === d ? value : -1; }; } });");
+            const date: any = getDynamicValue("d");
+            console.log(date.getTime(argument()));
+            console.log(Number(getDynamicValue("selected")), effects);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "live_json_date_selected_member_clean"), "7\n1 1\n");
+}
+
+#[test]
+fn public_dynamic_method_helper_evaluates_arguments_before_get_but_member_call_selects_first() {
+    let source = r#"
+        function helperArgs(): any {
+            loadScript("order.push('A')");
+            return JSON.parse("[4]");
+        }
+        function memberArg(): number {
+            loadScript("order.push('A')");
+            return 5;
+        }
+        function main(): void {
+            loadScript("globalThis.order = []; globalThis.box = { get m() { order.push('G'); return function(value) { order.push('C'); return value; }; } }");
+            const box: JsValue = getDynamicValue("box");
+            console.log(Number(callDynamicMethod(box, "m", helperArgs())));
+            loadScript("globalThis.helperOrder = order.join(''); order.length = 0");
+            console.log(String(getDynamicValue("helperOrder")));
+            console.log(Number(box.m(memberArg())));
+            loadScript("globalThis.memberOrder = order.join('')");
+            console.log(String(getDynamicValue("memberOrder")));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "public_helper_vs_member_get_order"), "4\nAGC\n5\nGAC\n");
 }

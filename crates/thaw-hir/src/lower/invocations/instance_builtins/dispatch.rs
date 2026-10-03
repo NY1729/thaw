@@ -140,6 +140,82 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+        // The private Date field layout is not proof of a native Date.
+        // Capture arguments before the internal-slot check, then pass only
+        // a verified allocation to every Date getter/setter/converter.
+        if matches!(property.sym.as_ref(),
+            "getTime" | "setTime" | "getYear" | "setYear" | "toISOString"
+            | "getFullYear" | "getMonth" | "getDate" | "getDay"
+            | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
+            | "getTimezoneOffset" | "getUTCFullYear" | "getUTCMonth"
+            | "getUTCDate" | "getUTCDay" | "getUTCHours" | "getUTCMinutes"
+            | "getUTCSeconds" | "getUTCMilliseconds" | "setFullYear"
+            | "setMonth" | "setDate" | "setHours" | "setMinutes"
+            | "setSeconds" | "setMilliseconds" | "setUTCFullYear"
+            | "setUTCMonth" | "setUTCDate" | "setUTCHours"
+            | "setUTCMinutes" | "setUTCSeconds" | "setUTCMilliseconds"
+            | "toJSON" | "toDateString" | "toTimeString" | "toUTCString"
+            | "toString" | "valueOf" | "toLocaleString"
+            | "toLocaleDateString" | "toLocaleTimeString") {
+            let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+            // Preserve Bytes here: normalizing it to Array would change
+            // the unrelated `Buffer.toString(encoding)` dispatch.
+            let receiver_type = self.infer_expr_type_inner(&receiver)?;
+            let receiver_name = format!("__thaw_date_method_receiver_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(receiver_name.clone(), receiver_type.clone());
+            let mut bindings = vec![(receiver_name.clone(), receiver_type.clone(), receiver)];
+            let (arguments, spread_bindings) = self.lower_native_spread_values(
+                &call.args, &format!("{}.{}", "native receiver", property.sym),
+            )?;
+            bindings.extend(spread_bindings);
+            let mut synthetic_call = call.clone();
+            synthetic_call.args.clear();
+            for argument in arguments {
+                let ty = self.infer_expr_type(&argument)?;
+                let name = format!("__thaw_date_method_arg_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                bindings.push((name.clone(), ty, argument));
+                synthetic_call.args.push(swc_ecma_ast::ExprOrSpread {
+                    spread: None,
+                    expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        name.into(), member.span,
+                    ))),
+                });
+            }
+            let checked_name = format!("__thaw_date_method_checked_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(checked_name.clone(), receiver_type.clone());
+            let checked = if receiver_type == date_object_type() {
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_date_assert_native_identity".into())),
+                    vec![HirExpr::Var(receiver_name)],
+                )
+            } else {
+                HirExpr::Var(receiver_name)
+            };
+            bindings.push((checked_name.clone(), receiver_type, checked));
+            let synthetic_member = MemberExpr {
+                obj: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    checked_name.into(), member.span,
+                ))),
+                ..member.clone()
+            };
+            let result = self.lower_native_instance_builtin_unchecked(
+                &synthetic_member, property, &synthetic_call,
+            )?;
+            return self.wrap_call_argument_bindings(result, &bindings);
+        }
+        self.lower_native_instance_builtin_unchecked(member, property, call)
+    }
+
+    fn lower_native_instance_builtin_unchecked(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
         match property.sym.as_ref() {
             "charAt" | "charCodeAt" | "localeCompare" | "normalize" | "split" => {
                 self.lower_native_text_method(member, property, call)

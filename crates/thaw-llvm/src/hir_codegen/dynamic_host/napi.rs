@@ -57,7 +57,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let args_json = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function("thaw_json_graph_encode").unwrap(),
                 &[array.into()],
                 "napi_setter_args_json",
             )
@@ -65,11 +65,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
         let result = self
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_napi_set_property_typed_result")
+                    .get_function("thaw_napi_set_property_typed_graph_result")
                     .unwrap(),
                 &[
                     receiver.into(),
@@ -98,18 +99,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let json = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_parse").unwrap(),
-                &[value.into()],
-                "napi_setter_parsed",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| "thaw_json_parse returned no setter value".to_string())?;
-        self.destroy_typed_host_result_string(value)?;
+        let json = self.compile_decode_quickjs_graph(value.into())?;
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
@@ -149,7 +139,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_napi_get_property_typed_result")
+                    .get_function("thaw_napi_get_property_typed_graph_result")
                     .unwrap(),
                 &[receiver.into(), property.as_pointer_value().into()],
                 "napi_getter_result",
@@ -173,18 +163,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let json = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_parse").unwrap(),
-                &[value.into()],
-                "napi_getter_parsed",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| "thaw_json_parse returned no getter value".to_string())?;
-        self.destroy_typed_host_result_string(value)?;
+        let json = self.compile_decode_quickjs_graph(value.into())?;
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
@@ -289,7 +268,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let args_json = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function("thaw_json_graph_encode").unwrap(),
                 &[array.into()],
                 "napi_method_args_json",
             )
@@ -297,13 +276,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
         if signature.backend == DynamicBackend::QuickJs && signature.ret == HirType::JsValue {
             self.uses_quickjs_handles = true;
             let result = self
                 .builder
                 .build_call(
                     self.module
-                        .get_function("thaw_js_call_method_handle_result")
+                        .get_function("thaw_js_call_method_handle_graph_args_result")
                         .unwrap(),
                     &[
                         receiver.into(),
@@ -359,9 +339,9 @@ impl<'ctx> HirCompiler<'ctx> {
             )?
         } else {
             let call_method = if signature.backend == DynamicBackend::QuickJs {
-                "thaw_js_call_method_result"
+                "thaw_js_call_method_graph_result"
             } else {
-                "thaw_napi_call_method_typed_result"
+                "thaw_napi_call_method_typed_graph_result"
             };
             self.builder
                 .build_call(
@@ -407,25 +387,47 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let json = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_parse").unwrap(),
-                &[value.into()],
-                "napi_method_parsed",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| "thaw_json_parse returned no method value".to_string())?;
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_cstring_destroy").unwrap(),
-                &[value.into()],
-                "destroy_typed_method_result_string",
-            )
-            .map_err(|error| error.to_string())?;
+        let json = self.compile_decode_quickjs_graph(value.into())?;
+
         self.compile_typed_dynamic_result(json, &signature.ret)
+    }
+
+    // Event callback wires are owned by the N-API event bridge until this
+    // void adapter returns. A failed first decode cannot leave the second
+    // wire's transferred graph leases behind; a failed second decode must
+    // release the first decoded Json before returning.
+    fn compile_napi_event_callback_graph_arguments(
+        &mut self,
+        adapter: FunctionValue<'ctx>,
+        error_string: BasicValueEnum<'ctx>,
+        result_string: BasicValueEnum<'ctx>,
+    ) -> Result<(BasicValueEnum<'ctx>, BasicValueEnum<'ctx>), String> {
+        let first_failed = self.context.append_basic_block(adapter, "event_error_graph_failed");
+        self.catch_stack.push(first_failed);
+        let error_json = self.compile_decode_graph(error_string, false);
+        self.catch_stack.pop();
+        let error_json = error_json?;
+        let second_failed = self.context.append_basic_block(adapter, "event_result_graph_failed");
+        self.catch_stack.push(second_failed);
+        let result_json = self.compile_decode_graph(result_string, false);
+        self.catch_stack.pop();
+        let result_json = result_json?;
+        let success = self.builder.get_insert_block().ok_or("event graph has no success block")?;
+
+        self.builder.position_at_end(first_failed);
+        self.builder.build_call(self.module.get_function("thaw_json_discard_graph_wire").unwrap(),
+            &[result_string.into()], "discard_unread_event_result_graph")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_return(None).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(second_failed);
+        self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+            &[error_json.into()], "destroy_decoded_event_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_return(None).map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(success);
+        Ok((error_json, result_json))
     }
 
     fn compile_typed_napi_method_callback(
@@ -464,24 +466,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let return_block = self.builder.get_insert_block().unwrap();
         let adapter_entry = self.context.append_basic_block(adapter, "entry");
         self.builder.position_at_end(adapter_entry);
+        // This adapter is a separate LLVM function; its exception route must
+        // not reference the caller's catch block or async completion value.
+        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
+        let outer_async_completion = self.active_async_completion.take();
         let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
         let error_string = adapter.get_nth_param(1).unwrap();
         let result_string = adapter.get_nth_param(2).unwrap();
-        let parse = self.module.get_function("thaw_json_parse").unwrap();
-        let error_json = self
-            .builder
-            .build_call(parse, &[error_string.into()], "method_callback_error")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap();
-        let result_json = self
-            .builder
-            .build_call(parse, &[result_string.into()], "method_callback_result")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap();
+        // The event bridge owns these CStrings until this adapter returns.
+        let (error_json, result_json) = self.compile_napi_event_callback_graph_arguments(
+            adapter, error_string, result_string,
+        )?;
         let code = self
             .builder
             .build_load(ptr_type, context, "method_callback_code")
@@ -504,11 +499,13 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         self.builder.build_return(None).map_err(|e| e.to_string())?;
+        self.catch_stack = outer_catch_stack;
+        self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(return_block);
         self.builder
             .build_call(
                 self.module
-                    .get_function("thaw_napi_call_method_with_callback_result")
+                    .get_function("thaw_napi_call_method_with_callback_graph_result")
                     .unwrap(),
                 &[
                     receiver.into(),
@@ -534,7 +531,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.compile_json_backend_call(args, "thaw_napi_call_result", "callNativeAddon")
+        self.compile_json_backend_call(args, "thaw_napi_call_graph_result", "callNativeAddon")
     }
 
     fn compile_poll_native_addon_events(
@@ -587,7 +584,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let name = self.compile_expr(name)?;
         let args_json = self.compile_expr(call_args)?;
         let closure = self.compile_expr(callback)?.into_pointer_value();
-        let stringify = self.module.get_function("thaw_json_stringify").unwrap();
+        let stringify = self.module.get_function("thaw_json_graph_encode").unwrap();
         let args_string = self
             .builder
             .build_call(stringify, &[args_json.into()], "napi_callback_args")
@@ -595,6 +592,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        let args_string = self.compile_check_json_stringify_error(args_string)?;
 
         let callback_name = format!("__thaw_napi_callback_{}", self.next_lambda);
         self.next_lambda += 1;
@@ -609,24 +607,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let return_block = self.builder.get_insert_block().unwrap();
         let adapter_entry = self.context.append_basic_block(adapter, "entry");
         self.builder.position_at_end(adapter_entry);
+        // This adapter is a separate LLVM function; its exception route must
+        // not reference the caller's catch block or async completion value.
+        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
+        let outer_async_completion = self.active_async_completion.take();
         let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
         let error_string = adapter.get_nth_param(1).unwrap();
         let result_string = adapter.get_nth_param(2).unwrap();
-        let parse = self.module.get_function("thaw_json_parse").unwrap();
-        let error_json = self
-            .builder
-            .build_call(parse, &[error_string.into()], "callback_error")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap();
-        let result_json = self
-            .builder
-            .build_call(parse, &[result_string.into()], "callback_result")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap();
+        // The event bridge owns these CStrings until this adapter returns.
+        let (error_json, result_json) = self.compile_napi_event_callback_graph_arguments(
+            adapter, error_string, result_string,
+        )?;
         let code = self
             .builder
             .build_load(ptr_type, context, "callback_code")
@@ -642,13 +633,15 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         self.builder.build_return(None).map_err(|e| e.to_string())?;
+        self.catch_stack = outer_catch_stack;
+        self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(return_block);
 
         let call = self
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_napi_call_with_callback_result")
+                    .get_function("thaw_napi_call_with_callback_graph_result")
                     .unwrap(),
                 &[
                     name.into(),
@@ -679,15 +672,6 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_json_parse").unwrap(),
-                &[value.into()],
-                "napi_callback_queued_result",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| "thaw_json_parse did not return a value".into())
+        self.compile_decode_quickjs_graph(value)
     }
 }

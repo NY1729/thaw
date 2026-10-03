@@ -6267,6 +6267,302 @@ fn crypto_buffer_regressions() {
 }
 
 #[test]
+fn native_json_graph_replacer_preserves_holder_date_alias_and_wrappers() {
+    assert_eq!(load(r#"
+      function inspectNativeGraph() {
+        const graph = { root: { r: 0 }, nodes: [
+          { o: [['left', { r: 1 }], ['right', { r: 1 }], ['map', { r: 2 }],
+                ['set', { r: 3 }], ['pattern', { r: 4 }], ['__proto__', { v: 7 }]] },
+          { d: 0 },
+          { m: { r: 5 } },
+          { s: { r: 6 } },
+          { re: ['a+', 'gi', 2] },
+          { a: [{ r: 7 }] },
+          { a: [{ v: 3 }] },
+          { a: [{ v: 'self' }, { r: 2 }] },
+        ] };
+        const value = __thaw_json_graph_decode(graph);
+        let same = false;
+        const output = __thaw_json_stringify_replacer(value, null, function (key, item) {
+          if (key === 'right') same = this.left === value.right && item === '1970-01-01T00:00:00.000Z';
+          if (key === 'map' || key === 'set' || key === 'pattern') return undefined;
+          return item;
+        });
+        return [same, value.map.get('self') === value.map,
+                value.set.has(3), value.pattern instanceof RegExp,
+                Object.prototype.hasOwnProperty.call(value, '__proto__'), output];
+      }
+    "#), 1);
+    assert_eq!(call("inspectNativeGraph", "[]"),
+        r#"[true,true,true,true,true,"{\"left\":\"1970-01-01T00:00:00.000Z\",\"right\":\"1970-01-01T00:00:00.000Z\",\"__proto__\":7}"]"#);
+}
+
+
+#[test]
+fn graph_replacer_uses_its_holder_without_reading_callable_call_property() {
+    assert_eq!(load(r#"
+      function inspectGraphReplacerCallProperty() {
+        const value = { item: 3 };
+        let callReads = 0;
+        function replacer(key, item) {
+          if (key === 'item' && this !== value) throw new Error('wrong holder');
+          return item;
+        }
+        Object.defineProperty(replacer, 'call', {
+          get() { callReads++; throw new Error('replacer.call was read'); }
+        });
+        const output = __thaw_json_stringify_replacer(value, null, replacer);
+        return [output, callReads];
+      }
+    "#), 1);
+    assert_eq!(call("inspectGraphReplacerCallProperty", "[]"),
+        r#"["{\"item\":3}",0]"#);
+}
+
+#[test]
+fn tagged_error_reconstruction_reads_versioned_and_legacy_ancestry_names() {
+    assert_eq!(load(r#"
+      function inspectAncestryNames() {
+        const versioned = __thaw_error_from_tagged(
+          '\u0001\u001eLeaf\u001fBase$Name\u001fError\u0001failure');
+        const legacy = __thaw_error_from_tagged('\u0001Leaf$Base$Error\u0001failure');
+        return [versioned.name, versioned.message, legacy.name, legacy.message];
+      }
+    "#), 1);
+    assert_eq!(call("inspectAncestryNames", "[]"),
+        r#"["Leaf","failure","Leaf","failure"]"#);
+}
+
+#[test]
+fn live_json_graph_encoding_does_not_read_replacer_children() {
+    assert_eq!(load(r#"
+      function inspectLiveGraphEncoding() {
+        const previousRetain = globalThis.__thaw_retain_dynamic_value;
+        let reads = 0;
+        const value = { get child() { reads++; throw new Error('early getter'); } };
+        try {
+          globalThis.__thaw_retain_dynamic_value = () => 1;
+          const graph = JSON.parse(__thaw_json_graph_encode_js([value], 0, true));
+          return [reads, graph.nodes[1].hdl === 1, graph.leases.length];
+        } finally {
+          globalThis.__thaw_retain_dynamic_value = previousRetain;
+        }
+      }
+    "#), 1);
+    assert_eq!(call("inspectLiveGraphEncoding", "[]"), "[0,true,1]");
+}
+
+#[test]
+fn live_host_number_query_preserves_negative_zero_and_non_finite_values() {
+    assert_eq!(load(r#"
+      function inspectLiveHostNumbers() {
+        return [__thaw_json_host_query(-0, 10),
+                __thaw_json_host_query(NaN, 10),
+                __thaw_json_host_query(Infinity, 10)];
+      }
+    "#), 1);
+    assert_eq!(call("inspectLiveHostNumbers", "[]"), r#"["-0","NaN","Infinity"]"#);
+}
+
+#[test]
+fn private_graph_result_marks_real_date_separately_from_user_shape() {
+    assert_eq!(load(r#"
+      function graphDateResult() {
+        return { real: new Date(0), user: { timestamp: 0 } };
+      }
+    "#), 1);
+    let result = thaw_js_call_graph_result(c"graphDateResult".as_ptr(), c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}],\"leases\":[]}".as_ptr());
+    assert!(result.error.is_null());
+    let graph: serde_json::Value = serde_json::from_str(
+        &unsafe { CStr::from_ptr(result.value) }.to_string_lossy(),
+    ).unwrap();
+    unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
+    assert_eq!(graph["nodes"][1]["d"], 0);
+    assert!(graph["nodes"][2].get("o").is_some());
+    assert_eq!(call("graphDateResult", "[]"),
+        r#"{"real":{"timestamp":0},"user":{"timestamp":0}}"#);
+}
+
+#[test]
+fn live_host_buffer_query_uses_native_buffer_identity() {
+    assert_eq!(load(r#"
+      function inspectLiveHostBuffer() {
+        return [__thaw_json_host_query(Buffer.from([1]), 11),
+                __thaw_json_host_query({ type: 'Buffer', data: [1] }, 11)];
+      }
+    "#), 1);
+    assert_eq!(call("inspectLiveHostBuffer", "[]"), r#"["1","0"]"#);
+}
+
+#[test]
+fn live_host_date_query_uses_internal_slot_and_preserves_invalid_date() {
+    assert_eq!(load(r#"
+      function inspectLiveHostDate() {
+        return [__thaw_json_host_query(new Date(0), 12),
+                __thaw_json_host_query({ timestamp: 0 }, 12),
+                __thaw_json_host_query(new Date(NaN), 12),
+                __thaw_json_host_query(new Date(NaN), 13),
+                (() => { const p = Proxy.revocable({}, {}); p.revoke();
+                  try { __thaw_json_host_query(p.proxy, 12); return 'missed'; }
+                  catch (error) { return error instanceof TypeError ? 'throws' : 'wrong'; }
+                })()];
+      }
+    "#), 1);
+    assert_eq!(call("inspectLiveHostDate", "[]"), r#"["1","0","1","NaN","throws"]"#);
+}
+
+#[test]
+fn live_host_date_setter_mutates_internal_slot_seen_by_alias() {
+    assert_eq!(load(r#"
+      function inspectLiveHostDateSetter() {
+        const date = new Date(0);
+        const alias = date;
+        const result = __thaw_json_host_date_set(date, 2000);
+        return [result, alias.getTime(), Object.hasOwn(date, 'timestamp')];
+      }
+    "#), 1);
+    assert_eq!(call("inspectLiveHostDateSetter", "[]"), r#"["2000",2000,false]"#);
+}
+
+#[test]
+fn user_date_to_json_is_standard_while_internal_wire_keeps_date_identity() {
+    assert_eq!(load(r#"
+      function userDateSerialization() {
+        const date = new Date(0);
+        const standard = JSON.stringify({ date });
+        date.toJSON = () => ({ timestamp: 42 });
+        const custom = JSON.stringify({ date });
+        return [standard, custom];
+      }
+      function internalDateSerialization() {
+        return { date: new Date(0) };
+      }
+    "#), 1);
+    assert_eq!(call("userDateSerialization", "[]"),
+        r#"["{\"date\":\"1970-01-01T00:00:00.000Z\"}","{\"date\":{\"timestamp\":42}}"]"#);
+    assert_eq!(call("internalDateSerialization", "[]"), r#"{"date":{"timestamp":0}}"#);
+}
+
+#[test]
+fn private_graph_result_preserves_custom_to_json_before_encoding() {
+    assert_eq!(load(r#"
+      function graphCustomToJsonResult() {
+        return { item: { toJSON(key) { return { key, value: 7 }; } } };
+      }
+    "#), 1);
+    let result = thaw_js_call_graph_result(c"graphCustomToJsonResult".as_ptr(), c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}],\"leases\":[]}".as_ptr());
+    assert!(result.error.is_null());
+    let graph: serde_json::Value = serde_json::from_str(
+        &unsafe { CStr::from_ptr(result.value) }.to_string_lossy(),
+    ).unwrap();
+    unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
+    assert_eq!(graph["nodes"][1]["o"][0][0], "key");
+    assert_eq!(graph["nodes"][1]["o"][0][1]["v"], "item");
+    assert_eq!(graph["nodes"][1]["o"][1][1]["v"], 7);
+}
+
+#[test]
+fn private_graph_arguments_do_not_revive_user_marker_shapes() {
+    assert_eq!(load(r#"
+      function inspectGraphArguments(real, user, absent, fake) {
+        return [real instanceof Date, user instanceof Date,
+                absent === undefined, fake === undefined,
+                user.timestamp, fake.$__thaw_napi_undefined$];
+      }
+    "#), 1);
+    let graph = c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[{\"r\":1},{\"r\":2},{\"u\":1},{\"r\":3}]},{\"d\":0},{\"o\":[[\"timestamp\",{\"v\":0}]]},{\"o\":[[\"$__thaw_napi_undefined$\",{\"v\":true}]]}],\"leases\":[]}";
+    let result = thaw_js_call_graph_result(c"inspectGraphArguments".as_ptr(), graph.as_ptr());
+    assert!(result.error.is_null());
+    let result: serde_json::Value = serde_json::from_str(
+        &unsafe { CStr::from_ptr(result.value) }.to_string_lossy(),
+    ).unwrap();
+    unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
+    assert_eq!(result["nodes"][0]["a"], serde_json::json!([
+        {"v": true}, {"v": false}, {"v": true}, {"v": false}, {"v": 0}, {"v": true}
+    ]));
+}
+
+#[test]
+fn private_graph_arguments_release_input_leases_before_target_lookup_errors() {
+    assert_eq!(load("globalThis.leaseInput = {}; globalThis.nonCallableLeaseTarget = 1;"), 1);
+    for target in ["missingLeaseTarget", "nonCallableLeaseTarget"] {
+        let input = thaw_js_get_global(c"leaseInput".as_ptr());
+        assert_eq!(thaw_js_retain_handle(input), 1); // one transferred graph lease
+        let graph = CString::new(format!(
+            r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{input}}}],"leases":[{input}]}}"#
+        )).unwrap();
+        let result = thaw_js_call_graph_result(CString::new(target).unwrap().as_ptr(), graph.as_ptr());
+        assert!(!result.error.is_null());
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()); }
+        // The ABI entry owns the transferred retain even when the callee is
+        // missing or not callable, before the graph decoder is reached.
+        assert_eq!(thaw_js_release_handle(input), 1);
+        assert_eq!(thaw_js_release_handle(input), 0);
+    }
+}
+
+#[test]
+fn private_graph_property_setter_runs_before_result_encoding() {
+    assert_eq!(load(r#"
+        globalThis.graphAssignmentOrder = '';
+        globalThis.graphAssignmentTarget = {};
+        Object.defineProperty(graphAssignmentTarget, 'field', {
+          set(value) { graphAssignmentOrder += 'S'; throw new Error('setter failure'); }
+        });
+        globalThis.graphAssignmentValue = {
+          toJSON() { graphAssignmentOrder += 'J'; return { value: 1 }; }
+        };
+        globalThis.getGraphAssignmentOrder = () => graphAssignmentOrder;
+    "#), 1);
+    let target = thaw_js_get_global(c"graphAssignmentTarget".as_ptr());
+    let value = thaw_js_get_global(c"graphAssignmentValue".as_ptr());
+    assert_eq!(thaw_js_retain_handle(value), 1);
+    let graph = CString::new(format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{value}}}],"leases":[{value}]}}"#
+    )).unwrap();
+    let result = thaw_js_set_property_json_graph_result(target, c"field".as_ptr(), graph.as_ptr());
+    assert!(!result.error.is_null());
+    unsafe { thaw_arena::destroy_string(result.error.cast_mut()); }
+    assert_eq!(call("getGraphAssignmentOrder", "[]"), "\"S\"");
+    assert_eq!(thaw_js_release_handle(value), 1);
+    assert_eq!(thaw_js_release_handle(value), 0);
+    assert_eq!(thaw_js_release_handle(target), 1);
+}
+
+#[test]
+fn private_graph_arguments_release_input_leases_after_success() {
+    assert_eq!(load("globalThis.leaseInput = {}; globalThis.acceptLeaseInput = value => value === leaseInput;"), 1);
+    let input = thaw_js_get_global(c"leaseInput".as_ptr());
+    assert_eq!(thaw_js_retain_handle(input), 1);
+    let graph = CString::new(format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{input}}}],"leases":[{input}]}}"#
+    )).unwrap();
+    let result = thaw_js_call_graph_result(c"acceptLeaseInput".as_ptr(), graph.as_ptr());
+    assert!(result.error.is_null());
+    unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
+    assert_eq!(thaw_js_release_handle(input), 1);
+    assert_eq!(thaw_js_release_handle(input), 0);
+}
+
+
+#[test]
+fn private_bigint_graph_token_requires_full_decimal_consumption() {
+    assert_eq!(load(r#"
+      function inspectBigIntGraphToken() {
+        const decode = text => __thaw_json_graph_decode({ root: { bi: text }, nodes: [] });
+        const exact = String(decode('9007199254740993'));
+        const invalid = ['1\n', '1\r', '1\u2028', '01', '-0', '+1'];
+        return [exact, ...invalid.map(text => {
+          try { decode(text); return false; }
+          catch (error) { return error instanceof TypeError; }
+        })];
+      }
+    "#), 1);
+    assert_eq!(call("inspectBigIntGraphToken", "[]"),
+        r#"["9007199254740993",true,true,true,true,true,true]"#);
+}
+
+#[test]
 fn dynamic_property_receiver_rejects_null_and_undefined_but_boxes_strings() {
     let null = CString::new("null").unwrap();
     let null_handle = thaw_js_retain_json_result(null.as_ptr());
@@ -6276,6 +6572,10 @@ fn dynamic_property_receiver_rejects_null_and_undefined_but_boxes_strings() {
     assert_eq!(null_result.value, 0);
     assert!(!null_result.error.is_null());
     assert!(unsafe { CStr::from_ptr(null_result.error) }.to_string_lossy().starts_with("\u{1}TypeError\u{1}"));
+    let key_json = CString::new("\"length\"").unwrap();
+    let json_key_result = thaw_js_get_property_json_key_result(null_handle.value, key_json.as_ptr());
+    assert!(!json_key_result.error.is_null());
+    assert!(unsafe { CStr::from_ptr(json_key_result.error) }.to_string_lossy().starts_with("\u{1}TypeError\u{1}"));
 
     assert_eq!(load("globalThis.__thaw_undefined_receiver = () => undefined"), 1);
     let function = CString::new("__thaw_undefined_receiver").unwrap();
@@ -6300,6 +6600,7 @@ fn dynamic_property_receiver_rejects_null_and_undefined_but_boxes_strings() {
     assert_eq!(unsafe { CStr::from_ptr(checked.value) }.to_str().unwrap(), "true");
     unsafe {
         thaw_arena::destroy_string(null_result.error.cast_mut());
+        thaw_arena::destroy_string(json_key_result.error.cast_mut());
         thaw_arena::destroy_string(undefined_result.error.cast_mut());
         thaw_arena::destroy_string(checked.value.cast_mut());
     }
